@@ -24,5 +24,6 @@ tracing.workspace = true
 fail = { workspace = true, optional = true }
 
 [dev-dependencies]
+opensvn-svn-oracle = { path = "../../tests/svn-oracle" }
 tempfile.workspace = true
 proptest.workspace = true

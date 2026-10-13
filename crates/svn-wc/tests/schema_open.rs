@@ -4,25 +4,12 @@
 
 mod schema_support;
 
-use std::path::Path;
-use std::process::Command;
-
 use schema_support::*;
 use svn_types::{Depth, ErrorCode};
 use svn_wc::db::{NewWc, WcDb, find_wcroot};
 
-fn svn_out(cwd: &Path, args: &[&str]) -> String {
-    let out = Command::new("svn")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("svn");
-    assert!(
-        out.status.success(),
-        "svn {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+fn svn_out(cwd: &std::path::Path, args: &[&str]) -> String {
+    svn_stdout(cwd, args).trim().to_string()
 }
 
 fn svn_wc_fixture(extra: &[&str]) -> (tempfile::TempDir, std::path::PathBuf, String) {
