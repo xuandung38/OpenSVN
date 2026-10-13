@@ -161,6 +161,34 @@ fn decodes_legacy_shapes() {
 }
 
 #[test]
+fn extra_trailing_arguments_are_ignored_like_svn() {
+    assert_eq!(
+        WorkItem::decode(b"(file-remove a b c)").unwrap(),
+        WorkItem::FileRemove {
+            relpath: "a".into()
+        }
+    );
+    assert_eq!(
+        WorkItem::decode(b"(postupgrade x)").unwrap(),
+        WorkItem::PostUpgrade
+    );
+    assert_eq!(
+        WorkItem::decode(b"(file-move a b c)").unwrap(),
+        WorkItem::FileMove {
+            src: "a".into(),
+            dst: "b".into()
+        }
+    );
+    // Real item captured from svn 1.15.0 after an interrupted `svn propset svn:executable`.
+    assert_eq!(
+        WorkItem::decode(b"(sync-file-flags a.txt)").unwrap(),
+        WorkItem::SyncFileFlags {
+            relpath: "a.txt".into()
+        }
+    );
+}
+
+#[test]
 fn rejects_unknown_and_malformed_items() {
     assert!(matches!(
         WorkItem::decode(b"(tmp-set-text-conflict-markers f)"),
@@ -172,15 +200,14 @@ fn rejects_unknown_and_malformed_items() {
     ));
     for bad in [
         &b"(file-remove)"[..],
-        b"(file-remove a b)",
         b"(file-install a 1 0)",
         b"(file-install a x y)",
         b"(file-move a)",
-        b"(postupgrade x)",
         b"()",
         b"file-remove",
         b"((file-remove a))",
         b"(dir-remove d q)",
+        b"(base-remove f)",
     ] {
         assert!(
             matches!(WorkItem::decode(bad), Err(WorkQueueError::Malformed { .. })),
@@ -231,6 +258,8 @@ impl WorkQueueStore for MemQueue {
 #[derive(Default)]
 struct FakeOps {
     nodes: BTreeMap<String, NodeInstallInfo>,
+    /// Actual props per relpath; defaults to the node's pristine props when absent.
+    actual: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
     sync: Option<SyncInput>,
     calls: Vec<String>,
 }
@@ -238,6 +267,14 @@ struct FakeOps {
 impl WorkingCopyOps for FakeOps {
     fn install_info(&self, relpath: &str) -> Result<NodeInstallInfo, WorkQueueError> {
         Ok(self.nodes.get(relpath).cloned().unwrap_or_default())
+    }
+    fn actual_props(&self, relpath: &str) -> Result<BTreeMap<String, Vec<u8>>, WorkQueueError> {
+        Ok(self.actual.get(relpath).cloned().unwrap_or_else(|| {
+            self.nodes
+                .get(relpath)
+                .map(|n| n.props.clone())
+                .unwrap_or_default()
+        }))
     }
     fn sync_flags_input(&self, _: &str) -> Result<Option<SyncInput>, WorkQueueError> {
         Ok(self.sync)
@@ -771,4 +808,473 @@ fn pristine_source_reads_installed_text() {
         .unwrap();
     assert_eq!(buf, "abc");
     let _ = Md5Digest([0; 16]);
+}
+
+// ------------------------------------------------- admin tmp operands, props source, moves
+
+use super::paths::{resolve_admin_tmp, resolve_operand, resolve_wc_path};
+
+#[test]
+fn admin_tmp_resolver_accepts_exactly_one_component() {
+    let w = wc();
+    std::fs::create_dir_all(w.dir.path().join(".svn/tmp")).unwrap();
+    let ok = resolve_admin_tmp(w.dir.path(), ".svn/tmp/svn-bCQBU2").unwrap();
+    assert_eq!(ok, w.dir.path().join(".svn/tmp/svn-bCQBU2"));
+    for bad in [
+        ".svn/tmp/",
+        ".svn/tmp",
+        ".svn/tmp/a/b",
+        ".svn/tmp/..",
+        ".svn/tmp/.",
+        ".svn/tmp/../wc.db",
+        ".svn/wc.db",
+        ".svn/pristine/ab/x",
+        ".svn/tmp/x:stream",
+        ".svn/tmp/x\\y",
+        ".svn/tmp/CON",
+        ".svn/tmp/trailing.",
+        ".svn/tmpx/f",
+        ".svn/tmp//f",
+        "/.svn/tmp/f",
+        "a/.svn/tmp/f",
+        ".SVN/tmp/f",
+    ] {
+        assert!(resolve_admin_tmp(w.dir.path(), bad).is_err(), "{bad}");
+    }
+    // Ordinary operands still refuse the administrative directory.
+    assert!(resolve_wc_path(w.dir.path(), ".svn/tmp/svn-x").is_err());
+    assert!(resolve_wc_path(w.dir.path(), ".svn/wc.db").is_err());
+    assert!(resolve_operand(w.dir.path(), ".svn/wc.db").is_err());
+    assert!(resolve_operand(w.dir.path(), ".svn/tmp/svn-x").is_ok());
+    assert!(resolve_operand(w.dir.path(), "dir/file").is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn admin_tmp_resolver_refuses_symlinked_adm_or_tmp() {
+    let outside = tempfile::tempdir().unwrap();
+    let w = wc();
+    std::fs::remove_dir_all(w.dir.path().join(".svn/tmp")).ok();
+    std::os::unix::fs::symlink(outside.path(), w.dir.path().join(".svn/tmp")).unwrap();
+    assert!(resolve_admin_tmp(w.dir.path(), ".svn/tmp/f").is_err());
+
+    let w2 = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), w2.path().join(".svn")).unwrap();
+    std::fs::create_dir_all(outside.path().join("tmp")).unwrap();
+    assert!(resolve_admin_tmp(w2.path(), ".svn/tmp/f").is_err());
+
+    let w3 = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(w3.path().join(".svn")).unwrap();
+    assert!(
+        resolve_admin_tmp(w3.path(), ".svn/tmp/f").is_err(),
+        "missing .svn/tmp"
+    );
+}
+
+fn queue_fixture(case: &str) -> Vec<Vec<u8>> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/compat/scenarios/wc/workqueue/queue.txt");
+    let text = std::fs::read_to_string(&path).unwrap();
+    text.lines()
+        .filter_map(|l| l.split_once('\t'))
+        .filter(|(c, _)| *c == case)
+        .map(|(_, item)| item.chars().map(|c| c as u8).collect())
+        .collect()
+}
+
+/// The queue svn 1.15.0 left behind when `svn revert` was interrupted (recorded by
+/// `tests/compat/scenarios/wc/workqueue/generate.py`): install from, then remove, a temporary
+/// file inside `.svn/tmp`. It must run to completion.
+#[test]
+fn interrupted_svn_revert_queue_completes() {
+    let items = queue_fixture("interrupted_revert");
+    assert_eq!(items.len(), 2);
+    let decoded: Vec<_> = items.iter().map(|i| WorkItem::decode(i).unwrap()).collect();
+    assert!(
+        matches!(&decoded[0], WorkItem::FileInstall { relpath, source: Some(src), .. }
+        if relpath == "b.txt" && src.starts_with(".svn/tmp/svn-"))
+    );
+    assert!(
+        matches!(&decoded[1], WorkItem::FileRemove { relpath } if relpath.starts_with(".svn/tmp/svn-"))
+    );
+    for (item, original) in decoded.iter().zip(&items) {
+        assert_eq!(
+            &item.encode(),
+            original,
+            "re-encoding must be byte identical"
+        );
+    }
+
+    let mut w = wc();
+    let sha = install(&mut w, b"not used: the explicit source wins\n");
+    let WorkItem::FileInstall {
+        source: Some(tmp_rel),
+        ..
+    } = &decoded[0]
+    else {
+        unreachable!()
+    };
+    std::fs::create_dir_all(w.dir.path().join(".svn/tmp")).unwrap();
+    std::fs::write(w.dir.path().join(tmp_rel), b"base\n").unwrap();
+    std::fs::write(w.dir.path().join("b.txt"), b"modified\n").unwrap();
+    let mut ops = FakeOps::default();
+    ops.nodes.insert("b.txt".into(), node(sha, &[]));
+    let mut q = MemQueue {
+        items: items
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(i, b)| (i as u64 + 1, b))
+            .collect(),
+        fileinfo: Vec::new(),
+    };
+    assert_eq!(run(&w, &mut ops, &mut q).unwrap(), 2);
+    assert_eq!(
+        std::fs::read(w.dir.path().join("b.txt")).unwrap(),
+        b"base\n"
+    );
+    assert!(!w.dir.path().join(tmp_rel).exists());
+    assert_eq!(
+        q.fileinfo.len(),
+        1,
+        "record_fileinfo was set on the install"
+    );
+}
+
+#[test]
+fn interrupted_svn_update_queue_removes_the_deleted_file() {
+    let items = queue_fixture("interrupted_update_delete");
+    assert_eq!(items, [b"(file-remove c.txt)".to_vec()]);
+    let w = wc();
+    std::fs::write(w.dir.path().join("c.txt"), b"c").unwrap();
+    let mut ops = FakeOps::default();
+    let mut q = MemQueue {
+        items: vec![(1, items[0].clone())],
+        fileinfo: Vec::new(),
+    };
+    run(&w, &mut ops, &mut q).unwrap();
+    assert!(!w.dir.path().join("c.txt").exists());
+}
+
+#[test]
+fn admin_paths_are_refused_where_they_are_not_documented_as_temporary() {
+    let mut w = wc();
+    let sha = install(&mut w, b"x");
+    let mut ops = FakeOps::default();
+    ops.nodes.insert(".svn/tmp/dest".into(), node(sha, &[]));
+    for bad in [
+        WorkItem::FileInstall {
+            relpath: ".svn/tmp/dest".into(),
+            use_commit_times: false,
+            record_fileinfo: false,
+            source: None,
+        },
+        WorkItem::DirInstall {
+            relpath: ".svn/tmp/d".into(),
+        },
+        WorkItem::DirRemove {
+            relpath: ".svn/tmp".into(),
+            recursive: true,
+        },
+        WorkItem::FileRemove {
+            relpath: ".svn/wc.db".into(),
+        },
+        WorkItem::FileMove {
+            src: ".svn/tmp/a".into(),
+            dst: ".svn/wc.db".into(),
+        },
+    ] {
+        let mut q = MemQueue::with(std::slice::from_ref(&bad));
+        let err = run(&w, &mut ops, &mut q).unwrap_err();
+        let WorkQueueError::ItemFailed { source, .. } = err else {
+            panic!("{bad:?}")
+        };
+        assert!(
+            matches!(*source, WorkQueueError::UnsafePath(_)),
+            "{bad:?}: {source}"
+        );
+    }
+    assert!(w.dir.path().join(".svn").is_dir());
+}
+
+#[test]
+fn file_install_uses_pristine_props_and_file_translate_uses_actual_props() {
+    let mut w = wc();
+    let sha = install(&mut w, b"a\nb\n");
+    std::fs::write(w.dir.path().join("src"), b"a\nb\n").unwrap();
+    let mut ops = FakeOps::default();
+    // Pristine says LF; the uncommitted local change says CRLF.
+    ops.nodes
+        .insert("f".into(), node(sha, &[("svn:eol-style", "LF")]));
+    ops.actual.insert(
+        "f".into(),
+        [("svn:eol-style".to_string(), b"CRLF".to_vec())].into(),
+    );
+    let mut q = MemQueue::with(&[
+        WorkItem::FileInstall {
+            relpath: "f".into(),
+            use_commit_times: false,
+            record_fileinfo: false,
+            source: None,
+        },
+        WorkItem::FileTranslate {
+            local: "f".into(),
+            src: "src".into(),
+            dst: "g".into(),
+        },
+    ]);
+    run(&w, &mut ops, &mut q).unwrap();
+    assert_eq!(std::fs::read(w.dir.path().join("f")).unwrap(), b"a\nb\n");
+    assert_eq!(
+        std::fs::read(w.dir.path().join("g")).unwrap(),
+        b"a\r\nb\r\n"
+    );
+}
+
+#[test]
+fn file_move_failures_other_than_cross_device_fail_the_item_and_keep_the_source() {
+    let w = wc();
+    std::fs::write(w.dir.path().join("src"), b"data").unwrap();
+    std::fs::create_dir_all(w.dir.path().join("dstdir/inner")).unwrap();
+    let mut ops = FakeOps::default();
+    let mut q = MemQueue::with(&[WorkItem::FileMove {
+        src: "src".into(),
+        dst: "dstdir".into(),
+    }]);
+    let err = run(&w, &mut ops, &mut q).unwrap_err();
+    assert!(matches!(err, WorkQueueError::ItemFailed { .. }));
+    assert_eq!(
+        std::fs::read(w.dir.path().join("src")).unwrap(),
+        b"data",
+        "no copy fallback"
+    );
+    assert!(w.dir.path().join("dstdir/inner").is_dir());
+    assert_eq!(q.items.len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn file_move_replaces_a_symlink_at_the_destination_instead_of_writing_through_it() {
+    let w = wc();
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim");
+    std::fs::write(&victim, b"keep").unwrap();
+    std::fs::write(w.dir.path().join("src"), b"new").unwrap();
+    std::os::unix::fs::symlink(&victim, w.dir.path().join("dst")).unwrap();
+    let mut ops = FakeOps::default();
+    let mut q = MemQueue::with(&[WorkItem::FileMove {
+        src: "src".into(),
+        dst: "dst".into(),
+    }]);
+    run(&w, &mut ops, &mut q).unwrap();
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+    assert_eq!(std::fs::read(w.dir.path().join("dst")).unwrap(), b"new");
+    assert!(
+        !std::fs::symlink_metadata(w.dir.path().join("dst"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+/// `copy_then_remove` is what a cross-device move falls back to; exercised directly because a
+/// second device is not available in a unit test.
+#[cfg(unix)]
+#[test]
+fn cross_device_copy_never_follows_symlinks() {
+    let w = wc();
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim");
+    std::fs::write(&victim, b"keep").unwrap();
+    std::fs::write(w.dir.path().join("src"), b"new").unwrap();
+    std::os::unix::fs::symlink(&victim, w.dir.path().join("dst")).unwrap();
+    super::runner::copy_then_remove_for_tests(&w.dir.path().join("src"), &w.dir.path().join("dst"))
+        .unwrap();
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+    assert_eq!(std::fs::read(w.dir.path().join("dst")).unwrap(), b"new");
+    assert!(!w.dir.path().join("src").exists());
+    std::os::unix::fs::symlink(&victim, w.dir.path().join("lsrc")).unwrap();
+    assert!(
+        super::runner::copy_then_remove_for_tests(
+            &w.dir.path().join("lsrc"),
+            &w.dir.path().join("x")
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn special_content_is_streamed_with_a_capped_head() {
+    let mut w = wc();
+    // 300 KB of an unknown special type: written whole as a regular file.
+    let mut big = b"unknown kind\n".to_vec();
+    big.extend(std::iter::repeat_n(b'x', 300_000));
+    let sha = install(&mut w, &big);
+    let mut ops = FakeOps::default();
+    ops.nodes
+        .insert("s".into(), node(sha, &[("svn:special", "*")]));
+    let mut q = MemQueue::with(&[WorkItem::FileInstall {
+        relpath: "s".into(),
+        use_commit_times: false,
+        record_fileinfo: false,
+        source: None,
+    }]);
+    run(&w, &mut ops, &mut q).unwrap();
+    assert_eq!(std::fs::read(w.dir.path().join("s")).unwrap(), big);
+
+    // A "link " line longer than the cap is rejected rather than buffered.
+    #[cfg(unix)]
+    {
+        let mut long = b"link ".to_vec();
+        long.extend(std::iter::repeat_n(
+            b'a',
+            crate::translate::special::MAX_SPECIAL_HEAD + 10,
+        ));
+        let sha = install(&mut w, &long);
+        ops.nodes
+            .insert("l".into(), node(sha, &[("svn:special", "*")]));
+        let mut q = MemQueue::with(&[WorkItem::FileInstall {
+            relpath: "l".into(),
+            use_commit_times: false,
+            record_fileinfo: false,
+            source: None,
+        }]);
+        assert!(run(&w, &mut ops, &mut q).is_err());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn file_translate_treats_a_symlink_source_as_special() {
+    let mut w = wc();
+    let sha = install(&mut w, b"x");
+    std::os::unix::fs::symlink("some/dest", w.dir.path().join("lsrc")).unwrap();
+    let mut ops = FakeOps::default();
+    ops.nodes.insert("local".into(), node(sha, &[]));
+    let mut q = MemQueue::with(&[WorkItem::FileTranslate {
+        local: "local".into(),
+        src: "lsrc".into(),
+        dst: "ldst".into(),
+    }]);
+    run(&w, &mut ops, &mut q).unwrap();
+    assert_eq!(
+        std::fs::read_link(w.dir.path().join("ldst")).unwrap(),
+        std::path::Path::new("some/dest")
+    );
+}
+
+/// svn requires every item to be re-runnable (`SVN_RUN_WORK_QUEUE_TWICE`): run each one twice.
+#[test]
+fn every_filesystem_item_is_idempotent() {
+    let mut w = wc();
+    let sha = install(&mut w, b"$Rev$\n");
+    std::fs::write(w.dir.path().join("src"), b"x\n").unwrap();
+    std::fs::write(w.dir.path().join("m1"), b"moved").unwrap();
+    std::fs::create_dir_all(w.dir.path().join("rd/in")).unwrap();
+    std::fs::write(w.dir.path().join("gone"), b"x").unwrap();
+    let mut ops = FakeOps::default();
+    ops.nodes
+        .insert("f".into(), node(sha, &[("svn:keywords", "Rev")]));
+    ops.sync = Some(SyncInput {
+        status_is_normal: true,
+        needs_lock_working: false,
+        needs_lock_pristine: false,
+        has_lock: false,
+        executable: false,
+    });
+    let items = [
+        WorkItem::FileInstall {
+            relpath: "f".into(),
+            use_commit_times: true,
+            record_fileinfo: true,
+            source: None,
+        },
+        WorkItem::FileTranslate {
+            local: "f".into(),
+            src: "src".into(),
+            dst: "t".into(),
+        },
+        WorkItem::SyncFileFlags {
+            relpath: "f".into(),
+        },
+        WorkItem::FileMove {
+            src: "m1".into(),
+            dst: "sub/m2".into(),
+        },
+        WorkItem::FileRemove {
+            relpath: "gone".into(),
+        },
+        WorkItem::DirInstall {
+            relpath: "made".into(),
+        },
+        WorkItem::DirRemove {
+            relpath: "rd".into(),
+            recursive: true,
+        },
+        WorkItem::RecordFileinfo {
+            relpath: "f".into(),
+            mtime: None,
+        },
+    ];
+    let doubled: Vec<_> = items.iter().flat_map(|i| [i.clone(), i.clone()]).collect();
+    let mut q = MemQueue::with(&doubled);
+    assert_eq!(run(&w, &mut ops, &mut q).unwrap(), 16);
+    assert_eq!(
+        std::fs::read(w.dir.path().join("f")).unwrap(),
+        b"$Rev: 7 $\n"
+    );
+    assert_eq!(
+        std::fs::read(w.dir.path().join("sub/m2")).unwrap(),
+        b"moved"
+    );
+    assert!(!w.dir.path().join("rd").exists() && w.dir.path().join("made").is_dir());
+}
+
+#[cfg(windows)]
+mod windows_unverified {
+    //! Never run in CI (no Windows CI): written to be checked on the first Windows run.
+    use super::*;
+
+    fn read_only(path: &std::path::Path) {
+        let mut p = std::fs::metadata(path).unwrap().permissions();
+        p.set_readonly(true);
+        std::fs::set_permissions(path, p).unwrap();
+    }
+
+    #[test]
+    fn read_only_files_can_be_removed_and_removed_recursively() {
+        let w = wc();
+        std::fs::create_dir_all(w.dir.path().join("d")).unwrap();
+        for f in ["ro", "d/ro"] {
+            std::fs::write(w.dir.path().join(f), b"x").unwrap();
+            read_only(&w.dir.path().join(f));
+        }
+        let mut ops = FakeOps::default();
+        let mut q = MemQueue::with(&[
+            WorkItem::FileRemove {
+                relpath: "ro".into(),
+            },
+            WorkItem::DirRemove {
+                relpath: "d".into(),
+                recursive: true,
+            },
+        ]);
+        run(&w, &mut ops, &mut q).unwrap();
+        assert!(!w.dir.path().join("ro").exists() && !w.dir.path().join("d").exists());
+    }
+
+    #[test]
+    fn mtime_can_be_set_on_a_read_only_file() {
+        let w = wc();
+        let p = w.dir.path().join("f");
+        std::fs::write(&p, b"abc").unwrap();
+        read_only(&p);
+        let mut ops = FakeOps::default();
+        let mut q = MemQueue::with(&[WorkItem::RecordFileinfo {
+            relpath: "f".into(),
+            mtime: Some(1_500_000_000_000_000),
+        }]);
+        run(&w, &mut ops, &mut q).unwrap();
+        assert_eq!(q.fileinfo[0].last_mod_time_micros, 1_500_000_000_000_000);
+    }
 }

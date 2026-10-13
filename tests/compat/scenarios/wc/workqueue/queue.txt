@@ -1,0 +1,3 @@
+interrupted_revert	(file-install b.txt 1 0 1 1 19 .svn/tmp/svn-QPLNU2)
+interrupted_revert	(file-remove 19 .svn/tmp/svn-QPLNU2)
+interrupted_update_delete	(file-remove c.txt)

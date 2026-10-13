@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use svn_types::{ErrorCode, RelPath, SvnError, rename_replacing, safe_join};
+use svn_types::{ErrorCode, SvnError, rename_replacing};
 
 use crate::pristine::{PristineError, PristineIndex, PristineStore, Sha1Digest};
 use crate::skel::Skel;
@@ -19,6 +19,7 @@ use crate::translate::{
     ContentTranslator, KeywordContext, TranslateInfo, UtcOffsetAt, special, translate_stream,
 };
 
+use super::paths::{resolve_operand, resolve_wc_path};
 use super::{WorkItem, WorkQueueError};
 
 /// Size and mtime of a freshly installed working file, to be written to NODES
@@ -34,6 +35,10 @@ pub struct FileInfoRecord {
 }
 
 /// Persistent queue (the `WORK_QUEUE` table).
+///
+/// **Crash idempotency contract:** `next_item` may be called again with the same `completed` id
+/// after a crash; deleting an already deleted item and re-storing the same file info must be
+/// harmless.
 pub trait WorkQueueStore {
     /// Atomically (one transaction) deletes the `completed` item, stores `fileinfo`, and returns
     /// the next item by ascending id, or `None` when the queue is empty.
@@ -50,7 +55,9 @@ pub trait WorkQueueStore {
 pub struct NodeInstallInfo {
     /// SHA-1 of the pristine text, if recorded.
     pub checksum: Option<Sha1Digest>,
-    /// Current properties (working props of the node).
+    /// Properties used to translate the installed file: the **pristine** properties of the
+    /// node (NODES top layer `properties`, as `svn_wc__db_read_node_install_info` returns).
+    /// `file-translate` uses [`WorkingCopyOps::actual_props`] instead.
     pub props: BTreeMap<String, Vec<u8>>,
     /// Last changed date, microseconds since the epoch.
     pub changed_date_micros: Option<i64>,
@@ -62,16 +69,25 @@ pub struct NodeInstallInfo {
     pub repos_relpath: String,
     /// Repository root URL, URI-encoded.
     pub repos_root_url: String,
-    /// The node is a plain addition.
+    /// The node's status is `added`. This includes copies and moves (`moved-here`), exactly
+    /// like svn's `status == svn_wc__db_status_added`.
     pub is_added: bool,
     /// The WC holds a lock token for the node.
     pub has_lock: bool,
 }
 
 /// Database-backed operations used by work items.
+///
+/// **Crash idempotency contract:** a work item can run again after a crash that happened after
+/// its effect but before it was marked done, so every mutating method here (`write_prop_reject_file`,
+/// `file_commit`, `base_remove`, `post_upgrade`) must be safe to repeat and must converge to the
+/// same state.
 pub trait WorkingCopyOps {
-    /// Install information for the node at `relpath`.
+    /// Install information for the node at `relpath` (pristine properties; see
+    /// [`NodeInstallInfo::props`]).
     fn install_info(&self, relpath: &str) -> Result<NodeInstallInfo, WorkQueueError>;
+    /// The node's actual (working) properties, which `file-translate` uses.
+    fn actual_props(&self, relpath: &str) -> Result<BTreeMap<String, Vec<u8>>, WorkQueueError>;
     /// Inputs for `sync-file-flags`; `None` when the node is not a normal/added file.
     fn sync_flags_input(&self, relpath: &str) -> Result<Option<SyncInput>, WorkQueueError>;
     /// Writes the `.prej` property reject file recorded in the node's conflict data.
@@ -166,13 +182,17 @@ impl<'a> WorkQueueRunner<'a> {
         }
     }
 
-    /// Resolves a relpath from an item below the working copy root, rejecting traversal and
-    /// symlinked ancestors.
+    /// Resolves a relpath from an item below the working copy root, rejecting traversal,
+    /// absolute paths, the administrative directory and symlinked ancestors.
     fn abs(&self, relpath: &str) -> Result<PathBuf, WorkQueueError> {
-        let rel = RelPath::new(relpath)
-            .map_err(|e| WorkQueueError::UnsafePath(format!("{relpath}: {}", e.message)))?;
-        safe_join(&self.config.wc_root, &rel)
-            .map_err(|e| WorkQueueError::UnsafePath(format!("{relpath}: {}", e.message)))
+        resolve_wc_path(&self.config.wc_root, relpath)
+    }
+
+    /// Like [`abs`](Self::abs) but also accepts exactly `.svn/tmp/<name>`, for the operands svn
+    /// documents as possibly temporary (install source, remove, move, translate source and
+    /// destination).
+    fn operand(&self, relpath: &str) -> Result<PathBuf, WorkQueueError> {
+        resolve_operand(&self.config.wc_root, relpath)
     }
 
     fn tmp_dir(&self) -> Result<PathBuf, WorkQueueError> {
@@ -194,8 +214,8 @@ impl<'a> WorkQueueRunner<'a> {
                 *record_fileinfo,
                 source.as_deref(),
             ),
-            WorkItem::FileRemove { relpath } => remove_file_if_present(&self.abs(relpath)?),
-            WorkItem::FileMove { src, dst } => move_file(&self.abs(src)?, &self.abs(dst)?),
+            WorkItem::FileRemove { relpath } => remove_file_if_present(&self.operand(relpath)?),
+            WorkItem::FileMove { src, dst } => move_file(&self.operand(src)?, &self.operand(dst)?),
             WorkItem::FileTranslate { local, src, dst } => self.file_translate(local, src, dst),
             WorkItem::SyncFileFlags { relpath } => {
                 let abs = self.abs(relpath)?;
@@ -270,7 +290,7 @@ impl<'a> WorkQueueRunner<'a> {
         relpath: &str,
     ) -> Result<Box<dyn Read>, WorkQueueError> {
         if let Some(src) = source {
-            let path = self.abs(src)?;
+            let path = self.operand(src)?;
             return Ok(Box::new(
                 File::open(&path).map_err(WorkQueueError::io("open", &path))?,
             ));
@@ -298,12 +318,8 @@ impl<'a> WorkQueueRunner<'a> {
         let tinfo = Self::translate_info(&info);
 
         if tinfo.special {
-            // svn bypasses eol/keywords for special files: raw bytes, then symlink or file.
-            let mut bytes = Vec::new();
-            reader
-                .read_to_end(&mut bytes)
-                .map_err(WorkQueueError::io("read source of", &abs))?;
-            special::install(&abs, &bytes)?;
+            // svn bypasses eol/keywords for special files: only the first line is buffered.
+            special::install_from_reader(&abs, reader.as_mut())?;
         } else {
             let translator = ContentTranslator::to_working(
                 &tinfo,
@@ -337,16 +353,24 @@ impl<'a> WorkQueueRunner<'a> {
     }
 
     fn file_translate(&mut self, local: &str, src: &str, dst: &str) -> Result<(), WorkQueueError> {
-        let (src_abs, dst_abs) = (self.abs(src)?, self.abs(dst)?);
+        let (src_abs, dst_abs) = (self.operand(src)?, self.operand(dst)?);
+        // Keyword values come from the node's database row, but the properties that select the
+        // translation are the *actual* ones (`svn_wc__get_translate_info` with props = NULL).
         let info = self.ops.install_info(local)?;
-        let tinfo = Self::translate_info(&info);
+        let props = self.ops.actual_props(local)?;
+        let tinfo = TranslateInfo::from_props(|name| props.get(name).map(Vec::as_slice));
+        // A symlink source is special whatever the properties say (`svn_io_check_special_path`).
+        let src_is_symlink = fs::symlink_metadata(&src_abs)
+            .map_err(WorkQueueError::io("stat", &src_abs))?
+            .file_type()
+            .is_symlink();
+        if src_is_symlink {
+            let text = special::read_repo_normal(&src_abs)?;
+            return Ok(special::install(&dst_abs, &text)?);
+        }
         let mut reader = File::open(&src_abs).map_err(WorkQueueError::io("open", &src_abs))?;
         if tinfo.special {
-            let mut bytes = Vec::new();
-            reader
-                .read_to_end(&mut bytes)
-                .map_err(WorkQueueError::io("read", &src_abs))?;
-            return Ok(special::install(&dst_abs, &bytes)?);
+            return Ok(special::install_from_reader(&dst_abs, &mut reader)?);
         }
         let translator =
             ContentTranslator::to_working(&tinfo, &Self::keyword_context(&info), self.config.tz);
@@ -391,38 +415,84 @@ fn write_atomically(
 }
 
 /// `svn_io_remove_file2(path, ignore_enoent = TRUE)`.
+///
+/// Windows refuses to delete read-only files (needs-lock files are read-only) and antivirus or
+/// indexers hold new files briefly, so the read-only attribute is cleared and sharing violations
+/// are retried with a bounded backoff (like svn's `WIN32_RETRY_LOOP`). **Unverified on Windows
+/// (no Windows CI).** Elsewhere this is a single `remove_file`.
 fn remove_file_if_present(path: &Path) -> Result<(), WorkQueueError> {
-    // Windows refuses to delete read-only files (needs-lock files are read-only).
-    // Unverified on Windows (no Windows CI).
-    #[cfg(windows)]
-    let _ = flags::set_read_write(path);
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(WorkQueueError::Io {
-            op: "remove",
-            path: path.to_path_buf(),
-            source: e,
-        }),
+    let mut delay = Duration::from_millis(10);
+    let attempts = if cfg!(windows) { 12 } else { 1 };
+    for attempt in 1..=attempts {
+        #[cfg(windows)]
+        let _ = flags::set_read_write(path);
+        match fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if attempt < attempts && e.kind() == std::io::ErrorKind::PermissionDenied => {
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(Duration::from_millis(500));
+            }
+            Err(e) => {
+                return Err(WorkQueueError::Io {
+                    op: "remove",
+                    path: path.to_path_buf(),
+                    source: e,
+                });
+            }
+        }
     }
+    Ok(())
 }
 
-/// `svn_io_file_move`: rename, falling back to copy + remove across devices. A missing source
-/// means the item already ran.
+/// `svn_io_file_move`: rename; copy + remove **only** when the rename crosses devices. A missing
+/// source means the item already ran. The copy goes through a temp file in the destination
+/// directory and is renamed over the destination, so a symlink at the destination is replaced,
+/// never written through; a symlink source is refused.
 fn move_file(src: &Path, dst: &Path) -> Result<(), WorkQueueError> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).map_err(WorkQueueError::io("create directory", parent))?;
     }
-    match rename_replacing(src, dst) {
+    match fs::rename(src, dst) {
         Ok(()) => Ok(()),
-        Err(e) if e.code == ErrorCode::PathNotFound && !src.exists() => Ok(()),
-        Err(_) if src.exists() => {
-            // Possibly a cross-device move: copy then remove.
-            fs::copy(src, dst).map_err(WorkQueueError::io("copy to", dst))?;
-            remove_file_if_present(src)
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound && fs::symlink_metadata(src).is_err() =>
+        {
+            Ok(())
         }
-        Err(e) => Err(e.into()),
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => copy_then_remove(src, dst),
+        // Same-device failures: let the retrying, read-only-clearing rename report or fix them.
+        Err(_) => Ok(rename_replacing(src, dst)?),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn copy_then_remove_for_tests(src: &Path, dst: &Path) -> Result<(), WorkQueueError> {
+    copy_then_remove(src, dst)
+}
+
+fn copy_then_remove(src: &Path, dst: &Path) -> Result<(), WorkQueueError> {
+    let meta = fs::symlink_metadata(src).map_err(WorkQueueError::io("stat", src))?;
+    if !meta.file_type().is_file() {
+        return Err(WorkQueueError::UnsafePath(format!(
+            "{}: refusing to copy a non-regular file across devices",
+            src.display()
+        )));
+    }
+    let dir = dst.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".svn-move")
+        .tempfile_in(dir)
+        .map_err(WorkQueueError::io("create temp file in", dir))?;
+    let mut input = File::open(src).map_err(WorkQueueError::io("open", src))?;
+    std::io::copy(&mut input, &mut tmp).map_err(WorkQueueError::io("copy to", tmp.path()))?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(WorkQueueError::io("sync", tmp.path()))?;
+    let _ = fs::set_permissions(tmp.path(), meta.permissions());
+    let tmp_path = tmp.into_temp_path();
+    rename_replacing(&tmp_path, dst)?;
+    remove_file_if_present(src)
 }
 
 /// `run_dir_remove`: recursive removal, or a non-recursive remove that tolerates a missing,
