@@ -1,9 +1,8 @@
 import { screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { beforeAll, expect, test } from "vitest";
+import { beforeAll, expect, test, vi } from "vitest";
 import { mockCalls } from "../../../ipc/mock/adapter";
 import { MOCK_REPO_ROOT, MOCK_REPO_UUID } from "../../../ipc/mock/remote-data";
-import { renderApp, setupMockIpc, stubLayout } from "../../../test-utils";
+import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../../test-utils";
 import { type LayoutContext, parseRevision, projectRootOf, refContainerUrl } from "./branch-model";
 import { CreateBranchTagDialog } from "./create-branch-tag-dialog";
 
@@ -11,6 +10,12 @@ beforeAll(async () => {
   stubLayout();
   await setupMockIpc("en");
 });
+
+// Fake clock: findBy/waitFor budgets count simulated time, so a loaded machine cannot time them out.
+const { user } = installFakeClock();
+// The per-test timeout is only a hang guard now: under CPU load rendering alone can take many
+// wall-clock seconds, while findBy/waitFor budgets run on the fake clock.
+vi.setConfig({ testTimeout: 120_000 });
 
 test("projectRootOf finds the part before trunk/branches/tags", () => {
   expect(projectRootOf("https://h/r/trunk")).toBe("https://h/r");
@@ -44,11 +49,11 @@ test("layout mode: new branch copies trunk to branches/<name> with the default m
   const dialog = await screen.findByRole("dialog", { name: "New branch", hidden: true });
   const create = within(dialog).getByRole("button", { name: "Create" }) as HTMLButtonElement;
   expect(create.disabled).toBe(true);
-  await userEvent.type(within(dialog).getByLabelText("Name"), "feature-y");
+  await user().type(within(dialog).getByLabelText("Name"), "feature-y");
   expect(within(dialog).getByText("/branches/feature-y")).toBeTruthy();
-  await userEvent.click(within(dialog).getByLabelText(/Switch the working copy/));
+  await user().click(within(dialog).getByLabelText(/Switch the working copy/));
   expect(create.disabled).toBe(false);
-  await userEvent.click(create);
+  await user().click(create);
   await waitFor(() => expect(mockCalls.some((c) => c.name === "copyLocation")).toBe(true));
   expect(mockCalls.find((c) => c.name === "copyLocation")?.args[0]).toEqual({
     fromUrl: `${MOCK_REPO_ROOT}/trunk`,
@@ -75,9 +80,9 @@ test("tag mode has no switch option; a specific revision must be a number", asyn
   );
   const dialog = await screen.findByRole("dialog", { name: "New tag", hidden: true });
   expect(within(dialog).queryByLabelText(/Switch the working copy/)).toBeNull();
-  await userEvent.type(within(dialog).getByLabelText("Name"), "v3");
-  await userEvent.click(within(dialog).getByLabelText("Specific revision"));
-  await userEvent.type(within(dialog).getByLabelText("Revision"), "abc");
+  await user().type(within(dialog).getByLabelText("Name"), "v3");
+  await user().click(within(dialog).getByLabelText("Specific revision"));
+  await user().type(within(dialog).getByLabelText("Revision"), "abc");
   expect(within(dialog).getByRole("alert").textContent).toMatch(/revision number/);
   expect(
     (within(dialog).getByRole("button", { name: "Create" }) as HTMLButtonElement).disabled,
@@ -106,7 +111,7 @@ test("location mode (no layout): copy to a chosen folder, source wc copy is not 
   ).toBe(true);
   // Default destination folder is the repo root, name defaults to "<source>-copy".
   expect((within(dialog).getByLabelText("New name") as HTMLInputElement).value).toBe("src-copy");
-  await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+  await user().click(within(dialog).getByRole("button", { name: "Create" }));
   await waitFor(() => expect(mockCalls.some((c) => c.name === "copyLocation")).toBe(true));
   expect(mockCalls.find((c) => c.name === "copyLocation")?.args[0]).toMatchObject({
     fromUrl: `${MOCK_REPO_ROOT}/trunk/src`,
