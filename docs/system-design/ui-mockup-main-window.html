@@ -1,0 +1,707 @@
+<title>OpenSVN Main Window</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: page header + one desktop-app window mock (scrolls sideways inside its own frame on narrow screens) + legend notes */
+:root{
+  --bg:#eef1f5; --surface:#ffffff; --surface-2:#f6f8fb; --line:#dbe1ea; --fg:#1b2533; --muted:#5d6b7e;
+  --accent:#2363d1; --accent-soft:#e3ecfb; --sel:#dbe7fb;
+  --ok:#1f8a4c; --warn:#b26a00; --warn-soft:#fff4dc; --bad:#c23b32; --bad-soft:#fde8e6; --info:#6a4bc4;
+  --add-bg:#e6f6ec; --del-bg:#fdeceb; --shadow:0 12px 40px rgba(20,34,58,.16);
+  --f-ui:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,"SF Mono",Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0f141b; --surface:#161d27; --surface-2:#1b2430; --line:#2a3544; --fg:#e3e9f2; --muted:#93a1b5;
+  --accent:#6ea0f5; --accent-soft:#1d2d4a; --sel:#22365a;
+  --ok:#4cc27e; --warn:#e6a23c; --warn-soft:#3a2d12; --bad:#f07067; --bad-soft:#3d1c1a; --info:#a58cf0;
+  --add-bg:#16301f; --del-bg:#3a1b1a; --shadow:0 12px 40px rgba(0,0,0,.5); color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f141b; --surface:#161d27; --surface-2:#1b2430; --line:#2a3544; --fg:#e3e9f2; --muted:#93a1b5;
+  --accent:#6ea0f5; --accent-soft:#1d2d4a; --sel:#22365a;
+  --ok:#4cc27e; --warn:#e6a23c; --warn-soft:#3a2d12; --bad:#f07067; --bad-soft:#3d1c1a; --info:#a58cf0;
+  --add-bg:#16301f; --del-bg:#3a1b1a; --shadow:0 12px 40px rgba(0,0,0,.5); color-scheme:dark}
+
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-ui);font-size:13px;margin:0;padding:24px 16px 48px}
+.page{max-width:1240px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+.head{display:flex;flex-wrap:wrap;align-items:end;justify-content:space-between;gap:12px}
+.head h1{font-size:20px;font-weight:600;margin:0;text-wrap:balance}
+.head p{margin:4px 0 0;color:var(--muted);max-width:68ch;line-height:1.5}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;background:var(--surface)}
+.seg button{border:0;background:none;color:var(--muted);font:inherit;padding:6px 12px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent);font-weight:600}
+button:focus-visible,[tabindex]:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+.frame{overflow-x:auto;border-radius:10px}
+.win{min-width:980px;height:640px;background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);display:grid;grid-template-rows:auto auto auto 1fr auto auto;position:relative;overflow:hidden}
+
+/* menu bar */
+.menubar{display:flex;align-items:center;gap:2px;padding:4px 8px;border-bottom:1px solid var(--line);background:var(--surface-2);position:relative;z-index:5}
+.dots{display:flex;gap:6px;margin-right:10px}
+.dots i{width:11px;height:11px;border-radius:50%;background:var(--line);display:block}
+.mac .dots i:nth-child(1){background:#ec6a5e}.mac .dots i:nth-child(2){background:#f4bf4f}.mac .dots i:nth-child(3){background:#61c554}
+.mitem{position:relative}
+.mitem>button{border:0;background:none;color:var(--fg);font:inherit;padding:3px 9px;border-radius:5px;cursor:pointer}
+.mitem>button[aria-expanded="true"],.mitem>button:hover{background:var(--sel)}
+.appname{font-weight:600}
+.dropdown{position:absolute;top:calc(100% + 4px);left:0;min-width:270px;background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);padding:5px;display:flex;flex-direction:column}
+.dropdown button{display:flex;justify-content:space-between;gap:24px;border:0;background:none;color:var(--fg);font:inherit;text-align:left;padding:5px 9px;border-radius:5px;cursor:pointer;white-space:nowrap}
+.dropdown button:hover{background:var(--accent);color:#fff}
+.dropdown button:hover kbd{color:#fff}
+.dropdown button[disabled]{color:var(--muted);cursor:default;background:none}
+.dropdown hr{border:0;border-top:1px solid var(--line);margin:4px 2px}
+kbd{font-family:var(--f-mono);font-size:11px;color:var(--muted)}
+.tag{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--info);border:1px solid currentColor;border-radius:4px;padding:0 4px;margin-left:6px}
+
+/* toolbar */
+.toolbar{display:flex;align-items:stretch;border-bottom:1px solid var(--line)}
+.tb{display:flex;align-items:center;gap:10px;padding:8px 14px;border:0;border-right:1px solid var(--line);background:none;color:var(--fg);font:inherit;text-align:left;cursor:pointer;min-width:220px}
+.tb:hover{background:var(--surface-2)}
+.tb small{display:block;color:var(--muted);font-size:11px}
+.tb b{font-weight:600}
+.tb .ico{width:18px;color:var(--muted);font-family:var(--f-mono)}
+.tb.update b .n{background:var(--accent);color:#fff;border-radius:9px;padding:0 6px;font-size:11px;margin-left:6px}
+.tb.update.busy .ico{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.tb.update.busy .ico{animation:none}}
+.tb-spacer{flex:1}
+.tb.small{min-width:0}
+.pop{position:absolute;z-index:6;background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);width:320px;padding:8px;display:flex;flex-direction:column;gap:6px}
+.pop input{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface-2);color:var(--fg);font:inherit}
+.pop .grp{font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);padding:6px 6px 0}
+.pop button.row{display:flex;justify-content:space-between;border:0;background:none;color:var(--fg);font:inherit;padding:6px;border-radius:5px;cursor:pointer;text-align:left}
+.pop button.row:hover{background:var(--sel)}
+.pop button.row.cur{font-weight:600}
+.pop .acts{display:flex;gap:6px;border-top:1px solid var(--line);padding-top:8px}
+
+/* banner */
+.banner{display:flex;align-items:center;gap:10px;padding:7px 14px;background:var(--warn-soft);color:var(--fg);border-bottom:1px solid var(--line)}
+.banner b{color:var(--warn)}
+.banner .sp{flex:1}
+
+/* body */
+.body{display:grid;grid-template-columns:330px 1fr;min-height:0}
+.side{border-right:1px solid var(--line);display:grid;grid-template-rows:auto auto 1fr auto;min-height:0}
+.tabs{display:flex;border-bottom:1px solid var(--line)}
+.tabs button{flex:1;border:0;background:none;color:var(--muted);font:inherit;padding:9px 0;cursor:pointer;border-bottom:2px solid transparent}
+.tabs button[aria-selected="true"]{color:var(--fg);font-weight:600;border-bottom-color:var(--accent)}
+.tabs .cnt{background:var(--surface-2);border:1px solid var(--line);border-radius:9px;padding:0 6px;font-size:11px;margin-left:4px}
+.filter{display:flex;flex-direction:column;gap:6px;padding:8px 10px;border-bottom:1px solid var(--line)}
+.filter input{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface-2);color:var(--fg);font:inherit}
+.chips{display:flex;gap:4px;flex-wrap:wrap}
+.chips span{font-size:11px;border:1px solid var(--line);border-radius:10px;padding:1px 8px;color:var(--muted);cursor:pointer}
+.chips span.on{background:var(--accent-soft);color:var(--accent);border-color:transparent}
+.list{overflow:auto;min-height:0}
+.allrow{display:flex;align-items:center;gap:8px;padding:6px 10px;color:var(--muted);font-size:12px;border-bottom:1px solid var(--line)}
+.frow{display:grid;grid-template-columns:18px 20px 1fr auto;align-items:center;gap:6px;padding:5px 10px;cursor:default}
+.frow:hover{background:var(--surface-2)}
+.frow.sel{background:var(--sel)}
+.frow .p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.frow .p .d{color:var(--muted)}
+.st{font-family:var(--f-mono);font-weight:500;font-size:12px;text-align:center;border-radius:4px}
+.st.M{color:var(--warn)}.st.A{color:var(--ok)}.st.D,.st.miss{color:var(--bad)}.st.U{color:var(--muted)}.st.C{color:#fff;background:var(--warn)}.st.R{color:var(--info)}
+.badge{font-size:11px;color:var(--muted)}
+.badge.lock-me{color:var(--accent)}.badge.lock-other{color:var(--bad)}
+.cl{padding:8px 10px 4px;font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+.commit{border-top:1px solid var(--line);padding:10px;display:flex;flex-direction:column;gap:6px;background:var(--surface-2)}
+.commit input,.commit textarea{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--fg);font:inherit;resize:none}
+.commit label{display:flex;gap:6px;align-items:center;color:var(--muted);font-size:12px}
+.btn{border:1px solid var(--line);background:var(--surface);color:var(--fg);font:inherit;padding:6px 12px;border-radius:6px;cursor:pointer}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.btn.primary[disabled]{opacity:.45;cursor:not-allowed}
+.btn.danger{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:600}
+
+.main{display:grid;grid-template-rows:auto 1fr;min-height:0;min-width:0}
+.mhead{display:flex;align-items:center;gap:10px;padding:7px 14px;border-bottom:1px solid var(--line)}
+.mhead .t{font-family:var(--f-mono);font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mhead .seg button{padding:3px 9px;font-size:12px}
+.diff{overflow:auto;font-family:var(--f-mono);font-size:12px;line-height:1.6;min-height:0}
+.dl{display:grid;grid-template-columns:44px 44px 18px 1fr;white-space:pre}
+.dl span:nth-child(-n+2){color:var(--muted);text-align:right;padding-right:8px;user-select:none}
+.dl.add{background:var(--add-bg)}.dl.del{background:var(--del-bg)}
+.dl.hunk{color:var(--info);background:var(--surface-2);grid-template-columns:1fr;padding-left:14px}
+.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;height:100%;color:var(--muted);padding:24px;text-align:center}
+.binbox{margin:24px;border:1px solid var(--line);border-radius:8px;padding:16px;display:grid;grid-template-columns:repeat(2,1fr);gap:16px;font-family:var(--f-ui)}
+.img{aspect-ratio:4/3;max-width:100%;border-radius:6px;background:repeating-conic-gradient(var(--surface-2) 0 25%,var(--line) 0 50%) 0 0/16px 16px;display:flex;align-items:end;padding:8px;font-size:11px;color:var(--muted)}
+
+/* history */
+.hrow{padding:8px 12px;border-bottom:1px solid var(--line);cursor:default;display:flex;flex-direction:column;gap:2px}
+.hrow:hover{background:var(--surface-2)}.hrow.sel{background:var(--sel)}
+.hrow .m{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hrow .meta{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.hrow.in .meta::before{content:"↓ chưa update · ";color:var(--accent)}
+.revd{padding:14px;display:flex;flex-direction:column;gap:10px;overflow:auto}
+.revd h3{margin:0;font-size:15px;font-weight:600}
+.revd .meta{color:var(--muted);font-variant-numeric:tabular-nums}
+.cp{font-family:var(--f-mono);font-size:12px;display:grid;grid-template-columns:22px 1fr;gap:2px 6px}
+
+/* browse */
+.tree{padding:6px 0;font-size:13px}
+.tree div{padding:3px 10px;cursor:default;white-space:nowrap}
+.tree div:hover{background:var(--surface-2)}.tree div.sel{background:var(--sel)}
+.tbl{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+.tbl th{text-align:left;font-weight:500;color:var(--muted);font-size:11px;letter-spacing:.04em;text-transform:uppercase;border-bottom:1px solid var(--line);padding:6px 10px}
+.tbl td{padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+.crumb{font-family:var(--f-mono);font-size:12px}
+
+/* activity + status */
+.activity{border-top:1px solid var(--line);background:var(--surface-2);max-height:150px;overflow:auto}
+.arow{display:grid;grid-template-columns:20px 1fr 160px 70px;gap:10px;align-items:center;padding:6px 14px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+.bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden}.bar i{display:block;height:100%;background:var(--accent)}
+.arow .err{color:var(--bad)}
+.status{display:flex;gap:16px;padding:5px 14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;background:var(--surface-2);white-space:nowrap;overflow:hidden}
+.status .ok{color:var(--ok)}
+
+/* context menu + dialog + toast */
+.ctx{position:absolute;z-index:8}
+.overlay{position:absolute;inset:0;background:rgba(10,18,30,.35);display:flex;align-items:center;justify-content:center;z-index:9}
+.dlg{background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);width:480px;max-width:92%;display:flex;flex-direction:column}
+.dlg h2{font-size:15px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line)}
+.dlg .c{padding:14px 16px;display:flex;flex-direction:column;gap:10px;line-height:1.5}
+.dlg .f{display:flex;flex-direction:column;gap:4px}
+.dlg .f span{color:var(--muted);font-size:12px}
+.dlg input,.dlg select,.dlg textarea{padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface-2);color:var(--fg);font:inherit}
+.dlg .a{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--line)}
+.dlg .warnbox{background:var(--warn-soft);border-radius:6px;padding:8px 10px}
+.dlg .badbox{background:var(--bad-soft);border-radius:6px;padding:8px 10px}
+/* sheets: conflict resolver, settings */
+.sheet{position:absolute;inset:18px;background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);display:grid;grid-template-rows:auto 1fr auto;overflow:hidden}
+.sheet>header{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line)}
+.sheet>header h2{margin:0;font-size:15px;flex:1}
+.sheet>footer{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--line);background:var(--surface-2)}
+.sheet>footer .sp{flex:1}
+.sbody{display:grid;grid-template-columns:230px 1fr;min-height:0}
+.snav{border-right:1px solid var(--line);overflow:auto;padding:6px}
+.snav button{display:flex;flex-direction:column;align-items:flex-start;gap:1px;width:100%;border:0;background:none;color:var(--fg);font:inherit;text-align:left;padding:7px 9px;border-radius:6px;cursor:pointer}
+.snav button small{color:var(--muted);font-size:11px}
+.snav button.cur{background:var(--sel);font-weight:600}
+.snav button.done{color:var(--muted)}.snav button.done::after{content:" ✓ đã giải quyết";color:var(--ok);font-size:11px}
+.three{display:grid;grid-template-columns:1fr 1fr 1fr;min-height:0;overflow:auto;font-family:var(--f-mono);font-size:12px;line-height:1.6}
+.three .col{border-right:1px solid var(--line);min-width:0}
+.three .col:last-child{border-right:0}
+.three .ch{position:sticky;top:0;background:var(--surface-2);font-family:var(--f-ui);font-size:12px;padding:6px 10px;border-bottom:1px solid var(--line);color:var(--muted)}
+.three .ch b{color:var(--fg)}
+.ln{padding:0 10px;white-space:pre;overflow:hidden;text-overflow:ellipsis}
+.blk{border-block:1px solid var(--warn);background:var(--warn-soft);padding:4px 0;margin:2px 0}
+.blk.done{border-color:var(--ok);background:var(--add-bg)}
+.blk .bb{display:flex;gap:4px;padding:2px 10px;font-family:var(--f-ui)}
+.blk .bb button{font:inherit;font-size:11px;padding:1px 7px;border-radius:4px;border:1px solid var(--line);background:var(--surface);color:var(--fg);cursor:pointer}
+.blk .ph{padding:0 10px;color:var(--warn);font-family:var(--f-ui);font-size:12px}
+.explain{padding:20px;display:flex;flex-direction:column;gap:12px;max-width:640px;line-height:1.55}
+.opt{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:8px;padding:10px 12px;cursor:pointer}
+.opt input{margin-top:3px}
+.opt small{display:block;color:var(--muted)}
+.spane{padding:16px 20px;overflow:auto;display:flex;flex-direction:column;gap:14px;max-width:720px}
+.spane h3{margin:0;font-size:15px}
+.srow{display:grid;grid-template-columns:220px 1fr;gap:12px;align-items:start}
+.srow>span{color:var(--muted);padding-top:6px}
+.srow input[type=text],.srow input:not([type]),.srow select,.srow input[type=number]{padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface-2);color:var(--fg);font:inherit;width:100%}
+.srow .hint{color:var(--muted);font-size:12px;margin-top:4px}
+.acct{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:8px 12px}
+.acct small{display:block;color:var(--muted)}
+.mono{font-family:var(--f-mono);font-size:12px;word-break:break-all}
+.sp-tree{border:1px solid var(--line);border-radius:8px;max-height:300px;overflow:auto}
+.sp-row{display:grid;grid-template-columns:1fr 120px 80px;gap:8px;align-items:center;padding:4px 10px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+.sp-row:last-child{border-bottom:0}
+.sp-row label{display:flex;gap:6px;align-items:center;white-space:nowrap}
+.sp-row select{padding:2px 4px;font:inherit;font-size:12px;border:1px solid var(--line);border-radius:4px;background:var(--surface-2);color:var(--fg)}
+.sp-row .sz{text-align:right;color:var(--muted)}
+.certgrid{display:grid;grid-template-columns:110px 1fr;gap:4px 10px;font-size:12px}
+.certgrid span:nth-child(odd){color:var(--muted)}
+.screens{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.screens span{color:var(--muted);font-size:12px}
+.toast{position:absolute;right:16px;bottom:44px;background:var(--fg);color:var(--surface);padding:9px 14px;border-radius:7px;box-shadow:var(--shadow);z-index:10}
+
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+.note{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 14px;line-height:1.55;min-width:0}
+.note h2{font-size:13px;margin:0 0 6px}
+.note p,.note ul{margin:0;color:var(--muted)}
+.note ul{padding-left:18px}
+</style>
+
+<div class="page">
+  <div class="head">
+    <div>
+      <h1>OpenSVN — cửa sổ chính (mockup tương tác · v1 tạm chốt 2026-10-13)</h1>
+      <p>Bấm vào menu, tab, nút Update, chuột phải lên file để mở context menu. Dữ liệu là ví dụ. Đặc tả đầy đủ trong <code>01-ui-screens-menus-and-interactions.md</code>.</p>
+    </div>
+    <div class="seg" role="group" aria-label="Nền tảng">
+      <button id="os-mac" aria-pressed="true">macOS</button>
+      <button id="os-win" aria-pressed="false">Windows / Linux</button>
+    </div>
+  </div>
+
+  <div class="screens" role="group" aria-label="Mở nhanh màn hình">
+    <span>Mở nhanh:</span>
+    <button class="btn" id="go-resolver">Conflict resolver</button>
+    <button class="btn" id="go-settings">Settings</button>
+    <button class="btn" id="go-signin">Sign in</button>
+    <button class="btn" id="go-cert">Trust certificate</button>
+    <button class="btn" id="go-sparse">Choose folders</button>
+  </div>
+
+  <div class="frame">
+  <div class="win mac" id="win">
+    <div class="menubar" id="menubar"><div class="dots"><i></i><i></i><i></i></div></div>
+
+    <div class="toolbar">
+      <button class="tb" id="tb-wc"><span class="ico">▣</span><span><small>Working copy</small><b>game-assets</b></span></button>
+      <button class="tb" id="tb-br"><span class="ico" id="br-ico">⑂</span><span><small id="br-sub">Branch · r48211</small><b id="br-name">trunk</b></span></button>
+      <button class="tb update" id="tb-up"><span class="ico">⟳</span><span><small id="up-sub">3 revision mới trên server</small><b id="up-label">Update<span class="n">↓3</span></b></span></button>
+      <div class="tb-spacer"></div>
+      <button class="tb small" id="tb-act" title="Activity"><span class="ico">⧗</span><span><small>Activity</small><b id="act-count">1 đang chạy</b></span></button>
+    </div>
+
+    <div class="banner" id="banner"><b>⚠ 3 conflict cần giải quyết</b><span>data/levels.json · art/env/trees.fbx · art/ui/logo.png</span><span class="sp"></span><button class="btn" id="resolve-btn">Resolve…</button></div>
+
+    <div class="body">
+      <div class="side">
+        <div class="tabs" role="tablist">
+          <button role="tab" aria-selected="true" data-tab="changes">Changes<span class="cnt">9</span></button>
+          <button role="tab" aria-selected="false" data-tab="history">History</button>
+          <button role="tab" aria-selected="false" data-tab="browse">Browse</button>
+        </div>
+        <div class="filter" id="filter"></div>
+        <div class="list" id="list"></div>
+        <div class="commit" id="commitbox">
+          <input id="c-sum" placeholder="Summary (bắt buộc)" value="Đọc tốc độ nhân vật từ config">
+          <textarea id="c-desc" rows="2" placeholder="Description"></textarea>
+          <label><input type="checkbox" id="c-keep"> Giữ lock sau commit</label>
+          <button class="btn primary" id="c-btn">Commit</button>
+        </div>
+      </div>
+      <div class="main" id="main"></div>
+    </div>
+
+    <div class="activity" id="activity" hidden></div>
+    <div class="status">
+      <span>~/svn/game-assets</span><span>r48211</span><span class="ok">● kết nối svn.corp.local</span><span>Kiểm tra lần cuối 2 phút trước</span><span>hxd@CORP (Windows sign-in)</span><span>Format 31 · tương thích svn 1.8+</span>
+    </div>
+    <div id="layer"></div>
+  </div>
+  </div>
+
+  <div class="notes">
+    <div class="note"><h2>Ký hiệu trạng thái</h2><p><b class="st M">M</b> sửa · <b class="st A">A</b> thêm · <b class="st D">D</b> xóa · <b class="st R">R</b> move · <b class="st U">?</b> chưa quản lý · <b class="st miss">!</b> mất file · <b class="st C">&nbsp;C&nbsp;</b> conflict · 🔒 xanh = bạn giữ lock, đỏ = người khác.</p></div>
+    <div class="note"><h2>Nút Update nhiều trạng thái</h2><p>Check for updates → Update ↓N → Updating % (bấm để xem tiến trình/hủy) → Up to date. Bấm thử trên toolbar.</p></div>
+    <div class="note"><h2>Màn hình phụ</h2><p>Conflict resolver, Settings, Sign in, Trust certificate, Choose folders mở từ hàng “Mở nhanh”, từ menu (Settings…, Working Copy › Choose folders, Selection › Resolve, Window › Conflict resolver) hoặc nút Resolve trên banner. Chưa có: Properties, Merge (phase 6).</p></div>
+  </div>
+</div>
+
+<script>
+(()=>{
+const $=s=>document.querySelector(s), win=$('#win'), layer=$('#layer');
+let mac=true, tab='changes', selFile=0, selRev=0, upState=2, activityOpen=false;
+const M=()=>mac?'⌘':'Ctrl+', SH=()=>mac?'⇧':'Shift+', ALT=()=>mac?'⌥':'Alt+';
+const k=s=>s.replace(/Mod\+/g,M()).replace(/Shift\+/g,SH()).replace(/Alt\+/g,ALT());
+
+/* ---------- sample data ---------- */
+const files=[
+ {st:'M',p:'src/game/',n:'Player.cs',on:true,diff:'code'},
+ {st:'A',p:'src/game/',n:'Inventory.cs',on:true,diff:'new'},
+ {st:'M',p:'art/characters/',n:'hero.psd',on:true,lock:'me',diff:'image'},
+ {st:'C',p:'data/',n:'levels.json',on:false,diff:'conflict'},
+ {st:'C',p:'art/env/',n:'trees.fbx',on:false,diff:'conflict'},
+ {st:'C',p:'art/ui/',n:'logo.png',on:false,diff:'conflict'},
+ {st:'U',p:'',n:'notes.txt',on:false,diff:'new'},
+ {st:'miss',p:'audio/',n:'old_theme.ogg',on:false,diff:'missing',cl:''},
+ {st:'M',p:'art/env/',n:'forest.fbx',on:false,lock:'other',diff:'binary',cl:'refactor-env'},
+];
+const revs=[
+ {r:48214,a:'lan.nt',d:'10 phút trước',m:'Thêm hiệu ứng mưa cho màn rừng',in:true,cp:[['M','/trunk/art/env/rain.vfx'],['A','/trunk/art/env/rain_drop.png']]},
+ {r:48213,a:'minh.pv',d:'35 phút trước',m:'Sửa lỗi va chạm khi nhảy tường',in:true,cp:[['M','/trunk/src/game/Physics.cs']]},
+ {r:48212,a:'build-bot',d:'1 giờ trước',m:'Tạo tag v2.4.0',in:true,cp:[['A','/tags/v2.4.0 (copy từ /trunk@48211)']]},
+ {r:48211,a:'hxd',d:'2 giờ trước',m:'Cập nhật level 3: thêm 2 checkpoint',cp:[['M','/trunk/data/levels.json'],['M','/trunk/src/game/Checkpoint.cs']]},
+ {r:48205,a:'thu.lt',d:'hôm qua 17:42',m:'Merge feature-inventory vào trunk',cp:[['M','/trunk/src/game/Inventory.cs'],['M','/trunk (svn:mergeinfo)']]},
+ {r:48190,a:'hxd',d:'hôm qua 10:05',m:'Đổi texture nhân vật chính sang 4K',cp:[['M','/trunk/art/characters/hero.psd']]},
+];
+const menus=[
+ ['OpenSVN',[['About OpenSVN'],['Check for app updates…'],'-',['Settings…','Mod+,','settings'],'-',['Hide OpenSVN','Mod+H'],['Quit OpenSVN','Mod+Q']],'mac'],
+ ['File',[['Checkout repository…','Mod+Shift+O','checkout'],['Add existing working copy…','Mod+O'],['Open recent ▸'],'-',['Close working copy','Mod+W'],['Settings…','Mod+,','settings','win'],['Exit','Mod+Q','','win']]],
+ ['Edit',[['Undo','Mod+Z'],['Redo','Mod+Shift+Z'],'-',['Cut','Mod+X'],['Copy','Mod+C'],['Paste','Mod+V'],['Select all','Mod+A'],'-',['Find / Filter','Mod+F'],['Copy path','Mod+Alt+C'],['Copy URL']]],
+ ['View',[['Changes','Mod+1','tab:changes'],['History','Mod+2','tab:history'],['Browse','Mod+3','tab:browse'],'-',['Activity panel','Mod+J','activity'],['Toggle sidebar','Mod+\\'],'-',['Split / Unified diff','Mod+Alt+D'],['Hide whitespace changes','Mod+Alt+W'],['Show unversioned files'],['Show ignored files'],['Group by changelist'],'-',['Theme ▸'],['Zoom in','Mod+='],['Zoom out','Mod+-'],['Actual size','Mod+0']]],
+ ['Working Copy',[['Check for updates','Mod+Shift+K'],['Update','Mod+Shift+U','update'],['Update to revision…'],['Commit','Mod+Enter','commit'],['Discard all changes…','','discard'],'-',['Choose folders (sparse)…','','sparse'],['Cleanup…'],['Properties…'],['Repository layout…'],['Upgrade working copy format…'],'-',['Show in Finder','Mod+Shift+R'],['Open in terminal','Mod+`'],['Open in editor','Mod+Shift+A']]],
+ ['Branch',[['Switch branch…','Mod+B','branch'],['New branch…','Mod+Shift+N','newbranch'],['New tag…','Mod+Shift+T'],'-',['Merge into current branch…','Mod+Shift+M','','','P6'],['Compare with branch…'],['Show branch on server'],'-',['Set up branch layout…','','layout']]],
+ ['Selection',[['Discard changes…','Mod+Shift+⌫','discard'],['Lock…','Mod+L','lock'],['Unlock'],['Add to changelist ▸'],['Ignore ▸'],['Resolve ▸','','resolver'],'-',['Show log','Mod+Shift+L','tab:history'],['Blame','Mod+Shift+B'],['Rename / Move…'],['Delete'],['Properties…']]],
+ ['Window',[['Minimize','Mod+M'],['Zoom'],['Conflict resolver','','resolver'],['Bring all to front']],'mac'],
+ ['Help',[['OpenSVN documentation'],['Keyboard shortcuts','Mod+/'],['Show logs folder'],['Report a problem…'],'-',['About OpenSVN','','','win'],['Check for app updates…','','','win']]],
+];
+
+/* ---------- menus ---------- */
+function closeAll(){layer.innerHTML='';document.querySelectorAll('.mitem>button').forEach(b=>b.setAttribute('aria-expanded','false'))}
+function mkMenu(items,{x,y}={}){
+  const d=document.createElement('div');d.className='dropdown';d.setAttribute('role','menu');
+  items.forEach(it=>{
+    if(it==='-'){d.appendChild(document.createElement('hr'));return}
+    const [label,sc='',act='',only='',flag='']=it;
+    if(only==='win'&&mac)return;
+    const b=document.createElement('button');b.setAttribute('role','menuitem');
+    let lab=label; if(!mac&&label==='Show in Finder')lab='Show in Explorer';
+    b.innerHTML=`<span>${lab}${flag?`<span class="tag">${flag}</span>`:''}</span><kbd>${sc?k(sc):''}</kbd>`;
+    b.onclick=e=>{e.stopPropagation();closeAll();run(act,label)};
+    d.appendChild(b);
+  });
+  if(x!==undefined){const w=document.createElement('div');w.className='ctx';w.style.left=x+'px';w.style.top=y+'px';w.appendChild(d);d.style.position='static';return w}
+  return d;
+}
+function buildMenubar(){
+  const mb=$('#menubar');mb.querySelectorAll('.mitem').forEach(n=>n.remove());
+  menus.forEach(([name,items,only])=>{
+    if(name==='Branch'&&!hasLayout){name='Location';items=[['Switch to another folder…','Mod+B','branch'],['Copy to new location…','Mod+Shift+N','copyloc'],['Compare with another folder…'],['Show on server'],'-',['Set up branch layout…','','layout']]}
+    if(only==='mac'&&!mac)return;
+    const w=document.createElement('div');w.className='mitem';
+    const b=document.createElement('button');b.textContent=name;b.setAttribute('aria-haspopup','menu');b.setAttribute('aria-expanded','false');
+    if(name==='OpenSVN')b.classList.add('appname');
+    const open=()=>{closeAll();b.setAttribute('aria-expanded','true');const d=mkMenu(items);const r=b.getBoundingClientRect(),wr=win.getBoundingClientRect();d.style.left=(r.left-wr.left)+'px';d.style.top=(r.bottom-wr.top+2)+'px';layer.appendChild(d)};
+    b.onclick=e=>{e.stopPropagation();b.getAttribute('aria-expanded')==='true'?closeAll():open()};
+    b.onmouseenter=()=>{if(layer.querySelector('.dropdown')&&!layer.querySelector('.ctx')&&!layer.querySelector('.overlay')&&!layer.querySelector('.pop'))open()};
+    w.appendChild(b);mb.appendChild(w);
+  });
+}
+document.addEventListener('click',e=>{if(!e.target.closest('.dlg')&&!e.target.closest('.pop'))closeAll()});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeAll()});
+
+/* ---------- actions ---------- */
+function run(act,label){
+  if(act.startsWith('tab:'))return setTab(act.slice(4));
+  ({copyloc:dlgCopyLocation,layout:dlgLayout,settings:openSettings,sparse:dlgSparse,resolver:openResolver,signin:dlgSignIn,cert:dlgCert,checkout:dlgCheckout,lock:dlgLock,discard:dlgDiscard,update:clickUpdate,activity:toggleActivity,branch:popBranch,newbranch:dlgNewBranch,commit:()=>$('#c-btn').click()}[act]||(()=>toast(`“${label}” — chưa có trong mockup`)))();
+}
+function toast(t){const n=document.createElement('div');n.className='toast';n.textContent=t;win.appendChild(n);setTimeout(()=>n.remove(),2600)}
+function overlay(html,bind){
+  closeAll();const o=document.createElement('div');o.className='overlay';o.innerHTML=`<div class="dlg" role="dialog" aria-modal="true">${html}</div>`;
+  o.addEventListener('click',e=>{if(e.target===o)closeAll()});
+  o.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>closeAll());
+  layer.appendChild(o);bind&&bind(o);o.querySelector('input,select,textarea,button')?.focus();
+}
+function dlgCheckout(){overlay(`<h2>Checkout repository</h2><div class="c">
+ <label class="f"><span>Repository URL</span><input id="d-url" value="https://svn.corp.local/svn/game-assets/trunk"></label>
+ <label class="f"><span>Thư mục đích</span><input id="d-path" value="~/svn/game-assets"></label>
+ <label class="f"><span>Revision</span><select id="d-rev"><option>HEAD (mới nhất)</option><option>Số revision…</option><option>Theo ngày…</option></select></label>
+ <label class="f"><span>Phạm vi</span><select id="d-scope"><option>Toàn bộ</option><option>Chọn thư mục… (sparse)</option></select></label>
+ <label class="f"><span>Định dạng working copy</span><select id="d-fmt"><option>Tương thích svn 1.8+ (format 31) — mặc định</option><option>Tiết kiệm dung lượng, không lưu bản gốc — cần svn 1.15+ (format 32)</option></select></label>
+ <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="d-ext"> Bỏ qua externals</label>
+ <div class="warnbox">Ước tính: 48.2 GB · 112 430 file. Format 32 sẽ tiết kiệm khoảng 41 GB bản gốc.</div>
+ </div><div class="a"><button class="btn" data-close>Cancel</button><button class="btn primary" id="d-go">Checkout</button></div>`,
+ o=>o.querySelector('#d-go').onclick=()=>{closeAll();addActivity('Checkout game-assets',12);toast('Đã bắt đầu checkout — xem tiến trình ở Activity')})}
+function dlgLock(){const f=files[selFile];const other=f.lock==='other';overlay(`<h2>${other?'File đang bị khóa':'Lock để sửa'}</h2><div class="c">
+ <div><b>${f.p}${f.n}</b></div>
+ ${other?`<div class="badbox">Đang bị <b>lan.nt</b> khóa từ 09:14 hôm nay — “Đang chỉnh UV cây”. Hãy liên hệ người giữ lock trước khi lấy lock.</div>
+ <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="d-steal"> Tôi hiểu: lấy lock (steal) sẽ làm thay đổi của lan.nt không commit được</label>`:''}
+ <label class="f"><span>Ghi chú lock (tùy chọn)</span><input id="d-lc" placeholder="Bạn đang sửa gì?"></label>
+ </div><div class="a"><button class="btn" data-close>Cancel</button><button class="btn ${other?'danger':'primary'}" id="d-go" ${other?'disabled':''}>${other?'Steal lock':'Lock'}</button></div>`,
+ o=>{const s=o.querySelector('#d-steal');if(s)s.onchange=()=>o.querySelector('#d-go').disabled=!s.checked;
+ o.querySelector('#d-go').onclick=()=>{f.lock='me';closeAll();render();toast('Đã lock '+f.n)}})}
+function dlgDiscard(){const chosen=files.filter(f=>f.on);const n=chosen.length||1;overlay(`<h2>Discard changes</h2><div class="c">
+ <div class="badbox">Bạn sắp hủy thay đổi của <b>${n} file</b>. Không thể hoàn tác.</div>
+ <div style="font-family:var(--f-mono);font-size:12px">${(chosen.length?chosen:[files[selFile]]).map(f=>f.p+f.n).join('<br>')}</div>
+ <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="d-unv"> Xóa luôn file chưa quản lý (?)</label>
+ </div><div class="a"><button class="btn" data-close>Cancel</button><button class="btn danger" id="d-go">Discard ${n} file</button></div>`,
+ o=>o.querySelector('#d-go').onclick=()=>{closeAll();toast(`Đã hủy thay đổi của ${n} file`)})}
+function dlgNewBranch(){overlay(`<h2>New branch</h2><div class="c">
+ <label class="f"><span>Tên branch</span><input id="d-bn" value="feature-rain-fx"></label>
+ <label class="f"><span>Tạo từ</span><select id="d-src"><option>HEAD của trunk</option><option>Revision cụ thể…</option><option>Working copy hiện tại (gồm thay đổi local)</option></select></label>
+ <label class="f"><span>Message</span><input id="d-bm" value="Tạo branch feature-rain-fx từ trunk"></label>
+ <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="d-sw" checked> Switch sang branch mới</label>
+ <div style="color:var(--muted);font-size:12px">Sẽ tạo: /branches/feature-rain-fx</div>
+ </div><div class="a"><button class="btn" data-close>Cancel</button><button class="btn primary" id="d-go">Create branch</button></div>`,
+ o=>o.querySelector('#d-go').onclick=()=>{closeAll();toast('Đã tạo branch feature-rain-fx (r48215)')})}
+function popBranch(){if(!hasLayout)return popLocation();closeAll();const p=document.createElement('div');p.className='pop';p.style.left='220px';p.style.top='88px';
+ p.innerHTML=`<input id="p-bq" placeholder="Tìm branch hoặc tag"><div class="grp">Hiện tại</div><button class="row cur">⑂ trunk<span class="badge">r48211</span></button>
+ <div class="grp">Branches</div><button class="row">feature-inventory<span class="badge">3 ngày</span></button><button class="row">feature-boss-ai<span class="badge">1 tuần</span></button><button class="row">release-2.4<span class="badge">hôm qua</span></button>
+ <div class="grp">Tags</div><button class="row">🏷 v2.4.0<span class="badge">r48212</span></button><button class="row">🏷 v2.3.2<span class="badge">r47710</span></button>
+ <div class="acts"><button class="btn" id="p-nb">New branch…</button><button class="btn">New tag…</button></div>`;
+ p.addEventListener('click',e=>e.stopPropagation());layer.appendChild(p);
+ p.querySelectorAll('button.row:not(.cur)').forEach(b=>b.onclick=()=>{closeAll();const isTag=b.textContent.includes('🏷');overlay(`<h2>Switch sang ${b.firstChild.textContent.trim()}?</h2><div class="c">${isTag?'<div class="badbox">Đây là <b>tag</b>. Trong SVN, tag chỉ là thư mục sao chép theo quy ước và thường không được sửa. Commit vào tag sẽ phải xác nhận thêm.</div>':''}<div class="warnbox">Bạn có 9 thay đổi local. Thay đổi sẽ được mang theo sang branch mới; có thể phát sinh conflict.</div></div><div class="a"><button class="btn" data-close>Cancel</button><button class="btn primary" data-close>Switch và mang thay đổi theo</button></div>`)});
+ p.querySelector('#p-nb').onclick=()=>dlgNewBranch();p.querySelector('input').focus()}
+function popWc(){closeAll();const p=document.createElement('div');p.className='pop';p.style.left='0';p.style.top='88px';
+ p.innerHTML=`<input id="p-wq" placeholder="Tìm working copy"><div class="grp">svn.corp.local</div>
+ <button class="row cur">game-assets<span class="badge">9 thay đổi · ↓3</span></button><button class="row">engine-core<span class="badge">sạch</span></button><button class="row">tai-lieu-du-an<span class="badge">không có branch · ↓12</span></button>
+ <div class="acts"><button class="btn" id="p-co">Checkout…</button><button class="btn">Add existing…</button></div>`;
+ p.addEventListener('click',e=>e.stopPropagation());layer.appendChild(p);p.querySelector('#p-co').onclick=dlgCheckout;
+ p.querySelectorAll('button.row').forEach((b,i)=>b.onclick=()=>setWc(i));p.querySelector('input').focus()}
+
+/* ---------- full-size sheets (conflict resolver, settings) ---------- */
+function sheet(html,bind){
+  closeAll();const o=document.createElement('div');o.className='overlay';
+  o.innerHTML=`<div class="sheet" role="dialog" aria-modal="true">${html}</div>`;
+  o.addEventListener('click',e=>{if(e.target===o)closeAll()});
+  layer.appendChild(o);bind&&bind(o);
+  o.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>closeAll());
+}
+
+/* Conflict resolver: text conflict theo block, tree conflict có giải thích, binary chọn 1 bên */
+const conflicts=[
+ {path:'data/levels.json',kind:'text',info:'Bạn sửa từ r48211 · server r48213 (minh.pv)',segs:[
+   ['c',['{','  "level": 3,','  "checkpoints": [','    { "id": 1, "x": 10, "y": 40 },','    { "id": 2, "x": 64, "y": 40 },']],
+   ['x',{mine:['    { "id": 3, "x": 120, "y": 40 }'],theirs:['    { "id": 3, "x": 128, "y": 44 },','    { "id": 4, "x": 200, "y": 40 }'],pick:null}],
+   ['c',['  ],']],
+   ['x',{mine:['  "timeLimit": 90,'],theirs:['  "timeLimit": 120,'],pick:null}],
+   ['c',['  "music": "forest_theme.ogg"','}']]]},
+ {path:'art/env/trees.fbx',kind:'tree',info:'Bạn sửa · server xóa ở r48213',pick:null},
+ {path:'art/ui/logo.png',kind:'binary',info:'Cả hai cùng sửa file binary',pick:null},
+];
+let curC=0;
+function openResolver(){const f=files[selFile],j=f&&f.st==='C'?conflicts.findIndex(c=>c.path===f.p+f.n):-1;curC=j>=0?j:Math.max(0,conflicts.findIndex(c=>!c.done));sheet(resolverHtml(),bindResolver)}
+function rerenderResolver(){const s=layer.querySelector('.sheet');if(!s)return;s.innerHTML=resolverHtml();bindResolver(layer.querySelector('.overlay'))}
+function blocksOf(c){return c.segs.filter(s=>s[0]==='x').map(s=>s[1])}
+function canResolve(c){return c.kind==='text'?blocksOf(c).every(b=>b.pick):!!c.pick}
+function resolverHtml(){
+  const c=conflicts[curC],left=conflicts.filter(x=>!x.done).length;
+  const nav=conflicts.map((x,i)=>`<button class="${i===curC?'cur':''} ${x.done?'done':''}" data-c="${i}"><span>${x.kind==='tree'?'📁 ':x.kind==='binary'?'🖼 ':'⚠ '}${x.path}</span><small>${x.kind==='text'?'Conflict nội dung':x.kind==='tree'?'Tree conflict':'Conflict file binary'} · ${x.info}</small></button>`).join('');
+  let body='';
+  if(c.kind==='text'){
+    const lines=a=>a.map(t=>`<div class="ln">${esc(t)}</div>`).join('');
+    let mine='',res='',th='',bi=0;
+    c.segs.forEach(([t,v])=>{
+      if(t==='c'){mine+=lines(v);res+=lines(v);th+=lines(v);return}
+      const i=bi++,picked=v.pick?(v.pick==='mine'?v.mine:v.pick==='theirs'?v.theirs:[...v.mine,...v.theirs]):null;
+      mine+=`<div class="blk ${v.pick==='mine'||v.pick==='both'?'done':''}">${lines(v.mine)}<div class="bb"><button data-b="${i}" data-p="mine">Dùng của bạn →</button></div></div>`;
+      th+=`<div class="blk ${v.pick==='theirs'||v.pick==='both'?'done':''}">${lines(v.theirs)}<div class="bb"><button data-b="${i}" data-p="theirs">← Dùng bản server</button></div></div>`;
+      res+=picked?`<div class="blk done">${lines(picked)}<div class="bb"><button data-b="${i}" data-p="">Hoàn tác</button></div></div>`
+                 :`<div class="blk"><div class="ph">Chưa chọn đoạn ${i+1}</div><div class="bb"><button data-b="${i}" data-p="both">Giữ cả hai (của bạn trước)</button></div></div>`;
+    });
+    body=`<div class="three"><div class="col"><div class="ch"><b>Của bạn</b> · working copy</div>${mine}</div><div class="col"><div class="ch"><b>Kết quả</b> · sửa tự do khi đã chọn</div>${res}</div><div class="col"><div class="ch"><b>Server</b> · r48213, minh.pv</div>${th}</div></div>`;
+  } else if(c.kind==='tree'){
+    body=`<div class="explain"><div class="warnbox"><b>Bạn đã sửa file này, nhưng trên server nó đã bị xóa</b> ở r48213 bởi minh.pv: “Dọn asset cây cũ, chuyển sang trees_v2.fbx”.</div>
+      ${[['keep','Giữ thay đổi của bạn','File được giữ lại và sẽ được thêm lại vào SVN khi bạn commit.'],['accept','Chấp nhận xóa','Thay đổi local của bạn trên file này sẽ mất.'],['move','Áp thay đổi sang file mới','Chọn file đích trên server (ví dụ art/env/trees_v2.fbx) nếu file đã được đổi tên/di chuyển.']].map(([v,t,d])=>`<label class="opt"><input type="radio" name="tc" value="${v}" ${c.pick===v?'checked':''}><span><b>${t}</b><small>${d}</small></span></label>`).join('')}</div>`;
+  } else {
+    body=`<div class="binbox"><div><div style="margin-bottom:6px;color:var(--muted)">Của bạn · 412 KB</div><div class="img">logo.png (bản của bạn)</div></div><div><div style="margin-bottom:6px;color:var(--muted)">Server · r48213 · 398 KB</div><div class="img">logo.png (bản server)</div></div>
+      <div style="grid-column:1/-1;display:flex;flex-direction:column;gap:8px">${[['mine','Dùng bản của bạn'],['theirs','Dùng bản server']].map(([v,t])=>`<label class="opt"><input type="radio" name="bc" value="${v}" ${c.pick===v?'checked':''}><span><b>${t}</b></span></label>`).join('')}</div></div>`;
+  }
+  const bl=c.kind==='text'?blocksOf(c):[],n=bl.filter(b=>b.pick).length;
+  return `<header><h2>Conflict resolver · còn ${left} conflict</h2><button class="btn" data-close>Đóng</button></header>
+   <div class="sbody"><nav class="snav">${nav}</nav>${body}</div>
+   <footer>${c.kind==='text'?`<span>${n}/${bl.length} đoạn đã chọn</span><button class="btn" id="r-allm">Lấy toàn bộ của bạn</button><button class="btn" id="r-allt">Lấy toàn bộ server</button>`:''}<button class="btn" id="r-ext">Mở bằng công cụ ngoài…</button><span class="sp"></span><button class="btn primary" id="r-ok" ${canResolve(c)&&!c.done?'':'disabled'}>Đánh dấu đã giải quyết</button></footer>`;
+}
+function bindResolver(o){
+  const c=conflicts[curC];
+  o.querySelectorAll('.snav button').forEach(b=>b.onclick=()=>{curC=+b.dataset.c;rerenderResolver()});
+  o.querySelectorAll('[data-b]').forEach(b=>b.onclick=()=>{blocksOf(c)[+b.dataset.b].pick=b.dataset.p||null;rerenderResolver()});
+  o.querySelectorAll('input[type=radio]').forEach(r=>r.onchange=()=>{c.pick=r.value;rerenderResolver()});
+  o.querySelector('#r-allm')&&(o.querySelector('#r-allm').onclick=()=>{blocksOf(c).forEach(b=>b.pick='mine');rerenderResolver()});
+  o.querySelector('#r-allt')&&(o.querySelector('#r-allt').onclick=()=>{blocksOf(c).forEach(b=>b.pick='theirs');rerenderResolver()});
+  o.querySelector('#r-ext').onclick=()=>toast('Mở bằng công cụ merge cấu hình trong Settings › Diff & Merge');
+  o.querySelector('#r-ok').onclick=()=>{
+    c.done=true;const f=files.find(x=>x.p+x.n===c.path);
+    if(f){if(c.kind==='tree'&&c.pick==='accept')files.splice(files.indexOf(f),1);else{f.st='M';f.diff='resolved'}}
+    const next=conflicts.findIndex(x=>!x.done);
+    if(next<0){closeAll();$('#banner').hidden=true;document.querySelector('.tabs .cnt').textContent=files.length;render();toast('Đã giải quyết toàn bộ conflict')}
+    else{curC=next;rerenderResolver();render();updateBanner()}};
+}
+function updateBanner(){const n=conflicts.filter(x=>!x.done).length;$('#banner b').textContent=`⚠ ${n} conflict cần giải quyết`;$('#banner b').nextElementSibling.textContent=conflicts.filter(x=>!x.done).map(x=>x.path).join(' · ')}
+function esc(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;')}
+
+/* Settings: 7 trang, thay đổi lưu ngay */
+let curPage='general';
+const getPages=()=>({
+ general:['General','Thư mục, kiểm tra cập nhật',`<h3>General</h3>
+  <div class="srow"><span>Thư mục checkout mặc định</span><div><input id="s-root" value="~/svn"></div></div>
+  <div class="srow"><span>Tự kiểm tra revision mới</span><div><select id="s-int"><option>Mỗi 5 phút</option><option selected>Mỗi 10 phút</option><option>Mỗi 30 phút</option><option>Tắt</option></select><div class="hint">Chỉ với working copy đang mở. Mỗi lần kiểm tra là 1 request nhẹ tới server.</div></div></div>
+  <div class="srow"><span>Khi khởi động</span><label><input type="checkbox" id="s-open" checked> Mở working copy gần nhất</label></div>
+  <div class="srow"><span>Ngôn ngữ</span><div><select id="s-lang"><option selected>Tiếng Việt</option><option>English</option></select></div></div>
+  <div class="srow"><span>Thông báo hệ thống</span><div style="display:flex;flex-direction:column;gap:4px"><label><input type="checkbox" id="s-n1" checked> Có revision mới</label><label><input type="checkbox" id="s-n2" checked> Lock của tôi bị người khác lấy</label><label><input type="checkbox" id="s-n3" checked> Tác vụ dài hoàn tất khi app ở nền</label></div></div>`],
+ accounts:['Accounts','Đăng nhập, chứng chỉ',`<h3>Accounts</h3>
+  <div class="acct"><span><b>svn.corp.local</b><small>VisualSVN Server · CORP\\hxd · Đăng nhập bằng tài khoản Windows</small></span><span class="badge">dùng 2 phút trước</span><button class="btn">Sign out</button></div>
+  <div class="acct"><span><b>svn-legacy.corp.local</b><small>VisualSVN Server · hxd · Mật khẩu lưu trong ${mac?'Keychain':'Windows Credential Manager'}</small></span><span class="badge">dùng 12 ngày trước</span><button class="btn">Sign out</button></div>
+  <h3>Chứng chỉ đã tin</h3>
+  <div class="acct"><span><b>svn-legacy.corp.local</b><small class="mono">SHA-256 7A:3F:91:…:C2:08 · hết hạn 2027-03-01</small></span><span class="badge">tin vĩnh viễn</span><button class="btn">Xóa</button></div>`],
+ appearance:['Appearance','Theme, font, mật độ',`<h3>Appearance</h3>
+  <div class="srow"><span>Theme</span><div><select id="s-theme"><option selected>Theo hệ thống</option><option>Sáng</option><option>Tối</option></select></div></div>
+  <div class="srow"><span>Font diff</span><div><select id="s-font"><option selected>IBM Plex Mono</option><option>JetBrains Mono</option><option>Font hệ thống</option></select></div></div>
+  <div class="srow"><span>Cỡ chữ</span><div><input type="number" id="s-size" value="13" min="10" max="20"></div></div>
+  <div class="srow"><span>Mật độ danh sách</span><div><select id="s-dens"><option selected>Comfortable</option><option>Compact</option></select></div></div>`],
+ diff:['Diff & Merge','Hiển thị, công cụ ngoài',`<h3>Diff & Merge</h3>
+  <div class="srow"><span>Kiểu diff mặc định</span><div><select id="s-dm"><option selected>Split</option><option>Unified</option></select></div></div>
+  <div class="srow"><span>Khoảng trắng</span><label><input type="checkbox" id="s-ws"> Ẩn thay đổi chỉ có khoảng trắng</label></div>
+  <div class="srow"><span>Tab width</span><div><input type="number" id="s-tab" value="4" min="1" max="8"></div></div>
+  <div class="srow"><span>Công cụ diff ngoài</span><div><select id="s-dt"><option selected>Không dùng</option><option>Beyond Compare</option><option>Meld</option><option>KDiff3</option><option>VS Code</option><option>Tùy chỉnh…</option></select></div></div>
+  <div class="srow"><span>Công cụ merge ngoài</span><div><select id="s-mt"><option selected>Conflict resolver của OpenSVN</option><option>Beyond Compare</option><option>KDiff3</option><option>Tùy chỉnh…</option></select><div class="hint">Tham số tùy chỉnh: <span class="mono">{base} {mine} {theirs} {merged}</span></div></div></div>`],
+ integrations:['Integrations','Editor, terminal, VisualSVN web',`<h3>Integrations</h3>
+  <div class="srow"><span>Editor ngoài</span><div><select id="s-ed"><option selected>VS Code</option><option>JetBrains Rider</option><option>Sublime Text</option><option>Tùy chỉnh…</option></select></div></div>
+  <div class="srow"><span>Terminal</span><div><select id="s-term"><option selected>${mac?'Terminal':'Windows Terminal'}</option><option>${mac?'iTerm2':'PowerShell'}</option><option>Tùy chỉnh…</option></select></div></div>
+  <div class="srow"><span>VisualSVN web — mở file/thư mục</span><div><input id="s-webf" value="https://{server}/!/#{repo}/view/{revSpec}/{path}"><div class="hint">Đã đối chiếu với server thật. Biến: <span class="mono">{server} {repo} {revSpec}</span> (<span class="mono">head</span> hoặc <span class="mono">r48211</span>) <span class="mono">{path}</span> (từ gốc repo, mã hóa UTF-8, không có / đầu).</div><div class="hint">Ví dụ: <span class="mono" id="s-webf-pv"></span></div></div></div>
+  <div class="srow"><span>VisualSVN web — mở revision</span><div><input id="s-web" value="https://{server}/!/#{repo}/commit/r{rev}/"><div class="hint">Chưa đối chiếu — cần 1 link mở revision thật để xác nhận.</div><div class="hint">Ví dụ: <span class="mono" id="s-web-pv"></span></div></div></div>`],
+ network:['Network','Proxy, kết nối song song',`<h3>Network</h3>
+  <div class="srow"><span>Proxy</span><div><select id="s-px"><option selected>Theo hệ thống</option><option>Không dùng</option><option>Thủ công…</option></select></div></div>
+  <div class="srow"><span>Kết nối song song tới server</span><div><input type="number" id="s-conn" value="4" min="1" max="16"><div class="hint">Tăng để checkout/update nhanh hơn trên mạng LAN; giảm nếu server quá tải.</div></div></div>
+  <div class="srow"><span>Timeout (giây)</span><div><input type="number" id="s-to" value="60" min="10" max="600"></div></div>`],
+ advanced:['Advanced','Định dạng WC, ignore, log',`<h3>Advanced</h3>
+  <div class="srow"><span>Định dạng mặc định khi checkout</span><div><select id="s-fmt"><option selected>Format 31 — tương thích svn 1.8+</option><option>Format 32 — không lưu bản gốc, cần svn 1.15+</option></select></div></div>
+  <div class="srow"><span>Global ignores</span><div><input id="s-gi" value="*.o *.obj *.tmp .DS_Store Thumbs.db Library/ Temp/"></div></div>
+  <div class="srow"><span>Cấu hình Subversion</span><label><input type="checkbox" id="s-cfg" checked> Đọc ~/.subversion/config (auto-props, global-ignores)</label></div>
+  <div class="srow"><span>Cache</span><div style="display:flex;gap:8px;align-items:center"><span>1.3 GB / 2 GB</span><button class="btn">Xóa cache</button></div></div>
+  <div class="srow"><span>Mức log</span><div><select id="s-log"><option selected>Info</option><option>Debug</option><option>Trace (rất nhiều dữ liệu)</option></select></div></div>`],
+});
+function openSettings(){sheet(settingsHtml(),bindSettings)}
+function settingsHtml(){return `<header><h2>Settings</h2><span class="badge">Thay đổi được lưu ngay</span><button class="btn" data-close>Đóng</button></header>
+  <div class="sbody"><nav class="snav">${Object.entries(getPages()).map(([k2,[t,d]])=>`<button class="${k2===curPage?'cur':''}" data-p="${k2}"><span>${t}</span><small>${d}</small></button>`).join('')}</nav><div class="spane">${getPages()[curPage][2]}</div></div><footer><span class="badge">OpenSVN 0.1.0 · engine svn-protocol 0.1</span></footer>`}
+function bindSettings(o){
+  o.querySelectorAll('.snav button').forEach(b=>b.onclick=()=>{curPage=b.dataset.p;o.querySelector('.sheet').innerHTML=settingsHtml();bindSettings(o);o.querySelectorAll('[data-close]').forEach(x=>x.onclick=()=>closeAll())});
+  const enc=p=>p.split('/').map(encodeURIComponent).join('/');
+  const fill=t=>t.replace('{server}','svn.corp.local').replace('{repo}','game-assets').replace('{rev}','48211').replace('{revSpec}','head').replace('{path}',enc('trunk/data/Cấu hình màn 3.json'));
+  [['#s-web','#s-web-pv'],['#s-webf','#s-webf-pv']].forEach(([i,v])=>{const w=o.querySelector(i);if(w){const pv=()=>o.querySelector(v).textContent=fill(w.value);w.oninput=pv;pv()}});
+}
+
+/* Sign in + Trust certificate */
+function dlgSignIn(){overlay(`<h2>Đăng nhập VisualSVN Server</h2><div class="c">
+ <div><b>svn.corp.local</b><div class="mono" style="color:var(--muted)">Realm: VisualSVN Server · https://svn.corp.local:443</div></div>
+ ${mac?'':`<button class="btn primary" id="d-sso">Đăng nhập bằng tài khoản Windows (CORP\\hxd)</button><div style="text-align:center;color:var(--muted);font-size:12px">hoặc dùng tài khoản khác</div>`}
+ <label class="f"><span>Tài khoản AD</span><input id="d-user" placeholder="CORP\\tên.đăng.nhập hoặc tên@corp.local" value="hxd"></label>
+ <label class="f"><span>Mật khẩu</span><input id="d-pass" type="password" value="••••••••"></label>
+ <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="d-rem" checked> Ghi nhớ trong ${mac?'Keychain':'Windows Credential Manager'}</label>
+ ${mac?`<div style="color:var(--muted);font-size:12px">Máy Mac đã có vé Kerberos của domain sẽ tự đăng nhập, không hiện hộp thoại này.</div>`:''}
+ </div><div class="a"><button class="btn" data-close>Cancel</button><button class="btn ${mac?'primary':''}" id="d-go">Sign in</button></div>`,
+ o=>{const ok=()=>{closeAll();toast('Đã đăng nhập svn.corp.local')};o.querySelector('#d-go').onclick=ok;o.querySelector('#d-sso')&&(o.querySelector('#d-sso').onclick=ok)})}
+function dlgCert(){overlay(`<h2>Chứng chỉ server không được tin cậy</h2><div class="c">
+ <div class="badbox">Chứng chỉ của <b>svn-legacy.corp.local</b> do một CA không có trong kho chứng chỉ của máy cấp. Chỉ tin nếu bạn chắc đây là server của công ty.</div>
+ <div class="certgrid"><span>Cấp cho</span><span>svn-legacy.corp.local</span><span>Cấp bởi</span><span>CORP Internal Root CA 2</span><span>Hiệu lực</span><span>2025-03-01 → 2027-03-01</span><span>SHA-256</span><span class="mono">7A:3F:91:0C:5E:22:B8:41:9D:E0:6A:17:F3:4C:88:2B:91:D5:0E:73:AA:19:64:BC:5F:02:E8:3D:71:C9:C2:08</span></div>
+ <div style="color:var(--muted);font-size:12px">Cách tốt hơn: nhờ IT cài CA nội bộ vào máy, OpenSVN sẽ tự tin mà không cần hỏi.</div>
+ </div><div class="a"><button class="btn" data-close>Từ chối</button><button class="btn" id="d-once">Tin trong phiên này</button><button class="btn primary" id="d-go">Tin vĩnh viễn</button></div>`,
+ o=>{o.querySelector('#d-once').onclick=()=>{closeAll();toast('Tin chứng chỉ đến khi đóng app')};o.querySelector('#d-go').onclick=()=>{closeAll();toast('Đã lưu chứng chỉ vào danh sách tin cậy')}})}
+
+/* Choose folders (sparse): cây 2 cấp, checkbox 3 trạng thái, tổng dung lượng */
+const sparse=[
+ {n:'art',kids:[{n:'characters',gb:12.3,on:true},{n:'env',gb:22.1,on:false},{n:'ui',gb:2.4,on:true},{n:'raw_sources',gb:4.9,on:false}]},
+ {n:'audio',kids:[{n:'music',gb:3.8,on:false},{n:'sfx',gb:1.3,on:true}]},
+ {n:'data',gb:0.012,on:true},{n:'src',gb:0.038,on:true},{n:'docs',gb:0.21,on:false},
+];
+function dlgSparse(){overlay(`<h2>Chọn thư mục tải về · game-assets</h2><div class="c"><div style="color:var(--muted)">Thư mục không chọn sẽ không có trên máy bạn. Đổi lại bất kỳ lúc nào.</div><div class="sp-tree" id="sp"></div><div id="sp-sum" class="warnbox"></div></div>
+ <div class="a"><button class="btn" data-close>Cancel</button><button class="btn primary" id="d-go">Áp dụng</button></div>`,
+ o=>{const draw=()=>{const leaf=[];sparse.forEach(x=>x.kids?leaf.push(...x.kids):leaf.push(x));
+  const gb=leaf.filter(x=>x.on).reduce((a,x)=>a+x.gb,0),all=leaf.reduce((a,x)=>a+x.gb,0);
+  const row=(x,pi,ci)=>{const kids=x.kids,on=kids?kids.every(c=>c.on):x.on,some=kids&&kids.some(c=>c.on)&&!on,sz=kids?kids.reduce((a,c)=>a+c.gb,0):x.gb;
+   return `<div class="sp-row" style="padding-left:${ci===undefined?10:34}px"><label><input type="checkbox" data-pi="${pi}" ${ci!==undefined?`data-ci="${ci}"`:''} ${on?'checked':''} ${some?'data-ind="1"':''}> ${kids?'▾ ':''}📁 ${x.n}</label><select aria-label="Độ sâu ${x.n}" ${on||some?'':'disabled'}><option>Toàn bộ</option><option>Chỉ file</option></select><span class="sz">${fmt(sz)}</span></div>`};
+  o.querySelector('#sp').innerHTML=sparse.map((x,pi)=>row(x,pi)+(x.kids?x.kids.map((c,ci)=>row(c,pi,ci)).join(''):'')).join('');
+  o.querySelectorAll('[data-ind]').forEach(i=>i.indeterminate=true);
+  o.querySelector('#sp-sum').innerHTML=`Sẽ có trên máy: <b>${fmt(gb)}</b> / ${fmt(all)} · bỏ qua ${fmt(all-gb)}`;
+  o.querySelectorAll('#sp input').forEach(i=>i.onchange=()=>{const p=sparse[+i.dataset.pi];if(i.dataset.ci!==undefined)p.kids[+i.dataset.ci].on=i.checked;else if(p.kids)p.kids.forEach(c=>c.on=i.checked);else p.on=i.checked;draw()})};
+  draw();o.querySelector('#d-go').onclick=()=>{closeAll();addActivity('Cập nhật thư mục tải về (set-depth)',5);toast('Đang áp dụng thay đổi thư mục')}})}
+function fmt(gb){return gb>=1?gb.toFixed(1)+' GB':Math.round(gb*1024)+' MB'}
+
+/* Repo không có trunk/branches/tags: toolbar chuyển sang chế độ Location */
+let hasLayout=true;
+const wcs=[{n:'game-assets',layout:true,sub:'Branch · r48211',name:'trunk'},{n:'engine-core',layout:true,sub:'Branch · r10233',name:'trunk'},{n:'tai-lieu-du-an',layout:false,sub:'Thư mục · r9120',name:'/2. Sản xuất/2. Phát triển/2025'}];
+function setWc(i){closeAll();const w=wcs[i];hasLayout=w.layout;
+  document.querySelector('#tb-wc b').textContent=w.n;$('#br-sub').textContent=w.sub;$('#br-name').textContent=w.name;$('#br-ico').textContent=w.layout?'⑂':'▤';
+  buildMenubar();toast(w.layout?`Đã mở ${w.n}`:`Đã mở ${w.n} — repo không dùng trunk/branches/tags, toolbar hiện thư mục (danh sách Changes trong mockup giữ nguyên)`)}
+function popLocation(){closeAll();const p=document.createElement('div');p.className='pop';p.style.left='220px';p.style.top='88px';
+ p.innerHTML=`<div class="grp">Vị trí trong repo</div><button class="row cur">▤ /2. Sản xuất/2. Phát triển/2025<span class="badge">r9120</span></button>
+ <div style="color:var(--muted);font-size:12px;padding:0 6px;line-height:1.5">Repo này không dùng quy ước trunk/branches/tags. Trong SVN, branch và tag chỉ là thư mục được sao chép bằng svn copy.</div>
+ <div class="grp">Gần đây</div><button class="row">▤ /2. Sản xuất/2. Phát triển/2024</button><button class="row">▤ /1. Kế hoạch</button>
+ <div class="acts" style="flex-wrap:wrap"><button class="btn" id="p-sw">Switch to another folder…</button><button class="btn" id="p-cp">Copy to new location…</button><button class="btn" id="p-ly">Set up branch layout…</button></div>`;
+ p.addEventListener('click',e=>e.stopPropagation());layer.appendChild(p);
+ p.querySelector('#p-sw').onclick=()=>toast('Mở cây repo để chọn thư mục (svn switch tới URL bất kỳ trong cùng repo)');
+ p.querySelector('#p-cp').onclick=dlgCopyLocation;
+ p.querySelector('#p-ly').onclick=dlgLayout;
+ p.querySelectorAll('button.row:not(.cur)').forEach(b=>b.onclick=()=>toast('Switch sang '+b.textContent.trim()))}
+function dlgCopyLocation(){overlay(`<h2>Copy to new location</h2><div class="c">
+ <label class="f"><span>Từ</span><input id="d-cfrom" value="/2. Sản xuất/2. Phát triển/2025"></label>
+ <label class="f"><span>Tới</span><input id="d-cto" value="/2. Sản xuất/2. Phát triển/2025 - bản nháp sửa đổi"></label>
+ <label class="f"><span>Revision</span><select id="d-crev"><option>HEAD</option><option>Revision cụ thể…</option><option>Working copy hiện tại (gồm thay đổi local)</option></select></label>
+ <label class="f"><span>Message</span><input id="d-cmsg" value="Tạo bản sao để chỉnh sửa song song"></label>
+ <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="d-csw"> Switch sang bản sao</label>
+ <div style="color:var(--muted);font-size:12px">svn copy trên server không nhân đôi dung lượng; lịch sử được giữ nguyên.</div>
+ </div><div class="a"><button class="btn" data-close>Cancel</button><button class="btn primary" id="d-go">Copy</button></div>`,o=>o.querySelector('#d-go').onclick=()=>{closeAll();toast('Đã tạo bản sao (r9121)')})}
+function dlgLayout(){overlay(`<h2>Branch layout · tai-lieu-du-an</h2><div class="c">
+ <label class="opt"><input type="radio" name="ly" value="auto"><span><b>Tự phát hiện</b><small>Tìm thư mục trunk / branches / tags trên đường dẫn. Repo này: không tìm thấy.</small></span></label>
+ <label class="opt"><input type="radio" name="ly" value="custom"><span><b>Tùy chỉnh</b><small>Tự chỉ định thư mục đóng vai trò trunk, branches, tags.</small></span></label>
+ <label class="opt"><input type="radio" name="ly" value="none" checked><span><b>Không dùng branch</b><small>Toolbar hiện thư mục hiện tại; dùng Switch to another folder và Copy to new location.</small></span></label>
+ </div><div class="a"><button class="btn" data-close>Cancel</button><button class="btn primary" data-close>Lưu</button></div>`)}
+
+/* ---------- update / activity ---------- */
+const acts=[{t:'Kiểm tra cập nhật engine-core',p:100,done:true},{t:'Tải log design-docs',p:64}];
+function addActivity(t,p){acts.unshift({t,p});activityOpen=true;renderActivity()}
+function renderActivity(){const a=$('#activity');a.hidden=!activityOpen;
+ a.innerHTML=acts.map(x=>`<div class="arow"><span>${x.done?'✓':x.err?'✕':'⧗'}</span><span class="${x.err?'err':''}">${x.t}</span><span class="bar"><i style="width:${x.p}%"></i></span><span>${x.done?'xong':x.p+'%'}</span></div>`).join('');
+ const running=acts.filter(x=>!x.done).length;$('#act-count').textContent=running?running+' đang chạy':'không có'}
+function toggleActivity(){activityOpen=!activityOpen;renderActivity()}
+function clickUpdate(){const b=$('#tb-up');
+ if(upState===1){upState=2;setUp();return}
+ if(upState===2){upState=3;setUp();addActivity('Update game-assets',0);let p=0;const t=setInterval(()=>{p+=20;acts[0].p=p;$('#up-label').textContent=`Updating ${p}%`;renderActivity();
+  if(p>=100){clearInterval(t);acts[0].done=true;upState=4;setUp();renderActivity();revs.forEach(r=>r.in=false);if(tab==='history')render();toast('Đã update lên r48214')}},450);return}
+ if(upState===3){activityOpen=true;renderActivity();return}
+ upState=1;setUp()}
+function setUp(){const b=$('#tb-up'),l=$('#up-label'),s=$('#up-sub');b.classList.toggle('busy',upState===3);
+ if(upState===1){s.textContent='Chưa kiểm tra';l.textContent='Check for updates'}
+ if(upState===2){s.textContent='3 revision mới trên server';l.innerHTML='Update<span class="n">↓3</span>'}
+ if(upState===3){s.textContent='Bấm để xem tiến trình';l.textContent='Updating 0%'}
+ if(upState===4){s.textContent='Kiểm tra lúc vừa xong';l.textContent='Up to date ✓'}}
+
+/* ---------- views ---------- */
+function setTab(t){tab=t;document.querySelectorAll('.tabs button').forEach(b=>b.setAttribute('aria-selected',b.dataset.tab===t));render()}
+const stLabel={M:'M',A:'A',D:'D',U:'?',C:'C',miss:'!',R:'R'};
+const stTitle={M:'Đã sửa',A:'Thêm mới',D:'Xóa',U:'Chưa quản lý',C:'Conflict',miss:'Mất file',R:'Move'};
+function render(){
+  const list=$('#list'),filter=$('#filter'),main=$('#main'),cb=$('#commitbox');
+  cb.hidden=tab!=='changes';
+  if(tab==='changes'){
+    filter.innerHTML=`<input id="q-files" placeholder="Lọc file (${k('Mod+F')})"><div class="chips"><span class="on">Tất cả</span><span>Modified</span><span>Unversioned</span><span>Conflicted</span><span>Locked</span></div>`;
+    const row=(f,i)=>`<div class="frow ${i===selFile?'sel':''}" data-i="${i}" tabindex="0"><input type="checkbox" aria-label="Chọn ${f.n}" ${f.on?'checked':''} ${f.st==='C'?'title="Giải quyết conflict trước khi commit"':''}><span class="st ${f.st}" title="${stTitle[f.st]}">${stLabel[f.st]}</span><span class="p"><span class="d">${f.p}</span>${f.n}</span><span class="badge ${f.lock?'lock-'+f.lock:''}">${f.lock==='me'?'🔒 bạn':f.lock==='other'?'🔒 lan.nt':''}</span></div>`;
+    const main1=files.map((f,i)=>[f,i]).filter(([f])=>!f.cl), cl=files.map((f,i)=>[f,i]).filter(([f])=>f.cl);
+    const onN=files.filter(f=>f.on).length;
+    list.innerHTML=`<div class="allrow"><input type="checkbox" id="all" ${onN===files.length?'checked':''}> ${onN}/${files.length} file được chọn</div>`+main1.map(([f,i])=>row(f,i)).join('')+`<div class="cl">Changelist · refactor-env</div>`+cl.map(([f,i])=>row(f,i)).join('');
+    $('#all').indeterminate=onN>0&&onN<files.length;
+    $('#all').onchange=e=>{files.forEach(f=>{if(f.st!=='C')f.on=e.target.checked});render()};
+    list.querySelectorAll('.frow').forEach(r=>{const i=+r.dataset.i;
+      r.onclick=e=>{if(e.target.type==='checkbox'){files[i].on=e.target.checked;render();return}selFile=i;render()};
+      r.oncontextmenu=e=>{e.preventDefault();e.stopPropagation();selFile=i;render();showCtx(e,i)}});
+    const n=files.filter(f=>f.on).length,blocked=files.some(f=>f.on&&f.st==='C');
+    const btn=$('#c-btn');btn.textContent=blocked?'Có file conflict trong danh sách chọn':`Commit ${n} file vào trunk`;btn.disabled=!n||blocked||!$('#c-sum').value.trim();
+    main.innerHTML=diffView(files[selFile]);bindDiff();
+  }
+  if(tab==='history'){
+    filter.innerHTML=`<input id="q-log" placeholder="Lọc theo message, author, path"><div class="chips"><span class="on">Toàn working copy</span><span>Stop on copy</span><span>30 ngày</span></div>`;
+    list.innerHTML=revs.map((r,i)=>`<div class="hrow ${i===selRev?'sel':''} ${r.in?'in':''}" data-i="${i}" tabindex="0"><span class="m">${r.m}</span><span class="meta">r${r.r} · ${r.a} · ${r.d}</span></div>`).join('');
+    list.querySelectorAll('.hrow').forEach(r=>{r.onclick=()=>{selRev=+r.dataset.i;render()};r.oncontextmenu=e=>{e.preventDefault();e.stopPropagation();selRev=+r.dataset.i;render();showRevCtx(e)}});
+    const r=revs[selRev];
+    main.innerHTML=`<div class="mhead"><span class="t">r${r.r}</span><button class="btn">Compare with working copy</button></div><div class="revd"><h3>${r.m}</h3><div class="meta">r${r.r} · ${r.a} · ${r.d}</div><div class="cp">${r.cp.map(([a,p])=>`<span class="st ${a==='A'?'A':a==='D'?'D':'M'}">${a}</span><span>${p}</span>`).join('')}</div><div style="color:var(--muted)">Bấm một đường dẫn để xem diff của revision này. Chuột phải lên revision để xem thêm thao tác.</div></div>`;
+  }
+  if(tab==='browse'){
+    filter.innerHTML=`<div class="crumb">svn.corp.local/svn/game-assets</div><div class="chips"><span class="on">HEAD · r48214</span><span>Chọn revision…</span></div>`;
+    list.innerHTML=`<div class="tree"><div>▾ 📁 game-assets</div><div class="sel">&nbsp;&nbsp;&nbsp;▾ ⑂ trunk</div><div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;▸ 📁 art</div><div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;▸ 📁 audio</div><div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;▸ 📁 data</div><div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;▸ 📁 src</div><div>&nbsp;&nbsp;&nbsp;▸ 📁 branches (3)</div><div>&nbsp;&nbsp;&nbsp;▸ 🏷 tags (14)</div></div>`;
+    main.innerHTML=`<div class="mhead"><span class="t">/trunk</span><button class="btn">New folder…</button><button class="btn">Upload file…</button></div><div class="diff" style="font-family:var(--f-ui)"><table class="tbl"><thead><tr><th>Tên</th><th>Kích thước</th><th>Rev</th><th>Author</th><th>Ngày</th><th>Lock</th></tr></thead><tbody>
+    <tr><td>📁 art</td><td>41.7 GB</td><td>48214</td><td>lan.nt</td><td>10 phút trước</td><td></td></tr><tr><td>📁 audio</td><td>5.1 GB</td><td>48170</td><td>quang.dh</td><td>3 ngày trước</td><td></td></tr><tr><td>📁 data</td><td>12 MB</td><td>48211</td><td>hxd</td><td>2 giờ trước</td><td></td></tr><tr><td>📁 src</td><td>38 MB</td><td>48213</td><td>minh.pv</td><td>35 phút trước</td><td></td></tr><tr><td>📄 README.md</td><td>4 KB</td><td>47002</td><td>thu.lt</td><td>2 tháng trước</td><td></td></tr><tr><td>📄 project.godot</td><td>9 KB</td><td>48120</td><td>minh.pv</td><td>5 ngày trước</td><td>🔒 minh.pv</td></tr></tbody></table></div>`;
+  }
+}
+function diffView(f){
+  const head=`<div class="mhead"><span class="t">${f.p}${f.n}</span><div class="seg"><button aria-pressed="true">Split</button><button aria-pressed="false">Unified</button></div><button class="btn" id="dmore">⋯</button></div>`;
+  if(f.diff==='code')return head+`<div class="diff">${[['hunk','@@ -38,9 +38,10 @@ public class Player : MonoBehaviour'],['','38','38','  private float speed;'],['','39','39','  private Vector3 velocity;'],['','40','40',''],['','41','41','  public void Move(Vector3 dir) {'],['del','42','','-   speed = 5f;'],['add','','42','+   speed = config.MoveSpeed;'],['add','','43','+   if (IsSprinting) speed *= config.SprintMultiplier;'],['','43','44','    velocity = dir.normalized * speed;'],['','44','45','    controller.Move(velocity * Time.deltaTime);'],['','45','46','  }']].map(l=>l[0]==='hunk'?`<div class="dl hunk">${l[1]}</div>`:`<div class="dl ${l[0]}"><span>${l[1]}</span><span>${l[2]}</span><span>${l[3][0]==='+'||l[3][0]==='-'?l[3][0]:''}</span><span>${l[3].replace(/^[+-]/,'')}</span></div>`).join('')}</div>`;
+  if(f.diff==='new')return head+`<div class="diff">${['using System.Collections.Generic;','','public class Inventory {','  private readonly List<Item> items = new();','  public int Capacity { get; } = 40;','}'].map((t,i)=>`<div class="dl add"><span></span><span>${i+1}</span><span>+</span><span>${t.replace(/</g,'&lt;')}</span></div>`).join('')}</div>`;
+  if(f.diff==='image')return head+`<div class="binbox"><div><div style="margin-bottom:6px;color:var(--muted)">Base · r48190 · 182.4 MB</div><div class="img">hero.psd (bản server)</div></div><div><div style="margin-bottom:6px;color:var(--muted)">Working copy · 184.1 MB</div><div class="img">hero.psd (bản của bạn)</div></div><div style="grid-column:1/-1;display:flex;gap:6px"><div class="seg"><button aria-pressed="true">Side by side</button><button aria-pressed="false">Onion</button><button aria-pressed="false">Swipe</button></div><span class="badge lock-me" style="align-self:center">🔒 Bạn đang giữ lock · sẽ nhả sau commit</span></div></div>`;
+  if(f.diff==='conflict')return head+`<div class="empty"><b style="color:var(--warn)">⚠ Conflict nội dung</b><span>Server (r48213) và bạn cùng thay đổi ${f.n}. Cần giải quyết trước khi commit file này.</span><div style="display:flex;gap:6px"><button class="btn primary" id="d-res">Mở conflict resolver</button></div></div>`;
+  if(f.diff==='resolved')return head+`<div class="empty"><b style="color:var(--ok)">✓ Đã giải quyết conflict</b><span>${f.n} giờ là thay đổi bình thường, sẵn sàng commit.</span></div>`;
+  if(f.diff==='missing')return head+`<div class="empty"><b>File đã bị xóa khỏi ổ đĩa nhưng chưa xóa khỏi SVN</b><span>Tick để commit việc xóa, hoặc khôi phục file.</span><div style="display:flex;gap:6px"><button class="btn">Khôi phục file</button><button class="btn">Ghi nhận là move…</button></div></div>`;
+  return head+`<div class="empty"><b>File binary · forest.fbx · 96.3 MB</b><span>Không hiển thị diff cho định dạng này.</span><span class="badge lock-other">🔒 lan.nt đang khóa file này từ 09:14 — commit sẽ bị từ chối</span><div style="display:flex;gap:6px"><button class="btn">Mở bằng ứng dụng mặc định</button><button class="btn" id="d-lock2">Xem lock…</button></div></div>`;
+}
+function bindDiff(){$('#d-res')&&($('#d-res').onclick=e=>{e.stopPropagation();openResolver()});$('#dmore')&&($('#dmore').onclick=e=>{e.stopPropagation();showCtx(e,selFile)});$('#d-lock2')&&($('#d-lock2').onclick=dlgLock)}
+function place(e,items){closeAll();const wr=win.getBoundingClientRect();const c=mkMenu(items,{x:Math.min(e.clientX-wr.left,wr.width-290),y:Math.min(e.clientY-wr.top,wr.height-380)});layer.appendChild(c)}
+function showCtx(e,i){const f=files[i];const it=[];
+  if(f.st==='C')it.push(['Resolve ▸ Mở conflict resolver','','resolver'],['Resolve ▸ Lấy của bạn'],['Resolve ▸ Lấy bản server'],'-');
+  if(f.st==='U')it.push(['Ignore ▸ notes.txt'],['Ignore ▸ mọi *.txt trong thư mục'],'-');
+  it.push(['Discard changes…','Mod+Shift+⌫','discard']);
+  if(f.st!=='U')it.push(['Add to changelist ▸'],[f.lock==='me'?'Unlock':'Lock…','Mod+L','lock'],['Show log','Mod+Shift+L','tab:history'],['Blame','Mod+Shift+B']);
+  it.push('-',['Open with default app'],['Open in external editor','Mod+Shift+A'],['Show in Finder','Mod+Shift+R'],'-',['Copy path','Mod+Alt+C'],['Copy relative path'],['Copy URL']);
+  if(f.st!=='U')it.push('-',['Rename / Move…'],['Delete'],['Properties…']);
+  place(e,it)}
+function showRevCtx(e){place(e,[['Copy revision number'],['Copy message'],'-',['Compare with working copy'],['Update to this revision…'],['Revert changes from this revision…'],['Create branch/tag from this revision…','','newbranch'],['Merge this revision into current branch…','','','','P6'],'-',['Open in VisualSVN web']])}
+
+/* ---------- wiring ---------- */
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
+$('#tb-up').onclick=e=>{e.stopPropagation();clickUpdate()};
+$('#tb-act').onclick=e=>{e.stopPropagation();toggleActivity()};
+$('#tb-br').onclick=e=>{e.stopPropagation();popBranch()};
+$('#tb-wc').onclick=e=>{e.stopPropagation();popWc()};
+$('#resolve-btn').onclick=e=>{e.stopPropagation();openResolver()};
+['resolver','settings','signin','cert','sparse'].forEach(n=>$('#go-'+n).onclick=e=>{e.stopPropagation();run(n)});
+$('#c-sum').oninput=()=>render();
+$('#c-btn').onclick=e=>{e.stopPropagation();const n=files.filter(f=>f.on).length;
+  for(let i=files.length-1;i>=0;i--)if(files[i].on)files.splice(i,1);selFile=0;$('#c-sum').value='';
+  document.querySelector('.tabs .cnt').textContent=files.length;render();toast(`Đã commit ${n} file · r48215`)};
+function setOS(m){mac=m;$('#os-mac').setAttribute('aria-pressed',m);$('#os-win').setAttribute('aria-pressed',!m);win.classList.toggle('mac',m);
+  document.querySelector('.status span').textContent=m?'~/svn/game-assets':'D:\\svn\\game-assets';closeAll();buildMenubar();render()}
+$('#os-mac').onclick=()=>setOS(true);$('#os-win').onclick=()=>setOS(false);
+buildMenubar();render();renderActivity();
+})();
+</script>
