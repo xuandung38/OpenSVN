@@ -44,6 +44,42 @@ impl HttpRaSession {
         Self::from_wire(RaWire::open(transport, session_url, cancel).await?)
     }
 
+    /// Like [`Self::open`], but nothing ever prompts, not even the opening `OPTIONS`: see
+    /// [`Self::unattended`]. For background work (remote status, recovery) that must not show
+    /// a dialog.
+    pub async fn open_unattended(
+        transport: Arc<HttpTransport>,
+        session_url: RepoUrl,
+        cancel: &CancelToken,
+    ) -> Result<Self> {
+        Self::from_wire(RaWire::open_unattended(transport, session_url, cancel).await?)
+    }
+
+    /// The same session rooted at `url`, without a network request: transport, credentials,
+    /// capabilities, repository root and UUID are shared. `url` must be on the session's
+    /// origin and at or below the repository root, otherwise [`ErrorCode::UnsafePath`].
+    pub fn reparent(&self, url: &RepoUrl) -> Result<Self> {
+        Ok(Self {
+            wire: self.wire.reparent(url)?,
+            repos_root: self.repos_root.clone(),
+            uuid: self.uuid.clone(),
+        })
+    }
+
+    /// The same session in unattended mode: every request goes through
+    /// [`HttpTransport::send_unattended`], so it never asks the `AuthPrompter` for credentials
+    /// or a certificate decision. Only credentials cached by the transport or returned by
+    /// `AuthPrompter::stored_credentials`, and certificates already accepted, are used; a
+    /// request that would need a prompt fails with `AuthRequired` (or its TLS error).
+    #[must_use]
+    pub fn unattended(&self) -> Self {
+        Self {
+            wire: self.wire.clone().unattended(),
+            repos_root: self.repos_root.clone(),
+            uuid: self.uuid.clone(),
+        }
+    }
+
     /// Builds a session from wiring that was already opened (for example with custom
     /// connection limits or update mode).
     pub fn from_wire(wire: RaWire) -> Result<Self> {
