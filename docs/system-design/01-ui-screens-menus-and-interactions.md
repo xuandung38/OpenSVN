@@ -137,7 +137,7 @@ SVN **không có** đối tượng branch/tag: đó chỉ là thư mục đượ
 | Thư mục đích | mặc định `<thư mục gốc cấu hình>/<tên repo>`; cảnh báo nếu không rỗng |
 | Revision | HEAD / số / ngày |
 | Phạm vi | Toàn bộ · Chọn thư mục… (mở dialog sparse §4.8) |
-| Định dạng WC | `Tương thích svn 1.8+ (format 31)` mặc định · `Tiết kiệm dung lượng — cần svn 1.15+ (format 32, không lưu bản gốc)` |
+| Định dạng WC | MVP: luôn `Tương thích svn 1.8+ (format 31)` (ẩn lựa chọn). Sau MVP: thêm `Tiết kiệm dung lượng — cần svn 1.15+ (format 32)` |
 | Externals | ☐ Bỏ qua externals |
 Nút: Checkout (chạy nền, mở Activity) · Cancel. Hiển thị ước tính dung lượng khi đã chọn phạm vi.
 
@@ -150,7 +150,7 @@ Chọn thư mục → engine đọc `.svn/wc.db` → hiện URL, revision, forma
 - Username / Password, ☑ Ghi nhớ (lưu vào OS credential store). Lỗi 401 lặp lại → thông báo rõ, không khóa tài khoản (tối đa 3 lần rồi dừng).
 
 ### 4.4 Trust certificate
-Hiển thị subject, issuer, hiệu lực, SHA-256 fingerprint, lỗi cụ thể (hết hạn / sai host / CA không tin cậy). Lựa chọn: Từ chối · Tin tạm thời (phiên này) · Tin vĩnh viễn (lưu fingerprint).
+Hiển thị host:port, subject, issuer, hiệu lực, SHA-256 fingerprint, lỗi cụ thể. **CA không tin cậy / tự ký**: Từ chối · Tin tạm thời (phiên này) · Tin vĩnh viễn (pin host:port + fingerprint leaf). **Sai hostname / hết hạn / bị thu hồi**: chặn cứng, chỉ có nút Đóng + hướng dẫn liên hệ IT. Cert của host đã pin bị đổi → cảnh báo riêng "Chứng chỉ server đã thay đổi".
 
 ### 4.5 Switch / New branch / New tag / Copy to new location
 - Switch: chọn từ cây (có layout) hoặc nhập/duyệt URL bất kỳ trong cùng repo (không có layout; `svn switch` yêu cầu cùng repository UUID); nếu có thay đổi local → "Mang thay đổi sang branch mới" (svn switch giữ thay đổi) hoặc "Hủy".
