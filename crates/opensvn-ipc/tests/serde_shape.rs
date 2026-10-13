@@ -216,3 +216,38 @@ fn path_grants_are_opaque_ids_with_display_names() {
         json!("invalid-argument")
     );
 }
+
+#[test]
+fn auth_prompt_carries_reason_offered_methods_and_structured_cert_failure() {
+    let prompt = AuthPrompt {
+        request_id: "r".into(),
+        kind: AuthPromptKind::Credentials,
+        realm: "realm".into(),
+        url: "https://svn.test.local:443".into(),
+        cert: None,
+        reason: Some(AuthPromptReason::NegotiateFailed),
+        attempt: 1,
+        offered: vec![AuthMethodKind::Negotiate, AuthMethodKind::Basic],
+    };
+    let v = serde_json::to_value(&prompt).unwrap();
+    assert_eq!(v["reason"], "negotiate-failed");
+    assert_eq!(v["offered"], json!(["negotiate", "basic"]));
+    assert_eq!(
+        serde_json::to_value(CertFailureInfo::Changed {
+            old_sha256: "aa".into(),
+            new_sha256: "bb".into()
+        })
+        .unwrap(),
+        json!({"changed": {"oldSha256": "aa", "newSha256": "bb"}})
+    );
+    assert_eq!(
+        serde_json::to_value(CertFailureInfo::SelfSigned).unwrap(),
+        json!("selfSigned")
+    );
+    assert_eq!(
+        serde_json::to_value(CertFailureInfo::Other("x".into())).unwrap(),
+        json!({"other": "x"})
+    );
+    let sso: AuthResponse = serde_json::from_value(json!({"kind": "negotiate"})).unwrap();
+    assert!(matches!(sso, AuthResponse::Negotiate));
+}
