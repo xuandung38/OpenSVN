@@ -13,6 +13,8 @@ mod seed;
 mod state;
 mod sync_ops;
 mod text;
+#[cfg(test)]
+mod tick_tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -113,9 +115,12 @@ impl FakeEngine {
             tokio::task::yield_now().await;
             return ctx.check();
         }
+        // Biased: a cancel that lands together with the end of the step must win, or the caller
+        // would start the next item after the user saw "cancelled".
         tokio::select! {
-            () = tokio::time::sleep(self.step_delay) => Ok(()),
+            biased;
             () = ctx.cancel.cancelled() => Err(super::context::cancelled()),
+            () = tokio::time::sleep(self.step_delay) => Ok(()),
         }
     }
 

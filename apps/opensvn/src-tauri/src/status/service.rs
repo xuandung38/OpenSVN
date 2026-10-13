@@ -113,7 +113,10 @@ async fn watch_loop(wc: ResolvedWc, publisher: Arc<StatusPublisher>, timing: Sta
     poll.tick().await; // the first tick is immediate; the open path already scanned
     loop {
         let deadline = debouncer.deadline().map(Instant::from_std);
+        // Biased: pending file events are taken before the quiet-period deadline, so a burst that
+        // is still arriving extends the debounce instead of triggering a scan in the middle of it.
         tokio::select! {
+            biased;
             event = rx.recv(), if watching => {
                 let Some((path, is_dir)) = event else { break };
                 debouncer.push(&path, is_dir, std::time::Instant::now());
