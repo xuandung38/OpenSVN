@@ -266,11 +266,23 @@ async fn out_of_date_edits_are_rejected() {
         .await
         .expect("editor");
     let root = ed.open_root(Some(Revnum(2))).await.expect("root");
-    let trunk = ed.open_directory(&p("trunk"), root, Some(Revnum(1))).await;
-    assert_eq!(
-        trunk.expect_err("trunk changed in r2").code,
-        ErrorCode::OutOfDate
-    );
+    // Like mod_dav_svn, an older directory may be opened (mixed-revision working copies);
+    // changing its properties is what is checked.
+    let old = ed
+        .open_directory(&p("trunk"), root, Some(Revnum(1)))
+        .await
+        .expect("open at r1");
+    let err = ed
+        .change_dir_prop(
+            old,
+            svn_types::PropChange {
+                name: "p".into(),
+                value: None,
+            },
+        )
+        .await
+        .expect_err("trunk changed in r2");
+    assert_eq!(err.code, ErrorCode::OutOfDate);
     let trunk = ed
         .open_directory(&p("trunk"), root, Some(Revnum(2)))
         .await

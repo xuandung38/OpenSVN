@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use opensvn_ipc::{AppError, ErrorCode, WcId, WorkingCopy};
+use opensvn_ipc::{AppError, ErrorCode, WcEntry, WcId, WorkingCopy};
 
 use super::actor::{RetryPolicy, WcActor};
 use crate::db::{AppDb, WcRow, now_iso};
@@ -36,6 +36,7 @@ pub struct WcRegistry {
     policy: RetryPolicy,
     actors: Mutex<HashMap<String, Arc<WcActor>>>,
     live: Mutex<HashMap<String, Live>>,
+    open: Mutex<std::collections::BTreeSet<String>>,
 }
 
 fn unknown_wc(id: &WcId) -> AppError {
@@ -65,6 +66,7 @@ impl WcRegistry {
             policy,
             actors: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
+            open: Mutex::new(std::collections::BTreeSet::new()),
         }
     }
 
@@ -86,6 +88,11 @@ impl WcRegistry {
             .get(id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Revisions known to be waiting on the server for a working copy.
+    pub fn incoming_of(&self, id: &WcId) -> u32 {
+        self.live(&id.0).incoming
     }
 
     /// Records the result of a remote check (incoming revisions and when it ran).
@@ -159,6 +166,64 @@ impl WcRegistry {
         Ok(out)
     }
 
+    /// Every registered working copy for the repository manager, including the ones that cannot be
+    /// read any more (`missing`), in list order.
+    pub async fn entries(&self) -> Result<Vec<WcEntry>, AppError> {
+        let mut out = Vec::new();
+        for row in self.db.wc_list()? {
+            let (url, problem) = match self.describe(&row).await {
+                Ok(wc) => (Some(wc.url), None),
+                Err(e) => (None, Some(e.message)),
+            };
+            out.push(WcEntry {
+                id: WcId(row.id),
+                name: row.name,
+                root_path: row.root_path,
+                repo_root_url: row.repo_root_url,
+                repo_uuid: row.repo_uuid,
+                url,
+                added_at: row.added_at,
+                last_opened_at: row.last_opened_at,
+                missing: problem.is_some(),
+                problem,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Points a registered working copy at the folder it was moved to. The folder must be a working
+    /// copy of the same repository (same UUID) and must not be registered under another entry.
+    /// The repository root URL is taken from the located working copy, which may have been
+    /// relocated (`svn relocate`) while it was missing.
+    pub async fn locate(&self, id: &WcId, path: &Path) -> Result<WorkingCopy, AppError> {
+        let row = self.db.wc_get(&id.0)?.ok_or_else(|| unknown_wc(id))?;
+        let shown = path.to_string_lossy().into_owned();
+        let info = self
+            .engine
+            .wc_info(path, &OpContext::detached())
+            .await
+            .map_err(|e| AppError::from(&e).with_path(shown.clone()))?;
+        if info.repo_uuid != row.repo_uuid {
+            return Err(crate::errors::invalid_argument(
+                "This folder is a working copy of another repository.",
+            )
+            .with_path(shown));
+        }
+        if let Some(other) = self.db.wc_get_by_root(&info.root_path)?
+            && other.id != row.id
+        {
+            return Err(crate::errors::invalid_argument(format!(
+                "This folder is already in the list as \"{}\".",
+                other.name
+            ))
+            .with_path(shown));
+        }
+        self.db
+            .wc_set_root(&row.id, &info.root_path, &info.repo_root_url)?;
+        let row = self.db.wc_get(&id.0)?.ok_or_else(|| unknown_wc(id))?;
+        self.describe(&row).await
+    }
+
     /// Registers the working copy at `path` (idempotent: an already registered root is returned).
     pub async fn add_existing(&self, path: &str) -> Result<WorkingCopy, AppError> {
         if path.trim().is_empty() || path.contains('\0') || !Path::new(path).is_absolute() {
@@ -183,6 +248,8 @@ impl WcRegistry {
                     repo_uuid: info.repo_uuid.clone(),
                     repo_root_url: info.repo_root_url.clone(),
                     sort_order: 0,
+                    added_at: String::new(),
+                    last_opened_at: None,
                 };
                 self.db.wc_insert(&row)?;
                 row
@@ -196,6 +263,10 @@ impl WcRegistry {
         if !self.db.wc_remove(&id.0)? {
             return Err(unknown_wc(id));
         }
+        self.open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id.0);
         self.live
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -236,6 +307,24 @@ impl WcRegistry {
         Ok((self.describe(&row).await?, opened.recovery))
     }
 
+    /// Marks a working copy as shown in the UI: it is watched and polled from now on.
+    pub fn mark_open(&self, id: &WcId) {
+        self.open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id.0.clone());
+    }
+
+    /// Ids of the working copies the user has open (watched and polled).
+    pub fn open_ids(&self) -> Vec<WcId> {
+        self.open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|id| WcId(id.clone()))
+            .collect()
+    }
+
     /// Ids of every registered working copy (used to run recovery at app start).
     pub fn ids(&self) -> Result<Vec<WcId>, AppError> {
         Ok(self.db.wc_list()?.into_iter().map(|r| WcId(r.id)).collect())
@@ -244,6 +333,10 @@ impl WcRegistry {
     /// Releases per-working-copy resources. The actor finishes queued writes first.
     pub fn close(&self, id: &WcId) -> Result<(), AppError> {
         self.db.wc_get(&id.0)?.ok_or_else(|| unknown_wc(id))?;
+        self.open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id.0);
         Ok(())
     }
 }

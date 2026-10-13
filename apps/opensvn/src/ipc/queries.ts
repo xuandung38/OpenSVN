@@ -11,6 +11,23 @@ export function useWorkingCopies() {
   });
 }
 
+/** Every registered working copy for the repository manager, including missing ones. */
+export function useWcEntries(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.wcEntries,
+    enabled,
+    queryFn: () => unwrap(ipc().commands.wcEntries()),
+  });
+}
+
+/** Repository URLs used recently (checkout suggestions). */
+export function useRecentUrls() {
+  return useQuery({
+    queryKey: queryKeys.recentUrls,
+    queryFn: () => unwrap(ipc().commands.recentUrls()),
+  });
+}
+
 export function useStatus(wcId: WcId | null) {
   return useQuery({
     queryKey: queryKeys.status(wcId ?? ""),

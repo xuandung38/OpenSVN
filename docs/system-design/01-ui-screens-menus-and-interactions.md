@@ -66,7 +66,7 @@ App
 ### 3.2 Toolbar
 | Thành phần | Hành vi |
 |---|---|
-| **Working copy ▾** | Popover: danh sách WC (tìm kiếm, nhóm theo server), trạng thái tóm tắt mỗi WC (số thay đổi, ↓ incoming). Nút "Checkout…", "Add existing…". Right-click: context menu WC (§6.5). |
+| **Current repository ▾** (Working copy) | Popover (`Mod+T`): ô lọc + danh sách WC (tên, đuôi đường dẫn, host repo, lần mở gần nhất; mũi tên/Enter để chuyển, `Shift+F10` hoặc chuột phải/⋯ cho thao tác §6.5: Reveal, Copy URL, Rename, Remove; WC mất thư mục có cảnh báo + "Locate…"). Chân popover: nút "Checkout…", "Add existing…". *Giai đoạn sau (chưa làm):* nhóm theo server và trạng thái tóm tắt mỗi WC (số thay đổi, ↓ incoming). Right-click: context menu WC (§6.5). |
 | **Location ▾** (đổi nhãn thành **Branch ▾** khi repo có layout) | Hai chế độ (xem §3.9). **Có layout**: popover cây trunk/branches/tags, tìm kiếm, branch gần đây; nút "New branch…", "New tag…". **Không có layout**: hiện đường dẫn WC trong repo (vd `/2. Sản xuất/2. Phát triển`), nút "Switch to another folder…" (chọn URL bất kỳ trong repo), "Copy to new location…", "Set up branch layout…". Chọn → xác nhận Switch (cảnh báo nếu có thay đổi local). Luôn hiện revision; mixed-revision hiện "r48200–48211". |
 | **Update** (nút đa trạng thái) | `Check for updates` (chưa biết) → `Update ↓N` (có N revision mới; hover: danh sách revision) → `Updating 45%` (bấm để xem Activity / hủy) → `Up to date`. Mũi tên phụ ▾: Update to revision…, Update selected folders, Check now. |
 | **Activity ⧗N** | Mở/đóng Activity panel; badge số tác vụ đang chạy; đỏ nếu tác vụ lỗi. |
@@ -255,6 +255,7 @@ About OpenSVN · Check for app updates… · Settings… `Cmd+,` · Hide `Cmd+H`
 |---|---|
 | Checkout repository… | `Mod+Shift+O` |
 | Add existing working copy… | `Mod+O` |
+| Switch repository… (mở popover **Current repository ▾**, như GitHub Desktop) | `Mod+T` |
 | Open recent ▸ | |
 | Close working copy | `Mod+W` |
 | Settings… (Win/Linux) | `Ctrl+,` |

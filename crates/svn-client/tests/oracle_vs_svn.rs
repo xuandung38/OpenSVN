@@ -862,3 +862,226 @@ async fn incoming_edit_under_locally_replaced_dir_vs_svn() {
     assert_eq!(read(&w.join("docs/guide.txt")), "mine\n");
     resolve_then_update_again(&o, &t, &w, "docs", "replaced dir vs edit").await;
 }
+
+// ---- Shadowed update regressions (PR #74 review of e3fff94) ---------------------------------
+//
+// Server deletes, adds and edits below a directory that is deleted or replaced locally. The
+// drive goes on under the working layer (`shadow`): BASE moves, the working rows and the disk
+// stay. Each case compares with svn 1.15 and then resolves and updates again.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_file_delete_under_locally_deleted_dir_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "deleted-dir-vs-file-delete",
+        |repo, wc, _| {
+            repo.svn(wc, &["rm", "-q", "docs"]);
+        },
+        |repo, seed| {
+            repo.svn(seed, &["rm", "-q", "docs/guide.txt"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "deleted dir vs file delete");
+    resolve_then_update_again(&o, &t, &w, "docs", "deleted dir vs file delete").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_subdir_delete_under_locally_deleted_dir_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "deleted-dir-vs-subdir-delete",
+        |repo, wc, _| {
+            repo.svn(wc, &["rm", "-q", "src"]);
+        },
+        |repo, seed| {
+            repo.svn(seed, &["rm", "-q", "src/lib"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "deleted dir vs subdir delete");
+    resolve_then_update_again(&o, &t, &w, "src", "deleted dir vs subdir delete").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_subdir_replaced_by_file_under_locally_deleted_dir_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "deleted-dir-vs-dir-to-file",
+        |repo, wc, _| {
+            repo.svn(wc, &["rm", "-q", "src"]);
+        },
+        |repo, seed| {
+            repo.svn(seed, &["rm", "-q", "src/lib"]);
+            write(&seed.join("src/lib"), "now a file\n");
+            repo.svn(seed, &["add", "-q", "src/lib"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "deleted dir vs dir to file");
+    resolve_then_update_again(&o, &t, &w, "src", "deleted dir vs dir to file").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_delete_of_readded_file_under_replaced_dir_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "replaced-dir-vs-file-delete",
+        |repo, wc, _| {
+            repo.svn(wc, &["rm", "-q", "docs"]);
+            write(&wc.join("docs/guide.txt"), "mine\n");
+            repo.svn(wc, &["add", "-q", "docs"]);
+        },
+        |repo, seed| {
+            repo.svn(seed, &["rm", "-q", "docs/guide.txt"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "replaced dir vs file delete");
+    assert_eq!(read(&w.join("docs/guide.txt")), "mine\n");
+    resolve_then_update_again(&o, &t, &w, "docs", "replaced dir vs file delete").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_delete_of_readded_subdir_under_replaced_dir_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "replaced-dir-vs-subdir-delete",
+        |repo, wc, _| {
+            repo.svn(wc, &["rm", "-q", "src"]);
+            write(&wc.join("src/lib/deep.rs"), "mine\n");
+            write(&wc.join("src/lib/extra.rs"), "extra\n");
+            repo.svn(wc, &["add", "-q", "src"]);
+        },
+        |repo, seed| {
+            repo.svn(seed, &["rm", "-q", "src/lib"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "replaced dir vs subdir delete");
+    assert_eq!(read(&w.join("src/lib/deep.rs")), "mine\n");
+    resolve_then_update_again(&o, &t, &w, "src", "replaced dir vs subdir delete").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_edit_of_modified_file_under_replaced_dir_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "replaced-dir-vs-edit-of-modified",
+        |repo, wc, _| {
+            repo.svn(wc, &["rm", "-q", "src"]);
+            write(&wc.join("src/lib/deep.rs"), "mine\n");
+            repo.svn(wc, &["add", "-q", "src"]);
+            repo.svn(wc, &["propset", "-q", "loc", "1", "src/lib/deep.rs"]);
+            write(&wc.join("src/lib/deep.rs"), "mine2\n");
+        },
+        |repo, seed| {
+            write(&seed.join("src/lib/deep.rs"), "server\n");
+            repo.svn(seed, &["propset", "-q", "srv", "1", "src/lib/deep.rs"]);
+            repo.svn(seed, &["propset", "-q", "srv", "1", "src/lib"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "replaced dir vs edit of modified");
+    assert_eq!(read(&w.join("src/lib/deep.rs")), "mine2\n");
+    resolve_then_update_again(&o, &t, &w, "src", "replaced dir vs edit of modified").await;
+}
+
+/// The directory is replaced by a copy, so the copied children sit at the copy's op_depth, the
+/// same op_depth the shadowed drive uses for its `base-deleted` rows. The server adds
+/// `docs/lib`, which the copy already has: `WcTxn::mark_base_deleted_at` must not write over
+/// the user's copied row (svn's `db_extend_parent_delete`). A plain `svn add` below a replaced
+/// directory puts the children deeper and never reaches that rule; only a copy does.
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_add_into_copy_replaced_dir_keeps_copied_rows_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "copy-replaced-dir-vs-add",
+        |repo, wc, _| {
+            repo.svn(wc, &["rm", "-q", "docs"]);
+            repo.svn(wc, &["cp", "-q", "src", "docs"]);
+            write(&wc.join("docs/lib/deep.rs"), "my copy edit\n");
+        },
+        |repo, seed| {
+            write(&seed.join("docs/lib/deep.rs"), "server\n");
+            write(&seed.join("docs/lib/x.rs"), "x\n");
+            repo.svn(seed, &["add", "-q", "docs/lib"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "copy-replaced dir vs add");
+    let rows = nodes_snapshot(&w);
+    for p in ["docs/lib", "docs/lib/deep.rs"] {
+        assert!(
+            rows.iter()
+                .any(|r| r.starts_with(&format!("{p}|1|normal|")) && r.contains("Some(\"src/")),
+            "the copied row of {p} stays: {rows:?}"
+        );
+    }
+    assert_eq!(read(&w.join("docs/lib/deep.rs")), "my copy edit\n");
+    resolve_then_update_again(&o, &t, &w, "docs", "copy-replaced dir vs add").await;
+}
+
+/// Deliberate divergence from svn 1.15. The directory is replaced by a copy, the user edits a
+/// copied file, and the server deletes that file. svn deletes the user's modified file from
+/// disk (it then shows as missing); we keep it. wc.db is identical, only the disk and therefore
+/// `svn status` differ. Losing an uncommitted edit is worse than the mismatch, so keep this
+/// behaviour: do not "fix" it to match svn.
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_delete_in_copy_replaced_dir_keeps_modified_file_unlike_svn() {
+    let Some((o, t, w)) = scenario(
+        "copy-replaced-dir-vs-delete",
+        |repo, wc, _| {
+            repo.svn(wc, &["cp", "-q", "src", "src2"]);
+            repo.svn(wc, &["rm", "-q", "src"]);
+            repo.svn(wc, &["cp", "-q", "src2", "src"]);
+            write(&wc.join("src/lib/deep.rs"), "my copy edit\n");
+        },
+        |repo, seed| {
+            repo.svn(seed, &["rm", "-q", "src/lib/deep.rs"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_eq!(
+        nodes_snapshot(&w),
+        nodes_snapshot(&t),
+        "NODES rows equal svn's"
+    );
+    assert_eq!(
+        actual_snapshot(&w),
+        actual_snapshot(&t),
+        "ACTUAL rows equal svn's"
+    );
+    assert!(
+        !t.join("src/lib/deep.rs").exists(),
+        "svn 1.15 removes the modified file; if this fails, svn changed and the divergence may be gone"
+    );
+    assert_eq!(read(&w.join("src/lib/deep.rs")), "my copy edit\n");
+    let (mut ours, mut theirs) = (tree_snapshot(&w), tree_snapshot(&t));
+    assert!(ours.remove("src/lib/deep.rs").is_some());
+    assert!(theirs.remove("src/lib/deep.rs").is_none());
+    assert_eq!(ours, theirs, "the rest of the disk equals svn's");
+    let st = svn_status(&o, &w, &[]);
+    assert!(
+        st.lines()
+            .any(|l| l.starts_with('M') && l.ends_with("src/lib/deep.rs")),
+        "our copy shows the edit as a modification:\n{st}"
+    );
+}

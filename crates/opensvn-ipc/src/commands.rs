@@ -40,8 +40,13 @@ pub struct IgnoreAddRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CheckoutRequest {
     pub url: String,
-    /// Folder chosen with `path_pick`; becomes the working copy root.
+    /// Folder chosen with `path_pick` (or minted by `checkout_root_grant`). With `dest_name` it is
+    /// the parent folder and the working copy is created in a new child folder; without it the
+    /// folder itself becomes the working copy root. An existing, non-empty target is refused.
     pub dest: PathGrantId,
+    /// Name of the new folder created inside `dest`: one path component, no separators, not `.` or
+    /// `..`, no reserved Windows name (`CON`, `NUL`, `COM1`, ...), no trailing dot or space.
+    pub dest_name: Option<String>,
     pub rev: Option<Rev>,
     pub depth: Depth,
     pub sparse: Option<Vec<SparseEntry>>,
@@ -137,6 +142,9 @@ pub struct CopyLocationRequest {
     pub to_url: String,
     pub message: String,
     pub switch_wc_id: Option<WcId>,
+    /// Copy the working copy (including its local changes) instead of `from_url`; `from_url` and
+    /// `from_rev` are then ignored.
+    pub from_wc: Option<WcId>,
 }
 
 /// Text that must never reach logs: `Debug` prints a fixed placeholder. On the wire it is a
@@ -191,8 +199,10 @@ pub enum AuthResponse {
 pub enum CertDecision {
     Reject,
     AcceptOnce,
+    /// Trust permanently. Valid only for self-signed or unknown-issuer failures.
     AcceptAlways,
-    // Replace the pinned certificate (valid only when the certificate changed).
+    /// Replace the pinned certificate of this host and port with the one now presented. Valid
+    /// only when the failure is `changed`.
     ReplacePin,
 }
 

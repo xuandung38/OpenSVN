@@ -61,6 +61,7 @@ function isAppError(e: unknown): e is AppError {
  * non-empty message so the UI never shows an empty toast or reads `code === undefined`.
  */
 export function toAppError(e: unknown): AppError {
+  if (e instanceof IpcError) return e.appError;
   if (isAppError(e)) return e;
   const message =
     typeof e === "string" && e.length > 0

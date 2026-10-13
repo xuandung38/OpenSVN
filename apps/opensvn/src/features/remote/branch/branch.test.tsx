@@ -61,6 +61,7 @@ test("layout mode: new branch copies trunk to branches/<name> with the default m
     toUrl: `${MOCK_REPO_ROOT}/branches/feature-y`,
     message: "Create branch feature-y",
     switchWcId: "wc-main",
+    fromWc: null,
   });
 });
 

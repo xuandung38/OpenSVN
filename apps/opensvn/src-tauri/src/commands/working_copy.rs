@@ -35,6 +35,7 @@ pub async fn wc_add_existing(
 #[specta::specta]
 pub async fn wc_remove(state: State<'_, AppState>, wc_id: WcId) -> Result<(), AppError> {
     guard(async {
+        state.watchers.stop(&wc_id.0);
         state.wcs.remove(&wc_id)?;
         state.status.forget(&wc_id);
         Ok(())
@@ -59,13 +60,16 @@ pub async fn wc_rename(
 pub async fn wc_open(state: State<'_, AppState>, wc_id: WcId) -> Result<WorkingCopy, AppError> {
     guard(async {
         let wc = state.open_wc(&wc_id).await?;
+        state.wcs.mark_open(&wc_id);
         let resolved = state.wcs.resolve(&wc_id)?;
         let publisher = std::sync::Arc::clone(&state.status);
+        let scan = resolved.clone();
         tokio::spawn(async move {
-            if let Err(e) = publisher.publish(&resolved).await {
+            if let Err(e) = publisher.publish(&scan).await {
                 tracing::warn!(code = ?e.code, "background status scan failed");
             }
         });
+        state.watchers.start(resolved);
         Ok(wc)
     })
     .await
@@ -74,7 +78,11 @@ pub async fn wc_open(state: State<'_, AppState>, wc_id: WcId) -> Result<WorkingC
 #[tauri::command]
 #[specta::specta]
 pub async fn wc_close(state: State<'_, AppState>, wc_id: WcId) -> Result<(), AppError> {
-    guard(async { state.wcs.close(&wc_id) }).await
+    guard(async {
+        state.watchers.stop(&wc_id.0);
+        state.wcs.close(&wc_id)
+    })
+    .await
 }
 
 /// Status from the engine, or from the snapshot while a write is running on the working copy
@@ -162,22 +170,7 @@ pub async fn status_remote(
             Some(wc_id.clone()),
             title,
             move |ctx| async move {
-                let wc = resolved.wc.clone();
-                let scan = resolved
-                    .actor
-                    .read(|| {
-                        let (engine, wc, ctx) =
-                            (std::sync::Arc::clone(&engine), wc.clone(), ctx.clone());
-                        async move {
-                            engine
-                                .status_remote(&wc, &ctx)
-                                .await
-                                .map_err(|e| AppError::from(&e))
-                        }
-                    })
-                    .await?;
-                wcs.set_incoming(&wc_id, scan.incoming);
-                publisher.apply_remote(&wc_id, &scan).await?;
+                crate::status::run_remote_check(&engine, &publisher, &wcs, &resolved, &ctx).await?;
                 Ok(OpResult::Done)
             },
         ))
