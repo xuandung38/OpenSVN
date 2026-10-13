@@ -76,6 +76,23 @@ pub struct NodeInstallInfo {
     pub has_lock: bool,
 }
 
+impl NodeInstallInfo {
+    /// Keyword context svn builds for the node in `svn_wc__expand_keywords`.
+    pub fn keyword_context(&self) -> KeywordContext {
+        KeywordContext {
+            rev: Some(self.changed_rev.unwrap_or(-1)),
+            url: Some(format!(
+                "{}/{}",
+                self.repos_root_url,
+                uri_encode(&self.repos_relpath)
+            )),
+            repos_root_url: Some(self.repos_root_url.clone()),
+            date_micros: self.changed_date_micros,
+            author: self.changed_author.clone(),
+        }
+    }
+}
+
 /// Database-backed operations used by work items.
 ///
 /// **Crash idempotency contract:** a work item can run again after a crash that happened after
@@ -288,17 +305,7 @@ impl<'a> WorkQueueRunner<'a> {
 
     /// Keyword context svn builds for a node in `svn_wc__expand_keywords`.
     fn keyword_context(info: &NodeInstallInfo) -> KeywordContext {
-        KeywordContext {
-            rev: Some(info.changed_rev.unwrap_or(-1)),
-            url: Some(format!(
-                "{}/{}",
-                info.repos_root_url,
-                uri_encode(&info.repos_relpath)
-            )),
-            repos_root_url: Some(info.repos_root_url.clone()),
-            date_micros: info.changed_date_micros,
-            author: info.changed_author.clone(),
-        }
+        info.keyword_context()
     }
 
     fn translate_info(info: &NodeInstallInfo) -> TranslateInfo {

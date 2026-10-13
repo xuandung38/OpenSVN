@@ -2,18 +2,24 @@
 
 use std::future::Future;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use opensvn_ipc::{AppError, OpResult, OperationHandle, OperationKind, WcId};
 use svn_types::SvnError;
 
+use crate::auth::{AuthBroker, NoSecretStore};
 use crate::db::{AppDb, CacheDb};
+use crate::diagnostics::DiagnosticsService;
 use crate::engine::{EngineFacade, OpContext, WcRef};
+use crate::menu::MenuControl;
+use crate::notify::Notifier;
 use crate::ops::{AppEvents, OperationManager};
+use crate::os_integration::OsOpener;
 use crate::path_grants::{PathGrants, PathPicker};
 use crate::programs::{ProgramLauncher, ProgramPicker, ProgramService};
 use crate::settings::{SettingsService, system_locale};
-use crate::status::StatusPublisher;
+use crate::status::{IncomingPoller, PollerDeps, StatusPublisher, StatusService, StatusTiming};
+use crate::updater::{SecretStore, UpdateControl};
 use crate::wc::{ResolvedWc, WcRegistry};
 
 /// Everything needed to build the state; tests substitute the engine, events and dialogs.
@@ -26,8 +32,20 @@ pub struct AppDeps {
     pub events: Arc<dyn AppEvents>,
     /// Native dialogs for programs.
     pub picker: Arc<dyn ProgramPicker>,
+    /// Watcher timing.
+    pub status_timing: StatusTiming,
     /// Native dialogs for files and folders.
     pub path_picker: Arc<dyn PathPicker>,
+    /// Reveal / open launcher.
+    pub opener: Arc<dyn OsOpener>,
+    /// Desktop notifications.
+    pub notifier: Arc<dyn Notifier>,
+    /// Native menu control.
+    pub menu: Arc<dyn MenuControl>,
+    /// App updates.
+    pub updates: Arc<dyn UpdateControl>,
+    /// Credential store (updater token).
+    pub secrets: Arc<dyn SecretStore>,
     /// Starts external programs (the diff tool).
     pub launcher: Arc<dyn ProgramLauncher>,
 }
@@ -48,17 +66,35 @@ pub struct AppState {
     pub wcs: Arc<WcRegistry>,
     /// Status deltas and snapshots.
     pub status: Arc<StatusPublisher>,
+    /// Credential and certificate prompts.
+    pub auth: Arc<AuthBroker>,
+    /// Diagnostics preview and export.
+    pub diagnostics: DiagnosticsService,
+    /// File watchers of open working copies.
+    pub watchers: Arc<StatusService>,
+    /// Periodic update check (started after the window exists).
+    pub poller: Mutex<Option<IncomingPoller>>,
     /// Path grants minted by native dialogs and drops.
     pub grants: Arc<PathGrants>,
     /// Native file and folder dialogs.
     pub path_picker: Arc<dyn PathPicker>,
+    /// Reveal / open launcher.
+    pub opener: Arc<dyn OsOpener>,
+    /// Desktop notifications.
+    pub notifier: Arc<dyn Notifier>,
+    /// Native menu control.
+    pub menu: Arc<dyn MenuControl>,
+    /// App updates.
+    pub updates: Arc<dyn UpdateControl>,
+    /// Credential store (updater token).
+    pub secrets: Arc<dyn SecretStore>,
     /// Serializes native dialogs (a second request cannot stack dialogs).
     pub path_dialog_open: tokio::sync::Mutex<()>,
     /// Program settings (native pick and confirm).
     pub programs: ProgramService,
     /// Starts external programs (the diff tool).
     pub launcher: Arc<dyn ProgramLauncher>,
-    /// Data directory; private folders for generated files live under it.
+    /// Data directory (databases, logs); private folders for generated files live under it.
     pub data_dir: std::path::PathBuf,
 }
 
@@ -77,7 +113,22 @@ impl AppState {
             cache,
             Arc::clone(&deps.events),
         ));
+        let watchers = Arc::new(StatusService::new(Arc::clone(&status), deps.status_timing));
+        let auth = Arc::new(AuthBroker::new(
+            Arc::clone(&deps.events),
+            db.clone(),
+            Arc::new(NoSecretStore),
+        ));
         Ok(Self {
+            diagnostics: DiagnosticsService::default(),
+            opener: deps.opener,
+            notifier: deps.notifier,
+            menu: deps.menu,
+            updates: deps.updates,
+            secrets: deps.secrets,
+            poller: Mutex::new(None),
+            auth,
+            watchers,
             grants: Arc::new(PathGrants::new()),
             path_picker: deps.path_picker,
             path_dialog_open: tokio::sync::Mutex::new(()),
@@ -147,6 +198,11 @@ impl AppState {
         Ok(self
             .ops
             .spawn(kind, Some(id.clone()), title, move |ctx| async move {
+                // Authenticate first: a prompt must never wait while the working copy is locked.
+                engine
+                    .ensure_authenticated(&wc, &ctx)
+                    .await
+                    .map_err(|e| AppError::from(&e))?;
                 let cancel = ctx.cancel.clone();
                 let result = r
                     .actor
@@ -177,6 +233,26 @@ impl AppState {
         self.ops.spawn(kind, None, title, move |ctx| async move {
             f(engine, ctx).await.map_err(|e| AppError::from(&e))
         })
+    }
+
+    /// Starts the periodic update check, replacing a running one. `period` overrides the setting
+    /// (tests).
+    pub fn start_poller(&self, period: Option<std::time::Duration>) {
+        let poller = IncomingPoller::start(PollerDeps {
+            engine: Arc::clone(&self.engine),
+            publisher: Arc::clone(&self.status),
+            wcs: Arc::clone(&self.wcs),
+            notifier: Arc::clone(&self.notifier),
+            settings: self.settings.subscribe(),
+            period_override: period,
+        });
+        let mut slot = self
+            .poller
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(old) = slot.replace(poller) {
+            old.stop();
+        }
     }
 
     /// Opens a working copy (engine recovery included). Locks that need the user (foreign or

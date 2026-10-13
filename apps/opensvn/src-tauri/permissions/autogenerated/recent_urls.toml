@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-recent-urls"
+description = "Enables the recent_urls command without any pre-configured scope."
+commands.allow = ["recent_urls"]
+
+[[permission]]
+identifier = "deny-recent-urls"
+description = "Denies the recent_urls command without any pre-configured scope."
+commands.deny = ["recent_urls"]

@@ -5,6 +5,7 @@ import type { OpenWith, Rev } from "../../ipc/bindings";
 import { ipc, toAppError, unwrap } from "../../ipc/client";
 import { queryKeys } from "../../ipc/query-keys";
 import { useT } from "../../lib/i18n/i18n";
+import { wcPathUrl } from "./wc-model";
 import { useWcSession } from "./wc-session";
 import { wcStrings } from "./wc-strings";
 
@@ -75,10 +76,21 @@ export function useWcActions() {
         if (!wcId) return;
         await attempt(() => unwrap(ipc().commands.diffExternal({ kind: "wc", wcId, path })));
       },
+      /** Copies `path` (empty = the working copy root) as a full or WC-relative path. */
       async copyPath(path: string, relative: boolean) {
-        const text = relative || !wc ? path : `${wc.rootPath}/${path}`;
+        const text = relative || !wc ? path : path ? `${wc.rootPath}/${path}` : wc.rootPath;
         try {
           await navigator.clipboard.writeText(text);
+          toast.show(t("copied"));
+        } catch (e) {
+          toast.show(toAppError(e).message);
+        }
+      },
+      /** Copies the repository URL of `path` (empty = the working copy itself). */
+      async copyUrl(path: string) {
+        if (!wc) return;
+        try {
+          await navigator.clipboard.writeText(path ? wcPathUrl(wc.url, path) : wc.url);
           toast.show(t("copied"));
         } catch (e) {
           toast.show(toAppError(e).message);

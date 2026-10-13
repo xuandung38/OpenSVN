@@ -11,6 +11,10 @@ pub enum ErrorCode {
     Network,
     Timeout,
     AuthRequired,
+    /// Single sign-on (Negotiate/Kerberos) failed with no password fallback to offer: the server
+    /// offers no Basic, the URL is plain http (SSO is https only), its mutual-authentication
+    /// token was invalid, or the user chose SSO again after it had failed.
+    NegotiateFailed,
     Forbidden,
     TlsUntrusted,
     OutOfDate,
@@ -45,6 +49,8 @@ pub enum ErrorAction {
     TrustCert,
     OpenLockDialog,
     OpenSettings,
+    /// The default app was refused for this item; show it in the file manager instead.
+    RevealInFileManager,
 }
 
 /// Error returned by every command. `message` is user-displayable; never a bare string error.
@@ -121,7 +127,9 @@ impl From<&SvnError> for AppError {
 }
 
 /// Engine error code -> (IPC code, retryable, UI actions).
-/// `Corrupt` maps to `wc-needs-cleanup`; `UnsafePath` and `ServerUnsupported` map to `internal`.
+/// `Corrupt` maps to `wc-needs-cleanup`; `UnsafePath` and `ServerUnsupported` map to `internal`;
+/// `CommitOutcomeUnknown` maps to a non-retryable `network`; `LimitExceeded` maps to a
+/// non-retryable `invalid-argument` with no actions.
 /// The match is exhaustive on purpose: a new engine code must be mapped explicitly.
 pub fn map_svn_error_code(code: SvnErrorCode) -> (ErrorCode, bool, &'static [ErrorAction]) {
     use ErrorAction as A;
@@ -130,6 +138,7 @@ pub fn map_svn_error_code(code: SvnErrorCode) -> (ErrorCode, bool, &'static [Err
         S::Network => (ErrorCode::Network, true, &[A::Retry]),
         S::Timeout => (ErrorCode::Timeout, true, &[A::Retry, A::OpenSettings]),
         S::AuthRequired => (ErrorCode::AuthRequired, false, &[A::SignIn]),
+        S::NegotiateFailed => (ErrorCode::NegotiateFailed, false, &[A::SignIn]),
         S::Forbidden => (ErrorCode::Forbidden, false, &[]),
         S::TlsUntrusted => (ErrorCode::TlsUntrusted, false, &[A::TrustCert]),
         S::OutOfDate => (ErrorCode::OutOfDate, false, &[A::Update]),
@@ -150,6 +159,11 @@ pub fn map_svn_error_code(code: SvnErrorCode) -> (ErrorCode, bool, &'static [Err
         S::PermissionDenied => (ErrorCode::PermissionDenied, false, &[]),
         S::FileInUse => (ErrorCode::FileInUse, true, &[A::Retry]),
         S::Cancelled => (ErrorCode::Cancelled, false, &[]),
+        // Never retryable: re-sending a commit that may already be a revision could apply it
+        // twice. The engine message says the outcome is unknown; reconciliation is the caller's.
+        S::CommitOutcomeUnknown => (ErrorCode::Network, false, &[]),
+        // A size cap, not corruption: the same request fails again, and cleanup cannot help.
+        S::LimitExceeded => (ErrorCode::InvalidArgument, false, &[]),
         S::Corrupt => (ErrorCode::WcNeedsCleanup, false, &[A::Cleanup]),
         S::ServerUnsupported => (ErrorCode::Internal, false, &[]),
         S::Internal => (ErrorCode::Internal, false, &[]),

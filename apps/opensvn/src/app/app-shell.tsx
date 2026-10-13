@@ -1,10 +1,10 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ActivityPanel } from "../components/layout/activity-panel";
 import { AppToolbar } from "../components/layout/app-toolbar";
 import { MainWindow } from "../components/layout/main-window";
 import { Button } from "../components/ui/button";
 import { EmptyState } from "../components/ui/empty-state";
-import { Popover, PopoverGroup } from "../components/ui/popover";
+import { Popover } from "../components/ui/popover";
 import { SegmentedControl } from "../components/ui/segmented-control";
 import { StatusBar, StatusBarItem } from "../components/ui/status-bar";
 import { Tabs } from "../components/ui/tabs";
@@ -20,6 +20,11 @@ import { SettingsSheet } from "../features/remote/settings/settings-sheet";
 import { WcSidebar } from "../features/wc/changes/wc-sidebar";
 import { WcDialogHost } from "../features/wc/dialogs/wc-dialog-host";
 import { DiffView } from "../features/wc/diff/diff-view";
+import { RepoPicker } from "../features/wc/repos/repo-picker";
+import { repoStrings } from "../features/wc/repos/repo-strings";
+import { useOpenCheckedOut } from "../features/wc/repos/use-open-checked-out";
+import { isMac } from "../features/wc/shortcuts";
+import { ShortcutsDialog } from "../features/wc/shortcuts-dialog";
 import { useOpNotifications } from "../features/wc/use-op-notifications";
 import { useWcActions } from "../features/wc/use-wc-actions";
 import { useWcShortcuts } from "../features/wc/use-wc-shortcuts";
@@ -33,7 +38,8 @@ import {
   WelcomeScreen,
 } from "../features/wc/welcome/welcome-screen";
 import type { FileStatus, WorkingCopy } from "../ipc/bindings";
-import { useOperations, useStatus, useWorkingCopies } from "../ipc/queries";
+import { ipc, unwrap } from "../ipc/client";
+import { useOperations, useStatus, useWcEntries, useWorkingCopies } from "../ipc/queries";
 import { useT } from "../lib/i18n/i18n";
 import { applyTheme, readTheme, type ThemeChoice } from "../lib/theme";
 import { shellStrings } from "./shell-strings";
@@ -47,8 +53,25 @@ const NO_FILES: readonly FileStatus[] = [];
  */
 export function AppShell() {
   const wcs = useWorkingCopies();
+  const entries = useWcEntries();
   const [wcId, setWcId] = useState<string | null>(null);
-  const current = wcs.data?.find((w) => w.id === wcId) ?? wcs.data?.[0] ?? null;
+  // File > Close working copy: no working copy is current until the user picks one again.
+  const [closed, setClosed] = useState(false);
+  const selectWc = useCallback((id: string) => {
+    setClosed(false);
+    setWcId(id);
+  }, []);
+  // Until the user picks one, the most recently opened working copy is current.
+  const lastOpened = useMemo(
+    () =>
+      [...(entries.data ?? [])]
+        .filter((e) => !e.missing && e.lastOpenedAt)
+        .sort((a, b) => (b.lastOpenedAt ?? "").localeCompare(a.lastOpenedAt ?? ""))[0]?.id,
+    [entries.data],
+  );
+  const current = closed
+    ? null
+    : (wcs.data?.find((w) => w.id === (wcId ?? lastOpened)) ?? wcs.data?.[0] ?? null);
   const status = useStatus(current?.id ?? null);
   const [view, setView] = useState<View>("changes");
   const links = useRemoteLinks(setView);
@@ -80,7 +103,8 @@ export function AppShell() {
       <ShellBody
         workingCopies={wcs.data ?? []}
         loaded={wcs.isSuccess}
-        onSelectWc={setWcId}
+        onSelectWc={selectWc}
+        onCloseWc={() => setClosed(true)}
         view={view}
         onView={setView}
         links={links}
@@ -93,6 +117,7 @@ function ShellBody({
   workingCopies,
   loaded,
   onSelectWc,
+  onCloseWc,
   view,
   onView,
   links,
@@ -100,6 +125,7 @@ function ShellBody({
   workingCopies: WorkingCopy[];
   loaded: boolean;
   onSelectWc: (id: string) => void;
+  onCloseWc: () => void;
   view: View;
   onView: (v: View) => void;
   links: ReturnType<typeof useRemoteLinks>;
@@ -114,42 +140,47 @@ function ShellBody({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [createKind, setCreateKind] = useState<"branch" | "tag" | "location" | null>(null);
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(true);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const r = useT(repoStrings);
+  const chooseTheme = (next: ThemeChoice) => {
+    setTheme(next);
+    applyTheme(next);
+  };
 
   useOpNotifications();
+  useOpenCheckedOut(onSelectWc);
   useWcShortcuts({
     onView,
     onToggleActivity: () => setShowActivity((v) => !v),
     onAddExisting: () => void addExisting(),
+    onSwitchRepo: () => setPickerOpen(true),
+    onOpenSettings: () => setSettingsOpen(true),
+    onToggleSidebar: () => setShowSidebar((v) => !v),
+    onCloseWc: () => {
+      if (!current) return;
+      const id = current.id;
+      onCloseWc();
+      // Stops its watcher; the entry stays in the repository list.
+      void actions.attempt(() => unwrap(ipc().commands.wcClose(id)));
+    },
+    onCreate: setCreateKind,
+    onTheme: chooseTheme,
+    onShowShortcuts: () => setShortcutsOpen(true),
   });
 
   const changed = changedFiles(files).length;
   const running = ops.filter((o) => o.state === "running").length;
 
   const wcPicker = (item: React.ReactNode) => (
-    <Popover trigger={item}>
-      <PopoverGroup>{sh("workingCopies")}</PopoverGroup>
-      {workingCopies.map((w) => (
-        <button
-          key={w.id}
-          type="button"
-          onClick={() => onSelectWc(w.id)}
-          className={`flex cursor-pointer justify-between rounded-[5px] border-0 bg-transparent p-1.5 text-left hover:bg-sel ${
-            w.id === current?.id ? "font-semibold" : ""
-          }`}
-        >
-          <span>{w.name}</span>
-          <span className="font-mono text-[11px] text-muted-text">r{w.baseRev}</span>
-        </button>
-      ))}
-      <div className="mt-1 flex flex-col gap-1 border-t border-line pt-1.5">
-        <Button small onClick={() => openDialog({ kind: "checkout" })}>
-          {t("checkoutAction")}
-        </Button>
-        <Button small onClick={() => void addExisting()}>
-          {t("addExistingAction")}
-        </Button>
-      </div>
-    </Popover>
+    <RepoPicker
+      trigger={item}
+      open={pickerOpen}
+      onOpenChange={setPickerOpen}
+      currentId={current?.id ?? null}
+      onSelect={onSelectWc}
+    />
   );
 
   const noWc = <EmptyState title={sh("noWorkingCopy")} description={sh("noWorkingCopyHint")} />;
@@ -160,7 +191,9 @@ function ShellBody({
       <MainWindow
         toolbar={
           <AppToolbar
-            workingCopyName={current?.name ?? sh("noWorkingCopy")}
+            workingCopyName={current?.name ?? r("noRepo")}
+            workingCopyLabel={r("currentRepo")}
+            workingCopyShortcut={isMac() ? "Meta+T" : "Control+T"}
             locationLabel={current?.branch ? "Branch" : "Location"}
             locationValue={current?.branch?.name ?? current?.pathInRepo ?? "-"}
             incoming={current?.incoming ?? 0}
@@ -187,7 +220,7 @@ function ShellBody({
           />
         }
         banner={<WcBanners />}
-        sidebar={<WcSidebar />}
+        sidebar={showSidebar ? <WcSidebar /> : undefined}
         main={
           loaded && workingCopies.length === 0 ? (
             <WelcomeScreen />
@@ -244,10 +277,7 @@ function ShellBody({
             <SegmentedControl<ThemeChoice>
               label="Theme"
               value={theme}
-              onChange={(next) => {
-                setTheme(next);
-                applyTheme(next);
-              }}
+              onChange={chooseTheme}
               options={[
                 { value: "system", label: "System" },
                 { value: "light", label: "Light" },
@@ -258,6 +288,7 @@ function ShellBody({
         }
       />
       <WcDialogHost />
+      <ShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
     </>
   );
 }

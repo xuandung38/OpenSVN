@@ -195,6 +195,10 @@ pub trait EngineFacade: Send + Sync {
     // ---- working copy: reads
     /// Describes the working copy containing `root`; `NotAWorkingCopy` if there is none.
     async fn wc_info(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcInfo>;
+    /// Makes sure the server session of this working copy is authenticated, prompting the user
+    /// through the auth prompter if needed. The app calls it BEFORE taking the working copy write
+    /// path, so no prompt ever happens while a working copy lock is held.
+    async fn ensure_authenticated(&self, wc: &WcRef, ctx: &OpContext) -> EngineResult<()>;
     /// Opens the working copy and runs crash/lock recovery (dead-owner locks and unfinished work
     /// queue items). Called when a working copy is added and at app start; it may write, so the app
     /// calls it through the working copy's write path. Locks of foreign or unknown owners are only
@@ -368,8 +372,15 @@ pub trait EngineFacade: Send + Sync {
     ) -> EngineResult<()>;
     /// Applies server-side edits in one commit; returns the new revision.
     async fn remote_edit(&self, plan: &RemoteEditPlan, ctx: &OpContext) -> EngineResult<Rev>;
-    /// Copies in the repository (branch, tag); returns the new revision.
-    async fn copy_location(&self, req: &CopyLocationRequest, ctx: &OpContext) -> EngineResult<Rev>;
+    /// Copies in the repository (branch, tag); returns the new revision. With `from_wc` the
+    /// source is that working copy including its local changes (`req.from_url` and `req.from_rev`
+    /// are ignored). The engine reads the working copy with the usual busy-retry.
+    async fn copy_location(
+        &self,
+        req: &CopyLocationRequest,
+        from_wc: Option<&WcRef>,
+        ctx: &OpContext,
+    ) -> EngineResult<Rev>;
     /// Branch tree of a repository for `layout`.
     async fn branches_list(
         &self,

@@ -15,6 +15,26 @@ export const commands = {
 	 */
 	wcOpen: (wcId: WcId) => typedError<WorkingCopy, AppError>(__TAURI_INVOKE("wc_open", { wcId })),
 	wcClose: (wcId: WcId) => typedError<null, AppError>(__TAURI_INVOKE("wc_close", { wcId })),
+	/**  Every registered working copy, including ones whose folder is gone or moved (`missing`). */
+	wcEntries: () => typedError<WcEntry[], AppError>(__TAURI_INVOKE("wc_entries")),
+	/**
+	 *  Points a moved working copy at its new folder, chosen in the native folder dialog. The folder
+	 *  must be a working copy of the same repository. Recovery runs as on open.
+	 */
+	wcLocate: (wcId: WcId, grant: PathGrantId) => typedError<WorkingCopy, AppError>(__TAURI_INVOKE("wc_locate", { wcId, grant })),
+	/**  Repository URLs used recently, newest first. */
+	recentUrls: () => typedError<string[], AppError>(__TAURI_INVOKE("recent_urls")),
+	/**
+	 *  A folder grant for the default checkout folder (`general.checkoutRoot`), created when missing.
+	 *  The setting only changes through `checkout_root_choose`, so the grant always names a folder
+	 *  the user chose (or the built-in `~/svn`).
+	 */
+	checkoutRootGrant: () => typedError<PathGrantInfo, AppError>(__TAURI_INVOKE("checkout_root_grant")),
+	/**
+	 *  Lets the user choose the default checkout folder in the native folder dialog and stores it.
+	 *  Returns the settings unchanged when the dialog is cancelled.
+	 */
+	checkoutRootChoose: () => typedError<Settings, AppError>(__TAURI_INVOKE("checkout_root_choose")),
 	/**
 	 *  Status from the engine, or from the snapshot while a write is running on the working copy
 	 *  (the running operation in `op_list` is the "updating" indicator).
@@ -33,6 +53,12 @@ export const commands = {
 	changelistSet: (wcId: WcId, paths: string[], name: string | null) => typedError<null, AppError>(__TAURI_INVOKE("changelist_set", { wcId, paths, name })),
 	ignoreAdd: (request: IgnoreAddRequest) => typedError<null, AppError>(__TAURI_INVOKE("ignore_add", { request })),
 	markMove: (wcId: WcId, from: string, to: string) => typedError<null, AppError>(__TAURI_INVOKE("mark_move", { wcId, from, to })),
+	/**
+	 *  Checks out into a new folder (`dest_name`) inside the granted parent folder, or into the granted
+	 *  folder itself. The target must not exist or be an empty folder. On success the working copy is
+	 *  registered and its id returned in `OpResult::CheckedOut`; a folder this checkout created is
+	 *  removed again when the checkout fails or is cancelled while it is still empty.
+	 */
 	checkout: (request: CheckoutRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("checkout", { request })),
 	update: (request: UpdateRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("update", { request })),
 	switch: (wcId: WcId, url: string, rev: number | null) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("switch", { wcId, url, rev })),
@@ -67,7 +93,10 @@ export const commands = {
 	accountsList: () => typedError<Account[], AppError>(__TAURI_INVOKE("accounts_list")),
 	accountsSignOut: (realm: string) => typedError<null, AppError>(__TAURI_INVOKE("accounts_sign_out", { realm })),
 	settingsGet: () => typedError<Settings, AppError>(__TAURI_INVOKE("settings_get")),
-	/**  Applies a partial update. Keys that launch programs are refused here; see `program_choose`. */
+	/**
+	 *  Applies a partial update. `SettingsPatch` has no program-launching keys (see `program_choose`);
+	 *  a patch containing one is refused with `invalid-argument`.
+	 */
 	settingsSet: (patch: SettingsPatch_Deserialize) => typedError<Settings, AppError>(__TAURI_INVOKE("settings_set", { patch })),
 	/**
 	 *  Opens a native file picker for a program setting and stores it after the user confirmed the
@@ -86,9 +115,44 @@ export const commands = {
 	displayName: string,
 	kind: GrantKind,
 } | null, AppError>(__TAURI_INVOKE("path_pick", { request })),
+	/**  Stores the GitHub read token used for app updates (write-only: it is never returned). */
+	updaterTokenSet: (token: SecretText) => typedError<null, AppError>(__TAURI_INVOKE("updater_token_set", { token })),
+	/**  Removes the stored update token. */
+	updaterTokenClear: () => typedError<null, AppError>(__TAURI_INVOKE("updater_token_clear")),
+	/**  Whether an update token is stored (the value itself is never readable). */
+	updaterTokenStatus: () => typedError<boolean, AppError>(__TAURI_INVOKE("updater_token_status")),
+	/**  Looks for a newer app version. User initiated; there is no background check. */
+	updateCheck: () => typedError<{
+	/**  Version string. */
+	version: string,
+	/**  Release notes, if any. */
+	notes: string | null,
+} | null, AppError>(__TAURI_INVOKE("update_check")),
+	/**  Installs the update found by `update_check` and restarts the app. */
+	updateInstall: () => typedError<null, AppError>(__TAURI_INVOKE("update_install")),
+	/**
+	 *  Builds the diagnostics bundle in memory and returns every file's text for review. Nothing is
+	 *  written yet.
+	 */
+	diagnosticsPreview: (options: DiagnosticsOptions) => typedError<DiagnosticsPreview, AppError>(__TAURI_INVOKE("diagnostics_preview", { options })),
+	/**  Switches the native menu between the Branch and the Location variant. */
+	menuSetLayout: (hasLayout: boolean) => typedError<null, AppError>(__TAURI_INVOKE("menu_set_layout", { hasLayout })),
+	certsList: () => typedError<TrustedCert[], AppError>(__TAURI_INVOKE("certs_list")),
+	/**  Stops trusting a certificate; the next connection asks again. */
+	certsRemove: (key: TrustedCertKey) => typedError<null, AppError>(__TAURI_INVOKE("certs_remove", { key })),
+	/**
+	 *  Shows a working copy item in the file manager. `path` is relative to the working copy root;
+	 *  an empty path reveals the root folder itself. Items reached through a symbolic link are
+	 *  refused, so the file manager never opens a folder outside the working copy.
+	 */
 	revealInOs: (wcId: WcId, path: string) => typedError<null, AppError>(__TAURI_INVOKE("reveal_in_os", { wcId, path })),
+	/**  Opens an item of a working copy with the default app, the editor or the terminal. */
 	openExternal: (wcId: WcId, path: string, openWith: OpenWith) => typedError<null, AppError>(__TAURI_INVOKE("open_external", { wcId, path, openWith })),
-	diagnosticsExport: () => typedError<string, AppError>(__TAURI_INVOKE("diagnostics_export")),
+	/**
+	 *  Saves the previewed bundle as a zip. The destination is chosen in a native save dialog;
+	 *  returns the saved path, or `None` when the user cancels the dialog.
+	 */
+	diagnosticsExport: (token: string) => typedError<string | null, AppError>(__TAURI_INVOKE("diagnostics_export", { token })),
 };
 
 /** Events */
@@ -198,7 +262,14 @@ export type BranchRef = {
 	url: string,
 };
 
-export type CertDecision = "reject" | "acceptOnce" | "acceptAlways" | "replacePin";
+export type CertDecision = "reject" | "acceptOnce" | 
+/**  Trust permanently. Valid only for self-signed or unknown-issuer failures. */
+"acceptAlways" | 
+/**
+ *  Replace the pinned certificate of this host and port with the one now presented. Valid
+ *  only when the failure is `changed`.
+ */
+"replacePin";
 
 /**  Why a TLS certificate needs a decision (`unknown-issuer`, ..., `{ changed: { oldSha256, newSha256 } }`). */
 export type CertFailureInfo = "unknown-issuer" | "self-signed" | "expired" | "not-yet-valid" | "hostname-mismatch" | "revoked" | 
@@ -231,8 +302,17 @@ export type ChangedPath = {
 
 export type CheckoutRequest = {
 	url: string,
-	/**  Folder chosen with `path_pick`; becomes the working copy root. */
+	/**
+	 *  Folder chosen with `path_pick` (or minted by `checkout_root_grant`). With `dest_name` it is
+	 *  the parent folder and the working copy is created in a new child folder; without it the
+	 *  folder itself becomes the working copy root. An existing, non-empty target is refused.
+	 */
 	dest: PathGrantId,
+	/**
+	 *  Name of the new folder created inside `dest`: one path component, no separators, not `.` or
+	 *  `..`, no reserved Windows name (`CON`, `NUL`, `COM1`, ...), no trailing dot or space.
+	 */
+	destName: string | null,
 	rev: Rev | null,
 	depth: Depth,
 	sparse: SparseEntry[] | null,
@@ -268,9 +348,40 @@ export type CopyLocationRequest = {
 	toUrl: string,
 	message: string,
 	switchWcId: WcId | null,
+	/**
+	 *  Copy the working copy (including its local changes) instead of `from_url`; `from_url` and
+	 *  `from_rev` are then ignored.
+	 */
+	fromWc: WcId | null,
 };
 
 export type Depth = "empty" | "files" | "immediates" | "infinity";
+
+/**  One file of the bundle as the user sees it. */
+export type DiagnosticsEntry = {
+	/**  Path inside the zip. */
+	name: string,
+	/**  Size in bytes. */
+	size: number,
+	/**  Full text that will be saved. */
+	content: string,
+};
+
+/**  What to hide besides secrets (which are always removed). */
+export type DiagnosticsOptions = {
+	/**  Replace the home folder and working copy paths with placeholders. */
+	hidePaths: boolean,
+	/**  Remove commit messages from log lines. */
+	hideCommitMessages: boolean,
+};
+
+/**  The bundle awaiting the user's decision. */
+export type DiagnosticsPreview = {
+	/**  Pass to `diagnostics_export` to save exactly these contents. */
+	token: string,
+	/**  Files in the bundle. */
+	entries: DiagnosticsEntry[],
+};
 
 export type DiffGetRequest = {
 	target: DiffTarget,
@@ -306,9 +417,17 @@ export type EntryKind = "file" | "dir";
 
 export type Eol = "LF" | "CRLF" | "mixed";
 
-export type ErrorAction = "retry" | "update" | "cleanup" | "sign-in" | "trust-cert" | "open-lock-dialog" | "open-settings";
+export type ErrorAction = "retry" | "update" | "cleanup" | "sign-in" | "trust-cert" | "open-lock-dialog" | "open-settings" | 
+/**  The default app was refused for this item; show it in the file manager instead. */
+"reveal-in-file-manager";
 
-export type ErrorCode = "network" | "timeout" | "auth-required" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "hook-failed" | "repository-moved" | "pristine-not-hydrated" | "wc-invalid-operation" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | 
+export type ErrorCode = "network" | "timeout" | "auth-required" | 
+/**
+ *  Single sign-on (Negotiate/Kerberos) failed with no password fallback to offer: the server
+ *  offers no Basic, the URL is plain http (SSO is https only), its mutual-authentication
+ *  token was invalid, or the user chose SSO again after it had failed.
+ */
+"negotiate-failed" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "hook-failed" | "repository-moved" | "pristine-not-hydrated" | "wc-invalid-operation" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | 
 /**  The request itself is invalid (bad value, expired path grant, unsupported option). */
 "invalid-argument" | "internal";
 
@@ -480,6 +599,11 @@ export type OpResult =
 { kind: "done" } | 
 /**  Commit or update produced/reached a revision. */
 { kind: "newRev"; newRev: Rev } | 
+/**
+ *  Checkout finished: the new working copy's registry id (`None` when it could not be
+ *  registered; the files are on disk and can be added with "Add existing working copy").
+ */
+{ kind: "checkedOut"; wcId: WcId | null; newRev: Rev } | 
 /**  Blame result. */
 { kind: "blame"; lines: BlameLine[] };
 
@@ -618,7 +742,6 @@ export type SecretText = string;
 
 /**  All settings with their effective values. */
 export type Settings = {
-	"general.checkoutRoot": string,
 	"general.checkIntervalMin": number,
 	"general.language": Language,
 	"appearance.theme": Theme,
@@ -633,6 +756,11 @@ export type Settings = {
 	"cache.maxSizeGb": number,
 	"integrations.webRevisionUrl": string,
 	"integrations.webFileUrl": string,
+	/**
+	 *  Parent folder offered for new checkouts. `~` stands for the home folder. Changes only
+	 *  through `checkout_root_choose` (native folder dialog).
+	 */
+	"general.checkoutRoot": string,
 	/**  `null` when no external tool is configured. */
 	"diff.externalTool": ExternalDiffTool | null,
 	/**  Same shape as `diff.externalTool`. `null` when not configured. */
@@ -658,7 +786,6 @@ export type SettingsPatch = SettingsPatch_Serialize | SettingsPatch_Deserialize;
  *  fails loudly instead of being ignored.
  */
 export type SettingsPatch_Deserialize = {
-	"general.checkoutRoot"?: string | null,
 	"general.checkIntervalMin"?: number | null,
 	"general.language"?: Language | null,
 	"appearance.theme"?: Theme | null,
@@ -682,7 +809,6 @@ export type SettingsPatch_Deserialize = {
  *  fails loudly instead of being ignored.
  */
 export type SettingsPatch_Serialize = {
-	"general.checkoutRoot"?: string | null,
 	"general.checkIntervalMin"?: number | null,
 	"general.language"?: Language | null,
 	"appearance.theme"?: Theme | null,
@@ -731,9 +857,34 @@ export type TextSide = {
 
 export type Theme = "system" | "light" | "dark";
 
+/**  A certificate the user chose to trust permanently (Settings > Certificates). */
+export type TrustedCert = {
+	host: string,
+	port: number,
+	sha256: string,
+	subject: string | null,
+	expiresAt: string | null,
+	trustedAt: string,
+};
+
+/**  Identifies a trusted certificate for removal. */
+export type TrustedCertKey = {
+	host: string,
+	port: number,
+	sha256: string,
+};
+
 export type UnlockRequest = {
 	targets: LockTargets,
 	breakLock: boolean | null,
+};
+
+/**  A newer version found by a check. */
+export type UpdateInfo = {
+	/**  Version string. */
+	version: string,
+	/**  Release notes, if any. */
+	notes: string | null,
 };
 
 export type UpdateRequest = {
@@ -744,6 +895,27 @@ export type UpdateRequest = {
 };
 
 export type WcBanner = Banner;
+
+/**
+ *  One row of the repository manager (`wc_entries`): every registered working copy, including
+ *  ones that can no longer be read (folder moved or deleted), which `wc_list` leaves out.
+ */
+export type WcEntry = {
+	id: WcId,
+	/**  Display name (app database only; renaming never touches the folder). */
+	name: string,
+	rootPath: string,
+	repoRootUrl: string,
+	repoUuid: string,
+	/**  URL the working copy points at; `None` when it cannot be read. */
+	url: string | null,
+	addedAt: string,
+	lastOpenedAt: string | null,
+	/**  The folder is gone, moved or no longer a working copy. The UI offers "Locate…" and "Remove". */
+	missing: boolean,
+	/**  Why the working copy cannot be read (only when `missing`). */
+	problem: string | null,
+};
 
 /**  Working-copy format; only 31 and 32 are valid (validated on deserialize; `number` in TS). */
 export type WcFormat = number;

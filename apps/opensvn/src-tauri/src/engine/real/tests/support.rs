@@ -232,6 +232,8 @@ pub(super) struct ScriptedSession {
     pub(super) inner: FakeRaSession,
     pub(super) abort_error: Option<ErrorCode>,
     pub(super) calls: std::sync::Mutex<Vec<&'static str>>,
+    /// When set, `lock` and `unlock` never answer (a server that hangs).
+    pub(super) hang_locks: std::sync::atomic::AtomicBool,
 }
 
 impl ScriptedSession {
@@ -240,6 +242,7 @@ impl ScriptedSession {
             inner,
             abort_error,
             calls: std::sync::Mutex::new(Vec::new()),
+            hang_locks: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -324,6 +327,9 @@ impl RaSession for ScriptedSession {
         base_rev: Option<Revnum>,
         cancel: &CancelToken,
     ) -> Result<LockInfo, SvnError> {
+        if self.hang_locks.load(std::sync::atomic::Ordering::SeqCst) {
+            return std::future::pending().await;
+        }
         self.inner
             .lock(path, comment, steal, base_rev, cancel)
             .await
@@ -335,6 +341,9 @@ impl RaSession for ScriptedSession {
         break_lock: bool,
         cancel: &CancelToken,
     ) -> Result<(), SvnError> {
+        if self.hang_locks.load(std::sync::atomic::Ordering::SeqCst) {
+            return std::future::pending().await;
+        }
         self.inner.unlock(path, token, break_lock, cancel).await
     }
     async fn file_revs(

@@ -1,5 +1,6 @@
 import { ConflictResolver } from "../conflicts/conflict-resolver";
-import { useWcSession } from "../wc-session";
+import { RemoveRepoDialog, RenameRepoDialog } from "../repos/repo-dialogs";
+import { isAppDialog, useWcSession } from "../wc-session";
 import { CheckoutDialog } from "./checkout-dialog";
 import { DeleteDialog, DiscardDialog, IgnoreDialog, RenameDialog } from "./file-dialogs";
 import { ChangelistDialog, WcLockDialog } from "./lock-dialogs";
@@ -9,8 +10,9 @@ import { CleanupDialog, SwitchDialog, UpdateToRevisionDialog } from "./update-di
 export function WcDialogHost() {
   const { dialog, closeDialog, wc } = useWcSession();
   if (!dialog) return null;
-  // Everything except checkout needs a working copy; guard so a stale dialog never mounts without one.
-  if (dialog.kind !== "checkout" && !wc) return null;
+  // Everything except the app-level dialogs needs a working copy; guard so a stale dialog never
+  // mounts without one.
+  if (!isAppDialog(dialog) && !wc) return null;
   switch (dialog.kind) {
     case "checkout":
       return <CheckoutDialog onClose={closeDialog} />;
@@ -32,6 +34,10 @@ export function WcDialogHost() {
       return <SwitchDialog onClose={closeDialog} />;
     case "cleanup":
       return <CleanupDialog onClose={closeDialog} />;
+    case "repo-rename":
+      return <RenameRepoDialog wcId={dialog.wcId} name={dialog.name} onClose={closeDialog} />;
+    case "repo-remove":
+      return <RemoveRepoDialog wcId={dialog.wcId} name={dialog.name} onClose={closeDialog} />;
     case "resolver":
       return <ConflictResolver initialPath={dialog.path} onClose={closeDialog} />;
   }

@@ -12,9 +12,12 @@ workspace = true
 [dependencies]
 svn-types.workspace = true
 svn-ra-api.workspace = true
+svn-protocol.workspace = true
+svn-delta.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
+md-5.workspace = true
 reqwest = { workspace = true, features = ["rustls-no-provider", "stream", "system-proxy"] }
 # `ring` provider: smaller C/asm surface than aws-lc-rs; FIPS and post-quantum key exchange are not
 # MVP requirements (see ADR-003).
@@ -22,6 +25,7 @@ rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 rustls-platform-verifier.workspace = true
 secrecy.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 base64.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time", "macros"] }
 tokio-util = { workspace = true, features = ["io"] }
@@ -30,15 +34,29 @@ tracing-subscriber = { workspace = true, features = ["std", "fmt"] }
 url.workspace = true
 x509-parser.workspace = true
 
+# Negotiate on Windows: SSPI "Negotiate" package, Kerberos only (cross-krb5 rejects an NTLM fallback).
+[target.'cfg(windows)'.dependencies]
+cross-krb5.workspace = true
+
+# Negotiate on macOS/Linux: system GSSAPI with the SPNEGO mechanism. Optional because building it
+# needs the gssapi headers (libkrb5-dev / krb5-devel; macOS SDK) and libclang for bindgen.
+[target.'cfg(unix)'.dependencies]
+libgssapi = { workspace = true, optional = true }
+
+[features]
+default = []
+# Kerberos single sign-on on macOS/Linux through the system GSSAPI library. Off by default so the
+# Linux CI builds without krb5 development packages. Windows always uses SSPI.
+negotiate-gssapi = ["dep:libgssapi"]
+
 [dev-dependencies]
-# Fixture replay and hostile-server tests parse what the transport delivers.
-svn-protocol.workspace = true
+svn-ra-api = { workspace = true, features = ["fake"] }
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 proptest.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "test-util"] }
 tokio-rustls = { workspace = true, features = ["ring", "tls12"] }
 wiremock.workspace = true

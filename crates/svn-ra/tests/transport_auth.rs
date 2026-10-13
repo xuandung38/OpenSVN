@@ -217,7 +217,7 @@ async fn negotiate_only_challenge_does_not_fall_back_to_basic() {
         .send(get(srv.url("/")), &CancelToken::new())
         .await
         .expect_err("unsupported");
-    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert_eq!(err.code, ErrorCode::NegotiateFailed);
     assert!(err.message.contains("Negotiate"), "{}", err.message);
     assert_eq!(prompter.credential_prompts(), 0);
     assert!(
@@ -248,6 +248,11 @@ async fn negotiate_plus_basic_is_offered_to_the_prompter_explicitly() {
     assert_eq!(r.status().as_u16(), 200);
     let calls = prompter.credential_calls.lock().unwrap().clone();
     assert_eq!(calls[0].2, vec![AuthMethod::Negotiate, AuthMethod::Basic]);
+    // Negotiate is unavailable in this transport, so the prompt says so.
+    assert_eq!(
+        prompter.reasons.lock().unwrap()[0],
+        svn_ra_api::PromptReason::NegotiateFailed
+    );
 }
 
 #[tokio::test]
@@ -366,13 +371,33 @@ async fn cancel_interrupts_a_request_queued_behind_a_prompt() {
         let (t, url, c) = (Arc::clone(&t), srv.url("/a"), owner_cancel.clone());
         tokio::spawn(async move { t.send(get(url), &c).await.map(|_| ()) })
     };
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait until the owner really is in the prompt (a fixed sleep raced the TLS handshake on a
+    // busy machine, letting the second request become the prompt owner).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while prompter.credential_prompts() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first request never prompted"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let queued_cancel = CancelToken::new();
     let queued = {
         let (t, url, c) = (Arc::clone(&t), srv.url("/b"), queued_cancel.clone());
         tokio::spawn(async move { t.send(get(url), &c).await.map(|_| ()) })
     };
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait until the server has answered the second request (401): from then on it only waits
+    // behind the owner's prompt, so the cancel below hits it while queued.
+    while !srv.requests().iter().any(|r| r.path == "/b") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the second request never reached the server"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Let it handle the 401 and reach the prompt queue (cancelling slightly earlier still has to
+    // end in `Cancelled`, so this is not a correctness wait).
+    tokio::task::yield_now().await;
     queued_cancel.cancel();
     let err = tokio::time::timeout(Duration::from_secs(1), queued)
         .await
@@ -408,4 +433,37 @@ async fn server_alternating_realms_cannot_loop_the_client_forever() {
         srv.requests().len()
     );
     assert!(prompter.credential_prompts() <= 6);
+}
+
+#[tokio::test]
+async fn unattended_send_never_prompts_and_uses_cached_credentials() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+
+    // No cached credentials: the 401 is an error, not a prompt.
+    let err = t
+        .send_unattended(get(srv.url("/a")), &CancelToken::new())
+        .await
+        .expect_err("needs credentials");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert_eq!(prompter.credential_prompts(), 0);
+    assert_eq!(srv.requests().len(), 1);
+
+    // Once an interactive request cached them, unattended requests reuse them silently.
+    t.send(get(srv.url("/b")), &CancelToken::new())
+        .await
+        .expect("interactive");
+    assert_eq!(prompter.credential_prompts(), 1);
+    let r = t
+        .send_unattended(get(srv.url("/c")), &CancelToken::new())
+        .await
+        .expect("cached credentials");
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(prompter.credential_prompts(), 1);
+    let seen = srv.requests();
+    assert_eq!(
+        seen.last().unwrap().header("authorization"),
+        Some(basic("alice", "pw"))
+    );
 }

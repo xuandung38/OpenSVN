@@ -191,7 +191,13 @@ fn ipc_app(f: &Fixture) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRu
         engine: f.engine.clone(),
         events: std::sync::Arc::new(crate::ops::events::RecordingEvents::default()),
         picker: f.picker.clone(),
+        status_timing: crate::status::StatusTiming::default(),
         path_picker: f.paths.clone(),
+        opener: f.opener.clone(),
+        notifier: f.notifier.clone(),
+        menu: f.menu.clone(),
+        updates: f.updates.clone(),
+        secrets: f.secrets.clone(),
         launcher: f.launcher.clone(),
     })
     .unwrap();
@@ -240,6 +246,9 @@ async fn ipc_allows_listed_commands_and_rejects_everything_else() {
     // plugin commands that were never registered
     for cmd in [
         "plugin:shell|execute",
+        "plugin:updater|check",
+        "plugin:updater|download_and_install",
+        "plugin:notification|notify",
         "plugin:fs|read_file",
         "plugin:opener|open_path",
     ] {
@@ -283,7 +292,24 @@ async fn settings_set_over_ipc_refuses_program_keys() {
         serde_json::json!({"patch": {"tools.terminal": {"path": "/bin/sh", "args": []}}}),
     )
     .unwrap_err();
-    assert!(err.to_string().contains("unknown field"), "{err}");
+    // reported as an AppError, not Tauri's raw string
+    assert_eq!(err["code"], "invalid-argument", "{err}");
+    assert!(
+        err["detail"].as_str().unwrap().contains("unknown field"),
+        "{err}"
+    );
+    // the default checkout folder changes only through the native folder dialog
+    let err = invoke(
+        &main,
+        "settings_set",
+        serde_json::json!({"patch": {"general.checkoutRoot": "/etc"}}),
+    )
+    .unwrap_err();
+    assert_eq!(err["code"], "invalid-argument", "{err}");
+    assert!(
+        err["detail"].as_str().unwrap().contains("unknown field"),
+        "{err}"
+    );
     let ok = invoke(
         &main,
         "settings_set",

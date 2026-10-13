@@ -4,21 +4,30 @@
 mod app_state;
 #[cfg(test)]
 mod app_tests;
+mod auth;
 mod boundary;
 mod command_names;
 mod command_registry;
 mod commands;
 mod db;
+mod diagnostics;
+mod display_text;
 pub mod engine;
 mod errors;
 mod events;
+mod layout;
 pub mod lock_ownership;
+mod logging;
+mod menu;
+mod notify;
 mod ops;
+mod os_integration;
 mod path_grants;
 mod preview;
 mod programs;
 pub mod settings;
 mod status;
+mod updater;
 mod wc;
 
 use std::sync::Arc;
@@ -56,9 +65,12 @@ const FAKE_ENGINE_SUBDIR: &str = "fake-engine";
 fn build_state<R: tauri::Runtime>(
     app: &tauri::App<R>,
 ) -> Result<AppState, Box<dyn std::error::Error>> {
-    let data_dir = db::current_data_dir()
+    let data_dir = db::current_data_dir(&app.config().identifier)
         .map_err(startup_error)?
         .join(FAKE_ENGINE_SUBDIR);
+    // First thing: every later log line goes through the redacting sinks. The diagnostics bundle
+    // reads the same folder.
+    logging::init(&data_dir.join("logs"));
     let preview = preview::prepare_preview_dir(&data_dir)
         .map_err(|e| startup_error(format!("{} {}", e.message, e.detail.unwrap_or_default())))?;
     app.asset_protocol_scope()
@@ -69,7 +81,14 @@ fn build_state<R: tauri::Runtime>(
         engine: default_engine()?,
         events: Arc::new(ops::TauriEvents::new(app.handle().clone())),
         picker: Arc::new(programs::NativeProgramPicker),
+        status_timing: status::StatusTiming::default(),
         path_picker: Arc::new(path_grants::NativePathPicker),
+        opener: Arc::new(os_integration::SystemOpener),
+        menu: Arc::new(menu::TauriMenu::new(app.handle().clone())),
+        updates: Arc::new(updater::TauriUpdater::new(app.handle().clone())),
+        // OS credential store only; refuses to save when none is reachable (no fallback).
+        secrets: updater::os_secret_store(),
+        notifier: Arc::new(notify::TauriNotifier::new(app.handle().clone())),
         launcher: Arc::new(programs::NativeLauncher),
     })
     .map_err(|e| startup_error(format!("{} {}", e.message, e.detail.unwrap_or_default())))
@@ -85,6 +104,7 @@ async fn finish_startup<R: tauri::Runtime>(handle: tauri::AppHandle<R>) {
         let _ = state.wcs.add_existing(&demo_root.to_string_lossy()).await;
     }
     state.recover_all().await;
+    state.start_poller(None);
 }
 
 /// The generated app context (config, capabilities, assets). The macro may expand only once per
@@ -96,8 +116,19 @@ fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
 /// Starts the Tauri application.
 pub fn run() {
     let builder = builder::<tauri::Wry>();
-    let result = tauri::Builder::default()
+    let context = app_context::<tauri::Wry>();
+    // The updater plugin fails to start without its `plugins.updater` config (public key and
+    // endpoints), so it is registered only when the config has one.
+    let has_updater = context.config().plugins.0.contains_key("updater");
+    let app_builder = tauri::Builder::default();
+    let app_builder = if has_updater {
+        app_builder.plugin(tauri_plugin_updater::Builder::new().build())
+    } else {
+        app_builder
+    };
+    let result = app_builder
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .on_window_event(|window, event| {
             // Native drag and drop: the WebView only ever sees grants, never the dropped paths.
             if window.label() != path_grants::MAIN_WINDOW {
@@ -114,12 +145,16 @@ pub fn run() {
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
+            // A missing menu bar must not stop the app; the shortcuts work without it.
+            if let Err(e) = menu::install(app, true) {
+                tracing::warn!(error = %e, "menu bar could not be installed");
+            }
             let state = build_state(app)?;
             app.manage(state);
             tauri::async_runtime::spawn(finish_startup(app.handle().clone()));
             Ok(())
         })
-        .run(app_context::<tauri::Wry>());
+        .run(context);
     if let Err(e) = result {
         eprintln!("OpenSVN failed to start: {e}");
         std::process::exit(1);
@@ -185,12 +220,5 @@ mod tests {
     fn committed_bindings_are_up_to_date() {
         let committed = include_str!("../../src/ipc/bindings.ts");
         assert_eq!(committed, export_to_string(), "run `pnpm gen:ipc`");
-    }
-
-    #[test]
-    fn commands_of_later_services_are_still_stubs() {
-        let err = tauri::async_runtime::block_on(commands::diagnostics_export()).expect_err("stub");
-        assert_eq!(err.code, opensvn_ipc::ErrorCode::Internal);
-        assert_eq!(err.message, "not implemented");
     }
 }

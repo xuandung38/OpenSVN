@@ -12,6 +12,8 @@ mod remote_ops;
 mod seed;
 mod state;
 mod sync_ops;
+#[cfg(test)]
+mod tick_tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,7 +37,7 @@ use super::facade::{
     RemoteEditPlan, RemoteScan, StatusQuery, WcInfo, WcOpened, WcRef,
 };
 
-pub use seed::{DEMO_REPO_URL, demo_wc_root};
+pub use seed::{DEMO_REPO_URL, demo_repo, demo_wc_root};
 
 /// Fake engine; cheap to share behind an `Arc`.
 pub struct FakeEngine {
@@ -112,9 +114,12 @@ impl FakeEngine {
             tokio::task::yield_now().await;
             return ctx.check();
         }
+        // Biased: a cancel that lands together with the end of the step must win, or the caller
+        // would start the next item after the user saw "cancelled".
         tokio::select! {
-            () = tokio::time::sleep(self.step_delay) => Ok(()),
+            biased;
             () = ctx.cancel.cancelled() => Err(super::context::cancelled()),
+            () = tokio::time::sleep(self.step_delay) => Ok(()),
         }
     }
 
@@ -142,6 +147,16 @@ fn not_a_wc(root: &Path) -> SvnError {
 impl EngineFacade for FakeEngine {
     async fn wc_info(&self, root: &Path, _ctx: &OpContext) -> EngineResult<WcInfo> {
         self.with_wc(root, |wc| Ok(wc.info()))
+    }
+
+    async fn ensure_authenticated(&self, wc: &WcRef, ctx: &OpContext) -> EngineResult<()> {
+        if !ctx.interactive {
+            return Ok(()); // background work never prompts
+        }
+        let root = self.with_wc(&wc.root, |w| Ok(w.repo_root_url.clone()))?;
+        self.repo_by_root(&root)?
+            .ensure_authenticated(&ctx.cancel)
+            .await
     }
 
     async fn open_wc(&self, root: &Path, _ctx: &OpContext) -> EngineResult<WcOpened> {
@@ -389,8 +404,13 @@ impl EngineFacade for FakeEngine {
         self.do_remote_edit(plan, ctx).await
     }
 
-    async fn copy_location(&self, req: &CopyLocationRequest, ctx: &OpContext) -> EngineResult<Rev> {
-        self.do_copy_location(req, ctx).await
+    async fn copy_location(
+        &self,
+        req: &CopyLocationRequest,
+        from_wc: Option<&WcRef>,
+        ctx: &OpContext,
+    ) -> EngineResult<Rev> {
+        self.do_copy_location(req, from_wc, ctx).await
     }
 
     async fn branches_list(
