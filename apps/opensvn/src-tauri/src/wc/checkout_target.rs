@@ -46,7 +46,7 @@ pub fn validate_folder_name(name: &str) -> Result<&str, AppError> {
     if name == "." || name == ".." {
         return Err(bad("\".\" and \"..\" are not folder names"));
     }
-    if name.chars().any(crate::programs::is_deceptive) {
+    if name.chars().any(crate::display_text::is_deceptive) {
         return Err(bad(
             "the name contains an invisible or text-direction character",
         ));
@@ -68,7 +68,11 @@ pub fn validate_folder_name(name: &str) -> Result<&str, AppError> {
         ));
     }
     if RelPath::from_server(name).is_err() {
-        return Err(bad("the name is reserved by Windows"));
+        // `from_server` refuses more than device names (stream separators, other platform
+        // rules), so the message names no single cause.
+        return Err(bad(
+            "the name cannot be used for a folder on every supported system",
+        ));
     }
     Ok(name)
 }
@@ -287,6 +291,18 @@ mod tests {
             "bom\u{FEFF}",
             "soft\u{00AD}hyphen",
             "tag\u{E0041}",
+            "num\u{0600}sign",
+            "num\u{0605}",
+            "ayah\u{06DD}",
+            "syriac\u{070F}",
+            "beam\u{1D173}",
+            "phrase\u{1D17A}",
+            "line\u{2028}sep",
+            "para\u{2029}sep",
+            "hangul\u{115F}",
+            "hangul\u{1160}",
+            "hangul\u{3164}",
+            "hangul\u{FFA0}",
         ] {
             assert!(
                 validate_folder_name(bad).is_err(),

@@ -279,6 +279,17 @@ async fn rename_and_remove_touch_only_the_list() {
     assert!(commands::wc_remove(f.state(), id).await.is_err());
 }
 
+/// Paths the file manager was asked to show (the recording opener's `reveal` calls).
+fn revealed(f: &Fixture) -> Vec<std::path::PathBuf> {
+    f.opener
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c.strip_prefix("reveal ").map(std::path::PathBuf::from))
+        .collect()
+}
+
 #[tokio::test]
 async fn reveal_shows_items_inside_the_working_copy_only() {
     let f = Fixture::new(Duration::ZERO).await;
@@ -292,10 +303,7 @@ async fn reveal_shows_items_inside_the_working_copy_only() {
         .await
         .unwrap();
     let root = parent.path().join("proj").canonicalize().unwrap();
-    assert_eq!(
-        *f.revealer.revealed.lock().unwrap(),
-        [root.clone(), root.join("readme.txt")]
-    );
+    assert_eq!(revealed(&f), [root.clone(), root.join("readme.txt")]);
     for bad in [
         "../outside",
         "/etc",
@@ -312,7 +320,7 @@ async fn reveal_shows_items_inside_the_working_copy_only() {
             "{bad}"
         );
     }
-    assert_eq!(f.revealer.revealed.lock().unwrap().len(), 2);
+    assert_eq!(revealed(&f).len(), 2);
 }
 
 /// Versioned symlinks (`svn:special`) are real links on Unix; the file manager would follow them.
@@ -346,16 +354,13 @@ async fn reveal_refuses_items_reached_through_a_symlink() {
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidArgument, "{bad}");
     }
-    assert!(
-        f.revealer.revealed.lock().unwrap().is_empty(),
-        "nothing was revealed"
-    );
+    assert!(revealed(&f).is_empty(), "nothing was revealed");
     // the real folder the inside link points at is fine
     commands::reveal_in_os(f.state(), id.clone(), "inside/file.txt".into())
         .await
         .unwrap();
     assert_eq!(
-        *f.revealer.revealed.lock().unwrap(),
+        revealed(&f),
         [wc.canonicalize().unwrap().join("inside/file.txt")]
     );
 }
@@ -371,7 +376,7 @@ fn reveal_target_resolves_a_linked_root_and_stays_inside_it() {
     std::fs::create_dir(&real).unwrap();
     std::fs::write(real.join("a.txt"), b"x").unwrap();
     symlink(&real, dir.path().join("link")).unwrap();
-    let got = crate::os_shell::reveal_target(&dir.path().join("link"), "a.txt").unwrap();
+    let got = crate::os_integration::reveal_target(&dir.path().join("link"), "a.txt").unwrap();
     assert_eq!(got, real.canonicalize().unwrap().join("a.txt"));
 }
 

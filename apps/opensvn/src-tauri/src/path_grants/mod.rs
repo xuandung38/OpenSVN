@@ -12,12 +12,46 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use opensvn_ipc::{AppError, GrantKind, PathGrantId, PathGrantInfo, PickRequest};
 
+use crate::display_text::{escape_for_display, has_deceptive};
 use crate::errors::invalid_argument;
 
 pub use native::NativePathPicker;
 
 /// How long a grant stays redeemable.
 pub const GRANT_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// Longest grant display name, in characters.
+const MAX_DISPLAY_NAME_CHARS: usize = 255;
+/// Longest dialog title the WebView may ask for, in characters.
+const MAX_TITLE_CHARS: usize = 120;
+
+/// Checks the WebView supplied text of a dialog request before a native dialog shows it: no
+/// control, bidirectional or invisible characters, bounded length, and a suggested file name that
+/// is a plain name (no folder part).
+pub fn validate_pick_request(request: &PickRequest) -> Result<(), AppError> {
+    let (title, suggested) = match request {
+        PickRequest::Folder { title } | PickRequest::File { title } => (title.as_deref(), None),
+        PickRequest::SaveFile {
+            suggested_name,
+            title,
+        } => (title.as_deref(), Some(suggested_name.as_str())),
+    };
+    if let Some(t) = title
+        && (t.chars().count() > MAX_TITLE_CHARS || has_deceptive(t))
+    {
+        return Err(invalid_argument("The dialog title is not valid."));
+    }
+    if let Some(n) = suggested
+        && (n.chars().count() > MAX_DISPLAY_NAME_CHARS
+            || has_deceptive(n)
+            || n.contains(['/', '\\'])
+            || n == "."
+            || n == "..")
+    {
+        return Err(invalid_argument("The suggested file name is not valid."));
+    }
+    Ok(())
+}
 
 /// The only window allowed to redeem grants.
 pub const MAIN_WINDOW: &str = "main";
@@ -56,9 +90,14 @@ impl PathGrants {
     /// Mints a grant for `path`, bound to `window`. Expired grants are dropped on the way.
     pub fn mint(&self, path: PathBuf, kind: GrantKind, window: &str) -> PathGrantInfo {
         let id = crate::ops::new_op_id().0; // UUID v7: unguessable enough together with single use
-        let display_name = path.file_name().map_or_else(
-            || path.to_string_lossy().into_owned(),
-            |n| n.to_string_lossy().into_owned(),
+        // A file name may carry bidirectional overrides (`photo\u{202E}gpj.exe`); the UI gets
+        // them as visible escapes.
+        let display_name = escape_for_display(
+            &path.file_name().map_or_else(
+                || path.to_string_lossy().into_owned(),
+                |n| n.to_string_lossy().into_owned(),
+            ),
+            MAX_DISPLAY_NAME_CHARS,
         );
         let mut grants = self.lock();
         let ttl = self.ttl;

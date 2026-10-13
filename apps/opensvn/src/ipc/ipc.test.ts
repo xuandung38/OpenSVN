@@ -8,7 +8,7 @@ import { queryKeys } from "./query-keys";
 test("mock adapter serves working copies and unmocked commands return a typed error", async () => {
   const wcs = await unwrap(mockAdapter.commands.wcList());
   expect(wcs.length).toBeGreaterThan(0);
-  await expect(unwrap(mockAdapter.commands.diagnosticsExport())).rejects.toMatchObject({
+  await expect(unwrap(mockAdapter.commands.diagnosticsExport("token"))).rejects.toMatchObject({
     name: "IpcError",
   });
 });
@@ -36,8 +36,8 @@ test("event bus folds op://* events into the ops cache and invalidates on wc://*
 
   const menu = vi.fn();
   bus.onMenu(menu);
-  mockEmit("menu://commit");
-  expect(menu).toHaveBeenCalledWith("menu://commit");
+  mockEmit("menu://wc.commit");
+  expect(menu).toHaveBeenCalledWith("menu://wc.commit");
 
   bus.stop();
   mockEmit("wc://incoming", { wcId: "wc-main", count: 1, latestRev: 2 });

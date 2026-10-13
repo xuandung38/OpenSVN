@@ -17,10 +17,17 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build.workspace = true
+# Reads tauri*.conf.json to refuse updater `dangerous*` TLS options at build time.
+serde_json.workspace = true
 
 [dependencies]
 opensvn-ipc = { path = "../../../crates/opensvn-ipc" }
 svn-types.workspace = true
+# OS credential store (Keychain, Credential Manager, Secret Service) for the updater token.
+secure-store.workspace = true
+# `RedactingMakeWriter` wraps every log sink (stderr and the log file) so secrets never reach logs.
+svn-ra.workspace = true
+tracing-subscriber = { workspace = true, features = ["std", "fmt", "registry"] }
 # Line diffs: display budget (`tooComplex`) for both engines, blame matching for the real one.
 svn-diff.workspace = true
 # Only needed by the real engine (working copy database, upload checksums, journal file names).
@@ -37,20 +44,32 @@ tauri = { workspace = true, features = ["protocol-asset"] }
 # Opens https links in the default browser. Only `opener:allow-open-url` with an https-only scope is
 # granted in capabilities; no path, reveal or other scheme permission.
 tauri-plugin-opener = "=2.7.1"
+# OS notifications are shown from Rust only (new revisions); no notification permission is granted
+# to the WebView.
+tauri-plugin-notification = "=2.6.0"
+# Updates come from a private GitHub releases repository. The read token is kept in the credential
+# store (`updater/github-token`), never in settings or the binary; no updater permission is granted
+# to the WebView (the app exposes its own `update_check` / `update_install` commands).
+tauri-plugin-updater = "=2.13.3"
 tauri-specta = { workspace = true, features = ["derive", "typescript"] }
 specta.workspace = true
 specta-typescript.workspace = true
 serde.workspace = true
+secrecy.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 futures-util = { workspace = true, features = ["std"] }
 rusqlite.workspace = true
+notify.workspace = true
 time = { workspace = true, features = ["std", "formatting"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 thiserror.workspace = true
 tracing.workspace = true
 url.workspace = true
+# Same version as tauri-plugin-updater uses: its redirect policy and sensitive header types are
+# passed to the updater's HTTP client.
+reqwest.workspace = true
 # Pinned here rather than in the workspace table until another crate needs them.
 uuid = { version = "=1.28.0", default-features = false, features = ["v7"] }
 # Process liveness and boot time for the working copy lock ownership probe (no unsafe in our code).
@@ -67,5 +86,8 @@ real-engine = ["dep:svn-wc", "dep:svn-delta", "dep:md-5", "dep:sha1"]
 engine-conformance = []
 
 [dev-dependencies]
+# Paused clock for deterministic select-ordering tests.
+tokio = { workspace = true, features = ["test-util"] }
 tauri = { workspace = true, features = ["test"] }
 tempfile.workspace = true
+proptest.workspace = true

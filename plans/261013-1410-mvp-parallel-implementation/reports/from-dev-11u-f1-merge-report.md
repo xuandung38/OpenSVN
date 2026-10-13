@@ -21,8 +21,9 @@ re-raised the conflict on every update and left the replacement out of date for 
   directory props go to BASE only, server adds below get BASE rows plus `base-deleted` rows,
   server deletes below only remove BASE. The tree conflict is recorded once, on the directory.
 - `WcTxn::mark_base_deleted_at` now follows svn's `db_extend_parent_delete`: it never writes
-  over an existing working row at or below that op_depth (a re-added child in a replaced
-  directory stays the user's addition).
+  over an existing working row at or below that op_depth (a child of a directory replaced by a
+  *copy* keeps its copied row when the server adds the same path; a plain re-add sits deeper and
+  never reaches the rule; corrected after review, pinned in `test/11u-f1-regressions`).
 
 Oracle tests (each: compare after update, `svn resolve --accept working`, compare, unrelated r3,
 second update of both, compare, assert no conflict and BASE at HEAD, then the real svn commits the

@@ -142,6 +142,9 @@ pub struct CopyLocationRequest {
     pub to_url: String,
     pub message: String,
     pub switch_wc_id: Option<WcId>,
+    /// Copy the working copy (including its local changes) instead of `from_url`; `from_url` and
+    /// `from_rev` are then ignored.
+    pub from_wc: Option<WcId>,
 }
 
 /// Text that must never reach logs: `Debug` prints a fixed placeholder. On the wire it is a
@@ -196,8 +199,10 @@ pub enum AuthResponse {
 pub enum CertDecision {
     Reject,
     AcceptOnce,
+    /// Trust permanently. Valid only for self-signed or unknown-issuer failures.
     AcceptAlways,
-    // Replace the pinned certificate (valid only when the certificate changed).
+    /// Replace the pinned certificate of this host and port with the one now presented. Valid
+    /// only when the failure is `changed`.
     ReplacePin,
 }
 

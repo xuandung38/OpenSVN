@@ -14,6 +14,25 @@ export type MainView = "changes" | "history" | "browse";
  */
 export const MENU_ECHO_MS = 400;
 
+/** Native menu item events (ids from `src-tauri/src/menu.rs`) and the shortcut action each runs. */
+export const MENU_ACTIONS: Readonly<Record<string, ShortcutId | undefined>> = {
+  "menu://file.checkout": "checkout",
+  "menu://file.add-wc": "addExisting",
+  "menu://file.switch-repo": "switchRepo",
+  "menu://wc.commit": "commit",
+  "menu://wc.update": "update",
+  "menu://wc.check-updates": "checkUpdates",
+  "menu://sel.lock": "lock",
+  "menu://sel.discard": "discard",
+  "menu://sel.log": "showLog",
+  "menu://sel.blame": "blame",
+  "menu://branch.switch": "switch",
+  "menu://view.changes": "viewChanges",
+  "menu://view.history": "viewHistory",
+  "menu://view.browse": "viewBrowse",
+  "menu://view.activity": "activity",
+};
+
 /**
  * App-level keyboard shortcuts (doc 01 section 8) and the native-menu events that mirror them.
  * Selection-scoped actions (lock, discard, log, blame) apply to the selected file. The latest
@@ -154,19 +173,11 @@ export function useWcShortcuts({
 
     const off = bus.onMenu((name) => {
       if (document.querySelector("dialog[open]")) return;
-      if (name === "menu://settings") {
+      if (name === "menu://app.settings") {
         latest.current.onOpenSettings?.();
         return;
       }
-      const map: Record<string, ShortcutId | undefined> = {
-        "menu://commit": "commit",
-        "menu://update": "update",
-        "menu://refresh": "checkUpdates",
-        "menu://add-working-copy": "addExisting",
-        "menu://checkout": "checkout",
-        "menu://switch-repository": "switchRepo",
-      };
-      const id = map[name];
+      const id = MENU_ACTIONS[name];
       if (!id) return;
       if (isEcho(lastKey, id)) {
         lastKey.delete(id);
