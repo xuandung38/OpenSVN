@@ -1,12 +1,13 @@
 //! Outbound events (Rust -> UI) behind a trait, so services are testable without a window.
 
 use opensvn_ipc::{
-    Incoming, OpFailed, OpFinished, OperationHandle, Progress, RevisionChanged, StatusChanged,
+    Banner, Incoming, OpFailed, OpFinished, OperationHandle, Progress, RevisionChanged,
+    StatusChanged,
 };
 use tauri_specta::Event;
 
 use crate::events::{
-    OpFailedEvent, OpFinishedEvent, OpProgress, OpStarted, WcIncoming, WcRevisionChanged,
+    OpFailedEvent, OpFinishedEvent, OpProgress, OpStarted, WcBanner, WcIncoming, WcRevisionChanged,
     WcStatusChanged,
 };
 
@@ -26,6 +27,8 @@ pub trait AppEvents: Send + Sync + 'static {
     fn revision_changed(&self, changed: &RevisionChanged);
     /// `wc://incoming`
     fn incoming(&self, incoming: &Incoming);
+    /// `wc://banner`
+    fn banner(&self, banner: &Banner);
 }
 
 /// Emits events to the WebView through Tauri.
@@ -70,6 +73,9 @@ impl<R: tauri::Runtime> AppEvents for TauriEvents<R> {
     fn incoming(&self, i: &Incoming) {
         emit!(self, WcIncoming, i, "wc://incoming");
     }
+    fn banner(&self, b: &Banner) {
+        emit!(self, WcBanner, b, "wc://banner");
+    }
 }
 
 /// One recorded event.
@@ -83,6 +89,7 @@ pub enum Recorded {
     Status(StatusChanged),
     Revision(RevisionChanged),
     Incoming(Incoming),
+    Banner(Banner),
 }
 
 /// Collects events for assertions in tests.
@@ -121,6 +128,7 @@ impl RecordingEvents {
                 Recorded::Status(c) => format!("status:{}", c.wc_id.0),
                 Recorded::Revision(c) => format!("revision:{}", c.wc_id.0),
                 Recorded::Incoming(i) => format!("incoming:{}", i.wc_id.0),
+                Recorded::Banner(b) => format!("banner:{}", b.wc_id.0),
             })
             .collect()
     }
@@ -162,5 +170,8 @@ impl AppEvents for RecordingEvents {
     }
     fn incoming(&self, i: &Incoming) {
         self.push(Recorded::Incoming(i.clone()));
+    }
+    fn banner(&self, b: &Banner) {
+        self.push(Recorded::Banner(b.clone()));
     }
 }

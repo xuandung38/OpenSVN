@@ -22,7 +22,12 @@ pub async fn wc_add_existing(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<WorkingCopy, AppError> {
-    guard(state.wcs.add_existing(&path)).await
+    guard(async {
+        let wc = state.wcs.add_existing(&path).await?;
+        // Run recovery now so a stale lock is handled before the first operation.
+        state.open_wc(&wc.id).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -52,7 +57,7 @@ pub async fn wc_rename(
 #[specta::specta]
 pub async fn wc_open(state: State<'_, AppState>, wc_id: WcId) -> Result<WorkingCopy, AppError> {
     guard(async {
-        let wc = state.wcs.open(&wc_id).await?;
+        let wc = state.open_wc(&wc_id).await?;
         let resolved = state.wcs.resolve(&wc_id)?;
         let publisher = std::sync::Arc::clone(&state.status);
         tokio::spawn(async move {

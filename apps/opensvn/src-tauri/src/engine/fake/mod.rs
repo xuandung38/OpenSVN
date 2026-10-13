@@ -33,8 +33,8 @@ use svn_types::{ErrorCode, RelPath, SvnError};
 use self::state::FakeWc;
 use super::context::OpContext;
 use super::facade::{
-    DiffOptions, EngineFacade, EngineResult, LockScope, LogScope, RemoteScan, StatusQuery, WcInfo,
-    WcRef,
+    DiffOptions, EngineFacade, EngineResult, LockScope, LogScope, RecoveryReport, RemoteScan,
+    StatusQuery, WcInfo, WcOpened, WcRef,
 };
 
 pub use seed::{DEMO_REPO_URL, demo_wc_root};
@@ -144,6 +144,19 @@ fn not_a_wc(root: &Path) -> SvnError {
 impl EngineFacade for FakeEngine {
     async fn wc_info(&self, root: &Path, _ctx: &OpContext) -> EngineResult<WcInfo> {
         self.with_wc(root, |wc| Ok(wc.info()))
+    }
+
+    async fn open_wc(&self, root: &Path, _ctx: &OpContext) -> EngineResult<WcOpened> {
+        self.with_wc(root, |wc| {
+            let recovered = std::mem::take(&mut wc.dead_owner_locks);
+            Ok(WcOpened {
+                info: wc.info(),
+                recovery: RecoveryReport {
+                    recovered,
+                    needs_user_action: wc.foreign_locks.clone(),
+                },
+            })
+        })
     }
 
     async fn status(

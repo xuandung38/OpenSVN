@@ -57,6 +57,7 @@ fn build_state<R: tauri::Runtime>(
     .map_err(|e| startup_error(format!("{} {}", e.message, e.detail.unwrap_or_default())))?;
     let demo_root = engine::fake::demo_wc_root();
     tauri::async_runtime::block_on(async {
+        state.recover_all().await;
         if state.wcs.list().await.map(|l| l.is_empty()).unwrap_or(true) {
             // Best effort: a failure here only means the sidebar starts empty.
             let _ = state.wcs.add_existing(&demo_root.to_string_lossy()).await;
@@ -75,6 +76,7 @@ fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
 pub fn run() {
     let builder = builder::<tauri::Wry>();
     let result = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);

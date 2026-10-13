@@ -60,6 +60,25 @@ pub struct WcInfo {
     pub path_in_repo: String,
 }
 
+/// What opening a working copy found and repaired.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecoveryReport {
+    /// Directories whose stale lock (dead owner) or unfinished work was recovered automatically.
+    pub recovered: Vec<String>,
+    /// Directories locked by a foreign or unknown owner. Never stolen automatically: the UI offers
+    /// "Run cleanup" and the user decides.
+    pub needs_user_action: Vec<String>,
+}
+
+/// Result of [`EngineFacade::open_wc`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WcOpened {
+    /// Description of the working copy.
+    pub info: WcInfo,
+    /// Recovery outcome.
+    pub recovery: RecoveryReport,
+}
+
 /// Which extra nodes `status` returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatusQuery {
@@ -123,6 +142,11 @@ pub trait EngineFacade: Send + Sync {
     // ---- working copy: reads
     /// Describes the working copy containing `root`; `NotAWorkingCopy` if there is none.
     async fn wc_info(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcInfo>;
+    /// Opens the working copy and runs crash/lock recovery (dead-owner locks and unfinished work
+    /// queue items). Called when a working copy is added and at app start; it may write, so the app
+    /// calls it through the working copy's write path. Locks of foreign or unknown owners are only
+    /// reported in `needs_user_action`.
+    async fn open_wc(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcOpened>;
     /// Local status of the working copy (changed nodes, plus locked or changelisted ones).
     async fn status(
         &self,

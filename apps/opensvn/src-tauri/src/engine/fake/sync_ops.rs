@@ -161,6 +161,8 @@ impl FakeEngine {
             store_pristine: req.store_pristine,
             nodes: BTreeMap::new(),
             ignores: Vec::new(),
+            dead_owner_locks: Vec::new(),
+            foreign_locks: Vec::new(),
         };
         for (i, (path, item)) in snap.items.into_iter().enumerate() {
             // Work-queue phase: a cancel here discards the partial working copy.
