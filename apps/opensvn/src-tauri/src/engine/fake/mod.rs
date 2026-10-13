@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use opensvn_ipc::{
-    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth, FileDiff,
-    FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage, RepoEntry, RepoInfo,
-    ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
+    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
+    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage,
+    RepoEntry, RepoInfo, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
 };
 use svn_ra_api::RaSession;
 use svn_ra_api::fake::FakeRaSession;
@@ -145,6 +145,11 @@ fn not_a_wc(root: &Path) -> SvnError {
 
 #[async_trait]
 impl EngineFacade for FakeEngine {
+    fn capabilities(&self) -> EngineCapabilities {
+        // The fake accepts `ignore_externals` (it has no externals to fetch either way).
+        EngineCapabilities { externals: true }
+    }
+
     async fn wc_info(&self, root: &Path, _ctx: &OpContext) -> EngineResult<WcInfo> {
         self.with_wc(root, |wc| Ok(wc.info()))
     }

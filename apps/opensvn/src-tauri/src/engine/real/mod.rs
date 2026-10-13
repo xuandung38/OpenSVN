@@ -21,9 +21,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use opensvn_ipc::{
-    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth, FileDiff,
-    FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage, RepoEntry, RepoInfo,
-    ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
+    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
+    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage,
+    RepoEntry, RepoInfo, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
 };
 use svn_ra_api::RaSession;
 use svn_types::{CancelToken, ErrorCode, LockOwnershipStore, RelPath, RepoUrl, SvnError};
@@ -39,6 +39,7 @@ mod commit;
 mod layout;
 mod local;
 mod locks;
+mod progress;
 mod recovery;
 mod remote;
 mod remote_edit;
@@ -233,6 +234,12 @@ fn not_wired(op: &str) -> SvnError {
 
 #[async_trait]
 impl EngineFacade for RealEngine {
+    fn capabilities(&self) -> EngineCapabilities {
+        // `svn-client` does not fetch `svn:externals` yet (issue #97): checkout, update and switch
+        // behave like `svn --ignore-externals`.
+        EngineCapabilities { externals: false }
+    }
+
     async fn wc_info(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcInfo> {
         wc_read::wc_info(root, ctx).await
     }
