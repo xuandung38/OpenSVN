@@ -13,6 +13,7 @@ pub mod errors;
 pub mod file_revs;
 pub mod get;
 pub mod http;
+pub mod limits;
 pub mod locks;
 pub mod log;
 pub mod propfind;
@@ -29,4 +30,5 @@ pub use errors::{error_from_response, map_errcode, map_http_status};
 pub use http::{
     Body, BodyStream, Headers, HttpRequest, Method, ResponseHead, ResponseParser, parse_chunked,
 };
+pub use limits::ParserLimits;
 pub use util::parse_timestamp;

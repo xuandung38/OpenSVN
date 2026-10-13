@@ -5,10 +5,10 @@ set -euo pipefail
 export LC_ALL=en_US.UTF-8
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${1:?out dir}"; mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
-WORK="$(mktemp -d)"; trap 'kill $PROXY 2>/dev/null || true; docker rm -f opensvn-capture >/dev/null 2>&1 || true' EXIT
+WORK="$(mktemp -d)"; trap 'kill ${PROXY:-} 2>/dev/null || true; docker rm -f opensvn-capture >/dev/null 2>&1 || true' EXIT
 docker image inspect opensvn-capture >/dev/null 2>&1 || docker build -q -t opensvn-capture "$HERE" >/dev/null
 docker rm -f opensvn-capture >/dev/null 2>&1 || true
-docker run -d --name opensvn-capture -p 18080:80 opensvn-capture >/dev/null
+docker run -d --name opensvn-capture -p 127.0.0.1:18080:80 opensvn-capture >/dev/null
 sleep 3
 docker exec opensvn-capture htpasswd -b /repos/htpasswd bob hunter2 >/dev/null
 docker exec opensvn-capture sh -c 'echo "#!/bin/sh
@@ -118,4 +118,11 @@ echo bump >> "$CW/a.txt"; svn "${A[@]}" commit -q -m 'bump for mixed update' "$C
 step update-mixed svn "${A[@]}" update "$MW"
 SW="$WORK/sw"; svn "${A[@]}" checkout -q --depth immediates $U/trunk "$SW"
 step update-sparse svn "${A[@]}" update --set-depth infinity "$SW/fresh"
+# commit message with control characters: the server sends it base64-encoded (encode-binary-props).
+# (svn refuses control characters in lock comments, so locks cannot be recorded that way.)
+printf 'esc \033[1mbold\033[0m message\n' > "$WORK/esc-msg.txt"
+CC="$WORK/cc"; svn "${A[@]}" checkout -q $U/trunk "$CC"
+echo esc >> "$CC/src/b.txt"
+step commit-control-chars svn "${A[@]}" commit -q -F "$WORK/esc-msg.txt" "$CC"
+step log-control-chars svn "${A[@]}" log --xml -v -l 1 $U/trunk
 echo "done"; ls "$OUT"
