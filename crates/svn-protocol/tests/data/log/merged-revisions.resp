@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:log-report xmlns:S="svn:" xmlns:D="DAV:">
+<S:log-item>
+<S:modified-path node-kind="dir" text-mods="false" prop-mods="true">/trunk/src</S:modified-path>
+<S:modified-path node-kind="file" text-mods="true" prop-mods="false">/trunk/src/b.txt</S:modified-path>
+<D:version-name>8</D:version-name>
+<S:date>2026-10-13T09:05:31.602450Z</S:date>
+<D:comment>merge b1 into trunk</D:comment>
+<D:creator-displayname>alice</D:creator-displayname>
+<S:has-children/></S:log-item>
+<S:log-item>
+<S:modified-path node-kind="file" text-mods="true" prop-mods="false">/branches/b1/b.txt</S:modified-path>
+<D:version-name>7</D:version-name>
+<S:date>2026-10-13T09:05:25.286127Z</S:date>
+<D:comment>edit on branch</D:comment>
+<D:creator-displayname>alice</D:creator-displayname>
+</S:log-item>
+<S:log-item>
+<S:added-path copyfrom-path="/trunk/src" copyfrom-rev="4" node-kind="dir" text-mods="false" prop-mods="false">/branches/b1</S:added-path>
+<D:version-name>5</D:version-name>
+<S:date>2026-10-13T09:04:38.541421Z</S:date>
+<D:comment>branch b1 copy</D:comment>
+<D:creator-displayname>alice</D:creator-displayname>
+</S:log-item>
+<S:log-item>
+<D:version-name>-1</D:version-name>
+</S:log-item>
+<S:log-item>
+<S:modified-path node-kind="file" text-mods="true" prop-mods="false">/trunk/a.txt</S:modified-path>
+<S:added-path node-kind="dir" text-mods="false" prop-mods="false">/trunk/newdir</S:added-path>
+<S:added-path node-kind="file" text-mods="true" prop-mods="false">/trunk/newdir/n.txt</S:added-path>
+<D:version-name>6</D:version-name>
+<D:comment>second commit: add dir &amp; edit</D:comment>
+<D:creator-displayname>alice</D:creator-displayname>
+<S:date>2026-10-13T09:05:12.806268Z</S:date>
+</S:log-item>
+<S:log-item>
+<S:deleted-path node-kind="file" text-mods="false" prop-mods="false">/trunk/docs/readme.md</S:deleted-path>
+<D:version-name>4</D:version-name>
+<S:date>2026-10-13T09:04:36.423797Z</S:date>
+<D:comment>delete readme</D:comment>
+<D:creator-displayname>alice</D:creator-displayname>
+</S:log-item>
+</S:log-report>
