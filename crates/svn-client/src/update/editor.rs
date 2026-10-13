@@ -523,6 +523,12 @@ impl DeltaEditor for UpdateEditor {
         if p.shadow.is_some() {
             // Below a shadowed directory only BASE goes away; the working layer and the disk
             // stay, and the conflict is the one of the shadowed root.
+            //
+            // Deliberate divergence from svn 1.15: when the directory was replaced by a copy and
+            // the user modified the copied file the server deletes, svn removes that modified
+            // file from disk (it then shows as missing). We never touch the disk here, so the
+            // user's edit survives; wc.db ends up identical to svn's. Do not "fix" this to match
+            // svn. Pinned by `incoming_delete_in_copy_replaced_dir_keeps_modified_file_unlike_svn`.
             return self.s.db.with_txn(|t| t.base_remove(&wc));
         }
         self.delete_node(&wc, parent)
