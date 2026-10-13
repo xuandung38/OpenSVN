@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-status-get"
+description = "Enables the status_get command without any pre-configured scope."
+commands.allow = ["status_get"]
+
+[[permission]]
+identifier = "deny-status-get"
+description = "Denies the status_get command without any pre-configured scope."
+commands.deny = ["status_get"]

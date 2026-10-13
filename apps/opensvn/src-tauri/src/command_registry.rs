@@ -1,0 +1,74 @@
+//! Single place that lists every command and event for both the runtime and the TS generator.
+
+use tauri_specta::{Builder, collect_commands, collect_events};
+
+use crate::commands::*;
+use crate::events::*;
+
+/// Builds the specta/tauri-specta registry (commands + events).
+pub fn builder() -> Builder<tauri::Wry> {
+    Builder::<tauri::Wry>::new()
+        .commands(collect_commands![
+            wc_list,
+            wc_add_existing,
+            wc_remove,
+            wc_rename,
+            wc_open,
+            wc_close,
+            status_get,
+            status_refresh,
+            status_remote,
+            diff_get,
+            changelist_set,
+            ignore_add,
+            mark_move,
+            checkout,
+            update,
+            switch,
+            commit,
+            revert,
+            add_paths,
+            delete_paths,
+            move_path,
+            cleanup,
+            set_depth,
+            upgrade_format,
+            resolve,
+            props_set,
+            repo_info,
+            repo_list,
+            repo_cat,
+            repo_save,
+            log_get,
+            blame_get,
+            lock,
+            unlock,
+            remote_edit,
+            branches_list,
+            layout_get,
+            layout_set,
+            layout_detect,
+            copy_location,
+            op_cancel,
+            op_list,
+            auth_respond,
+            accounts_list,
+            accounts_sign_out,
+            settings_get,
+            settings_set,
+            reveal_in_os,
+            open_external,
+            diagnostics_export,
+        ])
+        .events(collect_events![
+            OpStarted,
+            OpProgress,
+            OpFinishedEvent,
+            OpFailedEvent,
+            WcStatusChanged,
+            WcRevisionChanged,
+            WcIncoming,
+            WcBanner,
+            AuthPromptEvent,
+        ])
+}

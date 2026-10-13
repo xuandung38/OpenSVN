@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-status-refresh"
+description = "Enables the status_refresh command without any pre-configured scope."
+commands.allow = ["status_refresh"]
+
+[[permission]]
+identifier = "deny-status-refresh"
+description = "Denies the status_refresh command without any pre-configured scope."
+commands.deny = ["status_refresh"]
