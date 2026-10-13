@@ -28,8 +28,14 @@ Branch `feat/wp1-commit-journal-safety`, closes #85. Plan: `real-engine-wiring-p
 - commit_fake (svn 1.15 oracle): replaced dir with locks below vs svn; adds colliding with server changes vs svn (E155011); delete of a conflicted node refused vs svn; recovery keeps unknown-version / quarantines corrupt journals.
 - journal unit tests (v1 compat, unknown version, quarantine no-replace, unreadable kept); svn-ra-api fake tests; svn-ra HTTPS tests for `abort_txn_checked` statuses and the MERGE announcement/veto.
 
-## Gates
-See PR description / lead message for the run on the merged head.
+## Gates (merged with origin/main 8c04160; svn 1.15.0 oracle, OPENSVN_REQUIRE_SVN=1)
+- `cargo fmt --all --check`: pass
+- `cargo clippy --workspace --all-targets -- -D warnings`: pass
+- `cargo clippy -p svn-wc -p svn-client --all-targets --all-features -- -D warnings`: pass
+- `cargo clippy -p opensvn --features real-engine --all-targets -- -D warnings`: pass
+- `cargo test --workspace --locked`: 1224 passed, 0 failed, 20 ignored
+- `cargo test -p svn-wc -p svn-client --all-features`: 369 passed, 0 failed, 1 ignored
+- `cargo test -p opensvn --features opensvn/real-engine`: 317 passed, 0 failed (one app test updated: remote mkdir of an existing path now reports `OutOfDate`, the fake's new svn-like mapping)
 
 ## Remaining
 - WP5b/WP6 wire `recover_wc_commits` into the app and delete `engine/real/journal.rs` (not in WP1 scope).
