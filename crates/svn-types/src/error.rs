@@ -31,6 +31,9 @@ pub enum ErrorCode {
     NotAWorkingCopy,
     /// Unresolved conflicts block the commit.
     ConflictBlocksCommit,
+    /// A repository hook rejected the operation (pre-commit, pre-lock, pre-revprop-change;
+    /// Subversion error 165001). The hook's own output is the error message and is shown to the user.
+    HookFailed,
     /// Path does not exist.
     PathNotFound,
     /// Path failed safety validation (traversal, reserved name, symlink).

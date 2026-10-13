@@ -170,7 +170,7 @@ interface AppError {
 }
 type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'forbidden' | 'tls-untrusted'
   | 'out-of-date' | 'locked-by-other' | 'lock-token-invalid' | 'wc-busy' | 'wc-needs-cleanup'
-  | 'wc-format-unsupported' | 'not-a-working-copy' | 'conflict-blocks-commit' | 'path-not-found'
+  | 'wc-format-unsupported' | 'not-a-working-copy' | 'conflict-blocks-commit' | 'hook-failed' | 'path-not-found'
   | 'disk-full' | 'permission-denied' | 'file-in-use' | 'cancelled' | 'internal';
 ```
 
