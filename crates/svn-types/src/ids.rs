@@ -27,7 +27,7 @@ pub struct DirId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileId(pub u32);
 
-/// Validated repository URL (http or https, no query or fragment, no trailing slash).
+/// Validated repository URL (http or https, no credentials, query or fragment, no trailing slash).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RepoUrl(url::Url);
 
@@ -41,6 +41,13 @@ impl RepoUrl {
             return Err(SvnError::new(
                 ErrorCode::ServerUnsupported,
                 format!("unsupported URL scheme: {}", url.scheme()),
+            ));
+        }
+        // Credentials belong to the credential store; in a URL they would leak into logs and keys.
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(SvnError::new(
+                ErrorCode::Internal,
+                "repository URL must not contain credentials",
             ));
         }
         if url.host_str().is_none() || url.query().is_some() || url.fragment().is_some() {

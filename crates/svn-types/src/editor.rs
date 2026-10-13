@@ -112,6 +112,14 @@ pub trait Reporter: Send {
 /// 4. `abort_edit` may arrive at any moment (cancel or error). The editor must leave the
 ///    working copy in a valid, restartable (incomplete) state. After `abort_edit` or
 ///    `close_edit` no further call is made.
+///
+/// A driver can also vanish without `abort_edit` (a panic in the editor itself, or a crash):
+/// editors must mark the working copy incomplete *before* they mutate it, and dropping an
+/// editor without `abort_edit` must be safe.
+///
+/// `copy_from` sources and `RelPath` arguments originate from the server; the driver validates
+/// paths with `RelPath::from_server`, but `copy_from` strings are raw server text and must be
+/// validated by the editor before use.
 pub trait DeltaEditor: Send {
     /// Announces the revision the working copy will be at after the drive.
     fn set_target_revision(&mut self, rev: Revnum) -> Result<()>;
