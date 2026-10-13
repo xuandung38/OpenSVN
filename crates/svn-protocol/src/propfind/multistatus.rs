@@ -113,6 +113,7 @@ pub struct MultiStatusParser {
     stat_props: Vec<(Name, PropValue)>,
     stat_missing: Vec<Name>,
     prop: Option<PropBuild>,
+    failed: bool,
 }
 
 impl MultiStatusParser {
@@ -125,7 +126,7 @@ impl MultiStatusParser {
         match ev {
             XmlEvent::Start(tag) => self.start(tag),
             XmlEvent::Text(t) => self.text(&t),
-            XmlEvent::End(name) => self.end(name, out),
+            XmlEvent::End(_) => self.end(out),
         }
     }
 
@@ -192,7 +193,7 @@ impl MultiStatusParser {
         Ok(())
     }
 
-    fn end(&mut self, name: Name, out: &mut Vec<PropfindEntry>) -> Result<()> {
+    fn end(&mut self, out: &mut Vec<PropfindEntry>) -> Result<()> {
         let was_len = self.cursor.path.len();
         if let Some(p) = self.prop.as_mut() {
             if let Some((local, text)) = p.open.pop() {
@@ -242,7 +243,6 @@ impl MultiStatusParser {
         } else if self.cursor.is(&[(d, "multistatus"), (d, r)]) {
             out.push(std::mem::take(&mut self.entry));
         }
-        debug_assert!(self.cursor.path.last().is_some_and(|n| *n == name));
         self.cursor.path.pop();
         Ok(())
     }
@@ -278,16 +278,27 @@ impl ResponseParser for MultiStatusParser {
     type Item = PropfindEntry;
 
     fn feed(&mut self, chunk: &[u8]) -> Result<Vec<PropfindEntry>> {
-        let events = self.xml.feed(chunk)?;
-        self.run(events)
+        if self.failed {
+            return Err(corrupt("parser used after an error"));
+        }
+        let result = self.xml.feed(chunk).and_then(|events| self.run(events));
+        self.failed = result.is_err();
+        result
     }
 
     fn finish(&mut self) -> Result<Vec<PropfindEntry>> {
-        let events = self.xml.finish()?;
-        let out = self.run(events)?;
-        if !self.root_checked {
-            return Err(corrupt("empty multistatus document"));
+        if self.failed {
+            return Err(corrupt("parser used after an error"));
         }
-        Ok(out)
+        let result = self.xml.finish().and_then(|events| {
+            let out = self.run(events)?;
+            if self.root_checked {
+                Ok(out)
+            } else {
+                Err(corrupt("empty multistatus document"))
+            }
+        });
+        self.failed = result.is_err();
+        result
     }
 }

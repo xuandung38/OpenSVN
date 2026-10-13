@@ -45,6 +45,7 @@ pub struct LogParser {
     field: Option<Field>,
     text: String,
     path_tag: Option<StartTag>,
+    failed: bool,
 }
 
 impl Default for LogParser {
@@ -83,6 +84,7 @@ impl LogParser {
             field: None,
             text: String::new(),
             path_tag: None,
+            failed: false,
         }
     }
 
@@ -227,13 +229,21 @@ impl ResponseParser for LogParser {
     type Item = LogItem;
 
     fn feed(&mut self, chunk: &[u8]) -> Result<Vec<LogItem>> {
-        let events = self.xml.feed(chunk)?;
-        self.run(events)
+        if self.failed {
+            return Err(corrupt("parser used after an error"));
+        }
+        let result = self.xml.feed(chunk).and_then(|events| self.run(events));
+        self.failed = result.is_err();
+        result
     }
 
     fn finish(&mut self) -> Result<Vec<LogItem>> {
-        let events = self.xml.finish()?;
-        self.run(events)
+        if self.failed {
+            return Err(corrupt("parser used after an error"));
+        }
+        let result = self.xml.finish().and_then(|events| self.run(events));
+        self.failed = result.is_err();
+        result
     }
 }
 

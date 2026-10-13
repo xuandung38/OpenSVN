@@ -110,6 +110,7 @@ pub struct ListParser<'a> {
     target: RelPath,
     inner: MultiStatusParser,
     saw_target: bool,
+    failed: bool,
 }
 
 impl<'a> ListParser<'a> {
@@ -120,6 +121,7 @@ impl<'a> ListParser<'a> {
             target,
             inner: MultiStatusParser::new(),
             saw_target: false,
+            failed: false,
         }
     }
 
@@ -154,17 +156,31 @@ impl ResponseParser for ListParser<'_> {
     type Item = ListItem;
 
     fn feed(&mut self, chunk: &[u8]) -> Result<Vec<ListItem>> {
-        let entries = self.inner.feed(chunk)?;
-        self.convert(entries)
+        if self.failed {
+            return Err(corrupt("parser used after an error"));
+        }
+        let result = self
+            .inner
+            .feed(chunk)
+            .and_then(|entries| self.convert(entries));
+        self.failed = result.is_err();
+        result
     }
 
     fn finish(&mut self) -> Result<Vec<ListItem>> {
-        let entries = self.inner.finish()?;
-        let items = self.convert(entries)?;
-        if !self.saw_target {
-            return Err(corrupt("listing does not include the directory itself"));
+        if self.failed {
+            return Err(corrupt("parser used after an error"));
         }
-        Ok(items)
+        let result = self.inner.finish().and_then(|entries| {
+            let items = self.convert(entries)?;
+            if self.saw_target {
+                Ok(items)
+            } else {
+                Err(corrupt("listing does not include the directory itself"))
+            }
+        });
+        self.failed = result.is_err();
+        result
     }
 }
 
