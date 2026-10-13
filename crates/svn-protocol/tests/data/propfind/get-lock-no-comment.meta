@@ -1,0 +1,8 @@
+REQUEST PROPFIND /svn/repo/trunk/src/b.txt
+> User-Agent: SVN/1.15.0 (aarch64-apple-darwin27.0.0) serf/1.3.10
+> Content-Type: text/xml
+> Depth: 0
+RESPONSE 207
+< X-SVN-Creation-Date: 2026-10-13T09:05:03.643009Z
+< X-SVN-Lock-Owner: alice
+< Content-Type: text/xml; charset="utf-8"

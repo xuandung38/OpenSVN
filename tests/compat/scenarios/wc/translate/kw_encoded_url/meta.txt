@@ -1,0 +1,10 @@
+svn_version=1.15.0
+prop.svn:keywords=Id HeadURL URL Header Cb=%b|%P
+rev=28
+author=alice
+date_micros=1791884720197055
+utc_offset_secs=0
+url=file:///tmp/opensvn-golden/repo/sp%20ace/%C3%A9/a%20b%2541.txt
+root=file:///tmp/opensvn-golden/repo
+tz=UTC
+path=sp ace/é/a b%41.txt

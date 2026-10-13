@@ -1,0 +1,11 @@
+---
+source: crates/svn-protocol/tests/request_snapshots.rs
+expression: "render(&get_locks_request(&u, &rel(\"trunk\"), depth).unwrap())"
+---
+REPORT http://svn.test.local/svn/repo/trunk
+Content-Type: text/xml
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+
+<S:get-locks-report xmlns:S="svn:" depth="empty"></S:get-locks-report>
