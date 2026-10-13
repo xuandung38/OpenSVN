@@ -285,15 +285,15 @@ impl UpdateParser {
             });
         }
         if tag.name.is(&Ns::Dav, "href") {
-            if parent == Some(Role::CheckedIn) {
-                if let Some(n) = self.nodes.last_mut() {
-                    if n.href_seen {
-                        return Err(corrupt("checked-in carries more than one href"));
-                    }
-                    n.href_seen = true;
-                    if !n.announced {
-                        self.capture = Capture::Href;
-                    }
+            if parent == Some(Role::CheckedIn)
+                && let Some(n) = self.nodes.last_mut()
+            {
+                if n.href_seen {
+                    return Err(corrupt("checked-in carries more than one href"));
+                }
+                n.href_seen = true;
+                if !n.announced {
+                    self.capture = Capture::Href;
                 }
             }
             return Ok(Role::Other);
