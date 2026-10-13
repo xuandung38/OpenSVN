@@ -1,0 +1,14 @@
+# Negative control against real svn: wc b is updated back to r2 (before props, externals and
+# later changes), so every comparator must report a difference (needs-lock read-only state,
+# exec bits, status revisions, info, wc.db). If any check stays quiet the comparator is too lax.
+name: selfcheck-must-fail
+description: svn15 vs svn15 where b is deliberately at an older revision
+server: svn15
+repo: basic
+expect: mismatch
+steps:
+  - { on: svn15, wc: a, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: b, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: b, svn: [update, -r, "2"] }
+compare:
+  - { left: a, right: b, checks: [tree, status, info, wcdb] }
