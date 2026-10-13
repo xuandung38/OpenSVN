@@ -76,7 +76,12 @@ pub fn set_read_write(path: &Path) -> Result<(), TranslateError> {
             p = fs::Permissions::from_mode(p.mode() | 0o600);
         }
         #[cfg(not(unix))]
-        p.set_readonly(false);
+        {
+            // Windows only: this clears FILE_ATTRIBUTE_READONLY; it cannot make the file
+            // world-writable as it would on Unix.
+            #[allow(clippy::permissions_set_readonly_false)]
+            p.set_readonly(false);
+        }
         p
     })
 }

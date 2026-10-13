@@ -30,6 +30,9 @@ LATER = {
     "eol_native_mixed_after_prop": b"one\ntwo\r\nthree\n",
 }
 
+# Cases whose repository path differs from the case name (percent-encoding in URLs).
+PATHS = {"kw_encoded_url": "sp ace/\u00e9/a b%41.txt"}
+
 # (name, content, props, timezones)
 CASES = [
     ("plain_no_props", b"a\nb\r\nc\n", {}, ["UTC"]),
@@ -62,6 +65,10 @@ CASES = [
     ("kw_with_crlf", b"$Id$\r\n$Rev$\r\nx\r\n", {"svn:keywords": "Id Rev", "svn:eol-style": "CRLF"}, ["UTC"]),
     ("kw_with_native_crlf_source", b"$Id$\r\n$Rev$\r\nx\r\n", {"svn:keywords": "Id Rev", "svn:eol-style": "native"}, ["UTC"]),
     ("kw_empty_prop_value", b"$Id$\n", {"svn:keywords": ""}, ["UTC"]),
+    ("kw_fixed_interior_dollar_expand_lossy", b"$Rev:: a$b $\n", {"svn:keywords": "Rev Id"}, ["UTC"]),
+    ("kw_fixed_interior_dollar_contract_lossy", b"$Rev:: 5$b $\n", {"svn:keywords": "Rev Id"}, ["UTC"]),
+    ("kw_chunk_boundary_normalize_lossy", b"x" * 16377 + b"$Rev:a$Id: x $\n", {"svn:keywords": "Rev Id"}, ["UTC"]),
+    ("kw_encoded_url", b"$Id$ $HeadURL$ $URL$ $Header$ $Cb$\n", {"svn:keywords": "Id HeadURL URL Header Cb=%b|%P"}, ["UTC"]),
     ("kw_utf8_name", "Tên $Author$ $Id$ é\n".encode(), {"svn:keywords": "Author Id"}, ["UTC"]),
     ("special_symlink", None, {"svn:special": "*"}, ["UTC"]),
     ("executable_flag", b"#!/bin/sh\n", {"svn:executable": "*"}, ["UTC"]),
@@ -74,20 +81,26 @@ def run(args, env=None, check=True, cwd=None):
     return r
 
 def main():
-    work = tempfile.mkdtemp(prefix="svn-translate-golden-")
+    # A fixed, neutral location: repository URLs and svn error messages end up in the fixtures.
+    work = "/tmp/opensvn-golden"
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
     repo = os.path.join(work, "repo"); run(["svnadmin", "create", repo])
     url = "file://" + repo
     wc1 = os.path.join(work, "wc1"); run(["svn", "checkout", "-q", url, wc1])
-    env = dict(os.environ, TZ="UTC", LC_ALL="C")
+    env = dict(os.environ, TZ="UTC", LC_ALL="en_US.UTF-8")
     version = run(["svn", "--version", "--quiet"]).stdout.decode().strip()
     committed = {}
+    commit_inputs = {}
     for name, content, props, _ in CASES:
-        p = os.path.join(wc1, name)
+        rel = PATHS.get(name, name)
+        p = os.path.join(wc1, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
         if content is None:
             os.symlink("target/for link", p)
         else:
             open(p, "wb").write(content)
-        run(["svn", "add", "-q", p], env=env)
+        run(["svn", "add", "-q", "--parents", p], env=env)
         err = None
         for k, v in props.items():
             r = run(["svn", "propset", "-q", k, v, p], env=env, check=False)
@@ -96,8 +109,9 @@ def main():
                 break
         if err is None and name in LATER:
             open(p, "wb").write(LATER[name])
+        pre_commit = None if (err or os.path.islink(p)) else open(p, "rb").read()
         if err is None:
-            r = run(["svn", "commit", "-q", "-m", "add " + name, p], env=env, check=False)
+            r = run(["svn", "commit", "-q", "--username", "alice", "-m", "add " + name, wc1], env=env, check=False)
             if r.returncode != 0:
                 err = r.stderr.decode(errors="replace").strip()
         if err:
@@ -106,8 +120,12 @@ def main():
             committed[name] = ("error", err)
         else:
             committed[name] = ("ok", None)
+            # Exactly what `svn commit` read from the working file (input of the normaliser); svn
+            # rewrites the file with expanded keywords right after the commit, so it is captured before.
+            commit_inputs[name] = pre_commit
     for name, content, props, tzs in CASES:
         state, err = committed[name]
+        rel = PATHS.get(name, name)
         out = os.path.join(HERE, name)
         shutil.rmtree(out, ignore_errors=True)
         os.makedirs(out)
@@ -120,9 +138,9 @@ def main():
             continue
         for tz in tzs:
             wc2 = os.path.join(work, "co-" + name + "-" + tz.replace("/", "_"))
-            env2 = dict(os.environ, TZ=tz, LC_ALL="C")
+            env2 = dict(os.environ, TZ=tz, LC_ALL="en_US.UTF-8")
             run(["svn", "checkout", "-q", url, wc2], env=env2)
-            f = os.path.join(wc2, name)
+            f = os.path.join(wc2, rel)
             info = run(["svn", "info", "--xml", f], env=env2).stdout
             e = ET.fromstring(info).find("entry")
             rev = e.find("commit").get("revision")
@@ -136,19 +154,21 @@ def main():
             root = e.find("repository/root").text
             furl = e.find("url").text
             db = sqlite3.connect(os.path.join(wc2, ".svn", "wc.db"))
-            (chk,) = db.execute("select checksum from nodes where local_relpath=? and op_depth=0", (name,)).fetchone()
+            (chk,) = db.execute("select checksum from nodes where local_relpath=? and op_depth=0", (rel,)).fetchone()
             hexsum = chk.split("$")[-1]
             pristine = open(os.path.join(wc2, ".svn", "pristine", hexsum[:2], hexsum + ".svn-base"), "rb").read()
             sub = out if len(tzs) == 1 else os.path.join(out, tz.replace("/", "_"))
             os.makedirs(sub, exist_ok=True)
             open(os.path.join(sub, "pristine.bin"), "wb").write(pristine)
+            if commit_inputs.get(name) is not None:
+                open(os.path.join(sub, "commit.bin"), "wb").write(commit_inputs[name])
             if os.path.islink(f):
                 open(os.path.join(sub, "working.link"), "w").write(os.readlink(f))
             else:
                 open(os.path.join(sub, "working.bin"), "wb").write(open(f, "rb").read())
                 open(os.path.join(sub, "working.mode"), "w").write("%o\n" % (os.stat(f).st_mode & 0o777))
             m = meta + [f"rev={rev}", f"author={author}", f"date_micros={micros}", f"utc_offset_secs={off_secs}",
-                        f"url={furl}", f"root={root}", f"tz={tz}"]
+                        f"url={furl}", f"root={root}", f"tz={tz}", f"path={rel}"]
             open(os.path.join(sub, "meta.txt"), "w").write("\n".join(m) + "\n")
     shutil.rmtree(work, ignore_errors=True)
 

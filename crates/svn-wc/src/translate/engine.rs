@@ -1,7 +1,10 @@
-//! Byte-exact port of the libsvn_subr `translate_chunk` state machine (subst.c, tags
-//! 1.14.5 and 1.15.0 are identical here), operating on a whole in-memory buffer.
+//! Byte-exact incremental port of the libsvn_subr `translate_chunk` state machine (subst.c;
+//! tags 1.14.5 and 1.15.0 are identical here).
 //!
-//! One call is equivalent to feeding svn a single chunk followed by the final flush.
+//! A [`Translator`] keeps svn's cross-chunk state (pending CR, keyword buffer, first source
+//! line ending). svn's `next_sign_off` rollback marker is local to one `translate_chunk` call,
+//! so it is reset on every [`Translator::push`]: feeding the same chunk sizes as svn therefore
+//! reproduces its behaviour for malformed keywords that straddle a chunk boundary.
 
 use super::error::TranslateError;
 use super::keywords::Keywords;
@@ -10,13 +13,13 @@ use super::keywords::Keywords;
 const KEYWORD_MAX_LEN: usize = 255;
 
 /// Parameters of one translation run.
-pub(crate) struct Params<'a> {
+pub(crate) struct Params {
     /// End-of-line sequence to write; `None` leaves line endings untouched.
-    pub eol: Option<&'a [u8]>,
+    pub eol: Option<&'static [u8]>,
     /// Convert inconsistent line endings instead of failing.
     pub repair: bool,
     /// Keywords to expand or contract; `None`/empty disables keyword handling.
-    pub keywords: Option<&'a Keywords>,
+    pub keywords: Option<Keywords>,
     /// `true` expands keywords, `false` contracts them.
     pub expand: bool,
 }
@@ -50,6 +53,14 @@ fn write_expanded(buf: &mut Vec<u8>, name_len: usize, value: &[u8]) {
     }
 }
 
+/// Index of the first `$` at or after `from` (the buffer always ends with one).
+fn first_dollar(buf: &[u8], from: usize) -> usize {
+    buf[from..]
+        .iter()
+        .position(|b| *b == b'$')
+        .map_or(buf.len() - 1, |i| from + i)
+}
+
 /// `translate_keyword_subst`: expands (`value` is `Some`) or contracts (`None`) `buf`.
 /// Returns `false` when `buf` is not a well-formed instance of the keyword.
 fn subst_keyword(buf: &mut Vec<u8>, keyword: &[u8], value: Option<&[u8]>) -> bool {
@@ -70,10 +81,17 @@ fn subst_keyword(buf: &mut Vec<u8>, keyword: &[u8], value: Option<&[u8]>) -> boo
     {
         let max_value = len - (6 + kl);
         match value {
-            None => buf[bp + 2..len - 1].fill(b' '),
+            // svn pads with `while (*p != '$')`: the fill stops at the FIRST '$' after the start,
+            // which may be an interior one when the scanner kept buffering past a failed candidate.
+            None => {
+                let end = first_dollar(buf, bp + 2);
+                buf[bp + 2..end].fill(b' ');
+            }
             Some(v) if v.len() <= max_value => {
                 buf[bp + 3..bp + 3 + v.len()].copy_from_slice(v);
-                buf[bp + 3 + v.len()..len - 1].fill(b' ');
+                let start = bp + 3 + v.len();
+                let end = first_dollar(buf, start);
+                buf[start..end].fill(b' ');
             }
             Some(v) => {
                 buf[bp + 3..bp + 3 + max_value].copy_from_slice(&v[..max_value]);
@@ -106,120 +124,149 @@ fn subst_keyword(buf: &mut Vec<u8>, keyword: &[u8], value: Option<&[u8]>) -> boo
     false
 }
 
-/// Translates `input` according to `params`.
-pub(crate) fn translate(input: &[u8], params: &Params<'_>) -> Result<Vec<u8>, TranslateError> {
-    let keywords = params.keywords.filter(|k| !k.is_empty());
-    let eol = params.eol;
-    let interesting =
-        |b: u8| (keywords.is_some() && b == b'$') || (eol.is_some() && (b == b'\r' || b == b'\n'));
+/// Incremental translator; see the module documentation.
+pub(crate) struct Translator {
+    params: Params,
+    cr_pending: bool,
+    kwbuf: Vec<u8>,
+    src_format: Option<&'static [u8]>,
+}
 
-    let n = input.len();
-    let mut out: Vec<u8> = Vec::with_capacity(n + n / 16);
-    let mut cr_pending = false;
-    let mut kwbuf: Vec<u8> = Vec::new();
-    let mut next_sign = 0usize;
-    let mut src_format: Option<&'static [u8]> = None;
-    let mut p = 0usize;
+impl Translator {
+    /// Creates a translator for one file.
+    pub(crate) fn new(mut params: Params) -> Self {
+        params.keywords = params.keywords.filter(|k| !k.is_empty());
+        Self {
+            params,
+            cr_pending: false,
+            kwbuf: Vec::new(),
+            src_format: None,
+        }
+    }
 
-    // `translate_newline`: writes the configured eol, enforcing source consistency.
-    let mut newline = |out: &mut Vec<u8>, nl: &'static [u8]| -> Result<(), TranslateError> {
-        match src_format {
+    fn interesting(&self, b: u8) -> bool {
+        (self.params.keywords.is_some() && b == b'$')
+            || (self.params.eol.is_some() && (b == b'\r' || b == b'\n'))
+    }
+
+    /// `translate_newline`: writes the configured eol, enforcing source consistency.
+    fn newline(&mut self, out: &mut Vec<u8>, nl: &'static [u8]) -> Result<(), TranslateError> {
+        match self.src_format {
             Some(first) => {
-                if !params.repair && first != nl {
+                if !self.params.repair && first != nl {
                     return Err(TranslateError::InconsistentEol);
                 }
             }
-            None => src_format = Some(nl),
+            None => self.src_format = Some(nl),
         }
-        if let Some(e) = eol {
+        if let Some(e) = self.params.eol {
             out.extend_from_slice(e);
         }
         Ok(())
-    };
+    }
 
-    while p < n {
-        let c = input[p];
-        if cr_pending {
-            let nl: &'static [u8] = if c == b'\n' {
+    /// Translates one chunk (`translate_chunk` with a buffer), appending to `out`.
+    pub(crate) fn push(&mut self, input: &[u8], out: &mut Vec<u8>) -> Result<(), TranslateError> {
+        let n = input.len();
+        let mut next_sign = 0usize;
+        let mut p = 0usize;
+        while p < n {
+            let c = input[p];
+            if self.cr_pending {
+                let nl: &'static [u8] = if c == b'\n' {
+                    p += 1;
+                    b"\r\n"
+                } else {
+                    b"\r"
+                };
+                self.newline(out, nl)?;
+                self.cr_pending = false;
+            } else if !self.kwbuf.is_empty() && c == b'$' {
+                self.kwbuf.push(b'$');
                 p += 1;
-                b"\r\n"
-            } else {
-                b"\r"
-            };
-            newline(&mut out, nl)?;
-            cr_pending = false;
-        } else if !kwbuf.is_empty() && c == b'$' {
-            kwbuf.push(b'$');
-            p += 1;
-            let name = keywords
-                .and_then(|k| match_keyword(&kwbuf, k))
-                .map(<[u8]>::to_vec);
-            if name.is_none() {
-                // Reuse the closing '$' as the start of a new candidate.
-                p -= 1;
-                kwbuf.pop();
-            }
-            let done = match (&name, keywords) {
-                (Some(name), Some(k)) => {
-                    let value = if params.expand { k.get(name) } else { None };
-                    subst_keyword(&mut kwbuf, name, value) || kwbuf.len() >= KEYWORD_MAX_LEN
+                let name = self
+                    .params
+                    .keywords
+                    .as_ref()
+                    .and_then(|k| match_keyword(&self.kwbuf, k))
+                    .map(<[u8]>::to_vec);
+                if name.is_none() {
+                    // Reuse the closing '$' as the start of a new candidate.
+                    p -= 1;
+                    self.kwbuf.pop();
                 }
-                _ => true,
-            };
-            if done {
-                out.extend_from_slice(&kwbuf);
-                next_sign = 0;
-                kwbuf.clear();
-            } else {
-                if next_sign == 0 {
-                    next_sign = kwbuf.len() - 1;
+                let done = match (&name, &self.params.keywords) {
+                    (Some(name), Some(k)) => {
+                        let value = if self.params.expand {
+                            k.get(name)
+                        } else {
+                            None
+                        };
+                        subst_keyword(&mut self.kwbuf, name, value)
+                            || self.kwbuf.len() >= KEYWORD_MAX_LEN
+                    }
+                    _ => true,
+                };
+                if done {
+                    out.extend_from_slice(&self.kwbuf);
+                    next_sign = 0;
+                    self.kwbuf.clear();
+                } else {
+                    if next_sign == 0 {
+                        next_sign = self.kwbuf.len() - 1;
+                    }
+                    continue;
                 }
+            } else if self.kwbuf.len() == KEYWORD_MAX_LEN - 1
+                || (!self.kwbuf.is_empty() && (c == b'\r' || c == b'\n'))
+            {
+                if next_sign > 0 {
+                    // Roll back to the last '$' seen and rescan from there.
+                    p -= self.kwbuf.len() - next_sign;
+                    self.kwbuf.truncate(next_sign);
+                    next_sign = 0;
+                }
+                out.extend_from_slice(&self.kwbuf);
+                self.kwbuf.clear();
+            } else if !self.kwbuf.is_empty() {
+                self.kwbuf.push(c);
+                p += 1;
                 continue;
             }
-        } else if kwbuf.len() == KEYWORD_MAX_LEN - 1
-            || (!kwbuf.is_empty() && (c == b'\r' || c == b'\n'))
-        {
-            if next_sign > 0 {
-                // Roll back to the last '$' seen and rescan from there.
-                p -= kwbuf.len() - next_sign;
-                kwbuf.truncate(next_sign);
-                next_sign = 0;
-            }
-            out.extend_from_slice(&kwbuf);
-            kwbuf.clear();
-        } else if !kwbuf.is_empty() {
-            kwbuf.push(c);
-            p += 1;
-            continue;
-        }
 
-        // Boring state: copy a run of uninteresting bytes, then enter an interesting state.
-        let start = p;
-        while p < n && !interesting(input[p]) {
-            p += 1;
-        }
-        out.extend_from_slice(&input[start..p]);
-        if p < n {
-            match input[p] {
-                b'$' => {
-                    kwbuf.push(b'$');
-                    p += 1;
-                }
-                b'\r' => {
-                    cr_pending = true;
-                    p += 1;
-                }
-                _ => {
-                    p += 1;
-                    newline(&mut out, b"\n")?;
+            // Boring state: copy a run of uninteresting bytes, then enter an interesting state.
+            let start = p;
+            while p < n && !self.interesting(input[p]) {
+                p += 1;
+            }
+            out.extend_from_slice(&input[start..p]);
+            if p < n {
+                match input[p] {
+                    b'$' => {
+                        self.kwbuf.push(b'$');
+                        p += 1;
+                    }
+                    b'\r' => {
+                        self.cr_pending = true;
+                        p += 1;
+                    }
+                    _ => {
+                        p += 1;
+                        self.newline(out, b"\n")?;
+                    }
                 }
             }
         }
+        Ok(())
     }
 
-    if cr_pending {
-        newline(&mut out, b"\r")?;
+    /// Flushes pending state (`translate_chunk` with a NULL buffer): a pending CR becomes an
+    /// end-of-line, an open keyword candidate is written verbatim (no rollback).
+    pub(crate) fn finish(mut self, out: &mut Vec<u8>) -> Result<(), TranslateError> {
+        if self.cr_pending {
+            self.newline(out, b"\r")?;
+        }
+        out.extend_from_slice(&self.kwbuf);
+        Ok(())
     }
-    out.extend_from_slice(&kwbuf);
-    Ok(out)
 }

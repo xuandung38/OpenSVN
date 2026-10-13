@@ -16,10 +16,19 @@ pub struct KeywordContext {
     pub date_micros: Option<i64>,
     /// Last changed author (`%a`).
     pub author: Option<String>,
-    /// Local UTC offset in seconds in effect at `date_micros`. svn formats `$Date$`
-    /// (`%D`) in the local time zone; the caller resolves the zone because this crate has
-    /// no time-zone database. Short dates (`%d`, used by `$Id$`/`$Header$`) are always UTC.
-    pub utc_offset_secs: i32,
+}
+
+/// Resolves the UTC offset in seconds that was in effect at a Unix timestamp (seconds).
+///
+/// svn formats `$Date$` (`%D`) in the local time zone using the offset valid *at the commit
+/// time* (daylight saving included), so it must be evaluated per file. The caller supplies the
+/// resolver because this crate carries no time-zone database. Short dates (`%d`, used by
+/// `$Id$`/`$Header$`) are always UTC and never consult it.
+pub type UtcOffsetAt<'a> = &'a dyn Fn(i64) -> i32;
+
+/// Resolver for UTC (offset 0), used for normalisation and tests.
+pub fn utc_offset_zero(_unix_secs: i64) -> i32 {
+    0
 }
 
 /// Keyword name to expansion value, exactly as svn's `apr_hash_t` of keywords.
@@ -44,8 +53,14 @@ impl Keywords {
     }
 
     /// Builds the table from an `svn:keywords` value (`svn_subst_build_keywords3`, custom
-    /// `name=format` entries enabled).
-    pub fn build(keywords_prop: &[u8], ctx: &KeywordContext) -> Self {
+    /// `name=format` entries enabled). `tz` resolves the local UTC offset for `$Date$`.
+    ///
+    /// Intentional difference from svn: `%D` always renders the English, C-locale form
+    /// (`2002-06-23 11:13:02 +0300 (Sun, 23 Jun 2002)`). svn gettext-translates the trailing
+    /// part and uses the locale's weekday and month names, so output differs per machine; the
+    /// text of `$Date$` is cosmetic and never takes part in status, commit content or checksums
+    /// (contraction discards it).
+    pub fn build(keywords_prop: &[u8], ctx: &KeywordContext, tz: UtcOffsetAt<'_>) -> Self {
         let mut kw = Self::default();
         const SEPS: &[u8] = b" \t\x0b\n\x08\r\x0c";
         for token in keywords_prop
@@ -53,36 +68,36 @@ impl Keywords {
             .filter(|t| !t.is_empty())
         {
             if let Some(eq) = token.iter().position(|b| *b == b'=') {
-                let value = keyword_printf(&token[eq + 1..], ctx);
+                let value = keyword_printf(&token[eq + 1..], ctx, tz);
                 kw.map.insert(token[..eq].to_vec(), value);
                 continue;
             }
             let ci = |s: &str| token.eq_ignore_ascii_case(s.as_bytes());
             let ex = |s: &str| token == s.as_bytes();
             if ex("LastChangedRevision") || ex("Revision") || ci("Rev") {
-                let v = keyword_printf(b"%r", ctx);
+                let v = keyword_printf(b"%r", ctx, tz);
                 for n in ["LastChangedRevision", "Revision", "Rev"] {
                     kw.set(n, &v);
                 }
             } else if ex("LastChangedDate") || ci("Date") {
-                let v = keyword_printf(b"%D", ctx);
+                let v = keyword_printf(b"%D", ctx, tz);
                 for n in ["LastChangedDate", "Date"] {
                     kw.set(n, &v);
                 }
             } else if ex("LastChangedBy") || ci("Author") {
-                let v = keyword_printf(b"%a", ctx);
+                let v = keyword_printf(b"%a", ctx, tz);
                 for n in ["LastChangedBy", "Author"] {
                     kw.set(n, &v);
                 }
             } else if ex("HeadURL") || ci("URL") {
-                let v = keyword_printf(b"%u", ctx);
+                let v = keyword_printf(b"%u", ctx, tz);
                 for n in ["HeadURL", "URL"] {
                     kw.set(n, &v);
                 }
             } else if ci("Id") {
-                kw.set("Id", &keyword_printf(b"%b %r %d %a", ctx));
+                kw.set("Id", &keyword_printf(b"%b %r %d %a", ctx, tz));
             } else if ci("Header") {
-                kw.set("Header", &keyword_printf(b"%u %r %d %a", ctx));
+                kw.set("Header", &keyword_printf(b"%u %r %d %a", ctx, tz));
             }
         }
         kw
@@ -97,14 +112,13 @@ impl Keywords {
             repos_root_url: Some(String::new()),
             date_micros: None,
             author: Some(String::new()),
-            utc_offset_secs: 0,
         };
-        Self::build(keywords_prop, &ctx)
+        Self::build(keywords_prop, &ctx, &utc_offset_zero)
     }
 }
 
 /// Implementation of svn's `keyword_printf`.
-pub(crate) fn keyword_printf(fmt: &[u8], ctx: &KeywordContext) -> Vec<u8> {
+pub(crate) fn keyword_printf(fmt: &[u8], ctx: &KeywordContext, tz: UtcOffsetAt<'_>) -> Vec<u8> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < fmt.len() {
@@ -139,7 +153,7 @@ pub(crate) fn keyword_printf(fmt: &[u8], ctx: &KeywordContext) -> Vec<u8> {
             }
             b'D' => {
                 if let Some(d) = date(ctx) {
-                    out.extend(human_date(d, ctx.utc_offset_secs).into_bytes());
+                    out.extend(human_date(d, tz(d.div_euclid(1_000_000))).into_bytes());
                 }
             }
             b'P' => {
@@ -160,8 +174,8 @@ pub(crate) fn keyword_printf(fmt: &[u8], ctx: &KeywordContext) -> Vec<u8> {
             b'u' => out.extend(ctx.url.as_deref().unwrap_or("").as_bytes()),
             b'_' => out.push(b' '),
             b'%' => out.push(b'%'),
-            b'H' => out.extend(keyword_printf(b"%P%_%r%_%d%_%a", ctx)),
-            b'I' => out.extend(keyword_printf(b"%b%_%r%_%d%_%a", ctx)),
+            b'H' => out.extend(keyword_printf(b"%P%_%r%_%d%_%a", ctx, tz)),
+            b'I' => out.extend(keyword_printf(b"%b%_%r%_%d%_%a", ctx, tz)),
             other => {
                 out.push(b'%');
                 out.push(other);
@@ -259,7 +273,9 @@ impl Civil {
     }
 }
 
-/// `svn_time_to_human_cstring` in the C locale: `2002-06-23 11:13:02 +0300 (Sun, 23 Jun 2002)`.
+/// `svn_time_to_human_cstring` rendered in the C locale (see [`Keywords::build`] for why this
+/// differs from a localised svn). Pre-1970 dates use floor division where APR truncates; not ported.
+/// `2002-06-23 11:13:02 +0300 (Sun, 23 Jun 2002)`.
 pub(crate) fn human_date(micros: i64, offset_secs: i32) -> String {
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS: [&str; 12] = [

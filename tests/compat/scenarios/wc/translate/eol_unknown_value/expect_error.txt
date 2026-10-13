@@ -1,1 +1,1 @@
-svn: E135001: Unrecognized line ending style 'bogus' for '/var/folders/0n/5d8bqg7d2s381g6g71yx_5lr0000gn/T/svn-translate-golden-vemn4wiw/wc1/eol_unknown_value'
+svn: E135001: Unrecognized line ending style 'bogus' for '/tmp/opensvn-golden/wc1/eol_unknown_value'

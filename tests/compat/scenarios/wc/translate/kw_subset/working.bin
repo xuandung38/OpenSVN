@@ -1,6 +1,6 @@
-$Id$ $Rev: 16 $ $Revision: 16 $ $LastChangedRevision: 16 $ $Date$ $LastChangedDate$ $Author: hxd $ $LastChangedBy: hxd $ $HeadURL$ $URL$ $Header$
-stale: $Id: old 1 2000-01-01 00:00:00Z bob $ $Rev: 16 $ $Date: junk $ $Author: hxd $
-fixed: $Rev:: 16         $ $Rev:: 16                   $ $Author:: h#$ $Date::   $ $Id::  $
+$Id$ $Rev: 16 $ $Revision: 16 $ $LastChangedRevision: 16 $ $Date$ $LastChangedDate$ $Author: alice $ $LastChangedBy: alice $ $HeadURL$ $URL$ $Header$
+stale: $Id: old 1 2000-01-01 00:00:00Z bob $ $Rev: 16 $ $Date: junk $ $Author: alice $
+fixed: $Rev:: 16         $ $Rev:: 16                   $ $Author:: a#$ $Date::   $ $Id::  $
 unknown: $Foo$ $foo: bar$ $id$ $REV$ $Rev $ $$ $$$ $Id
 nested: $Id: $Rev: 16 $ x$ and $Rev: 16 $Date$
 tail $Rev: 16 $

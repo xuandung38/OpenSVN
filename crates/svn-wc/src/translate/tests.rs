@@ -2,10 +2,41 @@
 //! lives in `tests/translate_golden.rs`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::borrow::Cow;
+
 use proptest::prelude::*;
 
 use super::keywords::human_date;
 use super::*;
+use std::io::Cursor;
+
+// Owned-result wrappers so results compare directly with byte-string literals.
+fn to_working(
+    i: &TranslateInfo,
+    input: &[u8],
+    ctx: &KeywordContext,
+    tz: UtcOffsetAt<'_>,
+) -> Result<Vec<u8>, TranslateError> {
+    super::to_working(i, input, ctx, tz).map(Cow::into_owned)
+}
+
+fn to_working_with_native(
+    i: &TranslateInfo,
+    input: &[u8],
+    ctx: &KeywordContext,
+    tz: UtcOffsetAt<'_>,
+    native: &'static [u8],
+) -> Result<Vec<u8>, TranslateError> {
+    super::to_working_with_native(i, input, ctx, tz, native).map(Cow::into_owned)
+}
+
+fn to_repo_normal(
+    i: &TranslateInfo,
+    input: &[u8],
+    repair: bool,
+) -> Result<Vec<u8>, TranslateError> {
+    super::to_repo_normal(i, input, repair).map(Cow::into_owned)
+}
 
 fn info(eol: EolStyle, keywords: Option<&str>) -> TranslateInfo {
     TranslateInfo {
@@ -22,7 +53,6 @@ fn ctx() -> KeywordContext {
         repos_root_url: Some("http://h/repo".into()),
         date_micros: Some(1_000_000_000_123_456),
         author: Some("al".into()),
-        utc_offset_secs: 0,
     }
 }
 
@@ -39,7 +69,7 @@ fn eol_style_parsing() {
 #[test]
 fn native_uses_given_platform_eol_and_normalises_to_lf() {
     let i = info(EolStyle::Native, None);
-    let w = to_working_with_native(&i, b"a\nb\n", &ctx(), b"\r\n").unwrap();
+    let w = to_working_with_native(&i, b"a\nb\n", &ctx(), &utc_offset_zero, b"\r\n").unwrap();
     assert_eq!(w, b"a\r\nb\r\n");
     assert_eq!(to_repo_normal(&i, &w, false).unwrap(), b"a\nb\n");
 }
@@ -70,7 +100,7 @@ fn fixed_style_is_repaired_when_normalising() {
 fn expansion_always_repairs() {
     let i = info(EolStyle::Lf, None);
     assert_eq!(
-        to_working(&i, b"a\r\nb\rc\n", &ctx()).unwrap(),
+        to_working(&i, b"a\r\nb\rc\n", &ctx(), &utc_offset_zero).unwrap(),
         b"a\nb\nc\n"
     );
 }
@@ -83,7 +113,7 @@ fn unknown_style_normalise_errors_but_expand_keeps_eols() {
         Err(TranslateError::UnknownEol)
     ));
     assert_eq!(
-        to_working(&i, b"$Rev$\r\n", &ctx()).unwrap(),
+        to_working(&i, b"$Rev$\r\n", &ctx(), &utc_offset_zero).unwrap(),
         b"$Rev: 42 $\r\n"
     );
 }
@@ -92,14 +122,23 @@ fn unknown_style_normalise_errors_but_expand_keeps_eols() {
 fn no_translation_is_identity() {
     let i = info(EolStyle::None, None);
     let data = b"a\r\nb\n$Id$";
-    assert_eq!(to_working(&i, data, &ctx()).unwrap(), data);
+    assert_eq!(
+        to_working(&i, data, &ctx(), &utc_offset_zero).unwrap(),
+        data
+    );
     assert_eq!(to_repo_normal(&i, data, false).unwrap(), data);
 }
 
 #[test]
 fn keywords_expand_and_contract() {
     let i = info(EolStyle::None, Some("Rev Author Id Header"));
-    let w = to_working(&i, b"$Rev$ $Author$ $Id$ $Header$", &ctx()).unwrap();
+    let w = to_working(
+        &i,
+        b"$Rev$ $Author$ $Id$ $Header$",
+        &ctx(),
+        &utc_offset_zero,
+    )
+    .unwrap();
     assert_eq!(
         String::from_utf8(w.clone()).unwrap(),
         "$Rev: 42 $ $Author: al $ $Id: a b.txt 42 2001-09-09 01:46:40Z al $ \
@@ -114,7 +153,13 @@ fn keywords_expand_and_contract() {
 #[test]
 fn fixed_length_keywords_pad_and_truncate() {
     let i = info(EolStyle::None, Some("Author"));
-    let w = to_working(&i, b"$Author:: $\n$Author::      $\n$Author::   $", &ctx()).unwrap();
+    let w = to_working(
+        &i,
+        b"$Author:: $\n$Author::      $\n$Author::   $",
+        &ctx(),
+        &utc_offset_zero,
+    )
+    .unwrap();
     assert_eq!(
         String::from_utf8(w).unwrap(),
         "$Author:: $\n$Author:: al   $\n$Author:: a#$"
@@ -125,7 +170,7 @@ fn fixed_length_keywords_pad_and_truncate() {
 fn unknown_and_unterminated_keywords_are_left_alone() {
     let i = info(EolStyle::None, Some("Rev"));
     let data = b"$Foo$ $rev$ $Rev $ $$ $Rev: unterminated\nnext $Rev$";
-    let w = to_working(&i, data, &ctx()).unwrap();
+    let w = to_working(&i, data, &ctx(), &utc_offset_zero).unwrap();
     assert_eq!(
         w,
         b"$Foo$ $rev$ $Rev $ $$ $Rev: unterminated\nnext $Rev: 42 $"
@@ -135,7 +180,7 @@ fn unknown_and_unterminated_keywords_are_left_alone() {
 #[test]
 fn custom_keyword_definitions() {
     let i = info(EolStyle::None, Some("Mine=%a:%r:%b:%P:%%:%_:%R"));
-    let w = to_working(&i, b"$Mine$", &ctx()).unwrap();
+    let w = to_working(&i, b"$Mine$", &ctx(), &utc_offset_zero).unwrap();
     assert_eq!(
         String::from_utf8(w).unwrap(),
         "$Mine: al:42:a b.txt:trunk/a b.txt:%: :http://h/repo $"
@@ -147,7 +192,7 @@ fn keyword_value_is_truncated_to_the_255_byte_limit() {
     let i = info(EolStyle::None, Some("Foo=%a"));
     let mut c = ctx();
     c.author = Some("x".repeat(400));
-    let w = to_working(&i, b"$Foo$", &c).unwrap();
+    let w = to_working(&i, b"$Foo$", &c, &utc_offset_zero).unwrap();
     assert_eq!(w.len(), 255);
     assert!(w.starts_with(b"$Foo: xxx") && w.ends_with(b"x $"));
 }
@@ -159,6 +204,7 @@ fn missing_values_expand_to_nothing() {
         &i,
         b"$Rev$ $Date$ $Author$ $URL$",
         &KeywordContext::default(),
+        &utc_offset_zero,
     )
     .unwrap();
     assert_eq!(w, b"$Rev: $ $Date: $ $Author: $ $URL: $");
@@ -290,6 +336,183 @@ fn sync_with_props_rules() {
     assert_eq!(mode(&p), 0o644);
 }
 
+#[test]
+fn fixed_length_fill_stops_at_the_first_dollar() {
+    // Differential results from svn 1.15.0 with svn:keywords=Rev.
+    let i = info(EolStyle::None, Some("Rev Id"));
+    let mut c = ctx();
+    c.rev = Some(1);
+    assert_eq!(
+        to_working(&i, b"$Rev:: a$b $\n", &c, &utc_offset_zero).unwrap(),
+        b"$Rev:: 1$b $\n"
+    );
+    assert_eq!(
+        to_repo_normal(&i, b"$Rev:: 5$b $\n", false).unwrap(),
+        b"$Rev::  $b $\n"
+    );
+}
+
+#[test]
+fn special_files_are_never_translated() {
+    let i = TranslateInfo {
+        eol_style: EolStyle::CrLf,
+        keywords_prop: Some(b"Id".to_vec()),
+        special: true,
+    };
+    let data = b"link a\nb$Id$\r";
+    assert!(matches!(
+        super::to_working(&i, data, &ctx(), &utc_offset_zero).unwrap(),
+        Cow::Borrowed(_)
+    ));
+    assert_eq!(
+        to_working(&i, data, &ctx(), &utc_offset_zero).unwrap(),
+        &data[..]
+    );
+    assert_eq!(to_repo_normal(&i, data, false).unwrap(), &data[..]);
+}
+
+#[test]
+fn unknown_keyword_names_do_not_require_translation() {
+    assert!(!info(EolStyle::None, Some("foo bar")).translation_required());
+    assert!(info(EolStyle::None, Some("foo Id")).translation_required());
+    assert!(info(EolStyle::Native, None).translation_required());
+}
+
+/// svn resets its rollback marker for every chunk it translates, so a malformed candidate that
+/// straddles the normalisation chunk boundary is flushed raw (differential result, svn 1.15.0).
+#[test]
+fn normalisation_chunk_boundary_matches_svn() {
+    let i = info(EolStyle::None, Some("Rev Id"));
+    let mut data = vec![b'x'; NORMALIZE_CHUNK_SIZE - 7];
+    data.extend_from_slice(b"$Rev:a$Id: x $\n");
+    let got = to_repo_normal(&i, &data, false).unwrap();
+    assert!(
+        got.ends_with(b"$Rev:a$Id: x $\n"),
+        "{:?}",
+        String::from_utf8_lossy(&got[got.len() - 20..])
+    );
+    // Without the boundary the rollback applies and the second candidate is contracted.
+    let small = to_repo_normal(&i, b"$Rev:a$Id: x $\n", false).unwrap();
+    assert_eq!(small, b"$Rev:a$Id$\n");
+}
+
+#[test]
+fn streaming_equals_slice_translation() {
+    let i = info(EolStyle::CrLf, Some("Id Rev"));
+    let mut data = Vec::new();
+    for n in 0..20_000 {
+        data.extend_from_slice(format!("line {n} $Rev$ $Id: stale $\n").as_bytes());
+    }
+    let expected = to_working(&i, &data, &ctx(), &utc_offset_zero).unwrap();
+    let t = ContentTranslator::to_working(&i, &ctx(), &utc_offset_zero);
+    let mut out = Vec::new();
+    // A reader that returns tiny reads must not change the result.
+    struct Trickle<'a>(&'a [u8]);
+    impl std::io::Read for Trickle<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.0.len().min(buf.len()).min(1000);
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
+        }
+    }
+    translate_stream(&mut Trickle(&data), &mut out, t).unwrap();
+    assert_eq!(out, expected);
+    let back = ContentTranslator::to_repo_normal(&i, false).unwrap();
+    let mut normal = Vec::new();
+    translate_stream(&mut Cursor::new(&out), &mut normal, back).unwrap();
+    assert_eq!(normal, to_repo_normal(&i, &out, false).unwrap());
+}
+
+#[test]
+fn date_uses_the_offset_in_effect_at_the_commit_time() {
+    let i = info(EolStyle::None, Some("Date"));
+    let mut c = ctx();
+    // 2026-03-01 12:00:00 UTC and 2026-07-01 12:00:00 UTC.
+    let (winter, summer) = (1_772_366_400_i64, 1_782_907_200_i64);
+    // A fake zone with DST: +1h until the end of March, +2h afterwards.
+    let tz = |secs: i64| if secs < 1_774_000_000 { 3600 } else { 7200 };
+    c.date_micros = Some(winter * 1_000_000);
+    assert_eq!(
+        String::from_utf8(to_working(&i, b"$Date$", &c, &tz).unwrap()).unwrap(),
+        "$Date: 2026-03-01 13:00:00 +0100 (Sun, 01 Mar 2026) $"
+    );
+    c.date_micros = Some(summer * 1_000_000);
+    assert_eq!(
+        String::from_utf8(to_working(&i, b"$Date$", &c, &tz).unwrap()).unwrap(),
+        "$Date: 2026-07-01 14:00:00 +0200 (Wed, 01 Jul 2026) $"
+    );
+    // A fixed zone is just a constant resolver; the short date used by $Id$ stays UTC.
+    let id = info(EolStyle::None, Some("Id"));
+    assert_eq!(
+        String::from_utf8(to_working(&id, b"$Id$", &c, &|_| 7200).unwrap()).unwrap(),
+        "$Id: a b.txt 42 2026-07-01 12:00:00Z al $"
+    );
+}
+
+#[test]
+fn eol_consistency_check_matches_propset() {
+    assert!(check_eol_consistency(b"a\nb\n").is_ok());
+    assert!(check_eol_consistency(b"a\r\nb\r\n").is_ok());
+    assert!(check_eol_consistency(b"a\rb\r").is_ok());
+    assert!(check_eol_consistency(b"").is_ok());
+    assert!(matches!(
+        check_eol_consistency(b"a\nb\r\n"),
+        Err(TranslateError::InconsistentEol)
+    ));
+    assert!(matches!(
+        check_eol_consistency(b"a\rb\n"),
+        Err(TranslateError::InconsistentEol)
+    ));
+}
+
+#[test]
+fn errors_convert_to_svn_error_codes() {
+    use svn_types::{ErrorCode, SvnError};
+    let e: SvnError = TranslateError::InconsistentEol.into();
+    assert_eq!((e.code, e.svn_code), (ErrorCode::Corrupt, Some(135_000)));
+    let e: SvnError = TranslateError::UnknownEol.into();
+    assert_eq!((e.code, e.svn_code), (ErrorCode::Corrupt, Some(135_001)));
+    let io = std::io::Error::from(std::io::ErrorKind::NotFound);
+    let e: SvnError = TranslateError::Stream {
+        op: "read",
+        source: io,
+    }
+    .into();
+    assert_eq!(e.code, ErrorCode::PathNotFound);
+}
+
+#[test]
+fn special_install_keeps_full_content_for_regular_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("q");
+    special::install(&p, b"unknown kind\nsecond line\n").unwrap();
+    assert_eq!(std::fs::read(&p).unwrap(), b"unknown kind\nsecond line\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_read_only_attribute_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("f");
+    std::fs::write(&p, b"x").unwrap();
+    flags::set_read_only(&p).unwrap();
+    assert!(std::fs::metadata(&p).unwrap().permissions().readonly());
+    flags::set_read_write(&p).unwrap();
+    assert!(!std::fs::metadata(&p).unwrap().permissions().readonly());
+    // The executable flag does not exist on Windows.
+    flags::set_executable(&p, true).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_special_install_writes_the_repo_normal_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("l");
+    special::install(&p, b"link dest/x\nrest").unwrap();
+    assert_eq!(std::fs::read(&p).unwrap(), b"link dest/x\nrest");
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
     #[test]
@@ -301,7 +524,7 @@ proptest! {
                               Just(EolStyle::Cr), Just(EolStyle::CrLf)],
     ) {
         let i = info(style, Some("Id Rev"));
-        let w = to_working(&i, &data, &ctx()).unwrap();
+        let w = to_working(&i, &data, &ctx(), &utc_offset_zero).unwrap();
         prop_assert!(w.len() <= data.len() * 2 + 4 * 255);
         let n = to_repo_normal(&i, &data, true).unwrap();
         prop_assert_eq!(to_repo_normal(&i, &n, true).unwrap(), n);
@@ -312,7 +535,7 @@ proptest! {
                      style in prop_oneof![Just(EolStyle::Native), Just(EolStyle::Lf),
                                            Just(EolStyle::Cr), Just(EolStyle::CrLf)],
                      native_crlf in any::<bool>()) {
-        let native: &[u8] = if native_crlf { b"\r\n" } else { b"\n" };
+        let native: &'static [u8] = if native_crlf { b"\r\n" } else { b"\n" };
         let eol: &[u8] = match style {
             EolStyle::Native | EolStyle::Lf => b"\n",
             EolStyle::Cr => b"\r",
@@ -324,7 +547,7 @@ proptest! {
             if idx + 1 < lines.len() || trailing { repo.extend_from_slice(eol); }
         }
         let i = info(style, None);
-        let working = to_working_with_native(&i, &repo, &ctx(), native).unwrap();
+        let working = to_working_with_native(&i, &repo, &ctx(), &utc_offset_zero, native).unwrap();
         prop_assert_eq!(to_repo_normal(&i, &working, false).unwrap(), repo);
     }
 
@@ -333,7 +556,7 @@ proptest! {
         let names = ["Id", "Rev", "Date", "Author", "URL", "Header"];
         let src = format!("{prefix}${}${suffix}", names[which]);
         let i = info(EolStyle::None, Some("Id Rev Date Author URL Header"));
-        let w = to_working(&i, src.as_bytes(), &ctx()).unwrap();
+        let w = to_working(&i, src.as_bytes(), &ctx(), &utc_offset_zero).unwrap();
         prop_assert!(w.len() > src.len());
         prop_assert_eq!(to_repo_normal(&i, &w, false).unwrap(), src.as_bytes());
     }

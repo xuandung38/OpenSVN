@@ -1,3 +1,3 @@
-svn: E200009: File '/var/folders/0n/5d8bqg7d2s381g6g71yx_5lr0000gn/T/svn-translate-golden-vemn4wiw/wc1/eol_lf_mixed' has inconsistent newlines
+svn: E200009: File '/tmp/opensvn-golden/wc1/eol_lf_mixed' has inconsistent newlines
 svn: E135000: Inconsistent line ending style
 svn: E200042: Additional errors:

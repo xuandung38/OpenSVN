@@ -1,6 +1,6 @@
-$Id: kw_case_insensitive_prop 18 2026-10-13 08:55:16Z hxd $ $Rev: 18 $ $Revision: 18 $ $LastChangedRevision: 18 $ $Date: 2026-10-13 08:55:16 +0000 (Tue, 13 Oct 2026) $ $LastChangedDate: 2026-10-13 08:55:16 +0000 (Tue, 13 Oct 2026) $ $Author: hxd $ $LastChangedBy: hxd $ $HeadURL: file:///var/folders/0n/5d8bqg7d2s381g6g71yx_5lr0000gn/T/svn-translate-golden-vemn4wiw/repo/kw_case_insensitive_prop $ $URL: file:///var/folders/0n/5d8bqg7d2s381g6g71yx_5lr0000gn/T/svn-translate-golden-vemn4wiw/repo/kw_case_insensitive_prop $ $Header: file:///var/folders/0n/5d8bqg7d2s381g6g71yx_5lr0000gn/T/svn-translate-golden-vemn4wiw/repo/kw_case_insensitive_prop 18 2026-10-13 08:55:16Z hxd $
-stale: $Id: kw_case_insensitive_prop 18 2026-10-13 08:55:16Z hxd $ $Rev: 18 $ $Date: 2026-10-13 08:55:16 +0000 (Tue, 13 Oct 2026) $ $Author: hxd $
-fixed: $Rev:: 18         $ $Rev:: 18                   $ $Author:: h#$ $Date:: 2#$ $Id::  $
+$Id: kw_case_insensitive_prop 18 2026-10-13 09:45:10Z alice $ $Rev: 18 $ $Revision: 18 $ $LastChangedRevision: 18 $ $Date: 2026-10-13 09:45:10 +0000 (Tue, 13 Oct 2026) $ $LastChangedDate: 2026-10-13 09:45:10 +0000 (Tue, 13 Oct 2026) $ $Author: alice $ $LastChangedBy: alice $ $HeadURL: file:///tmp/opensvn-golden/repo/kw_case_insensitive_prop $ $URL: file:///tmp/opensvn-golden/repo/kw_case_insensitive_prop $ $Header: file:///tmp/opensvn-golden/repo/kw_case_insensitive_prop 18 2026-10-13 09:45:10Z alice $
+stale: $Id: kw_case_insensitive_prop 18 2026-10-13 09:45:10Z alice $ $Rev: 18 $ $Date: 2026-10-13 09:45:10 +0000 (Tue, 13 Oct 2026) $ $Author: alice $
+fixed: $Rev:: 18         $ $Rev:: 18                   $ $Author:: a#$ $Date:: 2#$ $Id::  $
 unknown: $Foo$ $foo: bar$ $id$ $REV$ $Rev $ $$ $$$ $Id
-nested: $Id: kw_case_insensitive_prop 18 2026-10-13 08:55:16Z hxd $Rev$ x$ and $Rev: 18 $Date$
+nested: $Id: kw_case_insensitive_prop 18 2026-10-13 09:45:10Z alice $Rev$ x$ and $Rev: 18 $Date$
 tail $Rev: 18 $

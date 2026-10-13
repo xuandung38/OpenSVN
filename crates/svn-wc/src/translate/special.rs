@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use svn_types::write_file_replacing;
+
 use super::error::TranslateError;
 
 /// Parsed repo-normal content of a special file.
@@ -46,38 +48,44 @@ pub fn read_repo_normal(path: &Path) -> Result<Vec<u8>, TranslateError> {
     }
 }
 
-/// Creates the working file for repo-normal `content` at `path`, replacing an existing file
-/// atomically. Symlinks become real symlinks on Unix; elsewhere (and for unknown special
-/// types) the repo-normal text is written to a regular file, as svn does.
+/// Creates the working file for repo-normal `content` at `path`, replacing an existing file or
+/// symlink atomically (a symlink at `path` is replaced, never followed).
+///
+/// `path` must already have been vetted with `svn_types::safe_join`; this function does not
+/// check ancestor directories. Symlinks become real symlinks on Unix. Elsewhere, and for
+/// unknown special types, the full repo-normal content is written to a regular file, as svn
+/// does when symlinks are unsupported.
 pub fn install(path: &Path, content: &[u8]) -> Result<(), TranslateError> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = tempfile::Builder::new()
-        .prefix(".svn-special")
-        .tempfile_in(dir)
-        .map_err(TranslateError::io("create temp file in", dir))?;
-    let tmp_path = tmp.into_temp_path();
-    // The temp file name must be free for the symlink; keep only the unique name.
-    std::fs::remove_file(&tmp_path).map_err(TranslateError::io("remove", &tmp_path))?;
-    let created = match parse(content) {
-        SpecialContent::Link(target) => make_symlink(&target, &tmp_path),
-        SpecialContent::Regular(bytes) => std::fs::write(&tmp_path, bytes),
-    };
-    created.map_err(TranslateError::io("create", &tmp_path))?;
-    std::fs::rename(&tmp_path, path).map_err(TranslateError::io("rename to", path))?;
-    // `tmp_path` was consumed by the rename; its drop only removes a missing path.
+    #[cfg(unix)]
+    if let SpecialContent::Link(target) = parse(content) {
+        return install_symlink(path, &target);
+    }
+    write_file_replacing(path, content)?;
     Ok(())
 }
 
+/// Creates a symlink under a unique name next to `path` (`symlink(2)` fails if the name exists,
+/// so it is exclusive) and renames it over `path`.
 #[cfg(unix)]
-fn make_symlink(target: &[u8], at: &Path) -> std::io::Result<()> {
+fn install_symlink(path: &Path, target: &[u8]) -> Result<(), TranslateError> {
     use std::os::unix::ffi::OsStrExt;
-    std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(target), at)
-}
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(not(unix))]
-fn make_symlink(target: &[u8], at: &Path) -> std::io::Result<()> {
-    // No symlink support: fall back to the internal representation.
-    std::fs::write(at, super::special::symlink_to_repo_normal(target))
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".svn-special.{}.{n}.tmp", std::process::id()));
+    std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(target), &tmp)
+        .map_err(TranslateError::io("create", &tmp))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(TranslateError::Io {
+            op: "rename to",
+            path: path.to_path_buf(),
+            source: e,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
