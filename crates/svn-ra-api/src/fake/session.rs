@@ -16,7 +16,9 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use super::commit_editor::FakeCommitEditor;
 use super::repo::{FakeChange, NodeData, RepoState, children};
 use super::update_drive::drive_update;
-use crate::auth::{AuthMethod, AuthPrompter, CredentialRequest, PromptReason};
+use crate::auth::{
+    AuthMethod, AuthPrompter, CertDecision, CertInfo, CredentialRequest, PromptReason,
+};
 use crate::commit::{CommitEditor, CommitObserver};
 use crate::session::{
     FileMeta, FileRev, FileRevHandler, LogRequest, RaSession, ReportFn, UpdateRequest,
@@ -39,6 +41,7 @@ pub struct FakeRaSession {
     pub(super) state: Arc<Mutex<RepoState>>,
     max_open_files: usize,
     required: Option<Arc<Required>>,
+    cert_check: Option<(CertInfo, Arc<dyn AuthPrompter>)>,
     authenticated: Arc<AtomicBool>,
     lock_counter: Arc<AtomicU64>,
 }
@@ -53,6 +56,7 @@ impl FakeRaSession {
             state: Arc::new(Mutex::new(RepoState::new())),
             max_open_files: 4,
             required: None,
+            cert_check: None,
             authenticated: Arc::new(AtomicBool::new(false)),
             lock_counter: Arc::new(AtomicU64::new(1)),
         })
@@ -85,6 +89,20 @@ impl FakeRaSession {
             password: password.to_owned(),
             prompter,
         }));
+        self
+    }
+
+    /// Makes `ensure_authenticated` first ask `prompter` to decide about `cert`, like the
+    /// transport does after a failed TLS verification. The fake checks the decision against the
+    /// failure (`CertDecision::is_valid_for`) and refuses with `TlsUntrusted` unless the
+    /// decision is valid and not `Reject`.
+    #[must_use]
+    pub fn with_certificate_check(
+        mut self,
+        cert: CertInfo,
+        prompter: Arc<dyn AuthPrompter>,
+    ) -> Self {
+        self.cert_check = Some((cert, prompter));
         self
     }
 
@@ -135,6 +153,16 @@ impl RaSession for FakeRaSession {
 
     async fn ensure_authenticated(&self, cancel: &CancelToken) -> Result<()> {
         cancel.check()?;
+        if let Some((cert, prompter)) = &self.cert_check {
+            let decision = prompter.confirm_certificate(cert).await;
+            // The prompter (the UI) is not a trust boundary: validate against the real failure.
+            if decision == CertDecision::Reject || !decision.is_valid_for(&cert.failure) {
+                return Err(SvnError::new(
+                    ErrorCode::TlsUntrusted,
+                    "certificate not trusted",
+                ));
+            }
+        }
         let Some(req) = &self.required else {
             return Ok(());
         };
