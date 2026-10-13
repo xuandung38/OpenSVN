@@ -259,6 +259,14 @@ impl<'a> EventBridge<'a> {
             return Ok(());
         }
         let href = href.ok_or_else(|| corrupt(format!("no href to fetch {path} from")))?;
+        // Like `fetch_props`: file text comes from a node of a revision root, never from any
+        // other resource the server might name (`me`, a transaction, a public URL, ...).
+        if !matches!(href.kind, HrefKind::RevRoot { .. }) {
+            return Err(SvnError::new(
+                ErrorCode::UnsafePath,
+                "fetch-file href is not a revision resource",
+            ));
+        }
         let scheduler = self
             .scheduler
             .clone()
@@ -373,7 +381,7 @@ impl<'a> EventBridge<'a> {
         let req = propfind::allprop_request(self.wire.urls(), *rev, repo_path)?;
         let resp = self.wire.send(req, &self.cancel).await?;
         let resp = RaWire::require_success(resp, &self.cancel).await?;
-        let body = RaWire::read_small(resp).await?;
+        let body = RaWire::read_small(resp, &self.cancel).await?;
         let mut parser = propfind::MultiStatusParser::new();
         let entries = svn_protocol::parse_chunked(&mut parser, &body, 0)?;
         let entry = entries

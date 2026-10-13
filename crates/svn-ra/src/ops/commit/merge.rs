@@ -3,6 +3,7 @@
 use svn_protocol::commit::{
     LockHandling, MergeOptions, MergeResponse, abort_txn_request, parse_merge_response,
 };
+use svn_protocol::xml::{Ns, XmlEvent, read_all};
 use svn_protocol::{ResponseHead, TxnName, map_http_status};
 use svn_types::{CancelToken, ErrorCode, RelPath, Result, SvnError};
 
@@ -31,7 +32,7 @@ pub(super) async fn merge(
         resp.status().as_u16(),
         crate::ops::update::headers_of(&resp),
     );
-    let body = RaWire::read_small(resp).await?;
+    let body = RaWire::read_small(resp, cancel).await?;
     parse_merge_response(&head, &body)
 }
 
@@ -61,27 +62,37 @@ pub(super) async fn delete_txn_found(
 }
 
 /// A `PROPPATCH` answers `207` even when a property was refused; the verdict is per property.
+///
+/// Parses the multistatus and looks only at `DAV:status` elements (of `DAV:propstat` or
+/// `DAV:response`), so text elsewhere, such as a `DAV:responsedescription`, cannot fake a status.
 pub(super) fn check_proppatch(body: &[u8]) -> Result<()> {
-    let text = String::from_utf8_lossy(body);
-    let mut rest: &str = &text;
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(());
+    }
+    let mut status_text: Option<String> = None;
     let mut first_failure: Option<u16> = None;
-    while let Some(at) = rest.find("HTTP/1.") {
-        rest = &rest[at + "HTTP/1.".len()..];
-        // "1 207 ..." or "0 200 ...": skip the minor version digit and the space.
-        let status: Option<u16> = rest.get(2..5).and_then(|s| s.parse().ok());
-        match status {
-            Some(s) if (200..300).contains(&s) => {}
-            // 424 only says "not done because another property failed".
-            Some(424) => {}
-            Some(s) => {
-                first_failure.get_or_insert(s);
+    for event in read_all(body)? {
+        match event {
+            XmlEvent::Start(tag) if tag.name.is(&Ns::Dav, "status") => {
+                status_text = Some(String::new());
             }
-            None => {
-                return Err(SvnError::new(
-                    ErrorCode::Corrupt,
-                    "unreadable status in PROPPATCH answer",
-                ));
+            XmlEvent::Text(t) => {
+                if let Some(buf) = status_text.as_mut() {
+                    buf.push_str(&t);
+                }
             }
+            XmlEvent::End(name) if name.is(&Ns::Dav, "status") => {
+                let line = status_text.take().unwrap_or_default();
+                match status_code(&line)? {
+                    s if (200..300).contains(&s) => {}
+                    // 424 only says "not done because another property failed".
+                    424 => {}
+                    s => {
+                        first_failure.get_or_insert(s);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     match first_failure {
@@ -93,6 +104,21 @@ pub(super) fn check_proppatch(body: &[u8]) -> Result<()> {
     }
 }
 
+/// Code of an `HTTP/1.1 207 Multi-Status` style status line.
+fn status_code(line: &str) -> Result<u16> {
+    let mut parts = line.split_whitespace();
+    match (parts.next(), parts.next()) {
+        (Some(v), Some(code)) if v.starts_with("HTTP/") && code.len() == 3 => {
+            code.parse().map_err(|_| unreadable_status())
+        }
+        _ => Err(unreadable_status()),
+    }
+}
+
+fn unreadable_status() -> SvnError {
+    SvnError::new(ErrorCode::Corrupt, "unreadable status in PROPPATCH answer")
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -100,10 +126,33 @@ mod tests {
 
     #[test]
     fn proppatch_success_and_failure() {
-        let ok = b"<D:multistatus><D:propstat><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:multistatus>";
+        let ok = br#"<?xml version="1.0"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>/x</D:href><D:propstat><D:prop/><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>"#;
         assert!(check_proppatch(ok).is_ok());
-        let bad = b"<D:status>HTTP/1.1 403 Forbidden</D:status><D:status>HTTP/1.1 424 Failed Dependency</D:status>";
+        let bad = br#"<D:multistatus xmlns:D="DAV:"><D:response><D:propstat><D:status>HTTP/1.1 403 Forbidden</D:status></D:propstat><D:propstat><D:status>HTTP/1.1 424 Failed Dependency</D:status></D:propstat></D:response></D:multistatus>"#;
         assert_eq!(check_proppatch(bad).unwrap_err().code, ErrorCode::Forbidden);
         assert!(check_proppatch(b"").is_ok());
+    }
+
+    #[test]
+    fn proppatch_ignores_status_text_outside_status_elements() {
+        let body = br#"<D:multistatus xmlns:D="DAV:"><D:response><D:propstat><D:status>HTTP/1.1 200 OK</D:status></D:propstat><D:responsedescription>was HTTP/1.1 500 before</D:responsedescription></D:response></D:multistatus>"#;
+        assert!(check_proppatch(body).is_ok());
+        // A failure stated only in a description is not a status either way.
+        let body = br#"<D:multistatus xmlns:D="DAV:"><D:response><D:status>HTTP/1.1 403 Forbidden</D:status><D:responsedescription>HTTP/1.1 200 OK</D:responsedescription></D:response></D:multistatus>"#;
+        assert_eq!(
+            check_proppatch(body).unwrap_err().code,
+            ErrorCode::Forbidden
+        );
+    }
+
+    #[test]
+    fn proppatch_rejects_garbage() {
+        let body =
+            br#"<D:multistatus xmlns:D="DAV:"><D:status>nonsense</D:status></D:multistatus>"#;
+        assert_eq!(check_proppatch(body).unwrap_err().code, ErrorCode::Corrupt);
+        assert_eq!(
+            check_proppatch(b"<unclosed").unwrap_err().code,
+            ErrorCode::Corrupt
+        );
     }
 }

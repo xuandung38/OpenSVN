@@ -265,6 +265,36 @@ async fn hostile_href_to_another_origin_stops_the_update() {
     );
 }
 
+/// File text is only fetched from a node of a revision root, like properties: a same-origin
+/// href to any other resource (here the `me` resource and a public URL) stops the update.
+#[tokio::test]
+async fn fetch_file_href_must_be_a_revision_resource() {
+    for replacement in ["/svn/repo/!svn/me", "/svn/repo/trunk/a.txt"] {
+        let srv = server(Bulk::Off).await;
+        let body = String::from_utf8(fixture("update/checkout-skelta.resp"))
+            .unwrap()
+            .replace("/svn/repo/!svn/rvr/3/trunk/a.txt", replacement);
+        serve_report(&srv, body.into_bytes()).await;
+        let w = wire(&srv, 4).await;
+        let (editor, log) = RecordingEditor::new();
+        let err = run_update(
+            &w,
+            request(UpdateMode::Update),
+            report(),
+            Box::new(editor),
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnsafePath, "{replacement}");
+        assert!(log.is_aborted());
+        assert!(
+            requests(&srv).await.iter().all(|(m, _)| m != "GET"),
+            "no download may start"
+        );
+    }
+}
+
 #[tokio::test]
 async fn unsafe_node_name_stops_the_update() {
     let srv = server(Bulk::Prefer).await;
