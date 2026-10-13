@@ -1,0 +1,23 @@
+//! Shared engine contracts: plain data types, error model, path safety and the
+//! synchronous delta-editor traits. This crate must not depend on an async runtime.
+
+mod cancel;
+mod editor;
+mod error;
+mod ids;
+mod lock_ownership;
+mod model;
+mod rel_path;
+mod safe_join;
+
+pub use cancel::{CancelToken, Cancelled};
+pub use editor::{DeltaEditor, Reporter, TxDeltaOp, TxDeltaWindow, WindowSink};
+pub use error::{ErrorCode, Result, SvnError};
+pub use ids::{DirId, FileId, OriginKey, RepoUrl, Revnum, Timestamp};
+pub use lock_ownership::{AliveProbe, LockOwnershipStore, MemoryLockOwnership};
+pub use model::{
+    ChangeAction, ChangedPath, Checksum, Depth, DirEntry, LockInfo, LogEntry, NodeKind, NodeStatus,
+    PropChange, PropStatus, RemoteStatus, WcStatus,
+};
+pub use rel_path::RelPath;
+pub use safe_join::{safe_join, write_file_replacing};

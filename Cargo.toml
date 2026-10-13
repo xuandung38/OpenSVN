@@ -1,0 +1,75 @@
+[workspace]
+resolver = "3"
+# Glob members: new crates join without editing this file. The app crate (apps/opensvn/src-tauri)
+# is added by its owner once it exists, because cargo rejects a glob that matches nothing.
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
+# Exact pins (=x.y.z). Adding a dependency here is a contract change.
+[workspace.dependencies]
+# internal crates
+svn-types = { path = "crates/svn-types" }
+svn-ra-api = { path = "crates/svn-ra-api" }
+svn-delta = { path = "crates/svn-delta" }
+svn-protocol = { path = "crates/svn-protocol" }
+svn-ra = { path = "crates/svn-ra" }
+svn-diff = { path = "crates/svn-diff" }
+svn-wc = { path = "crates/svn-wc" }
+svn-client = { path = "crates/svn-client" }
+secure-store = { path = "crates/secure-store" }
+
+# runtime and async
+tokio = { version = "=1.53.2", default-features = false }
+tokio-util = { version = "=0.7.20", default-features = false }
+futures-util = { version = "=0.3.34", default-features = false }
+async-trait = "=0.1.92"
+
+# data, errors, logging
+bytes = "=1.12.1"
+url = "=2.5.8"
+thiserror = "=2.0.21"
+anyhow = "=1.0.104"
+tracing = "=0.1.44"
+serde = { version = "=1.0.229", features = ["derive"] }
+secrecy = "=0.10.3"
+unicode-normalization = "=0.1.25"
+tempfile = "=3.27.0"
+
+# protocol, codecs
+quick-xml = "=0.42.0"
+base64 = "=0.23.1"
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
+lz4_flex = "=0.14.0"
+md-5 = "=0.11.0"
+sha1 = "=0.11.0"
+
+# storage, diff, fs
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+imara-diff = "=0.2.0"
+ignore = "=0.4.33"
+globset = "=0.4.20"
+notify = "=8.2.0"
+
+# network and credentials
+reqwest = { version = "=0.13.5", default-features = false }
+rustls-platform-verifier = "=0.7.1"
+keyring-core = "=1.0.1"
+
+# test
+proptest = "=1.12.0"
+insta = "=1.49.0"
