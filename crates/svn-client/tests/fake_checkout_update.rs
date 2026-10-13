@@ -128,3 +128,83 @@ async fn update_keeps_unversioned_files_inside_a_deleted_directory() {
     assert!(!wc.join("d/c.txt").exists());
     assert_eq!(read(&wc.join("d/notes.txt")), "mine\n");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_update_is_resumed_by_the_next_update() {
+    let s = session();
+    s.seed(
+        "a",
+        "r1",
+        &[
+            put("a.txt", "a\n"),
+            put("b.txt", "b\n"),
+            put("d/c.txt", "c\n"),
+        ],
+    )
+    .expect("seed");
+    let sb = Sandbox::new();
+    let wc = sb.path("wc");
+    checkout(
+        &ctx(),
+        &s,
+        &wc,
+        None,
+        Depth::Infinity,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("checkout");
+    s.seed(
+        "a",
+        "r2",
+        &[
+            put("a.txt", "a2\n"),
+            put("b.txt", "b2\n"),
+            put("d/c.txt", "c2\n"),
+            put("d/new.txt", "n\n"),
+        ],
+    )
+    .expect("seed");
+
+    // Cancel as soon as the first node is applied.
+    let cancel = CancelToken::new();
+    let mut c = ctx();
+    let trip = cancel.clone();
+    c.progress = Some(std::sync::Arc::new(move |_ev: &svn_client::UpdateEvent| {
+        trip.cancel()
+    }));
+    let err = update(&c, &s, &wc, None, Depth::Unknown, &cancel)
+        .await
+        .expect_err("cancelled");
+    assert_eq!(err.code, svn_types::ErrorCode::Cancelled, "{err}");
+    {
+        let db = open_db(&wc);
+        let root = db.read_base(&rp("")).expect("read").expect("root");
+        assert_eq!(root.presence, svn_wc::db::Presence::Incomplete);
+        assert!(db.work_items().expect("queue").is_empty());
+        assert_eq!(
+            db.wc_lock_held(&rp("")).expect("lock"),
+            svn_wc::db::LockState::Free,
+            "lock released on cancellation"
+        );
+    }
+
+    let sum = update(&ctx(), &s, &wc, None, Depth::Unknown, &CancelToken::new())
+        .await
+        .expect("resume");
+    assert_eq!(sum.revision, Some(Revnum(2)));
+    for (f, text) in [
+        ("a.txt", "a2\n"),
+        ("b.txt", "b2\n"),
+        ("d/c.txt", "c2\n"),
+        ("d/new.txt", "n\n"),
+    ] {
+        assert_eq!(read(&wc.join(f)), text, "{f}");
+    }
+    let rows = base_rows(&open_db(&wc));
+    assert!(
+        rows.iter().all(|r| r.1 == "normal" && r.3 == 2),
+        "rows: {rows:?}"
+    );
+}

@@ -203,6 +203,18 @@ async fn scenario(
     local: impl Fn(&Repo, &Path, bool),
     server: impl Fn(&Repo, &Path),
 ) -> Option<(Oracle, std::path::PathBuf, std::path::PathBuf)> {
+    scenario_at(name, local, server, "", Depth::Unknown).await
+}
+
+/// [`scenario`] with the update run on `target` (relative to the working copy root, `""` for
+/// the root) at `depth` (`svn update --depth`).
+async fn scenario_at(
+    name: &str,
+    local: impl Fn(&Repo, &Path, bool),
+    server: impl Fn(&Repo, &Path),
+    target: &str,
+    depth: Depth,
+) -> Option<(Oracle, std::path::PathBuf, std::path::PathBuf)> {
     let oracle = oracle()?;
     let repo = Repo::new(&oracle);
     let seed = build_r1(&repo);
@@ -224,13 +236,26 @@ async fn scenario(
     local(&repo, &ours, false);
     server(&repo, &seed);
     repo.svn(&seed, &["commit", "-q", "-m", "r2"]);
-    repo.svn(&theirs, &["update", "-q", "--accept", "postpone"]);
+    let mut args = vec!["update", "-q", "--accept", "postpone"];
+    let depth_word = depth_arg(depth);
+    if let Some(d) = depth_word.as_deref() {
+        args.extend(["--depth", d]);
+    }
+    if !target.is_empty() {
+        args.push(target);
+    }
+    repo.svn(&theirs, &args);
+    let path = if target.is_empty() {
+        ours.clone()
+    } else {
+        ours.join(target)
+    };
     update(
         &ctx(),
         &repo.fake(None),
-        &ours,
+        &path,
         None,
-        Depth::Unknown,
+        depth,
         &CancelToken::new(),
     )
     .await
@@ -443,4 +468,248 @@ async fn switch_matches_svn_switch() {
     .await
     .expect("switch");
     assert_same(&oracle, &theirs, &ours, "switch");
+}
+
+fn depth_arg(depth: Depth) -> Option<String> {
+    match depth {
+        Depth::Empty => Some("empty".into()),
+        Depth::Files => Some("files".into()),
+        Depth::Immediates => Some("immediates".into()),
+        Depth::Infinity => Some("infinity".into()),
+        _ => None,
+    }
+}
+
+// ---- review regressions (PR #74) ----------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_delete_of_locally_replaced_file_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "replace-vs-delete",
+        |repo, wc, _| {
+            repo.svn(wc, &["rm", "-q", "README"]);
+            write(&wc.join("README"), "brand new\n");
+            repo.svn(wc, &["add", "-q", "README"]);
+        },
+        |repo, seed| {
+            repo.svn(seed, &["rm", "-q", "README"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "replace vs delete");
+    // The local addition survives as the only row of README.
+    let rows: Vec<String> = nodes_snapshot(&w)
+        .into_iter()
+        .filter(|r| r.starts_with("README|"))
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        rows[0].starts_with("README|1|normal|file|None|None|"),
+        "{rows:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_delete_of_locally_replaced_directory_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "replace-dir-vs-delete",
+        |repo, wc, _| {
+            repo.svn(wc, &["rm", "-q", "docs"]);
+            write(&wc.join("docs/mine.txt"), "mine\n");
+            repo.svn(wc, &["add", "-q", "docs"]);
+        },
+        |repo, seed| {
+            repo.svn(seed, &["rm", "-q", "docs"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "replaced dir vs delete");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_delete_of_locally_deleted_file_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "delete-vs-delete",
+        |repo, wc, _| {
+            repo.svn(wc, &["rm", "-q", "README"]);
+        },
+        |repo, seed| {
+            repo.svn(seed, &["rm", "-q", "README"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "delete vs delete");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_prop_edit_of_locally_deleted_file_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "delete-vs-propedit",
+        |repo, wc, _| {
+            repo.svn(wc, &["rm", "-q", "docs/guide.txt"]);
+        },
+        |repo, seed| {
+            repo.svn(
+                seed,
+                &["propset", "-q", "svn:eol-style", "LF", "docs/guide.txt"],
+            );
+            repo.svn(seed, &["propset", "-q", "color", "red", "docs/guide.txt"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "delete vs prop edit");
+    assert!(
+        !w.join("docs/guide.txt.prej").exists(),
+        "no property reject file for a tree conflict"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_dir_add_over_unversioned_dir_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "dir-obstruction",
+        |_, wc, _| write(&wc.join("d/local.txt"), "mine\n"),
+        |repo, seed| {
+            write(&seed.join("d/x.txt"), "x\n");
+            write(&seed.join("d/sub/y.txt"), "y\n");
+            repo.svn(seed, &["add", "-q", "d"]);
+            repo.svn(seed, &["propset", "-q", "color", "green", "d"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "unversioned dir obstruction");
+    assert!(!w.join("d/x.txt").exists(), "the obstruction is left alone");
+    let st = svn_status(&o, &w, &[]);
+    assert!(st.contains("?       d/local.txt"), "{st}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_delete_of_update_target_keeps_not_present_like_svn() {
+    let Some((o, t, w)) = scenario_at(
+        "delete-target",
+        |_, _, _| {},
+        |repo, seed| {
+            repo.svn(seed, &["rm", "-q", "README"]);
+        },
+        "README",
+        Depth::Unknown,
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "deleted update target");
+    assert!(
+        nodes_snapshot(&w)
+            .iter()
+            .any(|r| r.starts_with("README|0|not-present|file|Some(2)")),
+        "{:?}",
+        nodes_snapshot(&w)
+    );
+}
+
+/// `svn update --depth D` at r2, then a full update to r3 that deletes a node the narrow
+/// update recorded as `not-present`.
+async fn depth_case(depth: Depth) {
+    let name = format!("depth-{depth:?}");
+    let Some((o, t, w)) = scenario_at(
+        &name,
+        |_, _, _| {},
+        |repo, seed| {
+            repo.svn(seed, &["update", "-q"]);
+            write(&seed.join("README"), "hello\nworld\nagain\n");
+            write(&seed.join("new.txt"), "new\n");
+            write(&seed.join("newdir/n.txt"), "n\n");
+            write(
+                &seed.join("docs/guide.txt"),
+                "one\ntwo\nthree\nfour\nfive\nsix\nSEVEN\n",
+            );
+            write(&seed.join("docs/extra.txt"), "extra\n");
+            repo.svn(seed, &["add", "-q", "new.txt", "newdir", "docs/extra.txt"]);
+            repo.svn(seed, &["rm", "-q", "empty.txt"]);
+            repo.svn(seed, &["propset", "-q", "color", "blue", "docs"]);
+            repo.svn(seed, &["propset", "-q", "top", "1", "."]);
+        },
+        "",
+        depth,
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, &name);
+    // The recorded depth never narrows without cropping.
+    assert!(
+        nodes_snapshot(&w)
+            .iter()
+            .any(|r| r.starts_with("|0|normal|dir|") && r.contains("Some(\"infinity\")")),
+        "{name}: root depth changed: {:?}",
+        nodes_snapshot(&w)
+    );
+
+    // r3: remove what the narrow update may have marked not-present, then a full update.
+    let repo_wc = t.parent().expect("parent").join("seed");
+    let mut c = o.svn();
+    c.args(["update", "-q"]).current_dir(&repo_wc);
+    assert!(c.status().expect("svn").success());
+    let mut c = o.svn();
+    c.args(["rm", "-q", "new.txt", "newdir/n.txt"])
+        .current_dir(&repo_wc);
+    assert!(c.status().expect("svn").success());
+    let mut c = o.svn();
+    c.args(["commit", "-q", "-m", "r3"]).current_dir(&repo_wc);
+    assert!(c.status().expect("svn").success());
+    let mut c = o.svn();
+    c.args(["update", "-q", "--accept", "postpone"])
+        .current_dir(&t);
+    assert!(c.status().expect("svn").success());
+    let repo_dir = t.parent().expect("parent").join("repo");
+    let fake = fake_from(&o, &repo_dir);
+    update(&ctx(), &fake, &w, None, Depth::Unknown, &CancelToken::new())
+        .await
+        .expect("full update");
+    assert_same(&o, &t, &w, &format!("{name} then full update"));
+}
+
+/// A fake session replaying the repository at `path`.
+fn fake_from(o: &Oracle, path: &Path) -> svn_ra_api::fake::FakeRaSession {
+    let mut c = o.svnadmin();
+    c.args(["dump", "-q"]).arg(path);
+    let out = c.output().expect("dump");
+    assert!(out.status.success(), "dump failed");
+    let s = session();
+    for changes in parse_dump(&out.stdout) {
+        s.seed("tester", "replay", &changes).expect("replay");
+    }
+    s
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_depth_empty_matches_svn() {
+    depth_case(Depth::Empty).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_depth_files_matches_svn() {
+    depth_case(Depth::Files).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_depth_immediates_matches_svn() {
+    depth_case(Depth::Immediates).await;
 }

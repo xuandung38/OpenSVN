@@ -29,7 +29,8 @@ pub enum UpdateKind {
 pub struct UpdateParams {
     /// Target revision (`None` = HEAD).
     pub revision: Option<Revnum>,
-    /// Requested depth (`Unknown` keeps the recorded depth).
+    /// Requested depth, `svn update --depth` semantics (`Unknown`: the recorded depths); never
+    /// recorded. A checkout records its depth when it creates the working copy.
     pub depth: Depth,
     /// Update or switch.
     pub kind: UpdateKind,

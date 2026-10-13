@@ -4810,6 +4810,7 @@ name = "svn-wc"
 version = "0.0.0"
 dependencies = [
  "fail",
+ "jiff",
  "md-5",
  "opensvn-svn-oracle",
  "proptest",
