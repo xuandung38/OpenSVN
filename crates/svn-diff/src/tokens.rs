@@ -1,3 +1,24 @@
+// ====================================================================
+//    Licensed to the Apache Software Foundation (ASF) under one
+//    or more contributor license agreements.  See the NOTICE file
+//    distributed with this work for additional information
+//    regarding copyright ownership.  The ASF licenses this file
+//    to you under the Apache License, Version 2.0 (the
+//    "License"); you may not use this file except in compliance
+//    with the License.  You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+//    Unless required by applicable law or agreed to in writing,
+//    software distributed under the License is distributed on an
+//    "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+//    KIND, either express or implied.  See the License for the
+//    specific language governing permissions and limitations
+//    under the License.
+// ====================================================================
+//
+// Modified by OpenSVN: tokenizer from diff_file.c and normalization from util.c, rewritten for in-memory byte slices.
+
 //! Line tokenizer and whitespace/EOL normalization.
 //!
 //! Behaviour follows `libsvn_diff/diff_file.c` (token reading) and
@@ -26,6 +47,9 @@ pub struct DiffOptions {
     pub ignore_space: IgnoreSpace,
     /// Treat `\n`, `\r\n` and `\r` as equal line terminators.
     pub ignore_eol_style: bool,
+    /// Optional work budget in LCS steps; exceeding it yields `DiffError::TooComplex`.
+    /// `None` means unbounded (still cancellable).
+    pub max_cost: Option<u64>,
 }
 
 impl DiffOptions {
@@ -152,11 +176,13 @@ mod tests {
         let o = DiffOptions {
             ignore_space: IgnoreSpace::Change,
             ignore_eol_style: true,
+            max_cost: None,
         };
         assert_eq!(&*normalize(b"a \t b\r\n", &o), b"a b\n");
         let o = DiffOptions {
             ignore_space: IgnoreSpace::All,
             ignore_eol_style: false,
+            max_cost: None,
         };
         assert_eq!(&*normalize(b" a \t b\r\n", &o), b"ab\r\n");
     }

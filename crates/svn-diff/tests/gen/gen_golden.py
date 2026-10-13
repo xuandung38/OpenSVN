@@ -141,8 +141,54 @@ def unified_cases():
     return c
 
 
+# Cases run with whitespace/EOL comparison options: name -> (orig, mod, option code).
+OPT_FLAGS = {"w": ["-x", "-w"], "b": ["-x", "-b"], "e": ["-x", "--ignore-eol-style"]}
+
+
+def perturb_ws(rng, data):
+    out = []
+    for l in split(data):
+        body = l.rstrip(b"\r\n")
+        eol = l[len(body):]
+        r = rng.random()
+        if r < 0.3:
+            body = b"  " + body
+        elif r < 0.5:
+            body = body + b" \t"
+        elif r < 0.7:
+            body = body.replace(b" ", b"   ", 1)
+        out.append(body + eol)
+    return b"".join(out)
+
+
+def option_cases():
+    rng = random.Random(4242)
+    base = j(lines(20))
+    c = {}
+    c["w-inner-and-real"] = (b"a b c\nx\nlast\n", b"ab c\ny\nlast\n", "w")
+    c["w-indent-plus-real"] = (base, perturb_ws(rng, base).replace(b"line 9", b"CHANGED 9"), "w")
+    c["w-tabs"] = (b"\tint x;\nfoo bar\n", b"    int  x ;\nfoo bar!\n", "w")
+    c["b-runs-and-real"] = (b"a  b\nc\nd\n", b"a b\nC\nd\n", "b")
+    c["b-trailing-plus-real"] = (base, perturb_ws(rng, base).replace(b"line 3", b"CHANGED 3"), "b")
+    c["b-leading-vs-none"] = (b"x\n  y\nz\n", b"x\ny\nZ\n", "b")
+    c["e-crlf-to-lf-plus-real"] = (b"a\r\nb\r\nc\r\nd\r\n", b"a\nB\nc\nd\n", "e")
+    c["e-cr-to-lf"] = (b"a\rb\rc\r", b"a\nb\nX\n", "e")
+    c["e-mixed-to-crlf"] = (b"a\nb\r\nc\rd\n", b"a\r\nb\r\nc\r\nD\r\n", "e")
+    c["e-no-final-eol"] = (b"a\r\nb", b"a\nb\nc", "e")
+    for i in range(6):
+        d = rand_doc(rng, rng.randrange(8, 40), vocab=5, eol=rng.choice([b"\n", b"\r\n"]))
+        m = mutate(rng, perturb_ws(rng, d), 2, vocab=5)
+        if rng.random() < 0.5:
+            m = m.replace(b"\r\n", b"\n")
+        c["random-%d-%s" % (i, "web"[i % 3])] = (d, m, "web"[i % 3])
+    return c
+
+
 def gen_unified(cfg, tmp):
     cases = unified_cases()
+    opt_cases = option_cases()
+    for n, (o, m, code) in opt_cases.items():
+        cases["opt-" + n] = (o, m)
     repo = os.path.join(tmp, "urepo")
     run(["svnadmin", "create", repo])
     url = "file://" + repo
@@ -162,14 +208,17 @@ def gen_unified(cfg, tmp):
             continue
         d = os.path.join(wc, n)
         write(os.path.join(d, "f"), mod)
-        out = svn(cfg, ["diff", "f"], cwd=d)
-        if b"Cannot display" in out or not out:
+        code = opt_cases.get(n[4:], (None, None, None))[2] if n.startswith("opt-") else None
+        out = svn(cfg, ["diff"] + (OPT_FLAGS[code] if code else []) + ["f"], cwd=d)
+        if b"Cannot display" in out or b"@@" not in out:
             print("skip", n)
             continue
         dest = os.path.join(out_root, n)
         write(os.path.join(dest, "orig"), orig)
         write(os.path.join(dest, "mod"), mod)
         write(os.path.join(dest, "expected.diff"), out)
+        if code:
+            write(os.path.join(dest, "opts"), code.encode())
         kept += 1
     # Added and deleted files: the header labels differ.
     for n, data in (("added-file", j(lines(8))), ("deleted-file", j(lines(8)))):

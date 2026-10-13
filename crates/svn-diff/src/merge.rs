@@ -1,3 +1,24 @@
+// ====================================================================
+//    Licensed to the Apache Software Foundation (ASF) under one
+//    or more contributor license agreements.  See the NOTICE file
+//    distributed with this work for additional information
+//    regarding copyright ownership.  The ASF licenses this file
+//    to you under the Apache License, Version 2.0 (the
+//    "License"); you may not use this file except in compliance
+//    with the License.  You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+//    Unless required by applicable law or agreed to in writing,
+//    software distributed under the License is distributed on an
+//    "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+//    KIND, either express or implied.  See the License for the
+//    specific language governing permissions and limitations
+//    under the License.
+// ====================================================================
+//
+// Modified by OpenSVN: merge3 writer and context saver from diff_file.c rewritten for in-memory buffers; configurable labels and fallback EOL.
+
 //! Three-way merge output with Subversion conflict markers.
 //!
 //! Port of `svn_diff_file_output_merge3` and its context-saver machinery from
@@ -6,8 +27,12 @@
 
 use std::collections::VecDeque;
 
+use svn_types::CancelToken;
+
+use crate::control::{Ctl, DiffError};
 use crate::diff_core::{Chunk, ChunkKind, diff3};
 use crate::tokens::{DiffOptions, detect_eol, split_lines};
+use crate::unified::native_eol;
 
 /// How conflicts are rendered (`svn_diff_conflict_display_style_t`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -49,7 +74,7 @@ impl Default for ConflictLabels {
 }
 
 /// Options for [`merge3`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MergeOptions {
     /// Comparison options.
     pub diff: DiffOptions,
@@ -57,6 +82,20 @@ pub struct MergeOptions {
     pub style: ConflictStyle,
     /// Marker labels.
     pub labels: ConflictLabels,
+    /// EOL for marker lines when "mine" contains no line break (svn's `APR_EOL_STR`);
+    /// defaults to the native one (`\r\n` on Windows).
+    pub fallback_eol: String,
+}
+
+impl Default for MergeOptions {
+    fn default() -> Self {
+        Self {
+            diff: DiffOptions::default(),
+            style: ConflictStyle::default(),
+            labels: ConflictLabels::default(),
+            fallback_eol: native_eol().to_owned(),
+        }
+    }
 }
 
 /// A conflicting region, as 0-based line ranges in each input.
@@ -95,7 +134,7 @@ struct Merger<'a> {
     lines: [Vec<&'a [u8]>; 3],
     current: [i64; 3],
     out: Vec<u8>,
-    marker_eol: &'static [u8],
+    marker_eol: Vec<u8>,
     labels: [String; 3],
     style: ConflictStyle,
     sink: Sink,
@@ -145,6 +184,10 @@ impl<'a> Merger<'a> {
         self.out.extend_from_slice(text);
     }
 
+    fn write_raw_eol(&mut self) {
+        self.out.extend_from_slice(&self.marker_eol);
+    }
+
     fn output_line(&mut self, idx: usize, skip: bool) {
         let n = self.current[idx];
         self.current[idx] += 1;
@@ -173,7 +216,7 @@ impl<'a> Merger<'a> {
     fn marker(&mut self, label_idx: usize, prefix: &str) {
         let text = format!("{prefix} {}", self.labels[label_idx]);
         self.write_raw(text.as_bytes());
-        self.write_raw(self.marker_eol);
+        self.write_raw_eol();
     }
 
     fn conflict_with_context(&mut self, c: &Chunk) {
@@ -192,7 +235,7 @@ impl<'a> Merger<'a> {
         self.context_marker_label(1, c.original_start, c.original_length);
         self.output_hunk(0, c.original_start, c.original_length);
         self.write_raw(b"=======");
-        self.write_raw(self.marker_eol);
+        self.write_raw_eol();
         self.output_hunk(2, c.latest_start, c.latest_length);
         self.context_marker_label(2, c.latest_start, c.latest_length);
         self.sink = Sink::Trailing(CONTEXT_SIZE);
@@ -208,7 +251,7 @@ impl<'a> Merger<'a> {
             format!("{prefix} {label} ({},{length})", start + 1)
         };
         self.write_raw(text.as_bytes());
-        self.write_raw(self.marker_eol);
+        self.write_raw_eol();
     }
 
     fn conflict(&mut self, c: &Chunk, resolved: Option<&[Chunk]>) {
@@ -243,7 +286,7 @@ impl<'a> Merger<'a> {
                     self.output_hunk(0, c.original_start, c.original_length);
                 }
                 self.write_raw(b"=======");
-                self.write_raw(self.marker_eol);
+                self.write_raw_eol();
                 self.output_hunk(2, c.latest_start, c.latest_length);
                 self.marker(2, ">>>>>>>");
             }
@@ -277,15 +320,34 @@ impl<'a> Merger<'a> {
 /// Merges `mine` and `theirs` relative to `base` with Subversion's diff3 semantics.
 ///
 /// Works on bytes; line terminators are `\n`, `\r\n` or `\r`.  Conflict marker lines use the
-/// EOL style of `mine` (falling back to `\n`).
-#[must_use]
-pub fn merge3(base: &[u8], mine: &[u8], theirs: &[u8], opts: &MergeOptions) -> MergeResult {
-    let chunks = diff3(base, mine, theirs, &opts.diff);
+/// EOL style of `mine` (falling back to `opts.fallback_eol`).
+///
+/// `conflicts.is_empty()` is the "merged cleanly" signal; regions are also recorded for the
+/// `Modified` and `Latest` styles, which resolve them without markers.
+///
+/// Memory is roughly 100 bytes per line over all three inputs plus the buffers themselves, and
+/// time grows with size times edit distance.  Callers should run this on a blocking thread and
+/// skip auto-merge (report a conflict instead) above a size threshold such as 64 MB or about
+/// one million lines, or set `opts.diff.max_cost`.
+///
+/// # Errors
+/// [`DiffError::Cancelled`] when `cancel` fires, [`DiffError::TooComplex`] when
+/// `opts.diff.max_cost` is exceeded.
+pub fn merge3(
+    base: &[u8],
+    mine: &[u8],
+    theirs: &[u8],
+    opts: &MergeOptions,
+    cancel: &CancelToken,
+) -> Result<MergeResult, DiffError> {
+    let mut ctl = Ctl::new(cancel, opts.diff.max_cost);
+    let chunks = diff3(base, mine, theirs, &opts.diff, &mut ctl)?;
     let mut m = Merger {
         lines: [split_lines(base), split_lines(mine), split_lines(theirs)],
         current: [0; 3],
         out: Vec::with_capacity(mine.len().max(theirs.len())),
-        marker_eol: detect_eol(mine).unwrap_or(b"\n"),
+        marker_eol: detect_eol(mine)
+            .map_or_else(|| opts.fallback_eol.as_bytes().to_vec(), <[u8]>::to_vec),
         labels: [
             opts.labels.mine.clone(),
             opts.labels.base.clone(),
@@ -301,10 +363,10 @@ pub fn merge3(base: &[u8], mine: &[u8], theirs: &[u8], opts: &MergeOptions) -> M
         m.start_saver();
     }
     m.output_chunks(&chunks, true);
-    MergeResult {
+    Ok(MergeResult {
         text: m.out,
         conflicts: m.conflicts,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -318,13 +380,21 @@ mod tests {
                 base: ".r1".into(),
                 theirs: ".r2".into(),
             },
+            fallback_eol: "\n".into(),
             ..MergeOptions::default()
         }
     }
 
+    fn run(base: &[u8], mine: &[u8], theirs: &[u8], o: &MergeOptions) -> MergeResult {
+        merge3(base, mine, theirs, o, &CancelToken::new()).unwrap_or_else(|_| MergeResult {
+            text: Vec::new(),
+            conflicts: Vec::new(),
+        })
+    }
+
     #[test]
     fn clean_merge_of_distant_edits() {
-        let r = merge3(
+        let r = run(
             b"a\nb\nc\nd\ne\nf\ng\n",
             b"A\nb\nc\nd\ne\nf\ng\n",
             b"a\nb\nc\nd\ne\nf\nG\n",
@@ -336,7 +406,7 @@ mod tests {
 
     #[test]
     fn conflict_markers() {
-        let r = merge3(b"a\n", b"b\n", b"c\n", &opts());
+        let r = run(b"a\n", b"b\n", b"c\n", &opts());
         assert_eq!(
             String::from_utf8_lossy(&r.text),
             "<<<<<<< .mine\nb\n||||||| .r1\na\n=======\nc\n>>>>>>> .r2\n"
@@ -346,7 +416,7 @@ mod tests {
 
     #[test]
     fn identical_edits_do_not_conflict() {
-        let r = merge3(b"a\nb\n", b"a\nX\n", b"a\nX\n", &opts());
+        let r = run(b"a\nb\n", b"a\nX\n", b"a\nX\n", &opts());
         assert_eq!(r.text, b"a\nX\n");
         assert!(r.conflicts.is_empty());
     }

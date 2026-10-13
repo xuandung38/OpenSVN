@@ -1,12 +1,11 @@
-//! Display-oriented diff hunks (histogram diff via `imara-diff`).
-//!
-//! Hunk boundaries may differ from `svn diff`; use [`crate::unified`] when byte-exact svn
-//! output matters.  The content (which lines are removed/inserted) is always a valid edit
-//! script from `old` to `new`.
+//! Display-oriented diff hunks, built on the same LCS engine (with identical prefix/suffix
+//! skipping) as [`crate::unified`], so UI and `svn diff` agree on what changed.
 
-use imara_diff::{Algorithm, Diff, InternedInput};
+use svn_types::CancelToken;
 
-use crate::tokens::{DiffOptions, normalize, split_lines};
+use crate::control::{Ctl, DiffError};
+use crate::diff_core::{ChunkKind, diff2};
+use crate::tokens::{DiffOptions, split_lines};
 
 /// Options for [`diff`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,52 +61,53 @@ pub struct Hunk {
 }
 
 /// Computes display hunks between `old` and `new`.
-#[must_use]
-pub fn diff(old: &[u8], new: &[u8], opts: &DisplayOptions) -> Vec<Hunk> {
+///
+/// # Errors
+/// [`DiffError::Cancelled`] when `cancel` fires, [`DiffError::TooComplex`] when
+/// `opts.diff.max_cost` is exceeded.
+pub fn diff(
+    old: &[u8],
+    new: &[u8],
+    opts: &DisplayOptions,
+    cancel: &CancelToken,
+) -> Result<Vec<Hunk>, DiffError> {
     let old_lines = split_lines(old);
     let new_lines = split_lines(new);
-    let mut input = InternedInput::default();
-    input.update_before(
-        old_lines
-            .iter()
-            .map(|l| normalize(l, &opts.diff).into_owned()),
-    );
-    input.update_after(
-        new_lines
-            .iter()
-            .map(|l| normalize(l, &opts.diff).into_owned()),
-    );
-    let algo = Diff::compute(Algorithm::Histogram, &input);
+    let mut ctl = Ctl::new(cancel, opts.diff.max_cost);
 
-    // Raw changes as (old range, new range).
-    let changes: Vec<(usize, usize, usize, usize)> = algo
-        .hunks()
-        .map(|h| {
+    // Raw changes as (old start, old end, new start, new end), 0-based half-open.
+    let to_usize = |v: i64| usize::try_from(v).unwrap_or(0);
+    let changes: Vec<(usize, usize, usize, usize)> = diff2(old, new, &opts.diff, &mut ctl)?
+        .iter()
+        .filter(|c| c.kind == ChunkKind::DiffModified)
+        .map(|c| {
+            let (os, ms) = (to_usize(c.original_start), to_usize(c.modified_start));
             (
-                h.before.start as usize,
-                h.before.end as usize,
-                h.after.start as usize,
-                h.after.end as usize,
+                os,
+                os + to_usize(c.original_length),
+                ms,
+                ms + to_usize(c.modified_length),
             )
         })
         .collect();
 
+    let gap = opts.context.saturating_mul(2);
     let mut hunks: Vec<Hunk> = Vec::new();
     let mut i = 0;
     while i < changes.len() {
         // Group changes whose gap is within 2 * context.
         let mut j = i;
-        while j + 1 < changes.len() && changes[j + 1].0 - changes[j].1 <= 2 * opts.context {
+        while j + 1 < changes.len() && changes[j + 1].0 - changes[j].1 <= gap {
             j += 1;
         }
         let (first, last) = (changes[i], changes[j]);
         let lead = opts.context.min(first.0);
-        let trail = opts.context.min(old_lines.len() - last.1);
+        let trail = opts.context.min(old_lines.len().saturating_sub(last.1));
         let old_start = first.0 - lead;
         let new_start = first.2 - lead;
         let mut lines = Vec::new();
         let ctx = |lines: &mut Vec<HunkLine>, from: usize, to: usize| {
-            for l in &old_lines[from..to] {
+            for l in old_lines.get(from..to).unwrap_or(&[]) {
                 lines.push(HunkLine {
                     kind: LineKind::Context,
                     text: l.to_vec(),
@@ -120,13 +120,13 @@ pub fn diff(old: &[u8], new: &[u8], opts: &DisplayOptions) -> Vec<Hunk> {
             if k > i {
                 ctx(&mut lines, changes[k - 1].1, os);
             }
-            for l in &old_lines[os..oe] {
+            for l in old_lines.get(os..oe).unwrap_or(&[]) {
                 lines.push(HunkLine {
                     kind: LineKind::Removed,
                     text: l.to_vec(),
                 });
             }
-            for l in &new_lines[ns..ne] {
+            for l in new_lines.get(ns..ne).unwrap_or(&[]) {
                 lines.push(HunkLine {
                     kind: LineKind::Added,
                     text: l.to_vec(),
@@ -145,5 +145,5 @@ pub fn diff(old: &[u8], new: &[u8], opts: &DisplayOptions) -> Vec<Hunk> {
         });
         i = j + 1;
     }
-    hunks
+    Ok(hunks)
 }

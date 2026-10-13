@@ -1,3 +1,24 @@
+// ====================================================================
+//    Licensed to the Apache Software Foundation (ASF) under one
+//    or more contributor license agreements.  See the NOTICE file
+//    distributed with this work for additional information
+//    regarding copyright ownership.  The ASF licenses this file
+//    to you under the Apache License, Version 2.0 (the
+//    "License"); you may not use this file except in compliance
+//    with the License.  You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+//    Unless required by applicable law or agreed to in writing,
+//    software distributed under the License is distributed on an
+//    "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+//    KIND, either express or implied.  See the License for the
+//    specific language governing permissions and limitations
+//    under the License.
+// ====================================================================
+//
+// Modified by OpenSVN: ported from token.c, diff.c and diff3.c onto index arenas; in-memory buffers; cancellation/budget checks.
+
 //! Two-way diff (`svn_diff_diff_2`) and three-way diff (`svn_diff_diff3_2`) producing chunk
 //! lists with libsvn_diff semantics.
 //!
@@ -8,6 +29,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::affix::{Affix, find_affix};
+use crate::control::{Ctl, DiffError};
 use crate::lcs::{LcsArena, NIL, Pos, lcs, new_pos, token_counts};
 use crate::tokens::{DiffOptions, normalize, split_lines};
 
@@ -150,7 +172,12 @@ fn diff_from_lcs(
 }
 
 /// Computes the two-way diff between `original` and `modified`.
-pub(crate) fn diff2(original: &[u8], modified: &[u8], opts: &DiffOptions) -> Vec<Chunk> {
+pub(crate) fn diff2(
+    original: &[u8],
+    modified: &[u8],
+    opts: &DiffOptions,
+    ctl: &mut Ctl<'_>,
+) -> Result<Vec<Chunk>, DiffError> {
     let mut p = prepare(&[original, modified], opts);
     let mut arena = LcsArena::new();
     let head = lcs(
@@ -162,8 +189,9 @@ pub(crate) fn diff2(original: &[u8], modified: &[u8], opts: &DiffOptions) -> Vec
         &p.counts[1],
         p.affix.prefix_lines,
         p.affix.suffix_lines,
-    );
-    diff_from_lcs(&arena, &p.pos, head, 1, 1, true)
+        ctl,
+    )?;
+    Ok(diff_from_lcs(&arena, &p.pos, head, 1, 1, true))
 }
 
 /// `svn_diff__resolve_conflict`: refines a conflicting hunk by diffing the two changed
@@ -174,7 +202,8 @@ fn resolve_conflict(
     list1: &mut usize,
     list2: &mut usize,
     counts_len: usize,
-) {
+    ctl: &mut Ctl<'_>,
+) -> Result<(), DiffError> {
     let mut modified_start = hunk.modified_start + 1;
     let mut latest_start = hunk.latest_start + 1;
     let mut modified_length = hunk.modified_length;
@@ -202,7 +231,7 @@ fn resolve_conflict(
         hunk.resolved = Vec::new();
         *list1 = p0;
         *list2 = p1;
-        return;
+        return Ok(());
     }
     hunk.kind = ChunkKind::Conflict;
 
@@ -254,7 +283,7 @@ fn resolve_conflict(
 
     let c0 = token_counts(pos, ring0, counts_len);
     let c1 = token_counts(pos, ring1, counts_len);
-    let sub = lcs(pos, &mut arena, ring0, ring1, &c0, &c1, 0, 0);
+    let sub = lcs(pos, &mut arena, ring0, ring1, &c0, &c1, 0, 0, ctl)?;
     if tail_link == NIL {
         head = sub;
     } else {
@@ -300,6 +329,7 @@ fn resolve_conflict(
         cur = node.next;
     }
     hunk.resolved = resolved;
+    Ok(())
 }
 
 /// Computes the three-way diff of `original`, `modified` (mine) and `latest` (theirs).
@@ -308,7 +338,8 @@ pub(crate) fn diff3(
     modified: &[u8],
     latest: &[u8],
     opts: &DiffOptions,
-) -> Vec<Chunk> {
+    ctl: &mut Ctl<'_>,
+) -> Result<Vec<Chunk>, DiffError> {
     let mut p = prepare(&[original, modified, latest], opts);
     let prefix_lines = p.affix.prefix_lines;
     let suffix_lines = p.affix.suffix_lines;
@@ -322,7 +353,8 @@ pub(crate) fn diff3(
         &p.counts[1],
         prefix_lines,
         suffix_lines,
-    );
+        ctl,
+    )?;
     let mut lcs_ol = lcs(
         &mut p.pos,
         &mut arena_ol,
@@ -332,7 +364,8 @@ pub(crate) fn diff3(
         &p.counts[2],
         prefix_lines,
         suffix_lines,
-    );
+        ctl,
+    )?;
 
     let mut out: Vec<Chunk> = Vec::new();
     let mut original_start: i64 = 1;
@@ -370,6 +403,7 @@ pub(crate) fn diff3(
     }
 
     loop {
+        ctl.tick(1)?;
         // Find the sync points.
         let original_sync;
         loop {
@@ -426,7 +460,7 @@ pub(crate) fn diff3(
             );
             if is_modified && is_latest {
                 let [l1, l2] = &mut list;
-                resolve_conflict(&mut chunk, &mut p.pos, l1, l2, p.num_tokens);
+                resolve_conflict(&mut chunk, &mut p.pos, l1, l2, p.num_tokens, ctl)?;
             } else if is_latest {
                 chunk.kind = ChunkKind::DiffLatest;
             }
@@ -469,5 +503,5 @@ pub(crate) fn diff3(
             lcs_ol = ol!().next;
         }
     }
-    out
+    Ok(out)
 }
