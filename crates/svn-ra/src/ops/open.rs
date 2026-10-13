@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use svn_protocol::options_request;
 use svn_ra_api::{
     CommitEditor, CommitObserver, FileMeta, FileRevHandler, LogRequest, RaSession, ReportFn,
-    UpdateRequest,
+    TxnAbort, UpdateRequest,
 };
 use svn_types::{
     CancelToken, DeltaEditor, Depth, DirEntry, ErrorCode, LockInfo, LogEntry, NodeKind, PropChange,
@@ -262,5 +262,9 @@ impl RaSession for HttpRaSession {
 
     async fn abort_txn(&self, txn_name: &str) -> Result<()> {
         commit::abort_txn(&self.wire, txn_name).await
+    }
+
+    async fn abort_txn_checked(&self, txn_name: &str, cancel: &CancelToken) -> Result<TxnAbort> {
+        commit::abort_txn_checked(&self.wire, txn_name, cancel).await
     }
 }

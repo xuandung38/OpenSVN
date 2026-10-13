@@ -153,6 +153,7 @@ pub struct LockInfo {
     pub owner: String,
     pub comment: Option<String>,
     pub created_at: String,
+    /// Always `None` over IPC: engines keep lock tokens to themselves (ownership is `mine`).
     pub token: Option<String>,
     pub mine: bool,
 }
@@ -330,11 +331,15 @@ pub struct FileDiff {
     pub mime: Option<String>,
     pub left: Option<TextSide>,
     pub right: Option<TextSide>,
-    /// Only hunks are sent when the file is too large.
+    /// Optional, only with `too_large`: an engine may send the changed hunks of a file too large
+    /// to send in full, or nothing (the real engine does not read a side over 5 MB at all). The
+    /// UI shows the large-file banner (load full / external tool) whenever `too_large` is set and
+    /// there are no text sides, with or without hunks.
     pub hunks: Option<Vec<Hunk>>,
     pub prop_changes: Vec<PropChange>,
     pub image: Option<ImageSides>,
-    /// Text larger than 5 MB: ask before loading.
+    /// Text larger than 5 MB: ask before loading (`force_large`). `left`/`right` are omitted;
+    /// property rows are still sent.
     pub too_large: Option<bool>,
     /// The two sides differ too much to diff within the display budget
     /// (`svn_diff::DISPLAY_MAX_COST`). `left`/`right` are then omitted and the UI offers the
