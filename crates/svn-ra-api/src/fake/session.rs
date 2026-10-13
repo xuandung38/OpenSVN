@@ -9,14 +9,16 @@ use bytes::Bytes;
 use secrecy::ExposeSecret;
 use svn_types::{
     CancelToken, DeltaEditor, Depth, DirEntry, ErrorCode, LockInfo, LogEntry, NodeKind, OriginKey,
-    PropChange, RelPath, RepoUrl, Result, Revnum, SvnError, TxDeltaWindow,
+    PropChange, RelPath, RepoDisplayPath, RepoUrl, Result, Revnum, SvnError, TxDeltaWindow,
 };
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use super::commit_editor::FakeCommitEditor;
 use super::repo::{FakeChange, NodeData, RepoState, children};
 use super::update_drive::drive_update;
-use crate::auth::{AuthMethod, AuthPrompter, CredentialRequest, PromptReason};
+use crate::auth::{
+    AuthMethod, AuthPrompter, CertDecision, CertInfo, CredentialRequest, PromptReason,
+};
 use crate::commit::{CommitEditor, CommitObserver};
 use crate::session::{
     FileMeta, FileRev, FileRevHandler, LogRequest, RaSession, ReportFn, UpdateRequest,
@@ -39,6 +41,7 @@ pub struct FakeRaSession {
     pub(super) state: Arc<Mutex<RepoState>>,
     max_open_files: usize,
     required: Option<Arc<Required>>,
+    cert_check: Option<(CertInfo, Arc<dyn AuthPrompter>)>,
     authenticated: Arc<AtomicBool>,
     lock_counter: Arc<AtomicU64>,
 }
@@ -53,6 +56,7 @@ impl FakeRaSession {
             state: Arc::new(Mutex::new(RepoState::new())),
             max_open_files: 4,
             required: None,
+            cert_check: None,
             authenticated: Arc::new(AtomicBool::new(false)),
             lock_counter: Arc::new(AtomicU64::new(1)),
         })
@@ -85,6 +89,20 @@ impl FakeRaSession {
             password: password.to_owned(),
             prompter,
         }));
+        self
+    }
+
+    /// Makes `ensure_authenticated` first ask `prompter` to decide about `cert`, like the
+    /// transport does after a failed TLS verification. The fake checks the decision against the
+    /// failure (`CertDecision::is_valid_for`) and refuses with `TlsUntrusted` unless the
+    /// decision is valid and not `Reject`.
+    #[must_use]
+    pub fn with_certificate_check(
+        mut self,
+        cert: CertInfo,
+        prompter: Arc<dyn AuthPrompter>,
+    ) -> Self {
+        self.cert_check = Some((cert, prompter));
         self
     }
 
@@ -135,6 +153,18 @@ impl RaSession for FakeRaSession {
 
     async fn ensure_authenticated(&self, cancel: &CancelToken) -> Result<()> {
         cancel.check()?;
+        if let Some((cert, prompter)) = &self.cert_check {
+            let decision = prompter.confirm_certificate(cert).await;
+            // The prompt can take a long time: honor cancellation before acting on the answer.
+            cancel.check()?;
+            // The prompter (the UI) is not a trust boundary: validate against the real failure.
+            if decision == CertDecision::Reject || !decision.is_valid_for(&cert.failure) {
+                return Err(SvnError::new(
+                    ErrorCode::TlsUntrusted,
+                    "certificate not trusted",
+                ));
+            }
+        }
         let Some(req) = &self.required else {
             return Ok(());
         };
@@ -311,10 +341,12 @@ impl RaSession for FakeRaSession {
                 let touched = req.paths.is_empty()
                     || req.paths.iter().any(|p| {
                         p.is_root()
-                            || rv
-                                .changed
-                                .iter()
-                                .any(|c| c.path.trim_start_matches('/').starts_with(p.as_str()))
+                            || rv.changed.iter().any(|c| {
+                                c.path
+                                    .as_str()
+                                    .trim_start_matches('/')
+                                    .starts_with(p.as_str())
+                            })
                     });
                 if !touched {
                     continue;
@@ -362,7 +394,7 @@ impl RaSession for FakeRaSession {
             })
             .map(|(_, l)| l.clone())
             .collect();
-        v.sort_by(|a, b| a.path.cmp(&b.path));
+        v.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
         Ok(v)
     }
 
@@ -401,7 +433,7 @@ impl RaSession for FakeRaSession {
         }
         let n = self.lock_counter.fetch_add(1, Ordering::SeqCst);
         let lock = LockInfo {
-            path: format!("/{path}"),
+            path: RepoDisplayPath::from_rel(path),
             token: format!("opaquelocktoken:{}-{n}", self.uuid),
             owner: self.user.clone(),
             comment: comment.map(str::to_owned),
@@ -449,7 +481,7 @@ impl RaSession for FakeRaSession {
             let st = self.guard();
             let lo = start.map_or(1, |r| r.0.max(1));
             let hi = end.unwrap_or_else(|| st.youngest()).0.min(st.youngest().0);
-            let abs = format!("/{path}");
+            let abs = RepoDisplayPath::from_rel(path);
             let mut v = Vec::new();
             for n in lo..=hi {
                 let Some(rv) = usize::try_from(n).ok().and_then(|i| st.revisions.get(i)) else {

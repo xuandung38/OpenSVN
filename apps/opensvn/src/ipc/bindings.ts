@@ -6,13 +6,22 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 /** Commands */
 export const commands = {
 	wcList: () => typedError<WorkingCopy[], AppError>(__TAURI_INVOKE("wc_list")),
-	wcAddExisting: (path: string) => typedError<WorkingCopy, AppError>(__TAURI_INVOKE("wc_add_existing", { path })),
+	wcAddExisting: (grant: PathGrantId) => typedError<WorkingCopy, AppError>(__TAURI_INVOKE("wc_add_existing", { grant })),
 	wcRemove: (wcId: WcId) => typedError<null, AppError>(__TAURI_INVOKE("wc_remove", { wcId })),
 	wcRename: (wcId: WcId, name: string) => typedError<null, AppError>(__TAURI_INVOKE("wc_rename", { wcId, name })),
+	/**
+	 *  Opens a working copy and refreshes its status in the background; the Changes tab shows the
+	 *  cached snapshot immediately and receives the delta as `wc://status-changed`.
+	 */
 	wcOpen: (wcId: WcId) => typedError<WorkingCopy, AppError>(__TAURI_INVOKE("wc_open", { wcId })),
 	wcClose: (wcId: WcId) => typedError<null, AppError>(__TAURI_INVOKE("wc_close", { wcId })),
+	/**
+	 *  Status from the engine, or from the snapshot while a write is running on the working copy
+	 *  (the running operation in `op_list` is the "updating" indicator).
+	 */
 	statusGet: (request: StatusGetRequest) => typedError<FileStatus[], AppError>(__TAURI_INVOKE("status_get", { request })),
 	statusRefresh: (wcId: WcId, paths: string[] | null) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("status_refresh", { wcId, paths })),
+	/**  Checks the repository for newer revisions; announces `wc://incoming` and updates remote info. */
 	statusRemote: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("status_remote", { wcId })),
 	diffGet: (request: DiffGetRequest) => typedError<FileDiff, AppError>(__TAURI_INVOKE("diff_get", { request })),
 	changelistSet: (wcId: WcId, paths: string[], name: string | null) => typedError<null, AppError>(__TAURI_INVOKE("changelist_set", { wcId, paths, name })),
@@ -34,8 +43,9 @@ export const commands = {
 	repoInfo: (url: string) => typedError<RepoInfo, AppError>(__TAURI_INVOKE("repo_info", { url })),
 	repoList: (url: string, rev: number | null) => typedError<RepoEntry[], AppError>(__TAURI_INVOKE("repo_list", { url, rev })),
 	repoCat: (url: string, rev: number | null) => typedError<TextSide, AppError>(__TAURI_INVOKE("repo_cat", { url, rev })),
-	repoSave: (url: string, rev: number | null, saveTo: string) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("repo_save", { url, rev, saveTo })),
+	repoSave: (url: string, rev: number | null, grant: PathGrantId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("repo_save", { url, rev, grant })),
 	logGet: (request: LogGetRequest) => typedError<LogPage, AppError>(__TAURI_INVOKE("log_get", { request })),
+	/**  Result arrives as `op://finished` with a blame payload. */
 	blameGet: (url: string, rev: number | null) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("blame_get", { url, rev })),
 	lock: (request: LockRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("lock", { request })),
 	unlock: (request: UnlockRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("unlock", { request })),
@@ -51,7 +61,25 @@ export const commands = {
 	accountsList: () => typedError<Account[], AppError>(__TAURI_INVOKE("accounts_list")),
 	accountsSignOut: (realm: string) => typedError<null, AppError>(__TAURI_INVOKE("accounts_sign_out", { realm })),
 	settingsGet: () => typedError<Settings, AppError>(__TAURI_INVOKE("settings_get")),
+	/**  Applies a partial update. Keys that launch programs are refused here; see `program_choose`. */
 	settingsSet: (patch: SettingsPatch_Deserialize) => typedError<Settings, AppError>(__TAURI_INVOKE("settings_set", { patch })),
+	/**
+	 *  Opens a native file picker for a program setting and stores it after the user confirmed the
+	 *  command line in a native dialog. Returns the settings unchanged when the user cancels.
+	 */
+	programChoose: (kind: ProgramKind, args: string[]) => typedError<Settings, AppError>(__TAURI_INVOKE("program_choose", { kind, args })),
+	/**  Removes a configured program. */
+	programClear: (kind: ProgramKind) => typedError<Settings, AppError>(__TAURI_INVOKE("program_clear", { kind })),
+	/**
+	 *  Shows a native file or folder dialog and returns an opaque, single-use grant for the choice
+	 *  (`None` when cancelled). Commands that need a local path outside a working copy take the grant.
+	 */
+	pathPick: (request: PickRequest) => typedError<{
+	id: PathGrantId,
+	/**  Last path component, for display only. */
+	displayName: string,
+	kind: GrantKind,
+} | null, AppError>(__TAURI_INVOKE("path_pick", { request })),
 	revealInOs: (wcId: WcId, path: string) => typedError<null, AppError>(__TAURI_INVOKE("reveal_in_os", { wcId, path })),
 	openExternal: (wcId: WcId, path: string, openWith: OpenWith) => typedError<null, AppError>(__TAURI_INVOKE("open_external", { wcId, path, openWith })),
 	diagnosticsExport: () => typedError<string, AppError>(__TAURI_INVOKE("diagnostics_export")),
@@ -60,6 +88,7 @@ export const commands = {
 /** Events */
 export const events = {
 	authPrompt: makeEvent<AuthPromptEvent>("auth://prompt"),
+	fsDropped: makeEvent<FsDropped>("fs://dropped"),
 	opFailed: makeEvent<OpFailedEvent>("op://failed"),
 	opFinished: makeEvent<OpFinishedEvent>("op://finished"),
 	opProgress: makeEvent<OpProgress>("op://progress"),
@@ -92,20 +121,44 @@ export type AppError = {
 	actions: ErrorAction[] | null,
 };
 
+/**  Authentication scheme the server offers. */
+export type AuthMethodKind = "basic" | 
+/**  Single sign-on (Windows SSO / Kerberos). */
+"negotiate";
+
 export type AuthPrompt = {
 	requestId: string,
 	kind: AuthPromptKind,
 	realm: string,
 	url: string,
 	cert: CertSummary | null,
+	/**  Why credentials are requested; `None` for certificate prompts. */
+	reason: AuthPromptReason | null,
+	/**  Failed tries so far in this prompt sequence, starting at 0. */
+	attempt: number,
+	/**  Schemes the server offers (credentials prompts; empty for certificate prompts). */
+	offered: AuthMethodKind[],
 };
 
 export type AuthPromptEvent = AuthPrompt;
 
 export type AuthPromptKind = "credentials" | "certificate";
 
+/**  Why credentials are requested (mirrors the transport's prompt reason). */
+export type AuthPromptReason = 
+/**  First request for this origin. */
+"initial" | 
+/**  The server rejected the credentials just offered. */
+"rejected" | 
+/**  Single sign-on failed; the user may fall back to a password. */
+"negotiate-failed" | 
+/**  Stored credentials are no longer valid. */
+"expired";
+
 /**  Response of `auth_respond`'s input (answer to an `auth://prompt`). */
-export type AuthResponse = { kind: "credentials"; username: string; password: SecretText; save: boolean } | { kind: "certificate"; decision: CertDecision } | { kind: "cancel" };
+export type AuthResponse = { kind: "credentials"; username: string; password: SecretText; save: boolean } | { kind: "certificate"; decision: CertDecision } | 
+/**  Use single sign-on (only valid when the prompt offered `negotiate`). */
+{ kind: "negotiate" } | { kind: "cancel" };
 
 export type Banner = {
 	wcId: WcId,
@@ -139,7 +192,15 @@ export type BranchRef = {
 	url: string,
 };
 
-export type CertDecision = "reject" | "acceptOnce" | "acceptAlways";
+export type CertDecision = "reject" | "acceptOnce" | "acceptAlways" | "replacePin";
+
+/**  Why a TLS certificate needs a decision (`unknown-issuer`, ..., `{ changed: { oldSha256, newSha256 } }`). */
+export type CertFailureInfo = "unknown-issuer" | "self-signed" | "expired" | "not-yet-valid" | "hostname-mismatch" | "revoked" | 
+/**  A different certificate than the pinned one; "always trust" is not offered. */
+({ changed: {
+	oldSha256: string,
+	newSha256: string,
+} }) & { other?: never } | ({ other: string }) & { changed?: never };
 
 export type CertSummary = {
 	host: string,
@@ -148,7 +209,7 @@ export type CertSummary = {
 	notBefore: string,
 	notAfter: string,
 	sha256: string,
-	failure: string,
+	failure: CertFailureInfo,
 };
 
 export type ChangeAction = "A" | "M" | "D" | "R";
@@ -164,7 +225,8 @@ export type ChangedPath = {
 
 export type CheckoutRequest = {
 	url: string,
-	path: string,
+	/**  Folder chosen with `path_pick`; becomes the working copy root. */
+	dest: PathGrantId,
 	rev: Rev | null,
 	depth: Depth,
 	sparse: SparseEntry[] | null,
@@ -219,13 +281,30 @@ export type DiffTarget =
 /**  rev-1 <-> rev */
 { kind: "rev"; url: string; rev: Rev } | { kind: "range"; url: string; from: Rev; to: Rev } | { kind: "wcVsRev"; wcId: WcId; path: string; rev: Rev };
 
+/**  Drop position in logical pixels relative to the window. */
+export type DropPosition = {
+	x: number,
+	y: number,
+};
+
+/**
+ *  Payload of `fs://dropped`: one grant per dropped item. The raw paths of a drop are never
+ *  delivered to the WebView.
+ */
+export type DroppedPaths = {
+	grants: PathGrantInfo[],
+	position: DropPosition,
+};
+
 export type EntryKind = "file" | "dir";
 
 export type Eol = "LF" | "CRLF" | "mixed";
 
 export type ErrorAction = "retry" | "update" | "cleanup" | "sign-in" | "trust-cert" | "open-lock-dialog" | "open-settings";
 
-export type ErrorCode = "network" | "timeout" | "auth-required" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | "internal";
+export type ErrorCode = "network" | "timeout" | "auth-required" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "hook-failed" | "repository-moved" | "pristine-not-hydrated" | "wc-invalid-operation" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | 
+/**  The request itself is invalid (bad value, expired path grant, unsupported option). */
+"invalid-argument" | "internal";
 
 export type ExternalDiffTool = {
 	path: string,
@@ -263,6 +342,11 @@ export type FileStatus = {
 	binary: boolean,
 	size: Size | null,
 };
+
+export type FsDropped = DroppedPaths;
+
+/**  What a grant points at. */
+export type GrantKind = "file" | "dir";
 
 export type Hunk = {
 	oldStart: number,
@@ -398,9 +482,41 @@ export type OperationHandle = {
 	title: string,
 };
 
-export type OperationKind = "checkout" | "update" | "switch" | "commit" | "revert" | "cleanup" | "lock" | "unlock" | "status-remote" | "log" | "blame" | "remote-edit" | "set-depth" | "upgrade" | "merge";
+export type OperationKind = "checkout" | "update" | "switch" | "commit" | "revert" | "cleanup" | "lock" | "unlock" | "status-remote" | "log" | "blame" | "remote-edit" | "set-depth" | "upgrade" | "merge" | 
+/**  Local status rescan (`status_refresh`). */
+"status-refresh" | "add" | "delete" | "move" | 
+/**  Server-side copy (`copy_location`). */
+"copy" | 
+/**  Download of a repository file to disk (`repo_save`). */
+"save";
+
+/**  Opaque, single-use, time-limited handle to a path chosen by the user. */
+export type PathGrantId = string;
+
+/**  A grant as shown to the UI: the id and a label to display. The real path is not included. */
+export type PathGrantInfo = {
+	id: PathGrantId,
+	/**  Last path component, for display only. */
+	displayName: string,
+	kind: GrantKind,
+};
 
 export type PathKind = "file" | "dir" | "unknown";
+
+/**  Which native dialog `path_pick` shows. */
+export type PickRequest = 
+/**  Choose an existing folder (checkout target, working copy to add). */
+{ kind: "folder"; title: string | null } | 
+/**  Choose an existing file (upload source). */
+{ kind: "file"; title: string | null } | 
+/**  Choose where to save a new file (`repo_save`). */
+{ kind: "saveFile"; suggestedName: string; title: string | null };
+
+/**
+ *  Settings that make the app launch a program. They are changed only through a native file
+ *  picker plus confirmation (`program_choose` / `program_clear`), never through `settings_set`.
+ */
+export type ProgramKind = "diff-tool" | "merge-tool" | "editor" | "terminal";
 
 export type Progress = {
 	opId: OpId,
@@ -428,7 +544,9 @@ export type RemoteEditRequest = {
 };
 
 /**  One operation of `remote_edit`. */
-export type RemoteOp = { kind: "mkdir"; url: string } | { kind: "rename"; fromUrl: string; toUrl: string } | { kind: "delete"; url: string } | { kind: "copy"; fromUrl: string; fromRev: Rev | null; toUrl: string } | { kind: "upload"; url: string; localPath: string };
+export type RemoteOp = { kind: "mkdir"; url: string } | { kind: "rename"; fromUrl: string; toUrl: string } | { kind: "delete"; url: string } | { kind: "copy"; fromUrl: string; fromRev: Rev | null; toUrl: string } | { kind: "upload"; url: string; 
+/**  File chosen with `path_pick`. */
+source: PathGrantId };
 
 export type RemoteStatus = {
 	outOfDate: boolean,
@@ -505,12 +623,28 @@ export type Settings = {
 	"integrations.webFileUrl": string,
 	/**  `null` when no external tool is configured. */
 	"diff.externalTool": ExternalDiffTool | null,
+	/**  Same shape as `diff.externalTool`. `null` when not configured. */
+	"diff.mergeTool": ExternalDiffTool | null,
+	/**  Editor used by "open with editor". `null` when not configured. */
+	"tools.editor": ExternalDiffTool | null,
+	/**  Terminal used by "open terminal here". `null` when not configured. */
+	"tools.terminal": ExternalDiffTool | null,
 };
 
-/**  Partial update: absent keys are left unchanged; nullable keys accept `null` to clear. */
+/**
+ *  Partial update: absent keys are left unchanged; nullable keys accept `null` to clear.
+ * 
+ *  Unknown keys are rejected, so a program-launching key (which exists in [`Settings`] only)
+ *  fails loudly instead of being ignored.
+ */
 export type SettingsPatch = SettingsPatch_Serialize | SettingsPatch_Deserialize;
 
-/**  Partial update: absent keys are left unchanged; nullable keys accept `null` to clear. */
+/**
+ *  Partial update: absent keys are left unchanged; nullable keys accept `null` to clear.
+ * 
+ *  Unknown keys are rejected, so a program-launching key (which exists in [`Settings`] only)
+ *  fails loudly instead of being ignored.
+ */
 export type SettingsPatch_Deserialize = {
 	"general.checkoutRoot"?: string | null,
 	"general.checkIntervalMin"?: number | null,
@@ -527,11 +661,14 @@ export type SettingsPatch_Deserialize = {
 	"cache.maxSizeGb"?: number | null,
 	"integrations.webRevisionUrl"?: string | null,
 	"integrations.webFileUrl"?: string | null,
-	/**  `null` when no external tool is configured. */
-	"diff.externalTool"?: ExternalDiffTool | null,
 };
 
-/**  Partial update: absent keys are left unchanged; nullable keys accept `null` to clear. */
+/**
+ *  Partial update: absent keys are left unchanged; nullable keys accept `null` to clear.
+ * 
+ *  Unknown keys are rejected, so a program-launching key (which exists in [`Settings`] only)
+ *  fails loudly instead of being ignored.
+ */
 export type SettingsPatch_Serialize = {
 	"general.checkoutRoot"?: string | null,
 	"general.checkIntervalMin"?: number | null,
@@ -548,8 +685,6 @@ export type SettingsPatch_Serialize = {
 	"cache.maxSizeGb"?: number | null,
 	"integrations.webRevisionUrl"?: string | null,
 	"integrations.webFileUrl"?: string | null,
-	/**  `null` when no external tool is configured. */
-	"diff.externalTool"?: ExternalDiffTool | null,
 };
 
 /**  Byte size; same wire/TS treatment as [`Rev`]. */
