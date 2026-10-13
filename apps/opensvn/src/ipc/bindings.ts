@@ -61,8 +61,11 @@ export const commands = {
 	accountsList: () => typedError<Account[], AppError>(__TAURI_INVOKE("accounts_list")),
 	accountsSignOut: (realm: string) => typedError<null, AppError>(__TAURI_INVOKE("accounts_sign_out", { realm })),
 	settingsGet: () => typedError<Settings, AppError>(__TAURI_INVOKE("settings_get")),
-	/**  Applies a partial update. Keys that launch programs are refused here; see `program_choose`. */
-	settingsSet: (patch: SettingsPatch_Deserialize) => typedError<Settings, AppError>(__TAURI_INVOKE("settings_set", { patch })),
+	/**
+	 *  Applies a partial update. `SettingsPatch` has no program-launching keys (see `program_choose`);
+	 *  a patch containing one is refused with `invalid-argument`.
+	 */
+	settingsSet: (patch: PatchArg_Deserialize) => typedError<Settings, AppError>(__TAURI_INVOKE("settings_set", { patch })),
 	/**
 	 *  Opens a native file picker for a program setting and stores it after the user confirmed the
 	 *  command line in a native dialog. Returns the settings unchanged when the user cancels.
@@ -545,6 +548,27 @@ export type OperationKind = "checkout" | "update" | "switch" | "commit" | "rever
 "copy" | 
 /**  Download of a repository file to disk (`repo_save`). */
 "save";
+
+/**
+ *  Argument of `settings_set`. Exported to TypeScript as `SettingsPatch`, but a patch that does not
+ *  parse (unknown or program-launching key, wrong type) is reported as an `AppError` by the
+ *  command instead of Tauri's raw string error.
+ */
+export type PatchArg = PatchArg_Serialize | PatchArg_Deserialize;
+
+/**
+ *  Argument of `settings_set`. Exported to TypeScript as `SettingsPatch`, but a patch that does not
+ *  parse (unknown or program-launching key, wrong type) is reported as an `AppError` by the
+ *  command instead of Tauri's raw string error.
+ */
+export type PatchArg_Deserialize = SettingsPatch_Deserialize;
+
+/**
+ *  Argument of `settings_set`. Exported to TypeScript as `SettingsPatch`, but a patch that does not
+ *  parse (unknown or program-launching key, wrong type) is reported as an `AppError` by the
+ *  command instead of Tauri's raw string error.
+ */
+export type PatchArg_Serialize = SettingsPatch_Serialize;
 
 /**  Opaque, single-use, time-limited handle to a path chosen by the user. */
 export type PathGrantId = string;

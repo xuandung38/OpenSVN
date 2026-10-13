@@ -50,14 +50,41 @@ pub async fn settings_get(state: State<'_, AppState>) -> Result<Settings, AppErr
     guard(async { Ok(state.settings.get()) }).await
 }
 
-/// Applies a partial update. Keys that launch programs are refused here; see `program_choose`.
+/// Argument of `settings_set`. Exported to TypeScript as `SettingsPatch`, but a patch that does not
+/// parse (unknown or program-launching key, wrong type) is reported as an `AppError` by the
+/// command instead of Tauri's raw string error.
+#[derive(Debug, specta::Type)]
+#[specta(transparent)]
+pub struct PatchArg(#[specta(type = SettingsPatch)] Result<SettingsPatch, String>);
+
+impl From<SettingsPatch> for PatchArg {
+    fn from(p: SettingsPatch) -> Self {
+        Self(Ok(p))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PatchArg {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(d)?;
+        Ok(Self(serde_json::from_value(raw).map_err(|e| e.to_string())))
+    }
+}
+
+/// Applies a partial update. `SettingsPatch` has no program-launching keys (see `program_choose`);
+/// a patch containing one is refused with `invalid-argument`.
 #[tauri::command]
 #[specta::specta]
 pub async fn settings_set(
     state: State<'_, AppState>,
-    patch: SettingsPatch,
+    patch: PatchArg,
 ) -> Result<Settings, AppError> {
-    guard(async { state.settings.apply_patch(&patch) }).await
+    guard(async {
+        let patch = patch.0.map_err(|why| {
+            crate::errors::invalid_argument("The settings change is not valid.").with_detail(why)
+        })?;
+        state.settings.apply_patch(&patch)
+    })
+    .await
 }
 
 /// Opens a native file picker for a program setting and stores it after the user confirmed the

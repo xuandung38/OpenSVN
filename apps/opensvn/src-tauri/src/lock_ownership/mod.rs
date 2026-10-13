@@ -4,8 +4,8 @@
 //!
 //! A row stores the owner's pid, the boot session and the process start time. Classification:
 //! * no live process with that pid: **dead**;
-//! * the pid is alive but its start time differs from the recorded one: the pid was recycled,
-//!   **dead**;
+//! * the pid is alive but its start stamp differs from the recorded one: the pid was recycled,
+//!   **dead** (on Linux the stamp is ticks since boot, so a clock change never moves it);
 //! * the pid is alive with a matching start time and the same boot session: **alive**;
 //! * the pid is alive with a matching start time but the boot id differs (a clock change moved a
 //!   derived boot time): **unknown**. Unknown owners are never taken over automatically.
@@ -24,9 +24,6 @@ use svn_types::{ErrorCode, LockOwnershipStore, RelPath, Result, SvnError};
 use crate::db::{AppDb, DbError, now_iso};
 
 pub use alive_probe::{OsProcessProbe, ProcessProbe, current_boot_id};
-
-/// Allowed difference between a recorded and a current process start time (seconds).
-const START_TIME_TOLERANCE_SECS: u64 = 2;
 
 /// State of a recorded lock owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +73,7 @@ impl SqliteLockOwnership {
         let Some(now_start) = self.probe.start_time(pid) else {
             return Liveness::Dead;
         };
-        if recorded_start.is_some_and(|s| s.abs_diff(now_start) > START_TIME_TOLERANCE_SECS) {
+        if recorded_start.is_some_and(|s| !self.probe.same_process(s, now_start)) {
             return Liveness::Dead; // the pid now belongs to a different process
         }
         if self.probe.same_boot(boot_id) {

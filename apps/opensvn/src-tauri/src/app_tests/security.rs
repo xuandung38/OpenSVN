@@ -286,7 +286,12 @@ async fn settings_set_over_ipc_refuses_program_keys() {
         serde_json::json!({"patch": {"tools.terminal": {"path": "/bin/sh", "args": []}}}),
     )
     .unwrap_err();
-    assert!(err.to_string().contains("unknown field"), "{err}");
+    // reported as an AppError, not Tauri's raw string
+    assert_eq!(err["code"], "invalid-argument", "{err}");
+    assert!(
+        err["detail"].as_str().unwrap().contains("unknown field"),
+        "{err}"
+    );
     let ok = invoke(
         &main,
         "settings_set",
