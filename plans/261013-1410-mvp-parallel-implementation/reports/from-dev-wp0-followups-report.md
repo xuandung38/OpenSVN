@@ -66,3 +66,50 @@ from the #91 review.
 - The app's `AuthBroker` still uses the default no-op hook. WP2 implements it.
 - `compat_read` against a real mod_dav_svn was not re-run. This change does not touch the wire
   paths it exercises, apart from the stricter root checks.
+
+## Round 2: review of #96 (REQUEST_CHANGES)
+
+- **B1. Refuse, don't normalise.** New `svn_protocol::check_server_url_text`, in
+  `caps/url_builder.rs`, refuses any server-supplied root, stub, href or `Location` that contains
+  `\`, any control character (tab, CR and LF are what the WHATWG parser deletes) or a percent
+  escape of a control character or of `\` (`%00`–`%1F`, `%7F`, `%5C`). The raw-path helper
+  `raw_path_of` ends the authority at `/` or `\`.
+  - `check_server_path_text` adds the dot-segment scan on top of that. Three places use it:
+    - `options.rs::stub_path`;
+    - `UrlBuilder::new`, for every stub. `Capabilities` has public fields, so the stubs can
+      bypass `from_options_response`; the session URL's own path is exempt;
+    - `accept_href`, which also covers propfind, update and `repo_path_of_url`. In listings
+      these entries are still quarantined.
+  - Redirect `Location` handling uses it too: `svn-ra` `redirect_target` and `svn-protocol`
+    `moved_error`.
+  - Tests:
+    - the reviewer's four values, plus CR, LF, NUL, DEL, `%09`, `%0d`, `%0A`, `%00`, `%7F`,
+      `%5C`/`%5c`, and `%5C` in the host;
+    - every stub header;
+    - `UrlBuilder::new` given unsafe stubs directly;
+    - ordinary escapes such as `%20`, `%E2%82%AC` and `%2F` are still accepted;
+    - new hostile hrefs;
+    - `moved_error`;
+    - a same-origin redirect test (`redirects_with_parser_rewritten_locations_are_refused`).
+  - New evil fixtures: `options/root-abs-backslash-dotdot`, `root-tab-dotdot`,
+    `root-encoded-tab-dotdot`, `root-encoded-backslash`, `me-tab` (76 cases). Rerunning
+    `generate.py` gives no diff.
+  - With `options.rs` reverted, the new `caps_and_urls` tests fail. `evil_server` still passes
+    then, because the `UrlBuilder::new` re-check rejects the values.
+- **N1.** The `stored_credentials_rejected` doc now covers the Apache 2.4 case: a user with a
+  valid password who fails a `Require` rule also gets 401, unless the server sets
+  `AuthzSendForbiddenOnFailure On`. The app must therefore mark the password stale (stop
+  auto-offering it, keep it stored, re-prompt), not delete it.
+- **N3.** The hook is no longer raced against `cancel`. A pending cancel takes effect right after
+  the hook returns. If the future is dropped mid-hook, a drop guard (`RestoreFromStored`) sets
+  `from_stored` again. The new test `cancel_during_the_rejection_hook_keeps_the_report` covers
+  interactive and unattended mode; it fails with `or_cancel` put back.
+
+### Gates, round 2 (after merging origin/main c482176; own target dir, `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0`)
+
+- `cargo fmt --all --check`: pass
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: pass
+- `cargo clippy -p opensvn --features real-engine --all-targets --locked -- -D warnings`: pass
+- `cargo test --workspace --locked`: 1251 passed, 0 failed, 21 ignored
+- `cargo test -p opensvn --features opensvn/real-engine --locked`: 338 passed, 0 failed
+- `python3 fixtures/evil/generate.py`: 76 cases, no diff
