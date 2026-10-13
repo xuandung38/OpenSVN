@@ -5,88 +5,97 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
+
+use opensvn_svn_oracle::{MinVersion, Oracle};
 
 use rusqlite::{Connection, OpenFlags};
 
-/// Returns the `svn --version --quiet` output, or `None` when svn is not installed.
-pub fn svn_version() -> Option<String> {
-    let out = Command::new("svn")
-        .args(["--version", "--quiet"])
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+/// The shared native-svn oracle (`tests/svn-oracle`): isolated svn config, one version check,
+/// `OPENSVN_REQUIRE_SVN` handling. Resolved once per test process and per minimum version.
+fn resolved(min: MinVersion) -> Option<&'static Oracle> {
+    static V1_14: OnceLock<Option<Oracle>> = OnceLock::new();
+    static V1_15: OnceLock<Option<Oracle>> = OnceLock::new();
+    let cell = match min {
+        MinVersion::V1_14 => &V1_14,
+        MinVersion::V1_15 => &V1_15,
+    };
+    cell.get_or_init(|| Oracle::resolve(min).unwrap_or_else(|e| panic!("svn oracle: {e}")))
+        .as_ref()
 }
 
-/// True when the installed svn is 1.15 or newer (needed for `--compatible-version=1.15`).
-pub fn svn_is_1_15_or_newer() -> bool {
-    svn_version().is_some_and(|v| {
-        let mut parts = v.split('.').filter_map(|p| p.parse::<u32>().ok());
-        let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
-        (major, minor) >= (1, 15)
-    })
+/// The oracle for tests that already passed one of the `skip_without_*` guards.
+fn oracle() -> &'static Oracle {
+    resolved(MinVersion::V1_14)
+        .or_else(|| resolved(MinVersion::V1_15))
+        .expect("svn oracle (call skip_without_svn first)")
 }
 
-/// Skips (returns `true`) when svn is older than 1.15, with a visible note.
+/// `(major, minor, patch)` of the installed svn, or `None` when it is unavailable.
+pub fn svn_version() -> Option<(u32, u32, u32)> {
+    resolved(MinVersion::V1_14).map(Oracle::version)
+}
+
+/// Skips (returns `true`) when svn is older than 1.15, with a visible note. With
+/// `OPENSVN_REQUIRE_SVN=1` a missing svn fails the test; an old one always skips.
 pub fn skip_without_svn_1_15() -> bool {
-    if skip_without_svn() {
-        return true;
-    }
-    if !svn_is_1_15_or_newer() {
-        eprintln!("svn older than 1.15: skipping format 32 test");
-        return true;
-    }
-    false
-}
-
-/// True when `OPENSVN_REQUIRE_SVN=1`: CI images that must have svn >= 1.15 turn a missing or old
-/// svn into a test failure instead of a silent skip.
-fn svn_required() -> bool {
-    std::env::var("OPENSVN_REQUIRE_SVN").is_ok_and(|v| !v.is_empty() && v != "0")
+    resolved(MinVersion::V1_15).is_none()
 }
 
 /// Skips (returns `true`) when svn is unavailable so the suite still passes on machines without
-/// Subversion. With `OPENSVN_REQUIRE_SVN=1` a missing or pre-1.15 svn fails the test instead.
+/// Subversion. With `OPENSVN_REQUIRE_SVN=1` a missing svn fails the test instead.
 pub fn skip_without_svn() -> bool {
-    if svn_required() {
-        assert!(
-            svn_is_1_15_or_newer(),
-            "OPENSVN_REQUIRE_SVN is set but svn >= 1.15 is not available (found {:?})",
-            svn_version()
-        );
-        return false;
-    }
-    if svn_version().is_none() {
-        eprintln!("svn not found on PATH: skipping svn-backed test");
-        return true;
-    }
-    false
+    resolved(MinVersion::V1_14).is_none()
 }
 
-fn run(cmd: &str, args: &[&str], cwd: &Path) {
-    let out = Command::new(cmd)
+/// `svn` (isolated config, non-interactive) running in `cwd`; add arguments and run it.
+pub fn svn_command(cwd: &Path) -> Command {
+    let mut cmd = oracle().svn();
+    cmd.current_dir(cwd);
+    cmd
+}
+
+/// `file://` URL of a local repository path. The single place that builds it; the oracle crate
+/// will provide `file_url` and this function then forwards to it.
+pub fn file_url(repo: &Path) -> String {
+    let abs = repo.canonicalize().expect("canonicalize");
+    format!("file://{}", abs.display())
+}
+
+fn run(mut cmd: Command, what: &str, args: &[&str]) {
+    let out = cmd
         .args(args)
-        .current_dir(cwd)
         .output()
-        .unwrap_or_else(|e| panic!("cannot run {cmd}: {e}"));
+        .unwrap_or_else(|e| panic!("cannot run {what}: {e}"));
     assert!(
         out.status.success(),
-        "{cmd} {args:?} failed: {}",
+        "{what} {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
 
 /// Creates a repository under `base/repo` and returns its `file://` URL.
 pub fn create_repo(base: &Path) -> String {
-    run("svnadmin", &["create", "repo"], base);
-    let abs = base.canonicalize().expect("canonicalize").join("repo");
-    format!("file://{}", abs.display())
+    let mut cmd = oracle().svnadmin();
+    cmd.current_dir(base);
+    run(cmd, "svnadmin", &["create", "repo"]);
+    file_url(&base.join("repo"))
 }
 
 /// Runs `svn <args>` in `cwd`, panicking with stderr on failure.
 pub fn svn(cwd: &Path, args: &[&str]) {
-    run("svn", args, cwd);
+    run(svn_command(cwd), "svn", args);
+}
+
+/// Runs `svn <args>` in `cwd` and returns its stdout, panicking with stderr on failure.
+pub fn svn_stdout(cwd: &Path, args: &[&str]) -> String {
+    let out = svn_command(cwd).args(args).output().expect("run svn");
+    assert!(
+        out.status.success(),
+        "svn {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 /// Checks out `url` into `base/<name>`; extra args (e.g. `--compatible-version=1.15`) are
@@ -96,7 +105,7 @@ pub fn checkout(base: &Path, url: &str, name: &str, extra: &[&str]) -> PathBuf {
     args.extend_from_slice(extra);
     args.push(url);
     args.push(name);
-    run("svn", &args, base);
+    run(svn_command(base), "svn", &args);
     base.join(name)
 }
 
@@ -401,9 +410,8 @@ pub fn dump_rows(wc: &Path) -> Vec<String> {
 
 /// `svn status --xml -v` with the working copy path masked, for cross-checking two copies.
 pub fn status_xml(wc: &Path) -> String {
-    let out = Command::new("svn")
+    let out = svn_command(wc)
         .args(["status", "--xml", "-v"])
-        .current_dir(wc)
         .output()
         .expect("svn status");
     assert!(
