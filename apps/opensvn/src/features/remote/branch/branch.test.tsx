@@ -2,9 +2,9 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, expect, test } from "vitest";
 import { mockCalls } from "../../../ipc/mock/adapter";
-import { MOCK_REPO_ROOT } from "../../../ipc/mock/remote-data";
+import { MOCK_REPO_ROOT, MOCK_REPO_UUID } from "../../../ipc/mock/remote-data";
 import { renderApp, setupMockIpc, stubLayout } from "../../../test-utils";
-import { parseRevision, projectRootOf, refTargetUrl } from "./branch-model";
+import { type LayoutContext, parseRevision, projectRootOf, refContainerUrl } from "./branch-model";
 import { CreateBranchTagDialog } from "./create-branch-tag-dialog";
 
 beforeAll(async () => {
@@ -19,11 +19,7 @@ test("projectRootOf finds the part before trunk/branches/tags", () => {
   expect(projectRootOf("https://h/r/docs/plan")).toBeNull();
 });
 
-test("refTargetUrl and parseRevision", () => {
-  expect(refTargetUrl("https://h/r", "branch", "feature a")).toBe(
-    "https://h/r/branches/feature%20a",
-  );
-  expect(refTargetUrl("https://h/r", "tag", "v1")).toBe("https://h/r/tags/v1");
+test("parseRevision", () => {
   expect(parseRevision("")).toBeNull();
   expect(parseRevision("head")).toBeNull();
   expect(parseRevision("42")).toBe(42);
@@ -39,6 +35,8 @@ test("layout mode: new branch copies trunk to branches/<name> with the default m
       sourceUrl={`${MOCK_REPO_ROOT}/trunk`}
       sourceName="trunk"
       repoRootUrl={MOCK_REPO_ROOT}
+      repoUuid={MOCK_REPO_UUID}
+      currentRefUrl={`${MOCK_REPO_ROOT}/trunk`}
       wcId="wc-main"
       onClose={() => undefined}
     />,
@@ -68,6 +66,8 @@ test("tag mode has no switch option; a specific revision must be a number", asyn
       sourceUrl={`${MOCK_REPO_ROOT}/trunk`}
       sourceName="trunk"
       repoRootUrl={MOCK_REPO_ROOT}
+      repoUuid={MOCK_REPO_UUID}
+      currentRefUrl={`${MOCK_REPO_ROOT}/trunk`}
       wcId="wc-main"
       onClose={() => undefined}
     />,
@@ -91,6 +91,8 @@ test("location mode (no layout): copy to a chosen folder, source wc copy is not 
       sourceUrl={`${MOCK_REPO_ROOT}/trunk/src`}
       sourceName="src"
       repoRootUrl={MOCK_REPO_ROOT}
+      repoUuid={MOCK_REPO_UUID}
+      currentRefUrl={`${MOCK_REPO_ROOT}/trunk`}
       wcId={null}
       onClose={() => undefined}
     />,
@@ -111,19 +113,53 @@ test("location mode (no layout): copy to a chosen folder, source wc copy is not 
   });
 });
 
-test("a branch request on a non-layout URL falls back to location mode with an explanation", async () => {
-  renderApp(
-    <CreateBranchTagDialog
-      kind="branch"
-      sourceUrl="https://h/r/docs/plan"
-      sourceName="plan"
-      repoRootUrl="https://h/r"
-      wcId={null}
-      onClose={() => undefined}
-    />,
-  );
-  const dialog = await screen.findByRole("dialog", { name: "Copy to new location", hidden: true });
+const ROOT = "https://h/r";
+const ctx = (over: Partial<LayoutContext>): LayoutContext => ({
+  layout: null,
+  nodes: [],
+  currentRefUrl: null,
+  sourceUrl: `${ROOT}/docs/plan`,
+  repoRootUrl: ROOT,
+  ...over,
+});
+
+test("refContainerUrl prefers backend nodes, then the configured layout, then the naming convention", () => {
+  // Existing branch node: its parent folder is the container, whatever it is called.
   expect(
-    within(dialog).getByText(/does not follow the trunk\/branches\/tags convention/),
-  ).toBeTruthy();
+    refContainerUrl(
+      "branch",
+      ctx({ nodes: [{ kind: "branch", name: "x", url: `${ROOT}/Dev/Forks/x` }] }),
+    ),
+  ).toBe(`${ROOT}/Dev/Forks`);
+  // Custom layout without any branch yet.
+  const layout = {
+    mode: "custom" as const,
+    trunk: "/{project}/Main",
+    branches: ["/{project}/Forks"],
+    tags: ["/{project}/Releases"],
+  };
+  expect(refContainerUrl("branch", ctx({ layout, currentRefUrl: `${ROOT}/Game/Main` }))).toBe(
+    `${ROOT}/Game/Forks`,
+  );
+  expect(refContainerUrl("tag", ctx({ layout, currentRefUrl: `${ROOT}/Game/Forks/x` }))).toBe(
+    `${ROOT}/Game/Releases`,
+  );
+  // Fixed (no {project}) custom pattern.
+  expect(
+    refContainerUrl(
+      "branch",
+      ctx({ layout: { mode: "custom", trunk: "/Main", branches: ["/Forks"], tags: ["/Rel"] } }),
+    ),
+  ).toBe(`${ROOT}/Forks`);
+  // Cannot tell the project: no destination, caller falls back to Location mode.
+  expect(refContainerUrl("branch", ctx({ layout }))).toBeNull();
+  // Layout "none" never yields a container, even if the URL looks conventional.
+  expect(
+    refContainerUrl("branch", ctx({ layout: { mode: "none" }, sourceUrl: `${ROOT}/trunk` })),
+  ).toBeNull();
+  // Auto layout, nothing known yet: naming convention fallback.
+  expect(refContainerUrl("branch", ctx({ sourceUrl: `${ROOT}/P/trunk` }))).toBe(
+    `${ROOT}/P/branches`,
+  );
+  expect(refContainerUrl("tag", ctx({ sourceUrl: `${ROOT}/docs/plan` }))).toBeNull();
 });

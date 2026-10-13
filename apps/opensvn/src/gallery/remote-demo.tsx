@@ -40,11 +40,6 @@ export function RemoteDemo() {
       <Button onClick={() => cred({ reason: "initial", attempt: 0, offered: ["basic"] })}>
         Sign in
       </Button>
-      <Button
-        onClick={() => cred({ reason: "initial", attempt: 0, offered: ["negotiate", "basic"] })}
-      >
-        Sign in (SSO)
-      </Button>
       <Button onClick={() => cred({ reason: "rejected", attempt: 2, offered: ["basic"] })}>
         Sign in (rejected 2)
       </Button>

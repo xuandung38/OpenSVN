@@ -172,6 +172,14 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     ]),
   accountsSignOut: () => ok(null),
   authRespond: (requestId: string, response: unknown) => {
+    // Like serde: only variants of the contract are accepted (credentials, certificate, cancel).
+    const kind = (response as { kind?: unknown } | null)?.kind;
+    if (kind !== "credentials" && kind !== "certificate" && kind !== "cancel") {
+      return errCode(
+        "internal",
+        `invalid args \`response\` for command \`auth_respond\`: unknown variant ${String(kind)}`,
+      );
+    }
     mockAuthResponses.push({ requestId, response });
     return ok(null);
   },

@@ -60,7 +60,22 @@ export function useHistory(target: LogTarget, filters: HistoryFilters) {
       ),
     getNextPageParam: (last) => last.nextRev ?? undefined,
   });
-  const all = useMemo(() => q.data?.pages.flatMap((p) => p.entries) ?? [], [q.data]);
+  // Paging contract: `nextRev` is the first revision not yet returned; the next request sends it as
+  // `fromRev` (inclusive, newest first). Dedupe by `rev` anyway so an off-by-one on the backend can
+  // never show a revision twice.
+  const all = useMemo(() => {
+    const seen = new Set<number>();
+    const out: LogEntry[] = [];
+    for (const page of q.data?.pages ?? []) {
+      for (const e of page.entries) {
+        if (!seen.has(e.rev)) {
+          seen.add(e.rev);
+          out.push(e);
+        }
+      }
+    }
+    return out;
+  }, [q.data]);
   const authors = useMemo(
     () => [...new Set(all.map((e) => e.author).filter((a): a is string => !!a))].sort(),
     [all],

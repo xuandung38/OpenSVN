@@ -56,8 +56,10 @@ const syntheticDir = (url: string): RepoEntry => ({
  */
 export function BrowseScreen({
   repoRootUrl,
+  repoUuid,
   startUrl,
   wcId,
+  currentRefUrl,
   layoutRepo,
   location,
   onShowLog,
@@ -65,8 +67,11 @@ export function BrowseScreen({
   onOpenRevision,
 }: {
   repoRootUrl: string;
+  repoUuid: string;
   startUrl: string;
   wcId: string | null;
+  /** The working copy's current branch/tag URL, if the repo has a layout. */
+  currentRefUrl: string | null;
   /** True when the repository follows trunk/branches/tags (enables branch/tag creation wording). */
   layoutRepo: boolean;
   location?: BrowseLocation | null;
@@ -292,6 +297,8 @@ export function BrowseScreen({
           sourceUrl={dialog.sourceUrl}
           sourceName={dialog.sourceName}
           repoRootUrl={repoRootUrl}
+          repoUuid={repoUuid}
+          currentRefUrl={currentRefUrl}
           wcId={wcId}
           onClose={() => setDialog(null)}
         />

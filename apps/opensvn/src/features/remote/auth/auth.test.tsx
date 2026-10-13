@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { act } from "react";
 import { beforeAll, expect, test, vi } from "vitest";
-import { mockAuthResponses, mockEmit } from "../../../ipc/mock/adapter";
+import { mockAuthResponses, mockCalls, mockEmit } from "../../../ipc/mock/adapter";
 import { I18nProvider } from "../../../lib/i18n/i18n";
 import { renderApp, setupMockIpc } from "../../../test-utils";
 import {
@@ -13,7 +13,7 @@ import {
   originOf,
   parseCertFailure,
 } from "./auth-model";
-import { AuthPromptHost } from "./auth-prompt-host";
+import { AuthPromptHost, answerAuthPrompt } from "./auth-prompt-host";
 import { SignInDialog } from "./sign-in-dialog";
 import { TrustCertDialog } from "./trust-cert-dialog";
 
@@ -100,7 +100,6 @@ test("sign-in shows full origin, realm and the rejection counter", () => {
     <SignInDialog
       prompt={creds({ reason: "rejected", attempt: 2 })}
       onSubmit={() => undefined}
-      onSso={() => undefined}
       onCancel={() => undefined}
     />,
   );
@@ -112,14 +111,7 @@ test("sign-in shows full origin, realm and the rejection counter", () => {
 test("sign-in submits trimmed username and the password, then Cancel answers cancel", async () => {
   const onSubmit = vi.fn();
   const onCancel = vi.fn();
-  withLang(
-    <SignInDialog
-      prompt={creds()}
-      onSubmit={onSubmit}
-      onSso={() => undefined}
-      onCancel={onCancel}
-    />,
-  );
+  withLang(<SignInDialog prompt={creds()} onSubmit={onSubmit} onCancel={onCancel} />);
   const signIn = screen.getByRole("button", { name: "Sign in" });
   expect((signIn as HTMLButtonElement).disabled).toBe(true);
   await userEvent.type(screen.getByLabelText("Username"), "  dev ");
@@ -131,35 +123,16 @@ test("sign-in submits trimmed username and the password, then Cancel answers can
   expect(onCancel).toHaveBeenCalled();
 });
 
-test("SSO is offered only when the server offered negotiate; other account reveals the form", async () => {
-  const onSso = vi.fn();
+test("Windows SSO is not offered even when the server offered negotiate (no contract variant yet)", () => {
   withLang(
     <SignInDialog
       prompt={creds({ offered: ["negotiate", "basic"] })}
       onSubmit={() => undefined}
-      onSso={onSso}
       onCancel={() => undefined}
     />,
   );
-  expect(screen.queryByLabelText("Username")).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "Sign in with Windows account" }));
-  expect(onSso).toHaveBeenCalled();
-  await userEvent.click(screen.getByRole("button", { name: "Use another account" }));
+  expect(screen.queryByRole("button", { name: /Windows/ })).toBeNull();
   expect(screen.getByLabelText("Username")).toBeTruthy();
-});
-
-test("no SSO button after a failed negotiate attempt, and none without negotiate", () => {
-  const { unmount } = withLang(
-    <SignInDialog
-      prompt={creds({ reason: "negotiate-failed", offered: ["negotiate", "basic"] })}
-      onSubmit={() => undefined}
-      onSso={() => undefined}
-      onCancel={() => undefined}
-    />,
-  );
-  expect(screen.queryByRole("button", { name: "Sign in with Windows account" })).toBeNull();
-  expect(screen.getByLabelText("Username")).toBeTruthy();
-  unmount();
 });
 
 test("after 3 rejected attempts submitting is blocked", async () => {
@@ -167,7 +140,6 @@ test("after 3 rejected attempts submitting is blocked", async () => {
     <SignInDialog
       prompt={creds({ reason: "rejected", attempt: 3 })}
       onSubmit={() => undefined}
-      onSso={() => undefined}
       onCancel={() => undefined}
     />,
   );
@@ -231,7 +203,6 @@ test("hostile realm and subject render as text", () => {
     <SignInDialog
       prompt={creds({ realm: "<img src=x onerror=alert(1)>" })}
       onSubmit={() => undefined}
-      onSso={() => undefined}
       onCancel={() => undefined}
     />,
   );
@@ -287,4 +258,24 @@ test("host: certificate decisions map to auth_respond", async () => {
     kind: "certificate",
     decision: "acceptOnce",
   });
+});
+
+test("auth_respond failure sends a compensating cancel so the engine is not left waiting", async () => {
+  mockCalls.length = 0;
+  // The mock rejects unknown variants like serde does for a variant that is not in the contract.
+  const err = await answerAuthPrompt("fail-1", { kind: "negotiate" } as never);
+  expect(err?.message).toMatch(/invalid args/);
+  const sent = mockCalls.filter((c) => c.name === "authRespond").map((c) => c.args);
+  expect(sent).toEqual([
+    ["fail-1", { kind: "negotiate" }],
+    ["fail-1", { kind: "cancel" }],
+  ]);
+  expect(mockAuthResponses.at(-1)).toEqual({ requestId: "fail-1", response: { kind: "cancel" } });
+});
+
+test("a failing cancel is not retried forever and the first error is returned", async () => {
+  mockCalls.length = 0;
+  const ok = await answerAuthPrompt("ok-1", { kind: "cancel" });
+  expect(ok).toBeNull();
+  expect(mockCalls.filter((c) => c.name === "authRespond")).toHaveLength(1);
 });

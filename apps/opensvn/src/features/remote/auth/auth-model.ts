@@ -84,7 +84,6 @@ function asMethods(v: unknown): AuthMethod[] {
  * `offered`, structured `cert.failure`) fall back to safe defaults so older backends still work.
  */
 export function normalizeAuthPrompt(p: AuthPromptEvent): AuthPromptInfo | null {
-  const raw = p as unknown as Record<string, unknown>;
   if (p.kind === "certificate") {
     if (!p.cert) return null;
     const { host, subject, issuer, notBefore, notAfter, sha256 } = p.cert;
@@ -97,7 +96,15 @@ export function normalizeAuthPrompt(p: AuthPromptEvent): AuthPromptInfo | null {
       failure: parseCertFailure((p.cert as unknown as Record<string, unknown>).failure),
     };
   }
-  const reason = raw.reason;
+  // The contract (doc 03, PR #43) adds reason/attempt/offered to `auth://prompt`, but the generated
+  // bindings do not carry them yet. Each @ts-expect-error below starts failing the moment
+  // `gen:ipc` emits the field: then delete this fallback and read the typed properties directly.
+  // @ts-expect-error -- remove once bindings carry `reason` (contract #43)
+  const reason: unknown = p.reason;
+  // @ts-expect-error -- remove once bindings carry `attempt` (contract #43)
+  const attempt: unknown = p.attempt;
+  // @ts-expect-error -- remove once bindings carry `offered` (contract #43)
+  const offered: unknown = p.offered;
   return {
     kind: "credentials",
     requestId: p.requestId,
@@ -107,8 +114,8 @@ export function normalizeAuthPrompt(p: AuthPromptEvent): AuthPromptInfo | null {
       reason === "rejected" || reason === "negotiate-failed" || reason === "initial"
         ? reason
         : "initial",
-    attempt: typeof raw.attempt === "number" && raw.attempt >= 0 ? raw.attempt : 0,
-    offered: asMethods(raw.offered),
+    attempt: typeof attempt === "number" && attempt >= 0 ? attempt : 0,
+    offered: asMethods(offered),
   };
 }
 

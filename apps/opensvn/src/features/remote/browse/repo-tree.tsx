@@ -1,6 +1,6 @@
 import { useQueries } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Folder } from "lucide-react";
-import { type KeyboardEvent, useId, useMemo, useState } from "react";
+import { type KeyboardEvent, useEffect, useId, useMemo, useState } from "react";
 import { SafeText } from "../../../components/ui/safe-text";
 import type { RepoEntry } from "../../../ipc/bindings";
 import { ipc, unwrap } from "../../../ipc/client";
@@ -70,7 +70,8 @@ export function RepoTree({
 }) {
   const baseId = useId();
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set([rootUrl]));
-  const [active, setActive] = useState(0);
+  // Active row is tracked by folder URL, not index: expanding/collapsing or refetching shifts indices.
+  const [activeUrl, setActiveUrl] = useState(rootUrl);
 
   const expandedUrls = useMemo(() => [...expanded], [expanded]);
   const results = useQueries({
@@ -89,7 +90,18 @@ export function RepoTree({
     return flattenTree(rootUrl, expanded, lists);
   }, [rootUrl, expanded, expandedUrls, results]);
 
-  const activeIdx = Math.min(active, rows.length - 1);
+  const found = rows.findIndex((r) => r.url === activeUrl);
+  const activeIdx = found >= 0 ? found : 0;
+  const setActive = (i: number) => {
+    const r = rows[Math.max(0, Math.min(rows.length - 1, i))];
+    if (r) setActiveUrl(r.url);
+  };
+
+  // Keep the active row visible while moving with the keyboard.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: scroll only when the active row changes
+  useEffect(() => {
+    document.getElementById(`${baseId}-${activeIdx}`)?.scrollIntoView?.({ block: "nearest" });
+  }, [activeUrl]);
   const toggle = (url: string, open: boolean) =>
     setExpanded((cur) => {
       const next = new Set(cur);
@@ -103,10 +115,10 @@ export function RepoTree({
     if (!row) return;
     switch (e.key) {
       case "ArrowDown":
-        setActive(Math.min(rows.length - 1, activeIdx + 1));
+        setActive(activeIdx + 1);
         break;
       case "ArrowUp":
-        setActive(Math.max(0, activeIdx - 1));
+        setActive(activeIdx - 1);
         break;
       case "Home":
         setActive(0);
@@ -116,7 +128,7 @@ export function RepoTree({
         break;
       case "ArrowRight":
         if (!row.expanded) toggle(row.url, true);
-        else setActive(Math.min(rows.length - 1, activeIdx + 1));
+        else setActive(activeIdx + 1);
         break;
       case "ArrowLeft":
         if (row.expanded) toggle(row.url, false);
@@ -152,7 +164,7 @@ export function RepoTree({
           aria-expanded={r.expanded}
           aria-selected={r.url === selectedUrl}
           onClick={() => {
-            setActive(i);
+            setActiveUrl(r.url);
             onSelect(r.url);
           }}
           className={cn(

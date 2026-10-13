@@ -8,8 +8,30 @@ import { certDecisionFor } from "./cert-decision";
 import { SignInDialog } from "./sign-in-dialog";
 import { TrustCertDialog } from "./trust-cert-dialog";
 
-/** Wire form of the Windows SSO answer; see contract request (AuthResponse has no negotiate variant yet). */
-type AuthResponseWithSso = AuthResponse | { kind: "negotiate" };
+/**
+ * Sends the answer; if `auth_respond` fails for any reason, sends `cancel` for the same request so
+ * the engine (which pauses the operation until it gets an answer) is never left waiting.
+ * Returns the first error, or null on success.
+ */
+export async function answerAuthPrompt(
+  requestId: string,
+  response: AuthResponse,
+): Promise<Error | null> {
+  try {
+    await unwrap(ipc().commands.authRespond(requestId, response));
+    return null;
+  } catch (e) {
+    const first = e instanceof Error ? e : new Error(String(e));
+    if (response.kind !== "cancel") {
+      try {
+        await unwrap(ipc().commands.authRespond(requestId, { kind: "cancel" }));
+      } catch {
+        // Nothing more to do: the backend rejected both answers; the first error is reported.
+      }
+    }
+    return first;
+  }
+}
 
 /**
  * Listens for `auth://prompt` and shows one dialog at a time (the engine pauses the operation until
@@ -31,13 +53,10 @@ export function AuthPromptHost() {
   );
 
   const respond = useCallback(
-    async (requestId: string, response: AuthResponseWithSso) => {
+    async (requestId: string, response: AuthResponse) => {
       setQueue((q) => q.filter((p) => p.requestId !== requestId));
-      try {
-        await unwrap(ipc().commands.authRespond(requestId, response as AuthResponse));
-      } catch (e) {
-        toast.show(e instanceof Error ? e.message : String(e));
-      }
+      const err = await answerAuthPrompt(requestId, response);
+      if (err) toast.show(err.message);
     },
     [toast],
   );
@@ -50,7 +69,6 @@ export function AuthPromptHost() {
         key={current.requestId}
         prompt={current}
         onSubmit={(a) => void respond(current.requestId, { kind: "credentials", ...a })}
-        onSso={() => void respond(current.requestId, { kind: "negotiate" })}
         onCancel={() => void respond(current.requestId, { kind: "cancel" })}
       />
     );

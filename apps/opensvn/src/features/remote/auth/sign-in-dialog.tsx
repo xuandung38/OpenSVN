@@ -16,24 +16,24 @@ export interface CredentialsAnswer {
 
 /**
  * Sign-in dialog (doc 01, 4.3). Shows the full origin (host:port), the realm and a reason-specific
- * message; offers Windows SSO when the server offered Negotiate. Esc/Close cancels the operation.
+ * message. Esc/Close cancels the operation.
+ *
+ * Windows SSO ("Sign in with Windows account") is intentionally not offered yet: `AuthResponse` has
+ * no `negotiate` variant, and an unknown variant is rejected while the engine keeps waiting. Add the
+ * button when the contract gains that variant (`offered` already carries the methods).
  */
 export function SignInDialog({
   prompt,
   onSubmit,
-  onSso,
   onCancel,
 }: {
   prompt: CredentialsPromptInfo;
   onSubmit: (a: CredentialsAnswer) => void;
-  onSso: () => void;
   onCancel: () => void;
 }) {
   const t = useT(authStrings);
   const c = useT(commonStrings);
   const formId = useId();
-  const canSso = prompt.offered.includes("negotiate") && prompt.reason !== "negotiate-failed";
-  const [useOther, setUseOther] = useState(!canSso);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [save, setSave] = useState(true);
@@ -62,11 +62,9 @@ export function SignInDialog({
       footer={
         <>
           <Button onClick={onCancel}>{c("cancel")}</Button>
-          {useOther && (
-            <Button variant="primary" type="submit" form={formId} disabled={!valid || exhausted}>
-              {t("signInAction")}
-            </Button>
-          )}
+          <Button variant="primary" type="submit" form={formId} disabled={!valid || exhausted}>
+            {t("signInAction")}
+          </Button>
         </>
       }
     >
@@ -87,59 +85,43 @@ export function SignInDialog({
         {reason}
       </p>
       {exhausted && <p className="m-0 text-bad-text">{t("lastAttempt")}</p>}
-      {canSso && !useOther && (
-        <div className="flex flex-col items-start gap-2">
-          <Button variant="primary" onClick={onSso}>
-            {t("ssoButton")}
-          </Button>
-          <button
-            type="button"
-            onClick={() => setUseOther(true)}
-            className="cursor-pointer border-0 bg-transparent p-0 text-accent-text underline"
-          >
-            {t("otherAccount")}
-          </button>
-        </div>
-      )}
-      {useOther && (
-        <form
-          id={formId}
-          className="flex flex-col gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            submit();
-          }}
-        >
-          <label className="flex flex-col gap-1">
-            {t("username")}
-            <Input
-              autoComplete="username"
-              autoCapitalize="off"
-              spellCheck={false}
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            {t("password")}
-            <Input
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </label>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={save}
-              onChange={(e) => setSave(e.target.checked)}
-              className="accent-[var(--accent)]"
-            />
-            {t("remember")}
-          </label>
-        </form>
-      )}
+      <form
+        id={formId}
+        className="flex flex-col gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+      >
+        <label className="flex flex-col gap-1">
+          {t("username")}
+          <Input
+            autoComplete="username"
+            autoCapitalize="off"
+            spellCheck={false}
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          {t("password")}
+          <Input
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </label>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={save}
+            onChange={(e) => setSave(e.target.checked)}
+            className="accent-[var(--accent)]"
+          />
+          {t("remember")}
+        </label>
+      </form>
     </Dialog>
   );
 }

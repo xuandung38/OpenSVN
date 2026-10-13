@@ -10,7 +10,7 @@ import { cn } from "../../../lib/cn";
 import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
 import { applyTheme } from "../../../lib/theme";
-import { type Draft, validateDraft } from "./settings-model";
+import { type Draft, validateDraft, withoutUnchanged } from "./settings-model";
 import {
   AccountsPage,
   AdvancedPage,
@@ -74,7 +74,12 @@ export function SettingsSheet({ open, onClose }: { open: boolean; onClose: () =>
   };
 
   const props: PageProps | null = s
-    ? { settings: s, draft, errors, set: (p) => setDraft((d) => ({ ...d, ...p })) }
+    ? {
+        settings: s,
+        draft,
+        errors,
+        set: (p) => setDraft((d) => withoutUnchanged(s, { ...d, ...p })),
+      }
     : null;
 
   return (

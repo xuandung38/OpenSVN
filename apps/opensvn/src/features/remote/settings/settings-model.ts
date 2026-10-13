@@ -53,3 +53,16 @@ export function validateDraft(s: Settings, d: Draft): Record<string, "https" | "
   if (proxy.mode === "custom" && !isProxyUrl(proxy.url)) errors["network.proxy"] = "proxy";
   return errors;
 }
+
+/**
+ * Drops draft keys whose value is back to the stored one (deep compare, e.g. `network.proxy`), so
+ * Save only enables and sends keys that really changed.
+ */
+export function withoutUnchanged(s: Settings, d: Draft): Draft {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(d)) {
+    if (JSON.stringify(v) !== JSON.stringify((s as unknown as Record<string, unknown>)[k]))
+      out[k] = v;
+  }
+  return out as Draft;
+}
