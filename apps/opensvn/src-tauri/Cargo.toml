@@ -27,6 +27,9 @@ svn-ra-api = { workspace = true, features = ["fake"] }
 # `protocol-asset` is required for the scoped asset protocol (image diffs); its scope is pinned to
 # the app temp dir in tauri.conf.json.
 tauri = { workspace = true, features = ["protocol-asset"] }
+# Opens https links in the default browser. Only `opener:allow-open-url` with an https-only scope is
+# granted in capabilities; no path, reveal or other scheme permission.
+tauri-plugin-opener = "=2.7.1"
 tauri-specta = { workspace = true, features = ["derive", "typescript"] }
 specta.workspace = true
 specta-typescript.workspace = true

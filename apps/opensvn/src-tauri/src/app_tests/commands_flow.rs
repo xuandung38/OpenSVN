@@ -409,3 +409,40 @@ async fn checkout_registers_the_new_working_copy_and_rejects_format_32() {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].name, "fresh");
 }
+
+#[tokio::test]
+async fn opening_recovers_dead_owner_locks_and_only_reports_foreign_ones() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let root = crate::engine::fake::demo_wc_root();
+    f.engine.simulate_dead_owner_lock(&root, "src").unwrap();
+    let wc = f.add_demo_wc().await;
+    assert!(
+        !f.events
+            .all()
+            .iter()
+            .any(|r| matches!(r, Recorded::Banner(_))),
+        "a dead owner's lock is recovered silently"
+    );
+
+    f.engine.simulate_foreign_lock(&root, "docs").unwrap();
+    commands::wc_open(f.state(), wc.id.clone()).await.unwrap();
+    let banner = f
+        .events
+        .all()
+        .into_iter()
+        .find_map(|r| {
+            if let Recorded::Banner(b) = r {
+                Some(b)
+            } else {
+                None
+            }
+        })
+        .expect("needs-cleanup banner");
+    assert_eq!(banner.kind, opensvn_ipc::BannerKind::NeedsCleanup);
+    assert_eq!(banner.data, vec!["docs"]);
+
+    // app start runs the same recovery for every registered working copy
+    let before = f.events.all().len();
+    f.state().recover_all().await;
+    assert!(f.events.all().len() > before);
+}

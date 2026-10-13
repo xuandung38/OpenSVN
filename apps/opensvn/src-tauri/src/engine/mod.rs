@@ -8,7 +8,7 @@ pub mod fake;
 
 pub use context::{OpContext, ProgressReporter, ProgressUpdate};
 pub use facade::{
-    DiffOptions, EngineFacade, EngineResult, LockScope, LogScope, RemoteScan, StatusQuery, WcInfo,
-    WcRef,
+    DiffOptions, EngineFacade, EngineResult, LockScope, LogScope, RecoveryReport, RemoteScan,
+    StatusQuery, WcInfo, WcOpened, WcRef,
 };
 pub use fake::FakeEngine;

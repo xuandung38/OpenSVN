@@ -107,6 +107,10 @@ pub struct FakeWc {
     pub store_pristine: bool,
     pub nodes: BTreeMap<RelPath, FakeNode>,
     pub ignores: Vec<String>,
+    /// Simulated stale locks of dead owners (recovered on open).
+    pub dead_owner_locks: Vec<String>,
+    /// Simulated locks of foreign owners (reported, never stolen).
+    pub foreign_locks: Vec<String>,
 }
 
 fn not_found(path: &RelPath) -> SvnError {

@@ -120,6 +120,7 @@ fn asset_scope_rejects_paths_outside_the_app_temp_folder() {
     assert!(!scope.is_allowed(tmp.join("other.png")));
     assert!(!scope.is_allowed(tmp.join("opensvn-evil").join("x.png")));
     assert!(!scope.is_allowed("/etc/passwd"));
+    #[cfg(unix)]
     assert!(!scope.is_allowed(tmp.join("opensvn").join("..").join("secret")));
 }
 
@@ -128,12 +129,17 @@ fn capability_is_main_window_only_with_exact_command_allowlist() {
     let cap: Value = serde_json::from_str(CAPABILITY).unwrap();
     assert_eq!(cap["windows"], serde_json::json!(["main"]));
     assert!(cap.get("remote").is_none() && cap.get("webviews").is_none());
-    let perms: Vec<&str> = cap["permissions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p.as_str().unwrap())
-        .collect();
+    let all = cap["permissions"].as_array().unwrap();
+    // The only scoped permission: opening https links in the browser.
+    let scoped: Vec<&Value> = all.iter().filter(|p| p.is_object()).collect();
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0]["identifier"], "opener:allow-open-url");
+    assert_eq!(
+        scoped[0]["allow"],
+        serde_json::json!([{"url": "https://*"}])
+    );
+    assert!(scoped[0].get("deny").is_none());
+    let perms: Vec<&str> = all.iter().filter_map(|p| p.as_str()).collect();
     for p in &perms {
         assert!(
             p.starts_with("allow-")
@@ -158,7 +164,6 @@ fn no_general_purpose_plugins_are_linked() {
         "tauri-plugin-shell",
         "tauri-plugin-fs",
         "tauri-plugin-http",
-        "tauri-plugin-opener",
         "tauri-plugin-dialog",
         "tauri-plugin-process",
     ] {
@@ -170,6 +175,7 @@ fn no_general_purpose_plugins_are_linked() {
 fn ipc_app(f: &Fixture) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRuntime>) {
     let reg = builder::<MockRuntime>();
     let app = tauri::test::mock_builder()
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(reg.invoke_handler())
         .build(crate::app_context())
         .unwrap();
@@ -276,4 +282,45 @@ async fn settings_set_over_ipc_refuses_program_keys() {
     )
     .unwrap();
     assert_eq!(ok["diff.mode"], "unified");
+}
+
+#[tokio::test]
+async fn opener_scope_rejects_everything_but_https() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let (_app, main) = ipc_app(&f);
+    for url in [
+        "http://example.com/",
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "ftp://example.com/x",
+        "vscode://file/etc/passwd",
+        "x-apple.systempreferences:",
+        "data:text/html,hi",
+    ] {
+        let err = invoke(
+            &main,
+            "plugin:opener|open_url",
+            serde_json::json!({"url": url}),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("not allowed"),
+            "{url}: {err}"
+        );
+    }
+    // other opener commands are not granted at all
+    for cmd in [
+        "plugin:opener|open_path",
+        "plugin:opener|reveal_item_in_dir",
+    ] {
+        assert!(
+            invoke(
+                &main,
+                cmd,
+                serde_json::json!({"path": "/etc/passwd", "paths": ["/etc/passwd"]})
+            )
+            .is_err(),
+            "{cmd}"
+        );
+    }
 }

@@ -33,6 +33,8 @@ pub struct AppState {
     pub db: AppDb,
     /// Settings with change notification.
     pub settings: Arc<SettingsService>,
+    /// Outbound events.
+    pub events: Arc<dyn AppEvents>,
     /// Operation lifecycle.
     pub ops: OperationManager,
     /// Engine behind every repository and working copy command.
@@ -62,7 +64,8 @@ impl AppState {
         ));
         Ok(Self {
             programs: ProgramService::new(Arc::clone(&settings), deps.picker),
-            ops: OperationManager::new(deps.events),
+            ops: OperationManager::new(Arc::clone(&deps.events)),
+            events: deps.events,
             engine: deps.engine,
             db,
             settings,
@@ -150,6 +153,34 @@ impl AppState {
         self.ops.spawn(kind, None, title, move |ctx| async move {
             f(engine, ctx).await.map_err(|e| AppError::from(&e))
         })
+    }
+
+    /// Opens a working copy (engine recovery included). Locks that need the user (foreign or
+    /// unknown owner) are announced as a `needs-cleanup` banner so the UI can offer "Run cleanup";
+    /// they are never taken over automatically.
+    pub async fn open_wc(&self, id: &WcId) -> Result<opensvn_ipc::WorkingCopy, AppError> {
+        let (wc, report) = self.wcs.open(id).await?;
+        if !report.recovered.is_empty() {
+            tracing::info!(wc = %id.0, dirs = report.recovered.len(), "recovered stale working copy locks");
+        }
+        if !report.needs_user_action.is_empty() {
+            self.events.banner(&opensvn_ipc::Banner {
+                wc_id: id.clone(),
+                kind: opensvn_ipc::BannerKind::NeedsCleanup,
+                data: report.needs_user_action,
+            });
+        }
+        Ok(wc)
+    }
+
+    /// Runs recovery for every registered working copy (app start). A failure is logged and does
+    /// not stop the others.
+    pub async fn recover_all(&self) {
+        for id in self.wcs.ids().unwrap_or_default() {
+            if let Err(e) = self.open_wc(&id).await {
+                tracing::warn!(wc = %id.0, code = ?e.code, "working copy recovery failed");
+            }
+        }
     }
 
     /// Republishes status; a failure is logged, never surfaced (the caller's result matters more).

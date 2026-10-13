@@ -344,3 +344,22 @@ impl FakeEngine {
         })
     }
 }
+
+/// Hooks that simulate lock situations found when a working copy is opened.
+impl FakeEngine {
+    /// Pretends a crashed process left a lock on `dir`; the next `open_wc` recovers it.
+    pub fn simulate_dead_owner_lock(&self, root: &Path, dir: &str) -> Result<(), SvnError> {
+        self.with_wc(root, |wc| {
+            wc.dead_owner_locks.push(dir.to_owned());
+            Ok(())
+        })
+    }
+
+    /// Pretends another program holds a lock on `dir`; `open_wc` reports it and leaves it alone.
+    pub fn simulate_foreign_lock(&self, root: &Path, dir: &str) -> Result<(), SvnError> {
+        self.with_wc(root, |wc| {
+            wc.foreign_locks.push(dir.to_owned());
+            Ok(())
+        })
+    }
+}

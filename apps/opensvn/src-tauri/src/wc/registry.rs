@@ -8,7 +8,7 @@ use opensvn_ipc::{AppError, ErrorCode, WcId, WorkingCopy};
 
 use super::actor::{RetryPolicy, WcActor};
 use crate::db::{AppDb, WcRow, now_iso};
-use crate::engine::{EngineFacade, OpContext, WcInfo, WcRef};
+use crate::engine::{EngineFacade, OpContext, RecoveryReport, WcInfo, WcRef};
 use crate::ops::new_op_id;
 
 /// Runtime facts about a working copy that are not persisted.
@@ -218,12 +218,27 @@ impl WcRegistry {
         }
     }
 
-    /// Marks the working copy as opened and returns its current description.
-    pub async fn open(&self, id: &WcId) -> Result<WorkingCopy, AppError> {
+    /// Opens the working copy through its actor: runs the engine's lock/crash recovery (a write),
+    /// stamps the open time and returns the description with the recovery report.
+    pub async fn open(&self, id: &WcId) -> Result<(WorkingCopy, RecoveryReport), AppError> {
         let row = self.db.wc_get(&id.0)?.ok_or_else(|| unknown_wc(id))?;
-        let wc = self.describe(&row).await?;
+        let (engine, root) = (Arc::clone(&self.engine), PathBuf::from(&row.root_path));
+        let opened = self
+            .actor_for(&row.id)
+            .write(async move {
+                engine
+                    .open_wc(&root, &OpContext::detached())
+                    .await
+                    .map_err(|e| AppError::from(&e))
+            })
+            .await?;
         self.db.wc_touch_opened(&id.0)?;
-        Ok(wc)
+        Ok((self.describe(&row).await?, opened.recovery))
+    }
+
+    /// Ids of every registered working copy (used to run recovery at app start).
+    pub fn ids(&self) -> Result<Vec<WcId>, AppError> {
+        Ok(self.db.wc_list()?.into_iter().map(|r| WcId(r.id)).collect())
     }
 
     /// Releases per-working-copy resources. The actor finishes queued writes first.
