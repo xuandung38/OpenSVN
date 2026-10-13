@@ -170,7 +170,7 @@ interface AppError {
 }
 type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'forbidden' | 'tls-untrusted'
   | 'out-of-date' | 'locked-by-other' | 'lock-token-invalid' | 'wc-busy' | 'wc-needs-cleanup'
-  | 'wc-format-unsupported' | 'not-a-working-copy' | 'conflict-blocks-commit' | 'path-not-found'
+  | 'wc-format-unsupported' | 'not-a-working-copy' | 'conflict-blocks-commit' | 'hook-failed' | 'repository-moved' | 'pristine-not-hydrated' | 'wc-invalid-operation' | 'path-not-found'
   | 'disk-full' | 'permission-denied' | 'file-in-use' | 'cancelled' | 'internal';
 ```
 
@@ -185,7 +185,9 @@ type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'forbidden' | 'tls-un
 | `wc://revision-changed` | `{ wcId, baseRev, revRange? }` | toolbar, History |
 | `wc://incoming` | `{ wcId, count, latestRev }` | badge Update, thông báo OS |
 | `wc://banner` | `{ wcId, kind, data }` (conflicts, mixed-rev, lock-stolen, needs-cleanup) | Banner |
-| `auth://prompt` | `{ requestId, kind: 'credentials' \| 'certificate', realm, url, cert? }` | Dialog Sign in / Trust |
+| `auth://prompt` | `{ requestId, kind: 'credentials' \| 'certificate', realm, url, cert?, reason?, attempt?, offered? }` | Dialog Sign in / Trust |
+
+Payload `auth://prompt`: với `kind: 'credentials'` có `reason: 'initial' | 'rejected' | 'negotiate-failed'` (chọn câu chữ dialog), `attempt` (số lần thất bại, từ 0) và `offered: ('basic' | 'negotiate')[]`. Với `kind: 'certificate'`, `cert.failure` là `unknown-issuer | self-signed | expired | not-yet-valid | hostname-mismatch | revoked | { changed: { oldSha256, newSha256 } } | { other: string }`. Khi nhiều lỗi cùng áp dụng, báo lỗi nặng nhất: hostname-mismatch, expired, revoked, not-yet-valid đứng trên `changed`, `changed` đứng trên `self-signed`/`unknown-issuer`; cert vừa đổi vừa sai hostname phải báo `hostname-mismatch`. `changed` không bao giờ "luôn tin cậy" mà không có thao tác thay pin rõ ràng.
 
 Luồng prompt auth: engine gặp 401 → phát `auth://prompt`, **tạm dừng** operation → UI hiện dialog → `auth_respond` → engine tiếp tục hoặc hủy (`cancelled`).
 

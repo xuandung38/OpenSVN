@@ -11,7 +11,19 @@
       "!plans"
     ]
   },
+  "css": { "parser": { "tailwindDirectives": true } },
   "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
-  "linter": { "enabled": true, "rules": { "preset": "recommended" } },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "a11y": {
+        "noLabelWithoutControl": {
+          "level": "error",
+          "options": { "inputComponents": ["Input", "Select", "Textarea"] }
+        }
+      }
+    }
+  },
   "assist": { "actions": { "source": { "organizeImports": "on" } } }
 }

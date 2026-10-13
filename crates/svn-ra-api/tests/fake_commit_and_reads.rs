@@ -8,12 +8,13 @@ use bytes::Bytes;
 use secrecy::SecretString;
 use svn_ra_api::fake::{FakeChange, FakeRaSession};
 use svn_ra_api::{
-    AuthMethod, AuthPrompter, CertDecision, CertInfo, CommitInfo, CommitObserver, Credentials,
-    FileRev, FileRevHandler, LogRequest, RaSession, ReplayableSource,
+    AuthMethod, AuthPrompter, CertDecision, CertInfo, CommitInfo, CommitObserver,
+    CredentialRequest, Credentials, FileRev, FileRevHandler, LogRequest, PromptReason, RaSession,
+    ReplayableSource,
 };
 use svn_types::{
-    CancelToken, Checksum, Depth, ErrorCode, NodeKind, OriginKey, PropChange, RelPath, Result,
-    Revnum, TxDeltaWindow, WindowSink,
+    CancelToken, Checksum, Depth, ErrorCode, NodeKind, PropChange, RelPath, Result, Revnum,
+    TxDeltaWindow, WindowSink,
 };
 
 fn p(s: &str) -> RelPath {
@@ -206,7 +207,7 @@ async fn commit_creates_a_new_revision() {
         seen[0]
             .changed_paths
             .iter()
-            .any(|c| c.path == "/trunk/b.txt")
+            .any(|c| c.path.as_str() == "/trunk/b.txt")
     );
 }
 
@@ -320,7 +321,7 @@ async fn locks_gate_commits_and_are_released_on_merge() {
         )
         .await
         .expect("lock");
-    assert_eq!(lock.path, "/trunk/a.txt");
+    assert_eq!(lock.path.as_str(), "/trunk/a.txt");
     assert_eq!(lock.owner, "tester");
     assert_eq!(
         s.lock(&p("trunk/a.txt"), None, false, None, &c)
@@ -639,21 +640,22 @@ async fn file_revs_streams_each_revision_that_changed_the_file() {
 
 struct Prompter {
     answers: Mutex<Vec<Option<&'static str>>>,
-    asked: Mutex<Vec<u8>>,
+    asked: Mutex<Vec<u32>>,
 }
 
 #[async_trait]
 impl AuthPrompter for Prompter {
-    async fn credentials(
-        &self,
-        origin: &OriginKey,
-        attempt: u8,
-        offered: &[AuthMethod],
-    ) -> Option<Credentials> {
-        assert_eq!(origin.host, "svn.test.local");
-        assert_eq!(origin.port, 443);
-        assert_eq!(offered, [AuthMethod::Basic]);
-        self.asked.lock().unwrap().push(attempt);
+    async fn credentials(&self, req: &CredentialRequest) -> Option<Credentials> {
+        assert_eq!(req.origin.host, "svn.test.local");
+        assert_eq!(req.origin.port, 443);
+        assert_eq!(req.offered, [AuthMethod::Basic]);
+        let expected = if req.attempt == 0 {
+            PromptReason::Initial
+        } else {
+            PromptReason::Rejected
+        };
+        assert_eq!(req.reason, expected);
+        self.asked.lock().unwrap().push(req.attempt);
         let next = self.answers.lock().unwrap().remove(0);
         next.map(|pw| Credentials {
             username: "alice".into(),

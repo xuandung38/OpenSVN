@@ -45,5 +45,10 @@ Phiên bản đã pin và kiểm tra build cùng nhau (2026-10-13):
 
 `specta`/`tauri-specta` còn là bản rc: luôn pin bằng `=`.
 
+## Quy ước mã nguồn
+- Mã port từ Apache Subversion giữ nguyên header ASF, thêm dòng "Modified by OpenSVN".
+- Cập nhật `NOTICE` trong cùng PR khi port thêm mã hoặc SQL từ upstream (Apache-2.0).
+- Giấy phép của OpenSVN: Apache-2.0 (xem `LICENSE`); mã port từ Apache Subversion ghi trong `NOTICE`.
+
 ## Trạng thái
 Skeleton app + contract IPC + CI; engine đang phát triển.

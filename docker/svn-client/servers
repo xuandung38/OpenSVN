@@ -1,0 +1,6 @@
+[global]
+ssl-authority-files = /certs/ca.crt
+store-passwords = no
+store-plaintext-passwords = no
+store-auth-creds = no
+http-library = serf

@@ -113,6 +113,25 @@ pub fn write_file_replacing(dest: &Path, data: &[u8]) -> Result<()> {
     result
 }
 
+/// Attempts of the Windows rename retry loop. With a 10 ms start doubling up to a 500 ms cap the
+/// sleeps add up to roughly ten seconds, the budget of svn's `WIN32_RETRY_LOOP` for sharing
+/// violations caused by antivirus and indexer handles.
+#[cfg(windows)]
+const RENAME_RETRY_ATTEMPTS: u32 = 25;
+
+/// Atomically renames `from` over `to`, replacing an existing destination (a symlink at `to`
+/// is replaced, not followed). Both paths must be on the same filesystem.
+///
+/// On Windows a read-only destination (every pristine, `svn:needs-lock` files) has its
+/// attribute cleared first, and sharing violations / access denied caused by antivirus or
+/// indexer handles are retried with a bounded exponential backoff (about ten seconds in
+/// total), like `svn_io_file_rename2`. Elsewhere this is a single `rename`.
+pub fn rename_replacing(from: &Path, to: &Path) -> Result<()> {
+    rename_over(from, to).map_err(|e| {
+        SvnError::from_io(format!("rename {} to {}", from.display(), to.display()), &e)
+    })
+}
+
 /// Renames `from` over `to`. On Windows a read-only destination (`svn:needs-lock` files) makes
 /// the rename fail, and antivirus or indexer handles cause short-lived sharing violations, so
 /// the attribute is cleared first and the rename is retried briefly.
@@ -129,7 +148,7 @@ fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
     }
     let mut delay = std::time::Duration::from_millis(10);
     let mut last = None;
-    for _ in 0..6 {
+    for _ in 0..RENAME_RETRY_ATTEMPTS {
         match fs::rename(from, to) {
             Ok(()) => return Ok(()),
             Err(e)
@@ -138,7 +157,7 @@ fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
             {
                 last = Some(e);
                 std::thread::sleep(delay);
-                delay *= 2;
+                delay = (delay * 2).min(std::time::Duration::from_millis(500));
             }
             Err(e) => return Err(e),
         }
