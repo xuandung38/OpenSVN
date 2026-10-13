@@ -35,3 +35,8 @@ lets `close_edit` delete the transaction:
 - `cargo test -p svn-ra -p svn-ra-api -p svn-protocol -p svn-types -p opensvn-ipc --no-fail-fast`:
   465 passed, 0 failed, 8 ignored
 - Not run: Docker / live mod_dav_svn compat tests.
+
+## Re-merge of origin/main 802822f (#76)
+Merged cleanly. Gates rerun:
+- fmt, workspace clippy, real-engine clippy (`--locked`): pass
+- `cargo test --workspace --locked --no-fail-fast`: 1155 passed, 0 failed, 13 ignored
