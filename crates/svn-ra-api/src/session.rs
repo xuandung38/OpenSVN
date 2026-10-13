@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use svn_types::{
-    CancelToken, Checksum, DeltaEditor, Depth, DirEntry, LockInfo, LogEntry, NodeKind, PropChange,
-    RelPath, RepoDisplayPath, RepoUrl, Reporter, Result, Revnum, WindowSink,
+    CancelToken, Checksum, DeltaEditor, Depth, DirEntry, ErrorCode, LockInfo, LogEntry, NodeKind,
+    PropChange, RelPath, RepoDisplayPath, RepoUrl, Reporter, Result, Revnum, SvnError, WindowSink,
 };
 use tokio::io::AsyncWrite;
 
@@ -223,4 +223,30 @@ pub trait RaSession: Send + Sync {
 
     /// Deletes a leaked server transaction (best effort, idempotent).
     async fn abort_txn(&self, txn_name: &str) -> Result<()>;
+
+    /// Deletes the server transaction `txn_name` and says whether it still existed.
+    ///
+    /// [`TxnAbort::Deleted`] proves the transaction was not merged (it existed until this call
+    /// removed it). [`TxnAbort::Gone`] means the server no longer has it: it was merged into a
+    /// revision, or deleted earlier (by a cleanup, an administrator or a failed commit). Errors
+    /// (network, authentication, an answer that says neither) leave the question open.
+    ///
+    /// The default cannot tell the two cases apart and fails with `ServerUnsupported`, so a
+    /// caller never mistakes "unknown" for "deleted".
+    async fn abort_txn_checked(&self, txn_name: &str, cancel: &CancelToken) -> Result<TxnAbort> {
+        let _ = (txn_name, cancel);
+        Err(SvnError::new(
+            ErrorCode::ServerUnsupported,
+            "this session cannot tell whether a commit transaction still exists",
+        ))
+    }
+}
+
+/// Result of [`RaSession::abort_txn_checked`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxnAbort {
+    /// The transaction existed and is now deleted: it was never merged.
+    Deleted,
+    /// The server has no such transaction (already merged or already deleted).
+    Gone,
 }

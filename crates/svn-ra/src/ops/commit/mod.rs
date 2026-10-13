@@ -10,10 +10,12 @@ use svn_protocol::TxnName;
 use svn_protocol::commit::{
     create_txn_plan, ephemeral_txn_props, parse_create_txn_response, txn_proppatch_request,
 };
-use svn_ra_api::{CommitEditor, CommitObserver};
-use svn_types::{CancelToken, ErrorCode, PropChange, RelPath, Result};
+use svn_ra_api::{CommitEditor, CommitObserver, TxnAbort};
+use svn_types::{CancelToken, ErrorCode, PropChange, RelPath, Result, SvnError};
 
 pub use editor::HttpCommitEditor;
+
+use self::merge::DeleteAnswer;
 
 use crate::ops::update::{RaWire, headers_of};
 
@@ -106,6 +108,43 @@ async fn begin(
         merge::check_proppatch(&RaWire::read_small(resp, cancel).await?)?;
     }
     Ok(())
+}
+
+/// Deletes transaction `txn_name` and says whether it still existed.
+///
+/// A journaled name does not say whether the transaction was plain or virtual, so both are
+/// tried (virtual only when the server announces virtual transactions). Any 2xx answer is
+/// [`TxnAbort::Deleted`]; [`TxnAbort::Gone`] needs a 404 for at least one kind and no 2xx. An
+/// answer that says neither (only 400s, or another error) is an error: the caller must not
+/// guess.
+pub async fn abort_txn_checked(
+    wire: &RaWire,
+    txn_name: &str,
+    cancel: &CancelToken,
+) -> Result<TxnAbort> {
+    let mut not_found = false;
+    let mut kinds = vec![TxnName::plain(txn_name)];
+    if wire.caps().vtxn_stub.is_some() {
+        kinds.push(TxnName::virtual_txn(txn_name));
+    }
+    for txn in &kinds {
+        match merge::delete_txn_answer(wire, txn, cancel).await {
+            Ok(DeleteAnswer::Deleted) => return Ok(TxnAbort::Deleted),
+            Ok(DeleteAnswer::NotFound) => not_found = true,
+            Ok(DeleteAnswer::WrongKind) => {}
+            // No plain stub announced: only virtual transactions exist on this server.
+            Err(e) if e.code == ErrorCode::ServerUnsupported && !txn.virtual_ => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if not_found {
+        Ok(TxnAbort::Gone)
+    } else {
+        Err(SvnError::new(
+            ErrorCode::ServerUnsupported,
+            format!("the server did not say whether transaction '{txn_name}' still exists"),
+        ))
+    }
 }
 
 /// Deletes a leaked server transaction by name. Idempotent: a missing transaction is success.

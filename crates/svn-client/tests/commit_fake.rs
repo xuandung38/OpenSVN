@@ -1039,3 +1039,185 @@ async fn cancel_after_merge_still_finishes_the_commit() {
     assert_eq!(read(&e.wc, "d/f1"), "rev $Rev: 2 $\n");
     assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
 }
+
+/// svn 1.15 sends the tokens of every locked node below a replaced directory too (the
+/// replacement deletes the BASE directory first) and releases them all.
+#[tokio::test]
+async fn replacing_a_directory_with_locks_below_sends_and_releases_every_token() {
+    let Some(e) = env() else { return };
+    let o = &e.fx.oracle;
+    let svn_wc = checkout(o, &e.fx.base, &e.fx.url, "svn-side");
+    svn(o, &svn_wc, &["lock", "-q", "d/f1", "d/sub/g"]);
+    svn(o, &svn_wc, &["rm", "-q", "d"]);
+    svn(o, &svn_wc, &["mkdir", "-q", "d"]);
+    svn(o, &svn_wc, &["commit", "-q", "-m", "replace"]);
+    assert!(svn_locks(&e).is_empty(), "svn released the locks");
+
+    let tokens = lock_ours(&e, &["d/f1", "d/sub/g"]).await;
+    local::delete(
+        &e.db,
+        &e.cancel,
+        &[e.wc.join("d")],
+        &DeleteOptions::default(),
+    )
+    .expect("rm");
+    std::fs::create_dir(e.wc.join("d")).expect("mkdir");
+    e.add(&["d"]);
+    e.commit_all("replace")
+        .await
+        .expect("commit")
+        .expect("some");
+    let ev = e.ra.events();
+    let editor = ev
+        .iter()
+        .find(|l| l.starts_with("commit_editor"))
+        .expect("editor");
+    for t in &tokens {
+        assert!(editor.contains(t.as_str()), "token {t} sent: {editor}");
+    }
+    assert!(server_locks(&e).await.is_empty(), "server released them");
+    assert_eq!(
+        lock_rows(&e.wc),
+        lock_rows(&svn_wc),
+        "no orphaned lock rows"
+    );
+    assert_eq!(svn_status(o, &e.wc), svn_status(o, &svn_wc));
+}
+
+/// Adding into a directory that was deleted on the server, and adding a name the server added
+/// too, are out of date (svn 1.15: E155011 wrapping E160013 / E160020).
+#[tokio::test]
+async fn adds_that_collide_with_server_changes_are_out_of_date() {
+    let Some(e) = env() else { return };
+    let o = &e.fx.oracle;
+    let other = checkout(o, &e.fx.base, &e.fx.url, "other");
+    svn(o, &other, &["rm", "-q", "e"]);
+    write(&other, "both.txt", "theirs\n");
+    svn(o, &other, &["add", "-q", "both.txt"]);
+    svn(o, &other, &["commit", "-q", "-m", "other"]);
+    let svn_wc = checkout(o, &e.fx.base, &e.fx.url, "svn-side");
+    svn(o, &svn_wc, &["update", "-q", "-r1"]);
+    write(&svn_wc, "e/new.txt", "new\n");
+    svn(o, &svn_wc, &["add", "-q", "e/new.txt"]);
+    let err = svn_fails(&e, &svn_wc, &["commit", "-m", "m"]);
+    assert!(err.contains("E155011"), "{err}");
+    svn(o, &svn_wc, &["revert", "-q", "-R", "."]);
+    write(&svn_wc, "both.txt", "mine\n");
+    svn(o, &svn_wc, &["add", "-q", "both.txt"]);
+    let err = svn_fails(&e, &svn_wc, &["commit", "-m", "m"]);
+    assert!(err.contains("E155011"), "{err}");
+
+    e.ra.inner
+        .seed(
+            "other",
+            "other",
+            &[
+                FakeChange::Delete(rp("e")),
+                FakeChange::PutFile(rp("both.txt"), Bytes::from_static(b"theirs\n")),
+            ],
+        )
+        .expect("seed");
+    write(&e.wc, "e/new.txt", "new\n");
+    e.add(&["e/new.txt"]);
+    let err = e.commit_all("m").await.expect_err("deleted on server");
+    assert_eq!(err.code, ErrorCode::OutOfDate, "{err}");
+    assert_eq!(err.svn_code, Some(160_013), "{err}");
+    assert!(e.ra.inner.open_txns().is_empty());
+    assert!(e.journal_files().is_empty());
+
+    write(&e.wc, "both.txt", "mine\n");
+    e.add(&["both.txt"]);
+    let err = e
+        .commit(&[e.wc.join("both.txt")], &CommitOptions::new("m"))
+        .await
+        .expect_err("added on server");
+    assert_eq!(err.code, ErrorCode::OutOfDate, "{err}");
+    assert_eq!(err.svn_code, Some(160_020), "{err}");
+    assert!(e.journal_files().is_empty());
+    // Raw codes from a server keep the same reading.
+    for code in [160_013, 160_020, 175_005, 175_007] {
+        assert_eq!(map_commit_error(raw_error(code)).code, ErrorCode::OutOfDate);
+    }
+}
+
+/// A locally deleted node in conflict (local delete, incoming edit) blocks the commit before
+/// the server is contacted, like svn 1.15 ("remains in conflict").
+#[tokio::test]
+async fn deleting_a_conflicted_node_is_refused() {
+    let Some(e) = env() else { return };
+    let o = &e.fx.oracle;
+    let other = checkout(o, &e.fx.base, &e.fx.url, "other");
+    write(&other, "top.txt", "theirs\n");
+    write(&other, "d/sub/g", "theirs\n");
+    svn(o, &other, &["commit", "-q", "-m", "o"]);
+    let wc2 = checkout(o, &e.fx.base, &e.fx.url, "wc2");
+    svn(o, &wc2, &["update", "-q", "-r1"]);
+    svn(o, &wc2, &["rm", "-q", "top.txt", "d/sub"]);
+    svn(o, &wc2, &["update", "-q", "--accept", "postpone"]);
+    let status = svn_status(o, &wc2);
+    assert!(status.contains("C top.txt"), "{status}");
+    for target in ["top.txt", "d/sub", "."] {
+        let err = svn_fails(&e, &wc2, &["commit", "-m", "m", target]);
+        assert!(err.contains("remains in conflict"), "{target}: {err}");
+    }
+
+    let db2 = open(&wc2);
+    let before = dump_rows(&wc2);
+    for target in ["top.txt", "d/sub", ""] {
+        let err = commit(
+            &db2,
+            &CommitContext {
+                ra: &e.ra,
+                state_dir: &e.state,
+                cancel: &e.cancel,
+            },
+            &[wc2.join(target)],
+            &CommitOptions::new("m"),
+        )
+        .await
+        .expect_err("blocked");
+        assert_eq!(err.code, ErrorCode::ConflictBlocksCommit, "{target}: {err}");
+    }
+    assert!(!e.ra.events().iter().any(|l| l.starts_with("commit_editor")));
+    assert_eq!(dump_rows(&wc2), before);
+}
+
+/// Recovery never deletes a journal it cannot use: another version's journal of this working
+/// copy is left alone and blocks commits, a corrupt one is moved aside.
+#[tokio::test]
+async fn recovery_keeps_journals_it_cannot_use() {
+    use svn_client::commit::recover_wc_commits;
+    let Some(e) = env() else { return };
+    std::fs::create_dir_all(&e.state).expect("mkdir");
+    let future = e.state.join("commit-future.json");
+    let future_bytes = format!(
+        r#"{{"version":99,"wcroot":{}}}"#,
+        serde_json_string(&e.wc.display().to_string())
+    );
+    std::fs::write(&future, &future_bytes).expect("write");
+    let corrupt = e.state.join("commit-junk.json");
+    std::fs::write(&corrupt, b"{ nope").expect("write");
+
+    let report = recover_wc_commits(&e.state, &e.db, Some(&e.ra), &e.cancel)
+        .await
+        .expect("recover");
+    assert_eq!(report.needs_user.len(), 1, "{report:?}");
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    assert_eq!(
+        std::fs::read_to_string(&future).expect("untouched"),
+        future_bytes
+    );
+    assert!(!corrupt.exists());
+    assert!(e.state.join("commit-junk.json.corrupt").exists());
+
+    write(&e.wc, "d/f1", "mine\n");
+    let err = e.commit_all("m").await.expect_err("blocked");
+    assert_eq!(err.code, ErrorCode::WcNeedsCleanup, "{err}");
+    assert!(err.message.contains("another version"), "{err}");
+    std::fs::remove_file(&future).expect("user moves it away");
+    e.commit_all("m").await.expect("commit").expect("some");
+}
+
+fn serde_json_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
