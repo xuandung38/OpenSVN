@@ -5,11 +5,18 @@
 //       --entry darwin-aarch64,path/OpenSVN.app.tar.gz,https://.../OpenSVN.app.tar.gz \
 //       --entry windows-x86_64,path/OpenSVN_0.2.0_x64.msi,https://.../OpenSVN_0.2.0_x64.msi
 //
+// URLs must be GitHub asset-API URLs of the private releases repository,
+//   https://api.github.com/repos/<owner>/OpenSVN-releases/releases/assets/<id>
+// because the client sends its read token to whatever host the manifest names. `--allow-any-url`
+// lifts the restriction for local tests only.
+//
 // The signature of each artifact is read from "<artifact>.sig" (written by the Tauri CLI when
 // TAURI_SIGNING_PRIVATE_KEY is set). Platform keys: darwin-aarch64, darwin-x86_64,
 // linux-x86_64, windows-x86_64 (optionally suffixed -app / -appimage / -msi, see Tauri docs).
 import { readFileSync, writeFileSync } from "node:fs";
 
+const ASSET_URL =
+  /^https:\/\/api\.github\.com\/repos\/[A-Za-z0-9_.-]+\/OpenSVN-releases\/releases\/assets\/\d+$/;
 const SEMVER = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 
 function parse(argv) {
@@ -26,12 +33,13 @@ function parse(argv) {
     else if (flag === "--notes-file") o.notes = readFileSync(value(), "utf8").trim();
     else if (flag === "--pub-date") o.pubDate = value();
     else if (flag === "--entry") o.entries.push(value());
+    else if (flag === "--allow-any-url") o.allowAnyUrl = true;
     else throw new Error(`unknown argument ${flag}`);
   }
   return o;
 }
 
-export function buildManifest({ version, notes, pubDate, entries }) {
+export function buildManifest({ version, notes, pubDate, entries, allowAnyUrl = false }) {
   if (!SEMVER.test(version ?? "")) throw new Error(`invalid --version "${version}"`);
   if (entries.length === 0) throw new Error("at least one --entry is required");
   const platforms = {};
@@ -41,7 +49,12 @@ export function buildManifest({ version, notes, pubDate, entries }) {
     if (platforms[platform]) throw new Error(`duplicate platform ${platform}`);
     const signature = readFileSync(`${artifact}.sig`, "utf8").trim();
     if (!signature) throw new Error(`empty signature: ${artifact}.sig`);
-    if (!/^https?:\/\//.test(url)) throw new Error(`url must be http(s): ${url}`);
+    if (!allowAnyUrl && !ASSET_URL.test(url)) {
+      throw new Error(
+        `url must be https://api.github.com/repos/<owner>/OpenSVN-releases/releases/assets/<id>: ${url}`,
+      );
+    }
+    if (allowAnyUrl && !/^https?:\/\//.test(url)) throw new Error(`url must be http(s): ${url}`);
     platforms[platform] = { signature, url };
   }
   return { version, notes: notes ?? "", pub_date: pubDate ?? new Date().toISOString(), platforms };

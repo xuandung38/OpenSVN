@@ -6,9 +6,41 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const gen = join(root, "packaging", "generated");
+const gen = process.env.RELEASE_GEN_DIR || join(root, "packaging", "generated");
 const rust = JSON.parse(readFileSync(join(gen, "rust-licenses.json"), "utf8"));
 const npm = JSON.parse(readFileSync(join(gen, "npm-licenses.json"), "utf8"));
+
+// npm license policy: the cargo-about list (packaging/licenses/about.toml) plus 0BSD and the OFL
+// used by the bundled IBM Plex fonts. Anything else (GPL, UNLICENSED, unknown) fails the build.
+const NPM_ALLOWED = new Set([
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "CC0-1.0",
+  "MPL-2.0",
+  "0BSD",
+  "OFL-1.1",
+]);
+
+/** True when an SPDX expression ("MIT", "(MIT OR Apache-2.0)", "A AND B") is acceptable. */
+function licenseAllowed(expr) {
+  const tokens = expr.replace(/[()]/g, " ").trim().split(/\s+/);
+  const anyOr = tokens.includes("OR");
+  const ids = tokens.filter((t) => t !== "OR" && t !== "AND");
+  if (ids.length === 0) return false;
+  return anyOr ? ids.some((id) => NPM_ALLOWED.has(id)) : ids.every((id) => NPM_ALLOWED.has(id));
+}
+
+const rejected = Object.keys(npm).filter((l) => !licenseAllowed(l));
+if (rejected.length > 0) {
+  const names = rejected.flatMap((l) => npm[l].map((p) => `${p.name} (${l})`));
+  console.error(`npm license policy violation: ${names.join(", ")}`);
+  process.exit(1);
+}
 
 const list = [];
 const out = [];

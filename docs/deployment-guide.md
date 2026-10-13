@@ -30,9 +30,12 @@ pnpm tauri icon src-tauri/icons/source/opensvn-icon-1024.png   # then delete ico
 
 The generated 16 px frame is unreadable (the lettering turns to mush and the squircle margin wastes
 pixels), so `icon.ico` uses the simplified variant for the 16 and 24 px frames and the master for
-32 px and up (lettering is still legible at 32). Rebuild the .ico after regenerating:
-`magick s16.png s24.png f32.png f48.png f64.png f256.png icon.ico`, where `s16`/`s24` come from
-`rsvg-convert -w N opensvn-icon-small.svg` and the rest from the generated frames.
+32 px and up (lettering is still legible at 32). Build it from freshly rendered 32-bit frames
+(`rsvg-convert -w N` of the small SVG for 16/24 and of the master for 32/48/64/256):
+
+```sh
+magick PNG32:f16.png PNG32:f24.png PNG32:f32.png PNG32:f48.png PNG32:f64.png PNG32:f256.png icon.ico
+```
 
 ## Version stamping
 
@@ -53,6 +56,8 @@ crates and 103 npm packages with full texts). The MSI and DMG also show `LICENSE
 Regenerate with `scripts/release/gen-licenses.sh` (needs
 `cargo install cargo-about --locked --version 0.9.2 --features cli`). cargo-about fails the run if a
 dependency uses a license outside `packaging/licenses/about.toml`; keep it equal to `deny.toml`.
+npm packages are checked by `render-licenses.mjs` against the same list plus `0BSD` and `OFL-1.1`
+(SPDX `OR` expressions pass when one alternative is allowed); anything else fails the run.
 
 ## macOS (DMG)
 
@@ -101,7 +106,9 @@ powershell -ExecutionPolicy Bypass -File scripts\release\build-windows.ps1
 ```
 
 WebView2 is installed by the MSI through the evergreen bootstrapper. Optional Authenticode
-signing: set `WINDOWS_SIGN_COMMAND` (see the script header). Unsigned MSIs trigger SmartScreen:
+signing: set `WINDOWS_SIGN_COMMAND` to a command without secrets, preferably a certificate-store
+selector (`signtool sign ... /sha1 <thumbprint> "%1"`); see the script header. The command is written to
+a git-ignored config file during the build and deleted afterwards, so never put a password in it. Unsigned MSIs trigger SmartScreen:
 "More info" then "Run anyway". Not exercised on this branch.
 
 ## Updates
@@ -117,6 +124,21 @@ registers the updater plugin (contract change listed in the updater README), set
 plus `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` and `OPENSVN_UPDATER_PUBKEY`
 to produce signed `.app.tar.gz` / `.sig` update artifacts. Until then a build with
 `OPENSVN_UPDATER=1` fails by design (verified), and artifacts cannot self-update.
+
+## Provisioning the update token
+
+The app never carries the GitHub token. Updates stay disabled (UI hint, no network calls) until
+the read-only fine-grained token for `OpenSVN-releases` (Contents: read, see
+`packaging/updater/README.md`) is in the OS keychain under the app's key `updater/github-token`
+(service and account naming follow `secure-store`; the app side lands with the updater
+registration in M2, so confirm the exact names with dev-p08 before scripting a fleet rollout):
+
+* **Single user**: paste the token in Settings > Updates; the app stores it in the keychain.
+* **Managed fleet (MDM / login script)**, illustrative commands, adjust the names once fixed:
+  macOS `security add-generic-password -s <service> -a updater/github-token -w <token> -U`;
+  Windows `cmdkey /generic:<service>:updater/github-token /user:updater /pass:<token>`;
+  Linux `secret-tool store --label OpenSVN service <service> account updater/github-token`.
+* **Rotation**: write the new token over the old one; no new installer is needed.
 
 ## Checklist for an internal release
 

@@ -33,7 +33,8 @@ if (!process.env.RELEASE_VERSION) {
   }
 }
 
-const gen = join(root, "packaging", "generated");
+// RELEASE_GEN_DIR lets tests write elsewhere than packaging/generated.
+const gen = process.env.RELEASE_GEN_DIR || join(root, "packaging", "generated");
 mkdirSync(gen, { recursive: true });
 writeFileSync(join(gen, "tauri.version.conf.json"), `${JSON.stringify({ version }, null, 2)}\n`);
 console.log(version);

@@ -2,7 +2,11 @@
 import { readFile, writeFile } from "node:fs/promises";
 // Tiny static file server for updater tests: serves a directory on 127.0.0.1, optionally
 // demanding "Authorization: Bearer <token>" like a private GitHub repo would.
-//   static-server.mjs --dir DIR --port-file FILE [--token TOKEN]
+//   static-server.mjs --dir DIR --port-file FILE [--token TOKEN] [--github-accept]
+// --github-accept mimics the GitHub API content negotiation: latest.json is only returned for
+// Accept: application/vnd.github.raw+json and every other file only for
+// Accept: application/octet-stream; otherwise a small JSON metadata document comes back, as
+// GitHub does.
 import { createServer } from "node:http";
 import { join, normalize, sep } from "node:path";
 
@@ -14,6 +18,7 @@ const get = (name) => {
 const dir = get("--dir");
 const portFile = get("--port-file");
 const token = get("--token");
+const githubAccept = args.includes("--github-accept");
 if (!dir || !portFile) {
   console.error("usage: static-server.mjs --dir DIR --port-file FILE [--token TOKEN]");
   process.exit(2);
@@ -23,6 +28,15 @@ const server = createServer(async (req, res) => {
   if (token && req.headers.authorization !== `Bearer ${token}`) {
     res.writeHead(401).end("unauthorized");
     return;
+  }
+  if (githubAccept) {
+    const wanted = req.url.split("?")[0].endsWith("latest.json")
+      ? "application/vnd.github.raw+json"
+      : "application/octet-stream";
+    if (req.headers.accept !== wanted) {
+      res.writeHead(200, { "content-type": "application/json" }).end('{"name":"metadata-only"}');
+      return;
+    }
   }
   const path = normalize(join(dir, decodeURIComponent(new URL(req.url, "http://x").pathname)));
   if (path !== dir && !path.startsWith(dir + sep)) {
