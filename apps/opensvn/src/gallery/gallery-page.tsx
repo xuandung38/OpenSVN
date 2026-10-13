@@ -22,6 +22,7 @@ import { Tabs } from "../components/ui/tabs";
 import { useToast } from "../components/ui/toast";
 import { ToolbarItem } from "../components/ui/toolbar-item";
 import type { StatusCode } from "../lib/status";
+import { RemoteDemo } from "./remote-demo";
 
 const CODES: StatusCode[] = ["M", "A", "D", "R", "?", "!", "C"];
 
@@ -242,6 +243,7 @@ function AllComponents() {
 export function GalleryPage() {
   return (
     <div className="h-full overflow-auto">
+      <RemoteDemo />
       <div className="grid min-w-[1100px] grid-cols-2">
         <div data-theme="light" className="bg-bg text-fg">
           <AllComponents />

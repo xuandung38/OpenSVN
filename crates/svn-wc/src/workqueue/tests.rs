@@ -812,7 +812,30 @@ fn pristine_source_reads_installed_text() {
 
 // ------------------------------------------------- admin tmp operands, props source, moves
 
-use super::paths::{resolve_admin_tmp, resolve_operand, resolve_wc_path};
+use super::paths::{AdmKind, resolve_adm_path, resolve_wc_path};
+
+/// `.svn/tmp/<name>` only.
+fn resolve_admin_tmp(
+    root: &std::path::Path,
+    rel: &str,
+) -> Result<std::path::PathBuf, WorkQueueError> {
+    let adm = resolve_adm_path(root, rel)?;
+    if adm.kind == AdmKind::Tmp {
+        Ok(adm.path)
+    } else {
+        Err(WorkQueueError::UnsafePath(format!(
+            "{rel}: not a temp path"
+        )))
+    }
+}
+
+/// Operand that is not a pristine source.
+fn resolve_operand(
+    root: &std::path::Path,
+    rel: &str,
+) -> Result<std::path::PathBuf, WorkQueueError> {
+    super::paths::resolve_operand(root, rel, false)
+}
 
 #[test]
 fn admin_tmp_resolver_accepts_exactly_one_component() {
@@ -1277,4 +1300,200 @@ mod windows_unverified {
         run(&w, &mut ops, &mut q).unwrap();
         assert_eq!(q.fileinfo[0].last_mod_time_micros, 1_500_000_000_000_000);
     }
+}
+
+// ------------------------------------------------- pristine operands (svn 1.14 queues)
+
+fn pristine_rel(sha: &crate::pristine::Sha1Digest) -> String {
+    let hex = sha.to_hex();
+    format!(".svn/pristine/{}/{hex}.svn-base", &hex[..2])
+}
+
+#[test]
+fn pristine_operands_accept_only_the_exact_shape() {
+    let mut w = wc();
+    let sha = install(&mut w, b"text");
+    let good = pristine_rel(&sha);
+    let adm = resolve_adm_path(w.dir.path(), &good).unwrap();
+    assert_eq!(adm.kind, AdmKind::Pristine);
+    assert_eq!(adm.path, w.dir.path().join(&good));
+    let hex = sha.to_hex();
+    let other = if hex.starts_with('a') { 'b' } else { 'a' };
+    for bad in [
+        // Uppercase hex, wrong directory prefix, wrong lengths, wrong suffix, extra components.
+        format!(
+            ".svn/pristine/{}/{}.svn-base",
+            hex[..2].to_uppercase(),
+            hex.to_uppercase()
+        ),
+        format!(".svn/pristine/{other}{}/{hex}.svn-base", &hex[1..2]),
+        format!(".svn/pristine/{}/{}.svn-base", &hex[..2], &hex[..39]),
+        format!(".svn/pristine/{}/{hex}0.svn-base", &hex[..2]),
+        format!(".svn/pristine/{}/{hex}.svn-bas", &hex[..2]),
+        format!(".svn/pristine/{}/{hex}", &hex[..2]),
+        format!(".svn/pristine/{}/{hex}.svn-base/x", &hex[..2]),
+        format!(".svn/pristine/{}/x/{hex}.svn-base", &hex[..2]),
+        format!(".svn/pristine/{hex}.svn-base"),
+        format!(".svn/pristine/{}/", &hex[..2]),
+        ".svn/pristine/".to_string(),
+        ".svn/pristine".to_string(),
+        format!(".svn/pristine/../wc.db/{hex}.svn-base"),
+        format!(".svn/pristine/{}/../{hex}.svn-base", &hex[..2]),
+        format!(".svn/pristine/{}/{}:stream.svn-base", &hex[..2], &hex[..38]),
+        format!(".svn/pristine/zz/{}.svn-base", "z".repeat(40)),
+        format!(".svn/pristine/{}\\{hex}.svn-base", &hex[..2]),
+        format!("x/.svn/pristine/{}/{hex}.svn-base", &hex[..2]),
+        format!(".svn/PRISTINE/{}/{hex}.svn-base", &hex[..2]),
+    ] {
+        assert!(resolve_adm_path(w.dir.path(), &bad).is_err(), "{bad}");
+    }
+    // Other admin files stay off limits.
+    for bad in [
+        ".svn/wc.db",
+        ".svn/wc.db-journal",
+        ".svn/format",
+        ".svn/entries",
+        ".svn/lock",
+        ".svn",
+    ] {
+        assert!(resolve_adm_path(w.dir.path(), bad).is_err(), "{bad}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn pristine_operands_refuse_symlinks_anywhere_on_the_way() {
+    let mut w = wc();
+    let sha = install(&mut w, b"text");
+    let rel = pristine_rel(&sha);
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret"), b"secret").unwrap();
+
+    // Symlinked final file.
+    let file = w.dir.path().join(&rel);
+    std::fs::remove_file(&file).ok();
+    std::os::unix::fs::symlink(outside.path().join("secret"), &file).unwrap();
+    assert!(resolve_adm_path(w.dir.path(), &rel).is_err());
+    std::fs::remove_file(&file).unwrap();
+
+    // Symlinked <xx> directory.
+    let xx = file.parent().unwrap().to_path_buf();
+    std::fs::remove_dir_all(&xx).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &xx).unwrap();
+    assert!(resolve_adm_path(w.dir.path(), &rel).is_err());
+    std::fs::remove_file(&xx).unwrap();
+
+    // Symlinked .svn/pristine.
+    let pristine = w.dir.path().join(".svn/pristine");
+    std::fs::remove_dir_all(&pristine).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &pristine).unwrap();
+    assert!(resolve_adm_path(w.dir.path(), &rel).is_err());
+}
+
+#[test]
+fn a_pristine_path_is_a_read_only_source_only() {
+    let mut w = wc();
+    let sha = install(&mut w, b"text");
+    let rel = pristine_rel(&sha);
+    let mut ops = FakeOps::default();
+    ops.nodes.insert("f".into(), node(sha, &[]));
+    for bad in [
+        WorkItem::FileRemove {
+            relpath: rel.clone(),
+        },
+        WorkItem::FileMove {
+            src: rel.clone(),
+            dst: "x".into(),
+        },
+        WorkItem::FileMove {
+            src: "f".into(),
+            dst: rel.clone(),
+        },
+        WorkItem::FileTranslate {
+            local: "f".into(),
+            src: "f".into(),
+            dst: rel.clone(),
+        },
+        WorkItem::FileInstall {
+            relpath: rel.clone(),
+            use_commit_times: false,
+            record_fileinfo: false,
+            source: None,
+        },
+        WorkItem::DirRemove {
+            relpath: rel.clone(),
+            recursive: false,
+        },
+        WorkItem::SyncFileFlags {
+            relpath: rel.clone(),
+        },
+    ] {
+        std::fs::write(w.dir.path().join("f"), b"x").unwrap();
+        let mut q = MemQueue::with(std::slice::from_ref(&bad));
+        let err = run(&w, &mut ops, &mut q).unwrap_err();
+        let WorkQueueError::ItemFailed { source, .. } = err else {
+            panic!("{bad:?}")
+        };
+        assert!(
+            matches!(*source, WorkQueueError::UnsafePath(_)),
+            "{bad:?}: {source}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(w.dir.path().join(&rel)).unwrap(),
+        b"text",
+        "the pristine is untouched"
+    );
+}
+
+/// Shape of what svn 1.14.5 / TortoiseSVN 1.14 leave behind when an update with a text conflict
+/// is interrupted: `merge_file` hands the old and new pristine files to `preserve_pre_merge_files`,
+/// which queues `file-translate` straight from `.svn/pristine`. Synthesized from the 1.14.5
+/// source (no 1.14.5 client is available here); a recorded queue from the 1.14.5 client image is
+/// a follow-up.
+#[test]
+fn synthesized_svn_1_14_interrupted_update_queue_runs() {
+    let mut w = wc();
+    let old = install(&mut w, b"old\n$Rev$\n");
+    let new = install(&mut w, b"new\n$Rev$\n");
+    let items = [
+        // Paths starting with '.' use the explicit-length atom form, as svn writes them.
+        format!(
+            "(file-translate f {} {} f.r1)",
+            pristine_rel(&old).len(),
+            pristine_rel(&old)
+        ),
+        format!(
+            "(file-translate f {} {} f.r2)",
+            pristine_rel(&new).len(),
+            pristine_rel(&new)
+        ),
+    ];
+    let decoded: Vec<_> = items
+        .iter()
+        .map(|i| WorkItem::decode(i.as_bytes()).unwrap())
+        .collect();
+    for (d, i) in decoded.iter().zip(&items) {
+        assert_eq!(
+            &String::from_utf8(d.encode()).unwrap(),
+            i,
+            "codec round trip"
+        );
+    }
+    let mut ops = FakeOps::default();
+    ops.nodes.insert(
+        "f".into(),
+        node(old, &[("svn:keywords", "Rev"), ("svn:eol-style", "CRLF")]),
+    );
+    let mut q = MemQueue::with(&decoded);
+    run(&w, &mut ops, &mut q).unwrap();
+    assert_eq!(
+        std::fs::read(w.dir.path().join("f.r1")).unwrap(),
+        b"old\r\n$Rev: 7 $\r\n"
+    );
+    assert_eq!(
+        std::fs::read(w.dir.path().join("f.r2")).unwrap(),
+        b"new\r\n$Rev: 7 $\r\n"
+    );
+    assert!(q.items.is_empty());
 }
