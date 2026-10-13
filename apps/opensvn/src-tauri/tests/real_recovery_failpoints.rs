@@ -118,7 +118,7 @@ async fn env(online: bool) -> Env {
     let tmp = tempfile::tempdir().unwrap();
     let wc = tmp.path().join("wc");
     svn_client::checkout(
-        &engine.client_ctx(&OpContext::detached()),
+        &svn_client::ClientCtx::new(this_process(&store)),
         &trunk(&repo),
         &wc,
         None,
@@ -144,13 +144,18 @@ fn trunk(repo: &FakeRaSession) -> FakeRaSession {
         .unwrap()
 }
 
+/// Lock owner of this process, as the engine records its own locks.
+fn this_process(store: &Arc<MemoryLockOwnership>) -> LockOwner {
+    LockOwner {
+        store: store.clone() as Arc<dyn LockOwnershipStore>,
+        pid: std::process::id(),
+        boot_id: THIS_BOOT.to_owned(),
+    }
+}
+
 impl Env {
     fn owner(&self) -> LockOwner {
-        LockOwner {
-            store: self.store.clone() as Arc<dyn LockOwnershipStore>,
-            pid: std::process::id(),
-            boot_id: THIS_BOOT.to_owned(),
-        }
+        this_process(&self.store)
     }
 
     async fn commit(&self, message: &str) -> Result<Option<CommitResult>, SvnError> {
@@ -170,7 +175,7 @@ impl Env {
 
     async fn update(&self) -> Result<svn_client::UpdateSummary, SvnError> {
         svn_client::update(
-            &self.engine.client_ctx(&OpContext::detached()),
+            &svn_client::ClientCtx::new(self.owner()),
             &trunk(&self.repo),
             &self.wc,
             None,
