@@ -3,7 +3,13 @@
 //!
 //! ```text
 //! updater-harness --endpoint URL --pubkey TEXT --current 0.1.0 [--header K=V]... [--download]
+//!                 [--download-accept VALUE|keep] [--allowed-download-host HOST [--insecure-test]]
 //! ```
+//! `--header` applies to the manifest request. Before downloading, the harness replaces `Accept`
+//! with `application/octet-stream` (the GitHub asset API needs it; the plugin would otherwise reuse
+//! the manifest `Accept`), unless `--download-accept keep` reproduces the pitfall.
+//! `--allowed-download-host` is the reference for the app-side check that must run before the
+//! bearer token is sent: https scheme (waived by `--insecure-test`) and an exact host match.
 //! Prints one JSON line: `{"available":false}` or
 //! `{"available":true,"version":"0.2.0","downloaded_bytes":N}`. Exits 1 on any failure
 //! (unreachable endpoint, bad manifest, signature mismatch).
@@ -18,6 +24,9 @@ struct Args {
     current: semver::Version,
     headers: Vec<(String, String)>,
     download: bool,
+    download_accept: Option<String>,
+    allowed_download_host: Option<String>,
+    insecure_test: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -26,6 +35,9 @@ fn parse_args() -> Result<Args, String> {
     let mut current = None;
     let mut headers = Vec::new();
     let mut download = false;
+    let mut download_accept = Some("application/octet-stream".to_owned());
+    let mut allowed_download_host = None;
+    let mut insecure_test = false;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
@@ -44,6 +56,14 @@ fn parse_args() -> Result<Args, String> {
                 headers.push((k.to_owned(), v.to_owned()));
             }
             "--download" => download = true,
+            "--download-accept" => {
+                let v = value("--download-accept")?;
+                download_accept = (v != "keep").then_some(v);
+            }
+            "--allowed-download-host" => {
+                allowed_download_host = Some(value("--allowed-download-host")?);
+            }
+            "--insecure-test" => insecure_test = true,
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -53,6 +73,9 @@ fn parse_args() -> Result<Args, String> {
         current: current.ok_or("--current is required")?,
         headers,
         download,
+        download_accept,
+        allowed_download_host,
+        insecure_test,
     })
 }
 
@@ -74,9 +97,23 @@ async fn run(args: Args) -> Result<String, Box<dyn std::error::Error>> {
         builder = builder.header(k.as_str(), v.as_str())?;
     }
     let updater = builder.build()?;
-    let Some(update) = updater.check().await? else {
+    let Some(mut update) = updater.check().await? else {
         return Ok(serde_json::json!({ "available": false }).to_string());
     };
+    if let Some(host) = &args.allowed_download_host {
+        let url = &update.download_url;
+        if url.scheme() != "https" && !args.insecure_test {
+            return Err(format!("download url is not https: {url}").into());
+        }
+        if url.host_str() != Some(host.as_str()) {
+            return Err(format!("download host {:?} is not {host}", url.host_str()).into());
+        }
+    }
+    if let Some(accept) = &args.download_accept {
+        update
+            .headers
+            .insert("accept", tauri::http::HeaderValue::from_str(accept)?);
+    }
     let downloaded = if args.download {
         update.download(|_, _| {}, || {}).await?.len()
     } else {

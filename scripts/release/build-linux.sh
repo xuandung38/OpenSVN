@@ -20,15 +20,19 @@ log "version $VERSION"
 if [[ "${SKIP_LICENSES:-0}" != "1" ]]; then "$REPO_ROOT/scripts/release/gen-licenses.sh"; fi
 [[ -f "$GEN_DIR/THIRD-PARTY-LICENSES.txt" ]] || die "run scripts/release/gen-licenses.sh first"
 
+if [[ "${OPENSVN_UPDATER:-0}" == "1" ]]; then
+  [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]] || die "OPENSVN_UPDATER=1 needs TAURI_SIGNING_PRIVATE_KEY"
+fi
 tauri_config_args
 (cd "$REPO_ROOT" && pnpm install --frozen-lockfile)
+MARK="$(mktemp)"; trap 'rm -f "$MARK"' EXIT
 (cd "$APP_DIR" && pnpm tauri build --bundles appimage,deb "${CONFIG_ARGS[@]}")
 
 OUT="$GEN_DIR/out/$VERSION"
-mkdir -p "$OUT"
+rm -rf "$OUT"; mkdir -p "$OUT"
 BUNDLE_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}/release/bundle"
 [[ -d "$BUNDLE_DIR" ]] || die "bundle directory not found: $BUNDLE_DIR"
-cp -f "$BUNDLE_DIR"/deb/*.deb "$BUNDLE_DIR"/appimage/*.AppImage "$OUT/"
-if [[ "${OPENSVN_UPDATER:-0}" == "1" ]]; then cp -f "$BUNDLE_DIR"/appimage/*.AppImage.sig "$OUT/" 2>/dev/null || true; fi
+cp -f "$(pick_artifact "$BUNDLE_DIR/deb" "OpenSVN_${VERSION}_*.deb" "$MARK")" "$OUT/"
+copy_with_sig "$(pick_artifact "$BUNDLE_DIR/appimage" "OpenSVN_${VERSION}_*.AppImage" "$MARK")" "$OUT"
 (cd "$OUT" && sha256sum -- *.deb *.AppImage > SHA256SUMS)
 log "artifacts in $OUT"

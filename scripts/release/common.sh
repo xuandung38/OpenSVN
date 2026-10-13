@@ -26,6 +26,28 @@ ensure_cargo() {
   need cargo "install Rust via rustup"
 }
 
+# Prints the one file in DIR whose name matches the glob PATTERN and that is not older than the
+# marker file MARK (touched right before the build). Zero or several matches are a hard error, so
+# an installer left over from an earlier version or build can never be packaged by accident.
+pick_artifact() {
+  local dir="$1" pattern="$2" mark="$3" found=()
+  while IFS= read -r f; do found+=("$f"); done \
+    < <(find "$dir" -maxdepth 1 -type f -name "$pattern" -newer "$mark" 2>/dev/null)
+  [[ ${#found[@]} -eq 1 ]] \
+    || die "expected exactly one fresh '$pattern' in $dir, found ${#found[@]}"
+  printf '%s\n' "${found[0]}"
+}
+
+# With OPENSVN_UPDATER=1 every update artifact needs its .sig: copy both or fail.
+copy_with_sig() {
+  local src="$1" out="$2"
+  cp -f "$src" "$out/"
+  if [[ "${OPENSVN_UPDATER:-0}" == "1" ]]; then
+    [[ -s "$src.sig" ]] || die "missing signature for $(basename "$src") (OPENSVN_UPDATER=1)"
+    cp -f "$src.sig" "$out/"
+  fi
+}
+
 # Prints the version to stamp (workspace version, or RELEASE_VERSION) and writes the Tauri config
 # override that carries it.
 stamp_version() {
