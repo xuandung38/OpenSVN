@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wc-list"
+description = "Enables the wc_list command without any pre-configured scope."
+commands.allow = ["wc_list"]
+
+[[permission]]
+identifier = "deny-wc-list"
+description = "Denies the wc_list command without any pre-configured scope."
+commands.deny = ["wc_list"]

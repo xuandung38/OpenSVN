@@ -1,0 +1,25 @@
+[package]
+name = "opensvn"
+version = "0.0.0"
+edition = "2024"
+publish = false
+default-run = "opensvn"
+description = "OpenSVN desktop app (Tauri 2)"
+
+[lib]
+name = "opensvn_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.2", features = [] }
+
+[dependencies]
+opensvn-ipc = { path = "../../../crates/opensvn-ipc" }
+tauri = { version = "=2.12.3", features = [] }
+tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
+specta = { version = "=2.0.0-rc.25" }
+specta-typescript = "=0.0.12"
+serde = { version = "=1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "=1.0.154"

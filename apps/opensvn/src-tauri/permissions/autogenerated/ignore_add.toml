@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ignore-add"
+description = "Enables the ignore_add command without any pre-configured scope."
+commands.allow = ["ignore_add"]
+
+[[permission]]
+identifier = "deny-ignore-add"
+description = "Denies the ignore_add command without any pre-configured scope."
+commands.deny = ["ignore_add"]
