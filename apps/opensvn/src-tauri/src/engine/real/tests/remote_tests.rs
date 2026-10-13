@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use opensvn_ipc::{EntryKind, Layout, LogGetRequest, LogTarget, Rev, WcFormat, WcId};
+use opensvn_ipc::{EntryKind, Layout, LogGetRequest, LogTarget, Rev, WcId};
 use svn_ra_api::fake::FakeChange;
 use svn_types::{ErrorCode, RelPath, SvnError};
 
@@ -12,9 +12,7 @@ use super::support::{
 };
 use crate::engine::conformance::{self, Harness, PlantedOwner};
 use crate::engine::real::RealEngine;
-use crate::engine::{
-    CheckoutPlan, DiffOptions, EngineFacade, LockScope, LogScope, OpContext, WcRef,
-};
+use crate::engine::{DiffOptions, EngineFacade, LockScope, LogScope, OpContext, WcRef};
 
 /// Harness that runs the shared suite against the real engine.
 ///
@@ -105,24 +103,6 @@ async fn shared_recovery_scenario_with_planted_locks() {
         assert!(opened.recovery.recovered.is_empty());
         assert_eq!(opened.recovery.needs_user_action, vec!["src".to_owned()]);
     }
-}
-
-#[tokio::test]
-async fn working_copy_operations_report_that_they_are_not_wired() {
-    let f = fixture();
-    let plan = CheckoutPlan {
-        url: format!("{URL}/trunk"),
-        path: PathBuf::from("/nowhere"),
-        rev: None,
-        depth: opensvn_ipc::Depth::Infinity,
-        sparse: None,
-        format: WcFormat::V31,
-        store_pristine: true,
-        ignore_externals: false,
-    };
-    let err = f.engine.checkout(&plan, &ctx()).await.unwrap_err();
-    assert_eq!(err.code, ErrorCode::Internal);
-    assert!(err.message.starts_with("not wired"), "{}", err.message);
 }
 
 #[tokio::test]
@@ -679,7 +659,7 @@ async fn a_dropped_working_copy_lock_or_unlock_releases_the_directory_lock() {
     let f = fixture_on(
         repo,
         Arc::new(ScriptedConnector(session.clone())),
-        Arc::new(crate::engine::real::UnwiredRecovery),
+        Arc::new(crate::engine::real::ClientRecovery),
     );
     let (_tmp, root) = make_wc(1);
     add_base_file(&root, "README.md", "trunk/README.md", 1);

@@ -11,6 +11,9 @@ export const repoStrings = defineStrings({
     noMatch: "No repository matches “{query}”.",
     missing: "Missing",
     missingHint: "The folder was moved or deleted. Locate it or remove it from the list.",
+    incomplete: "Incomplete — Update to finish",
+    incompleteHint:
+      "The checkout or update stopped before it finished. Open the working copy and run Update to finish it.",
     lastOpened: "opened {when}",
     neverOpened: "never opened",
     checkoutAction: "Checkout repository…",
@@ -48,6 +51,9 @@ export const repoStrings = defineStrings({
     noMatch: "Không có repository nào khớp “{query}”.",
     missing: "Không tìm thấy",
     missingHint: "Thư mục đã bị chuyển hoặc xóa. Hãy định vị lại hoặc gỡ khỏi danh sách.",
+    incomplete: "Chưa hoàn tất — Update để hoàn tất",
+    incompleteHint:
+      "Checkout hoặc update đã dừng giữa chừng. Mở working copy và chạy Update để hoàn tất.",
     lastOpened: "mở {when}",
     neverOpened: "chưa mở",
     checkoutAction: "Checkout repository…",

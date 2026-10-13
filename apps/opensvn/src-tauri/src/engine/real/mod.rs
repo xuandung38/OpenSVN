@@ -3,7 +3,7 @@
 //! * Repository reads, locks, branch listing and server-side edits go through [`RaSession`]
 //!   (`remote`, `blame`, `layout`, `remote_edit`, `locks`).
 //! * Opening a working copy reads `wc.db` through `svn-wc` and runs crash recovery (`wc_read`,
-//!   `recovery`, `journal`).
+//!   `recovery`; commit journals are `svn-client`'s, below `<state_dir>/commit-journals/`).
 //! * Status, working copy diff and remote status run through `svn-client` (`wc_status`, with the
 //!   type mapping in `wc_map`).
 //! * Operations that need the rest of the `svn-client` working copy layer (checkout, update,
@@ -21,9 +21,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use opensvn_ipc::{
-    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth, FileDiff,
-    FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage, RepoEntry, RepoInfo,
-    ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
+    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
+    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage,
+    RepoEntry, RepoInfo, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
 };
 use svn_ra_api::RaSession;
 use svn_types::{CancelToken, ErrorCode, LockOwnershipStore, RelPath, RepoUrl, SvnError};
@@ -36,10 +36,10 @@ use super::facade::{
 
 mod blame;
 mod commit;
-mod journal;
 mod layout;
 mod local;
 mod locks;
+mod progress;
 mod recovery;
 mod remote;
 mod remote_edit;
@@ -54,8 +54,7 @@ mod wc_read;
 #[cfg(test)]
 mod tests;
 
-pub use journal::{CommitJournal, JournalPhase, JournalRecord, JournalStore};
-pub use recovery::{RecoveryHooks, UnwiredRecovery};
+pub use recovery::{ClientRecovery, RecoveryHooks};
 
 /// Opens repository sessions for the engine.
 ///
@@ -138,9 +137,9 @@ pub struct RealEngineConfig {
     /// Boot session id of this process (`lock_ownership::current_boot_id()` in the app); with
     /// the process id it identifies the locks this process takes.
     pub boot_id: String,
-    /// Per-user state directory; commit journals live below it.
+    /// Per-user state directory; commit journals live below it (`commit-journals/`).
     pub state_dir: PathBuf,
-    /// Steps of crash recovery that need the working copy layer.
+    /// Steps of crash recovery that need the working copy layer ([`ClientRecovery`]).
     pub recovery: Arc<dyn RecoveryHooks>,
 }
 
@@ -149,7 +148,7 @@ pub struct RealEngine {
     connector: Arc<dyn SessionConnector>,
     lock_ownership: Arc<dyn LockOwnershipStore>,
     boot_id: String,
-    journals: JournalStore,
+    state_dir: PathBuf,
     recovery: Arc<dyn RecoveryHooks>,
 }
 
@@ -160,7 +159,7 @@ impl RealEngine {
             connector: config.connector,
             lock_ownership: config.lock_ownership,
             boot_id: config.boot_id,
-            journals: JournalStore::new(config.state_dir),
+            state_dir: config.state_dir,
             recovery: config.recovery,
         }
     }
@@ -235,6 +234,12 @@ fn not_wired(op: &str) -> SvnError {
 
 #[async_trait]
 impl EngineFacade for RealEngine {
+    fn capabilities(&self) -> EngineCapabilities {
+        // `svn-client` does not fetch `svn:externals` yet (issue #97): checkout, update and switch
+        // behave like `svn --ignore-externals`.
+        EngineCapabilities { externals: false }
+    }
+
     async fn wc_info(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcInfo> {
         wc_read::wc_info(root, ctx).await
     }

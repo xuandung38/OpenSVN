@@ -56,8 +56,10 @@ export const commands = {
 	/**
 	 *  Checks out into a new folder (`dest_name`) inside the granted parent folder, or into the granted
 	 *  folder itself. The target must not exist or be an empty folder. On success the working copy is
-	 *  registered and its id returned in `OpResult::CheckedOut`; a folder this checkout created is
-	 *  removed again when the checkout fails or is cancelled while it is still empty.
+	 *  registered and its id returned in `OpResult::CheckedOut`. When the checkout fails or is cancelled
+	 *  after it created the working copy, the partial working copy is registered anyway (listed as
+	 *  incomplete; an update finishes it); otherwise a folder this checkout created is removed again
+	 *  while it is still empty.
 	 */
 	checkout: (request: CheckoutRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("checkout", { request })),
 	update: (request: UpdateRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("update", { request })),
@@ -93,6 +95,11 @@ export const commands = {
 	accountsList: () => typedError<Account[], AppError>(__TAURI_INVOKE("accounts_list")),
 	accountsSignOut: (realm: string) => typedError<null, AppError>(__TAURI_INVOKE("accounts_sign_out", { realm })),
 	settingsGet: () => typedError<Settings, AppError>(__TAURI_INVOKE("settings_get")),
+	/**
+	 *  What the running engine supports, so the UI can hide or explain options it would ignore
+	 *  (externals are not fetched by the real engine yet).
+	 */
+	engineCapabilities: () => typedError<EngineCapabilities, AppError>(__TAURI_INVOKE("engine_capabilities")),
 	/**
 	 *  Applies a partial update. `SettingsPatch` has no program-launching keys (see `program_choose`);
 	 *  a patch containing one is refused with `invalid-argument`.
@@ -411,6 +418,19 @@ export type DropPosition = {
 export type DroppedPaths = {
 	grants: PathGrantInfo[],
 	position: DropPosition,
+};
+
+/**
+ *  What the running engine supports, so the UI can hide or explain options it would ignore
+ *  (`engine_capabilities`).
+ */
+export type EngineCapabilities = {
+	/**
+	 *  Checkout, update and switch fetch `svn:externals`. When `false` they behave like
+	 *  `svn --ignore-externals` whatever `CheckoutRequest.ignore_externals` says
+	 *  (https://github.com/xuandung38/OpenSVN/issues/97).
+	 */
+	externals: boolean,
 };
 
 export type EntryKind = "file" | "dir";
@@ -924,6 +944,11 @@ export type WcEntry = {
 	missing: boolean,
 	/**  Why the working copy cannot be read (only when `missing`). */
 	problem: string | null,
+	/**
+	 *  A checkout or update stopped before it finished; the UI shows "Incomplete — Update to
+	 *  finish". Always `false` when `missing`.
+	 */
+	incomplete: boolean,
 };
 
 /**  Working-copy format; only 31 and 32 are valid (validated on deserialize; `number` in TS). */
@@ -955,6 +980,11 @@ export type WorkingCopy = {
 	/**  Number of new revisions not yet updated. */
 	incoming: number,
 	lastCheckedAt: string | null,
+	/**
+	 *  A checkout or update stopped before it finished (cancelled, connection lost): some folders
+	 *  are recorded as incomplete. Updating the working copy finishes it.
+	 */
+	incomplete: boolean,
 };
 
 /* Tauri Specta runtime */

@@ -3546,6 +3546,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "dunce",
+ "fail",
  "futures-util",
  "md-5",
  "notify",

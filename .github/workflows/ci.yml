@@ -63,6 +63,7 @@ jobs:
         run: |
           cargo clippy -p opensvn --features real-engine --all-targets --locked -- -D warnings
           cargo test -p opensvn --features real-engine --locked
+          cargo test -p opensvn --features failpoints --locked
 
   deny:
     name: cargo-deny
