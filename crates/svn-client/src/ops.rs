@@ -20,8 +20,10 @@ async fn open(ctx: &ClientCtx, path: &Path) -> Result<(Arc<svn_wc::db::WcDb>, sv
 
 /// Updates the working copy item at `path` to `revision` (HEAD when `None`).
 ///
-/// `depth` of `Unknown` keeps the depth recorded in the working copy; any other value makes the
-/// new depth sticky for the target.
+/// `depth` works like `svn update --depth`: `Unknown` updates to the depths recorded in the
+/// working copy; a narrower depth limits the update (nodes outside it keep their revision, and
+/// children the server added there are recorded as `not-present`); it is never recorded and
+/// never widens the working copy. Changing the recorded depth (`--set-depth`) is not supported.
 pub async fn update(
     ctx: &ClientCtx,
     session: &dyn RaSession,

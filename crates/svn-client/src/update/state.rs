@@ -20,7 +20,9 @@ pub struct UpdateSetup {
     pub target: RelPath,
     /// Repository path the target moves to (switch), else `None`.
     pub switch_relpath: Option<String>,
-    /// Depth requested by the user (`Unknown`: keep what the working copy has).
+    /// Depth requested by the user (`Unknown`: the depth the working copy has). Like
+    /// `svn update --depth`, it limits the drive and is never recorded: the working copy keeps
+    /// its depths (checkout records the depth up front).
     pub depth: Depth,
     /// An unversioned file that is in the way is adopted instead of becoming a tree conflict.
     pub allow_unversioned_obstructions: bool,
@@ -86,6 +88,16 @@ pub struct DirState {
     pub base: Option<Node>,
     /// Depth recorded for the directory afterwards.
     pub depth: Depth,
+    /// How far below this directory the drive applies (`Empty`: nothing, `Files`: files only,
+    /// `Immediates`: children, whose own children are left alone). The requested depth of the
+    /// update narrowed by the depth the working copy already has; never recorded.
+    pub limit: Depth,
+    /// Children dropped by `limit` that the server adds become `not-present` rows: the limit
+    /// comes from a requested depth narrower than the recorded one (svn issue #3569).
+    pub not_present_on_drop: bool,
+    /// The directory lies under an unversioned obstruction: BASE is written, the disk is left
+    /// alone and every node gets a `base-deleted` row at this op depth.
+    pub shadow: Option<u32>,
     /// Incoming property changes, applied at close.
     pub prop_changes: Vec<PropChange>,
     /// Entry properties.
@@ -129,6 +141,9 @@ pub struct FileState {
     pub text: TextSlot,
     /// Tree conflict to record when the file closes.
     pub tree_conflict: Option<PendingTreeConflict>,
+    /// The file lies under an unversioned directory obstruction: BASE only, with a
+    /// `base-deleted` row at this op depth (see [`DirState::shadow`]).
+    pub shadow: Option<u32>,
 }
 
 /// Path of the temporary directory of the administrative area.
