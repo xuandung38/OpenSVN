@@ -41,6 +41,23 @@ pub fn sql_err(err: rusqlite::Error) -> SvnError {
     SvnError::new(code, format!("wc.db: {err}"))
 }
 
+/// Opens an existing database for probing and normal use: read/write when the file allows it
+/// (so a hot journal left by a crashed writer is rolled back exactly like svn does), otherwise
+/// read-only. Returns the connection and whether it can write.
+pub fn open_existing(path: &Path) -> Result<(Connection, bool)> {
+    match open_connection(path, OpenMode::ReadWrite) {
+        // SQLite silently downgrades a READWRITE open of a write-protected file to read-only.
+        Ok(conn) => {
+            let writable = !conn.is_readonly(rusqlite::MAIN_DB).map_err(sql_err)?;
+            Ok((conn, writable))
+        }
+        Err(e) if e.code == ErrorCode::PermissionDenied => {
+            open_connection(path, OpenMode::ReadOnly).map(|c| (c, false))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Opens `path` and applies the svn-compatible per-connection settings.
 pub fn open_connection(path: &Path, mode: OpenMode) -> Result<Connection> {
     let mut flags = OpenFlags::SQLITE_OPEN_NO_MUTEX;
@@ -76,10 +93,15 @@ fn apply_pragmas(conn: &Connection, writable: bool) -> Result<()> {
          PRAGMA foreign_keys = OFF;
          PRAGMA recursive_triggers = ON;
          PRAGMA case_sensitive_like = 1;
-         PRAGMA temp_store = MEMORY;
-         PRAGMA reverse_unordered_selects = ON;",
+         PRAGMA temp_store = MEMORY;",
     )
-    .map_err(sql_err)
+    .map_err(sql_err)?;
+    // svn enables this only in SVN_DEBUG builds (it surfaces missing ORDER BY clauses); mirror that.
+    if cfg!(debug_assertions) {
+        conn.execute_batch("PRAGMA reverse_unordered_selects = ON;")
+            .map_err(sql_err)?;
+    }
+    Ok(())
 }
 
 /// Registers `relpath_depth(local_relpath)` exactly like `svn_wc__db_util_open_db`: the number of

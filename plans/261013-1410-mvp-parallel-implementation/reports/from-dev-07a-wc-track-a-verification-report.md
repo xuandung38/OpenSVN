@@ -104,3 +104,6 @@ Tests that lock these facts in: `crates/svn-wc/tests/{skel_real_blobs,schema_str
   foreign rows below (ignoring those deeper than `levels`), and the nearest row at/above that reaches the dir. An svn commit holds the root lock for its whole duration
   (observed with a sleeping pre-commit hook); `svn commit` refuses to run while our row exists (E155004).
 - Ownership is outside wc.db; risk noted in `wc_lock.rs` docs: a dead record plus a later svn lock on the same directory is indistinguishable from the stale row.
+## Corrections after review of the schema PR
+- `reverse_unordered_selects` is NOT a normal svn setting: it is compiled in only for SVN_DEBUG builds (sqlite.c). OpenSVN enables it under `debug_assertions` only (section 5 above and the lead's settings note list it as unconditional; treat that row as debug-only).
+- `open` probes with a READ_WRITE connection (falls back to read-only for write-protected files), so a hot journal left by a crashed writer is rolled back like svn does; the `sqlite_stat1` re-install runs in one `BEGIN IMMEDIATE` with a 100 ms busy timeout and is skipped (debug log) when the database is busy.
