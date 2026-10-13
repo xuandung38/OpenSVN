@@ -62,6 +62,7 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             accounts_list,
             accounts_sign_out,
             settings_get,
+            engine_capabilities,
             settings_set,
             program_choose,
             program_clear,

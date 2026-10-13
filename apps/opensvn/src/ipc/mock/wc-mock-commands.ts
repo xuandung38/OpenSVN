@@ -66,6 +66,7 @@ export const MOCK_MISSING_WC: WcEntry = {
   lastOpenedAt: "2026-09-30T16:20:00Z",
   missing: true,
   problem: "/Users/dev/work/old-prototype is not a working copy",
+  incomplete: false,
 };
 
 function initialState(): State {
@@ -93,6 +94,7 @@ function entryOf(w: WorkingCopy): WcEntry {
     lastOpenedAt: state.lastOpened.get(w.id) ?? null,
     missing: false,
     problem: null,
+    incomplete: w.incomplete,
   };
 }
 
@@ -110,6 +112,12 @@ let state = initialState();
 /** Restores the sample working copies and status (tests, and dev reloads). */
 export function resetWcMock(): void {
   state = initialState();
+}
+
+/** Marks a sample working copy as left behind by a checkout that stopped half-way (tests). */
+export function markMockWcIncomplete(wcId: string): void {
+  const wc = state.wcs.find((w) => w.id === wcId);
+  if (wc) wc.incomplete = true;
 }
 
 const FOLDER_NAMES = ["game-assets", "tools-sandbox", "level-editor", "audio-bank"];

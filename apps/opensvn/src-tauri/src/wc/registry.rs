@@ -150,6 +150,7 @@ impl WcRegistry {
             path_in_repo: info.path_in_repo,
             incoming: live.incoming,
             last_checked_at: live.last_checked_at,
+            incomplete: info.incomplete,
         })
     }
 
@@ -171,9 +172,9 @@ impl WcRegistry {
     pub async fn entries(&self) -> Result<Vec<WcEntry>, AppError> {
         let mut out = Vec::new();
         for row in self.db.wc_list()? {
-            let (url, problem) = match self.describe(&row).await {
-                Ok(wc) => (Some(wc.url), None),
-                Err(e) => (None, Some(e.message)),
+            let (url, incomplete, problem) = match self.describe(&row).await {
+                Ok(wc) => (Some(wc.url), wc.incomplete, None),
+                Err(e) => (None, false, Some(e.message)),
             };
             out.push(WcEntry {
                 id: WcId(row.id),
@@ -186,6 +187,7 @@ impl WcRegistry {
                 last_opened_at: row.last_opened_at,
                 missing: problem.is_some(),
                 problem,
+                incomplete,
             });
         }
         Ok(out)
@@ -256,6 +258,39 @@ impl WcRegistry {
             }
         };
         self.describe(&row).await
+    }
+
+    /// After a checkout into `root` that did not finish (cancelled, connection lost): registers the
+    /// partial working copy so the user can finish it with an update instead of being left with a
+    /// folder that is neither in the list nor usable for a new checkout. Only a working copy whose
+    /// root is exactly `root` (its administrative folder is directly inside) is registered, never
+    /// an enclosing one. Returns `None` when there is nothing to register.
+    pub async fn add_unfinished(&self, root: &Path) -> Option<WorkingCopy> {
+        let has_admin_dir = std::fs::read_dir(root).is_ok_and(|entries| {
+            entries.flatten().any(|e| {
+                e.file_type().is_ok_and(|t| t.is_dir())
+                    && svn_types::is_any_admin_dir_name(&e.file_name().to_string_lossy())
+            })
+        });
+        if !has_admin_dir {
+            return None;
+        }
+        let info = self
+            .engine
+            .wc_info(root, &OpContext::detached())
+            .await
+            .ok()?;
+        let canonical = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        if canonical(Path::new(&info.root_path)) != canonical(root) {
+            return None;
+        }
+        match self.add_existing(&info.root_path).await {
+            Ok(wc) => Some(wc),
+            Err(e) => {
+                tracing::warn!(code = ?e.code, "unfinished checkout was not registered");
+                None
+            }
+        }
     }
 
     /// Removes the working copy from the list; its files stay on disk.
