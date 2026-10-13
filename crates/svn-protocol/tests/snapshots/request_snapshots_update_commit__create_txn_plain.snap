@@ -1,0 +1,11 @@
+---
+source: crates/svn-protocol/tests/request_snapshots_update_commit.rs
+expression: render(&plain)
+---
+POST http://svn.test.local/svn/repo/!svn/me
+Content-Type: application/vnd.svn-skel
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+
+(create-txn)

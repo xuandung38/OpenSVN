@@ -7,22 +7,27 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod caps;
+pub mod commit;
 pub mod display_path;
 pub mod errors;
+pub mod file_revs;
 pub mod get;
 pub mod http;
 pub mod limits;
+pub mod list_report;
 pub mod locks;
 pub mod log;
 pub mod propfind;
+pub mod update;
 pub mod xml;
 
 mod util;
 
 pub use caps::{
-    AcceptedHref, BulkUpdates, Capabilities, DavCaps, HrefKind, UrlBuilder, options_request,
+    AcceptedHref, BulkPreference, BulkUpdates, Capabilities, DavCaps, HrefKind, ListStrategy,
+    TxnName, UrlBuilder, options_request,
 };
-pub use display_path::{DisplayChangedPath, RepoDisplayPath, RepoLock};
+pub use display_path::RepoDisplayPath;
 pub use errors::{error_from_response, map_errcode, map_http_status};
 pub use http::{
     Body, BodyStream, Headers, HttpRequest, Method, ResponseHead, ResponseParser, parse_chunked,
