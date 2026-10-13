@@ -323,11 +323,7 @@ async fn commit_locked(
     // From here on the revision exists in the repository. Cancellation is ignored and nothing
     // is reported as a failed commit: the user must never retry a commit that went through.
     let journal = observer.snapshot();
-    let finalized = (|| {
-        failpoint!("commit.finalize");
-        finalize::finalize(db, &journal, &data_dir)
-    })();
-    if let Err(e) = finalized {
+    if let Err(e) = finalize_after_merge(db, &journal, &data_dir) {
         // The journal stays: commit recovery (or the next commit, once the journal records the
         // revision) finishes it.
         let mut err = SvnError::new(
@@ -363,6 +359,12 @@ async fn commit_locked(
         committed: prepared.iter().map(|p| p.item.relpath.clone()).collect(),
         wc_warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
     }))
+}
+
+/// Folds the merged commit into the working copy (failpoint `commit.finalize` replaces it).
+fn finalize_after_merge(db: &WcDb, journal: &journal::JournalData, data_dir: &Path) -> Result<()> {
+    failpoint!("commit.finalize");
+    finalize::finalize(db, journal, data_dir)
 }
 
 /// How a commit whose `close_edit` failed continues.
