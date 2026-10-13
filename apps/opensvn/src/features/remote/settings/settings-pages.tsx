@@ -73,17 +73,27 @@ const num = (s: string) => (s.trim() === "" ? Number.NaN : Number(s));
 
 export function GeneralPage({ settings, draft, errors, set }: PageProps) {
   const t = useT(settingsStrings);
+  const qc = useQueryClient();
+  const toast = useToast();
   const v = <K extends keyof Settings>(k: K) => settingValue(settings, draft, k);
+  // Rust shows the native folder dialog and stores the choice; the WebView never sends a path.
+  const chooseRoot = useMutation({
+    mutationFn: () => unwrap(ipc().commands.checkoutRootChoose()),
+    onSuccess: (next) => qc.setQueryData(queryKeys.settings, next),
+    onError: (e) => toast.show(e.message),
+  });
   return (
     <div className="flex flex-col gap-3">
       <Field label={t("checkoutRoot")} hint={t("needsPicker")}>
         <div className="flex gap-2">
           <Input
             readOnly
-            value={v("general.checkoutRoot")}
+            value={settings["general.checkoutRoot"]}
             className="flex-1 font-mono text-[12px]"
           />
-          <Button disabled>{t("changeFolder")}</Button>
+          <Button disabled={chooseRoot.isPending} onClick={() => chooseRoot.mutate()}>
+            {t("changeFolder")}
+          </Button>
         </div>
       </Field>
       <Field
