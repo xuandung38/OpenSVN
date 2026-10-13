@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, LOCATION};
 use reqwest::{Method, StatusCode};
@@ -15,11 +15,15 @@ use super::config::{ProxyConfig, TransportConfig};
 use super::redact::{RedactedHeaders, redacted_url};
 use super::request::{HttpRequest, HttpResponse};
 use super::retry::{classify_error, error_chain, is_idempotent, is_transient_status};
-use super::tls::{CertProblem, OriginTls, TrustStore, make_client_config};
-use crate::auth::{AuthManager, Challenges, HostKey};
+use super::tls::{CertProblem, OriginTls, PinAction, TrustStore, make_client_config};
+use crate::auth::{AuthManager, Challenges, HostKey, or_cancel};
 
 /// How many certificate prompts one request may trigger before giving up.
 const MAX_TLS_ROUNDS: u8 = 2;
+/// 401 responses tolerated per realm: the unauthenticated request plus three rejected submissions.
+const MAX_CHALLENGES_PER_REALM: u8 = crate::auth::MAX_ATTEMPTS + 1;
+/// Total 401 round trips tolerated per request, whatever the realms.
+const MAX_AUTH_ROUND_TRIPS: u8 = 10;
 
 /// Client, TLS state and connection limit of one `(scheme, host, port)`.
 struct OriginClient {
@@ -95,6 +99,18 @@ impl HttpTransport {
             let status = resp.status;
             let target = redirect_target(&req.url, &resp)?;
             drop(resp);
+            if !follows_redirects(&req.method) {
+                return Err(SvnError::new(
+                    ErrorCode::Network,
+                    format!(
+                        "repository moved: {} was redirected (HTTP {}) to {}; \
+                         write requests are not re-sent",
+                        req.method,
+                        status.as_u16(),
+                        redacted_url(&target)
+                    ),
+                ));
+            }
             if !req.body.is_replayable() {
                 return Err(SvnError::new(
                     ErrorCode::Network,
@@ -175,12 +191,27 @@ impl HttpTransport {
     ) -> Result<HttpResponse> {
         let mut sent = self.auth.prepare(&req.url)?;
         let mut tls_rounds = 0u8;
+        let mut round_trips = 0u8;
+        let mut per_realm: HashMap<String, u8> = HashMap::new();
         loop {
             cancel.check()?;
             match self.attempt(origin, req, &sent.header, cancel).await {
                 Ok(resp) if resp.status == StatusCode::UNAUTHORIZED => {
                     let challenges = Challenges::from_headers(&resp.headers);
                     drop(resp);
+                    // A misbehaving server must not keep the client authenticating forever.
+                    round_trips += 1;
+                    let realm_count = per_realm
+                        .entry(challenges.basic_realm.clone().unwrap_or_default())
+                        .or_default();
+                    *realm_count += 1;
+                    if round_trips > MAX_AUTH_ROUND_TRIPS || *realm_count > MAX_CHALLENGES_PER_REALM
+                    {
+                        return Err(SvnError::new(
+                            ErrorCode::AuthRequired,
+                            "server kept rejecting credentials; giving up",
+                        ));
+                    }
                     if !req.body.is_replayable() {
                         return Err(SvnError::new(
                             ErrorCode::AuthRequired,
@@ -190,7 +221,7 @@ impl HttpTransport {
                     }
                     sent = self
                         .auth
-                        .on_unauthorized(&req.url, &challenges, &sent)
+                        .on_unauthorized(&req.url, &challenges, &sent, cancel)
                         .await?;
                 }
                 Ok(resp) => {
@@ -222,7 +253,7 @@ impl HttpTransport {
         }
         let tls = &origin.tls;
         let fp = problem.info.sha256;
-        let _gate = tls.prompt_gate.lock().await;
+        let _gate = or_cancel(cancel, tls.prompt_gate.lock()).await?;
         if tls.is_trusted(&fp) {
             return Ok(());
         }
@@ -231,9 +262,18 @@ impl HttpTransport {
         }
         let mut info = problem.info.clone();
         if problem.changed {
-            info.failure = CertFailure::Other(
-                "the certificate changed since it was last trusted for this server".to_owned(),
-            );
+            // Distinct report: the dedicated failure kind arrives with the contract update.
+            let old = problem
+                .previous
+                .iter()
+                .map(|fp| hex(fp))
+                .collect::<Vec<_>>()
+                .join(", ");
+            info.failure = CertFailure::Other(format!(
+                "the certificate changed since it was last trusted for this server \
+                 (previous sha256: {old}; new sha256: {})",
+                hex(&fp)
+            ));
         }
         let decision = tokio::select! {
             biased;
@@ -246,12 +286,17 @@ impl HttpTransport {
                 Err(problem.to_error())
             }
             CertDecision::AcceptOnce => {
-                tls.accept(fp, false);
+                tls.accept(fp, PinAction::SessionOnly);
                 Ok(())
             }
-            // A changed certificate is never pinned silently, even on "always".
+            // Only an explicit "always" replaces the old pin of a changed certificate.
             CertDecision::AcceptAlways => {
-                tls.accept(fp, !problem.changed);
+                let action = if problem.changed {
+                    PinAction::Replace
+                } else {
+                    PinAction::Add
+                };
+                tls.accept(fp, action);
                 Ok(())
             }
         }
@@ -297,6 +342,7 @@ impl HttpTransport {
                 authorized = authorization.is_some(),
                 "http request"
             );
+            let started = Instant::now();
             let result = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Err(cancel_error(cancel)),
@@ -322,12 +368,12 @@ impl HttpTransport {
                         url: resp.url().clone(),
                         inner: resp,
                         cancel: cancel.clone(),
-                        _permit: permit,
+                        _permit: Some(permit),
                     });
                 }
                 Err(e) => {
                     if (e.is_connect() || e.is_request())
-                        && let Some(p) = origin.tls.problem()
+                        && let Some(p) = origin.tls.problem_since(started)
                     {
                         return Err(AttemptError::Tls(Box::new(p)));
                     }
@@ -348,6 +394,10 @@ impl HttpTransport {
             }
         }
     }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn cancel_error(cancel: &CancelToken) -> AttemptError {
@@ -381,6 +431,12 @@ fn validate_url(url: &Url) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Redirects are followed for read-only methods only; a moved repository is reported for
+/// writes, like svn does.
+fn follows_redirects(method: &Method) -> bool {
+    matches!(method.as_str(), "GET" | "PROPFIND" | "OPTIONS" | "REPORT")
 }
 
 fn is_redirect(status: StatusCode) -> bool {

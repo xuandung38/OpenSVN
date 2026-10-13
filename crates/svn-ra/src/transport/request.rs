@@ -142,7 +142,8 @@ pub struct HttpResponse {
     pub(crate) url: Url,
     pub(crate) inner: reqwest::Response,
     pub(crate) cancel: CancelToken,
-    pub(crate) _permit: OwnedSemaphorePermit,
+    /// Connection slot; released as soon as the body ends or the response is dropped.
+    pub(crate) _permit: Option<OwnedSemaphorePermit>,
 }
 
 impl std::fmt::Debug for HttpResponse {
@@ -181,7 +182,14 @@ impl HttpResponse {
         tokio::select! {
             biased;
             () = self.cancel.cancelled() => self.cancel.check().map(|()| None),
-            r = self.inner.chunk() => r.map_err(classify_error),
+            r = self.inner.chunk() => {
+                let chunk = r.map_err(classify_error)?;
+                if chunk.is_none() {
+                    // Body finished: free the slot even if the caller keeps the response.
+                    self._permit = None;
+                }
+                Ok(chunk)
+            }
         }
     }
 
