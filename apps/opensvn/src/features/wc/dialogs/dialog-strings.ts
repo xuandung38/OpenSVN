@@ -163,6 +163,8 @@ export const dialogStrings = defineStrings({
     openExternalTool: "Open in external tool",
     tooLarge: "Large file",
     tooLargeHint: "This text file is larger than 5 MB. Showing only the changed hunks.",
+    tooLargeNoHunksHint:
+      "This text file is larger than 5 MB and was not loaded. Load the full diff or open it in an external tool.",
     loadFull: "Load full diff",
     binaryTitle: "Binary file",
     binaryHint: "No text diff for binary files.",
@@ -329,6 +331,8 @@ export const dialogStrings = defineStrings({
     openExternalTool: "Mở bằng công cụ ngoài",
     tooLarge: "File lớn",
     tooLargeHint: "File văn bản này lớn hơn 5 MB. Chỉ hiển thị các hunk thay đổi.",
+    tooLargeNoHunksHint:
+      "File văn bản này lớn hơn 5 MB nên chưa được tải. Hãy tải diff đầy đủ hoặc mở bằng công cụ ngoài.",
     loadFull: "Tải diff đầy đủ",
     binaryTitle: "File nhị phân",
     binaryHint: "File nhị phân không có diff văn bản.",
