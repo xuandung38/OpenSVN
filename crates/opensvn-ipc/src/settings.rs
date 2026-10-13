@@ -37,6 +37,17 @@ pub struct ExternalDiffTool {
     pub args: Vec<String>,
 }
 
+/// Settings that make the app launch a program. They are changed only through a native file
+/// picker plus confirmation (`program_choose` / `program_clear`), never through `settings_set`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProgramKind {
+    DiffTool,
+    MergeTool,
+    Editor,
+    Terminal,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(tag = "mode", rename_all = "camelCase")]
 pub enum ProxySetting {
@@ -114,5 +125,11 @@ settings_structs! {
     nullable {
         /// `null` when no external tool is configured.
         diff_external_tool: ExternalDiffTool = "diff.externalTool",
+        /// Same shape as `diff.externalTool`. `null` when not configured.
+        diff_merge_tool: ExternalDiffTool = "diff.mergeTool",
+        /// Editor used by "open with editor". `null` when not configured.
+        tools_editor: ExternalDiffTool = "tools.editor",
+        /// Terminal used by "open terminal here". `null` when not configured.
+        tools_terminal: ExternalDiffTool = "tools.terminal",
     }
 }

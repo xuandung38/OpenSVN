@@ -162,3 +162,33 @@ fn nullable_patch_key_distinguishes_unchanged_clear_and_set() {
         json!({"diff.externalTool": {"path": "/usr/bin/meld", "args": ["%l", "%r"]}})
     );
 }
+
+#[test]
+fn program_settings_are_nullable_patch_keys() {
+    let patch: SettingsPatch = serde_json::from_value(json!({
+        "diff.mergeTool": null,
+        "tools.editor": {"path": "/usr/bin/code", "args": []},
+    }))
+    .unwrap();
+    assert_eq!(patch.diff_merge_tool, Some(None));
+    assert!(matches!(patch.tools_editor, Some(Some(_))));
+    assert_eq!(patch.tools_terminal, None);
+    assert_eq!(
+        serde_json::to_value(ProgramKind::MergeTool).unwrap(),
+        json!("merge-tool")
+    );
+}
+
+#[test]
+fn operation_kinds_for_local_edits_and_downloads() {
+    for (kind, wire) in [
+        (OperationKind::StatusRefresh, "status-refresh"),
+        (OperationKind::Add, "add"),
+        (OperationKind::Delete, "delete"),
+        (OperationKind::Move, "move"),
+        (OperationKind::Copy, "copy"),
+        (OperationKind::Save, "save"),
+    ] {
+        assert_eq!(serde_json::to_value(kind).unwrap(), json!(wire));
+    }
+}
