@@ -940,7 +940,7 @@ async fn list_infinity_enforces_the_limits() {
     let err = list(session_with_limits(&srv, few).await)
         .await
         .unwrap_err();
-    assert_eq!(err.code, ErrorCode::Corrupt);
+    assert_eq!(err.code, ErrorCode::LimitExceeded);
     assert!(err.message.contains("4 entries"), "{}", err.message);
 
     let shallow = ListLimits {
@@ -950,7 +950,93 @@ async fn list_infinity_enforces_the_limits() {
     let err = list(session_with_limits(&srv, shallow).await)
         .await
         .unwrap_err();
+    assert_eq!(err.code, ErrorCode::LimitExceeded);
     assert!(err.message.contains("2 levels"), "{}", err.message);
+}
+
+/// One-level listings are capped too; `Files` counts children of every kind, since all of
+/// them are read before the filter applies.
+#[tokio::test]
+async fn one_level_listings_enforce_the_entry_limit() {
+    let srv = server(Bulk::Prefer).await;
+    mount_listing(&srv, "trunk", &[("a", true), ("x", false), ("y", false)]).await;
+    for depth in [Depth::Immediates, Depth::Files] {
+        let list = |limits| {
+            let srv = &srv;
+            async move {
+                session_with_limits(srv, limits)
+                    .await
+                    .list(
+                        &RelPath::root(),
+                        Some(Revnum(7)),
+                        depth,
+                        &CancelToken::new(),
+                    )
+                    .await
+            }
+        };
+        let exact = ListLimits {
+            max_entries: 3,
+            ..ListLimits::default()
+        };
+        let expected = if depth == Depth::Files { 2 } else { 3 };
+        assert_eq!(list(exact).await.unwrap().len(), expected, "{depth:?}");
+        let few = ListLimits {
+            max_entries: 2,
+            ..ListLimits::default()
+        };
+        let err = list(few).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::LimitExceeded, "{depth:?}");
+        assert!(err.message.contains("2 entries"), "{}", err.message);
+    }
+}
+
+/// The cap is enforced while the answer streams in: an answer whose tail is broken still
+/// fails on the cap (it would be `Corrupt` if the whole body were read before counting).
+#[tokio::test]
+async fn entry_limit_is_enforced_while_streaming() {
+    let srv = server(Bulk::Prefer).await;
+    let rvr = "/svn/repo/!svn/rvr/7";
+    let mut rs = vec![response(&format!("{rvr}/trunk/"), true, 7)];
+    // About 2 MB of entries, so the body arrives in many chunks before the broken tail.
+    for i in 0..5000 {
+        rs.push(response(&format!("{rvr}/trunk/f{i:05}"), false, 7));
+    }
+    let mut body = multistatus(&rs).into_bytes();
+    body.truncate(body.len() - "</D:multistatus>".len());
+    body.extend_from_slice(b"<D:response><D:href>broken");
+    mount(&srv, "PROPFIND", &format!("{rvr}/trunk"), xml(207, body)).await;
+
+    let s = session_with_limits(
+        &srv,
+        ListLimits {
+            max_entries: 10,
+            ..ListLimits::default()
+        },
+    )
+    .await;
+    let err = s
+        .list(
+            &RelPath::root(),
+            Some(Revnum(7)),
+            Depth::Immediates,
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::LimitExceeded, "{err:?}");
+    // Control: without the cap the broken answer is reported as such.
+    let err = session(&srv)
+        .await
+        .list(
+            &RelPath::root(),
+            Some(Revnum(7)),
+            Depth::Immediates,
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Corrupt, "{err:?}");
 }
 
 #[tokio::test]
