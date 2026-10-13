@@ -214,10 +214,12 @@ impl From<PristineError> for SvnError {
             PristineError::NotInstalled(_) => {
                 SvnError::new(ErrorCode::Corrupt, err.to_string()).with_svn_code(155_017)
             }
-            // Callers that must fetch the text from the repository match on `NotHydrated`
-            // before converting; the converted form only reports the missing text.
+            // No ErrorCode means "fetch the text from the repository", so the converted error
+            // stays distinguishable through an OpenSVN-private svn_code. P11 should still match
+            // `PristineError::NotHydrated` before converting when it can.
             PristineError::NotHydrated(_) => {
                 SvnError::new(ErrorCode::PathNotFound, err.to_string())
+                    .with_svn_code(NOT_HYDRATED_SVN_CODE)
             }
             PristineError::ReadOnlyFormat | PristineError::RehydrateUnsupported(_) => {
                 SvnError::new(ErrorCode::WcFormatUnsupported, err.to_string())
