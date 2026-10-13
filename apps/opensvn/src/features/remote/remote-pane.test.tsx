@@ -17,8 +17,12 @@ test("history -> open file at revision jumps to Browse with the file previewed",
   await userEvent.click(
     await screen.findByRole("button", { name: /Actions: \/trunk\/src\/engine\/renderer\.ts/ }),
   );
-  await userEvent.click(await screen.findByRole("menuitem", { name: "Open file at this revision" }));
-  expect(within(views).getByRole("tab", { name: "Browse" }).getAttribute("aria-selected")).toBe("true");
+  await userEvent.click(
+    await screen.findByRole("menuitem", { name: "Open file at this revision" }),
+  );
+  expect(within(views).getByRole("tab", { name: "Browse" }).getAttribute("aria-selected")).toBe(
+    "true",
+  );
   await waitFor(() => expect(document.body.textContent).toContain("export function render"), {
     timeout: 4000,
   });
@@ -32,7 +36,9 @@ test("browse -> show log of a folder scopes History and the scope chip clears it
   await screen.findByRole("option", { name: /README\.md/ });
   await userEvent.click(screen.getByRole("button", { name: "Actions" }));
   await userEvent.click(await screen.findByRole("menuitem", { name: "Show log" }));
-  expect(within(views).getByRole("tab", { name: "History" }).getAttribute("aria-selected")).toBe("true");
+  expect(within(views).getByRole("tab", { name: "History" }).getAttribute("aria-selected")).toBe(
+    "true",
+  );
   const clear = await screen.findByRole("button", { name: "Clear scope" });
   await userEvent.click(clear);
   expect(screen.queryByRole("button", { name: "Clear scope" })).toBeNull();
