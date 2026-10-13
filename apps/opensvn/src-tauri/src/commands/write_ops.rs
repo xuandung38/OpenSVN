@@ -20,8 +20,10 @@ fn mvp_limit(msg: &str) -> AppError {
 
 /// Checks out into a new folder (`dest_name`) inside the granted parent folder, or into the granted
 /// folder itself. The target must not exist or be an empty folder. On success the working copy is
-/// registered and its id returned in `OpResult::CheckedOut`; a folder this checkout created is
-/// removed again when the checkout fails or is cancelled while it is still empty.
+/// registered and its id returned in `OpResult::CheckedOut`. When the checkout fails or is cancelled
+/// after it created the working copy, the partial working copy is registered anyway (listed as
+/// incomplete; an update finishes it); otherwise a folder this checkout created is removed again
+/// while it is still empty.
 #[tauri::command]
 #[specta::specta]
 pub async fn checkout(
@@ -60,7 +62,11 @@ pub async fn checkout(
                 let info = match engine.checkout(&plan, &ctx).await {
                     Ok(info) => info,
                     Err(e) => {
-                        target.discard_if_empty();
+                        // A checkout that already wrote its working copy stays resumable: it is
+                        // listed as incomplete and an update finishes it.
+                        if wcs.add_unfinished(&target.path).await.is_none() {
+                            target.discard_if_empty();
+                        }
                         return Err(e);
                     }
                 };

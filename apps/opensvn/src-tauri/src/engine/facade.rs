@@ -16,9 +16,10 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use opensvn_ipc::{
-    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth, FileDiff,
-    FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage, RepoEntry, RepoInfo,
-    ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest, WcFormat, WcId,
+    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
+    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage,
+    RepoEntry, RepoInfo, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest, WcFormat,
+    WcId,
 };
 use svn_types::SvnError;
 
@@ -57,6 +58,9 @@ pub struct WcInfo {
     pub store_pristine: bool,
     /// Path of the root inside the repository, `/`-prefixed.
     pub path_in_repo: String,
+    /// Some folder is recorded as incomplete: a checkout or update stopped before it finished.
+    /// An update of the working copy finishes it.
+    pub incomplete: bool,
 }
 
 /// A checkout with its destination already resolved from a path grant.
@@ -74,9 +78,11 @@ pub struct CheckoutPlan {
     pub sparse: Option<Vec<opensvn_ipc::SparseEntry>>,
     /// Working copy format.
     pub format: WcFormat,
-    /// Store pristine copies.
+    /// Store pristine copies. Format 31 always stores them, so an engine that cannot create a
+    /// pristine-less working copy refuses `false` instead of ignoring it.
     pub store_pristine: bool,
-    /// Skip externals.
+    /// Skip externals. Only meaningful when [`EngineFacade::capabilities`] reports `externals`;
+    /// otherwise externals are never fetched, whatever this says (`svn --ignore-externals`).
     pub ignore_externals: bool,
 }
 
@@ -192,6 +198,9 @@ pub enum LockScope {
 /// Everything the app asks of an engine.
 #[async_trait]
 pub trait EngineFacade: Send + Sync {
+    /// What this engine supports; the UI hides or explains options it would ignore.
+    fn capabilities(&self) -> EngineCapabilities;
+
     // ---- working copy: reads
     /// Describes the working copy containing `root`; `NotAWorkingCopy` if there is none.
     async fn wc_info(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcInfo>;

@@ -314,3 +314,14 @@ fn file_diff_flags_too_complex_in_camel_case() {
     assert_eq!(v["left"], json!(null));
     assert_eq!(serde_json::from_value::<FileDiff>(v).unwrap(), d);
 }
+
+#[test]
+fn engine_capabilities_shape() {
+    let caps = EngineCapabilities { externals: false };
+    let v = serde_json::to_value(caps).unwrap();
+    assert_eq!(v, json!({"externals": false}));
+    assert_eq!(
+        serde_json::from_value::<EngineCapabilities>(v).unwrap(),
+        caps
+    );
+}

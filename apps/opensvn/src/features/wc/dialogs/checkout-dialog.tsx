@@ -2,10 +2,12 @@ import { useEffect, useId, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { Input, Select } from "../../../components/ui/fields";
+import { SafeLink } from "../../../components/ui/safe-link";
 import { SafeText } from "../../../components/ui/safe-text";
 import type { Depth, PathGrantInfo } from "../../../ipc/bindings";
 import { ipc, toAppError, unwrap } from "../../../ipc/client";
 import {
+  useEngineCapabilities,
   useOperationOutcome,
   useOperations,
   useRecentUrls,
@@ -25,6 +27,9 @@ import {
 import { isCheckoutUrl } from "../wc-model";
 import { pickFolder } from "../welcome/use-path-grant";
 import { dialogStrings } from "./dialog-strings";
+
+/** Tracking issue for svn:externals support, linked from the checkout dialog. */
+export const EXTERNALS_ISSUE_URL = "https://github.com/xuandung38/OpenSVN/issues/97";
 
 const DEPTHS: {
   value: Depth;
@@ -80,10 +85,11 @@ export function CheckoutDialog({
   const recentId = useId();
   const settings = useSettings();
   const recent = useRecentUrls();
+  // Externals are fetched only by an engine that supports them; the note explains the rest.
+  const externalsUnsupported = useEngineCapabilities().data?.externals === false;
   const [url, setUrl] = useState(initialUrl);
   const [revText, setRevText] = useState("");
   const [depth, setDepth] = useState<Depth>("infinity");
-  const [ignoreExternals, setIgnoreExternals] = useState(false);
   // `null` = the default checkout folder; a grant once the user picked another parent.
   const [picked, setPicked] = useState<PathGrantInfo | null>(null);
   const [needsRepick, setNeedsRepick] = useState(false);
@@ -148,7 +154,7 @@ export function CheckoutDialog({
           sparse: null,
           format: 31,
           storePristine: true,
-          ignoreExternals,
+          ignoreExternals: false,
         }),
       );
       if (usedPicked) setPicked(null); // grants are single use
@@ -208,14 +214,17 @@ export function CheckoutDialog({
           <progress
             className="w-full"
             aria-label={d("checkingOut")}
-            value={progress?.current ?? undefined}
+            // Without a total the bar is indeterminate (no value), never a bar stuck at "full".
+            value={progress?.total != null ? (progress.current ?? undefined) : undefined}
             max={progress?.total ?? undefined}
           />
           <SafeText as="p" className="m-0 truncate font-mono text-[12px] text-muted-text">
-            {progress?.current != null && progress.total != null
-              ? `${d("progressItems", { current: progress.current, total: progress.total })}${
-                  progress.currentPath ? ` · ${progress.currentPath}` : ""
-                }`
+            {progress?.current != null
+              ? `${
+                  progress.total != null
+                    ? d("progressItems", { current: progress.current, total: progress.total })
+                    : d("progressCount", { current: progress.current })
+                }${progress.currentPath ? ` · ${progress.currentPath}` : ""}`
               : d("checkoutPreparing")}
           </SafeText>
         </div>
@@ -346,15 +355,12 @@ export function CheckoutDialog({
               {d("revisionInvalid")}
             </span>
           )}
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={ignoreExternals}
-              onChange={(e) => setIgnoreExternals(e.target.checked)}
-              className="accent-[var(--accent)]"
-            />
-            {d("ignoreExternals")}
-          </label>
+          {externalsUnsupported && (
+            <span className="text-[12px] text-muted-text">
+              {d("externalsNote")}{" "}
+              <SafeLink href={EXTERNALS_ISSUE_URL}>{d("externalsIssue")}</SafeLink>
+            </span>
+          )}
           <span className="text-[12px] text-muted-text">{d("formatNote")}</span>
         </form>
       )}

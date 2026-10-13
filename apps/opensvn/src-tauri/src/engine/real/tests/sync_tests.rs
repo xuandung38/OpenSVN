@@ -7,8 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use opensvn_ipc::{Depth, Rev, SparseDepth, SparseEntry, UpdateRequest, WcFormat, WcId};
-use svn_ra_api::fake::FakeRaSession;
+use svn_ra_api::fake::{FakeChange, FakeRaSession};
 use svn_ra_api::{
     CommitEditor, CommitObserver, FileMeta, FileRevHandler, LogRequest, RaSession, ReportFn,
 };
@@ -23,11 +24,15 @@ use crate::engine::context::{OpContext, ProgressReporter, ProgressUpdate};
 use crate::engine::facade::{CheckoutPlan, EngineFacade, WcRef};
 use crate::engine::real::{Anchor, ConnectOptions, SessionConnector, UnwiredRecovery};
 
+/// Runs once, right after the next update drive finished (a commit landing between drives).
+type AfterUpdate = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
 /// Serves `repo`, anchored at the requested URL when asked to; `hang` makes every update drive
 /// wait for cancellation, like a server that has not answered the REPORT yet.
 struct AnchoringConnector {
     repo: FakeRaSession,
     hang: Arc<AtomicBool>,
+    after_update: AfterUpdate,
 }
 
 #[async_trait]
@@ -56,6 +61,7 @@ impl SessionConnector for AnchoringConnector {
         Ok(Arc::new(GatedSession {
             inner,
             hang: Arc::clone(&self.hang),
+            after_update: Arc::clone(&self.after_update),
         }))
     }
 }
@@ -63,6 +69,7 @@ impl SessionConnector for AnchoringConnector {
 struct Setup {
     f: super::support::Fixture,
     hang: Arc<AtomicBool>,
+    after_update: AfterUpdate,
     tmp: tempfile::TempDir,
 }
 
@@ -79,13 +86,16 @@ fn setup() -> Setup {
     )
     .unwrap();
     let hang = Arc::new(AtomicBool::new(false));
+    let after_update: AfterUpdate = Arc::new(Mutex::new(None));
     let connector = Arc::new(AnchoringConnector {
         repo: repo.clone(),
         hang: Arc::clone(&hang),
+        after_update: Arc::clone(&after_update),
     });
     Setup {
         f: fixture_on(repo, connector, Arc::new(UnwiredRecovery)),
         hang,
+        after_update,
         tmp: tempfile::tempdir().unwrap(),
     }
 }
@@ -349,6 +359,11 @@ async fn a_checkout_cancelled_half_way_is_finished_by_update() {
         !(wc.join("README.md").exists() && wc.join("src/main.rs").exists()),
         "the checkout was not interrupted"
     );
+    let info = s.f.engine.wc_info(&wc, &ctx()).await.unwrap();
+    assert!(
+        info.incomplete,
+        "an interrupted checkout is reported as incomplete"
+    );
 
     let rev =
         s.f.engine
@@ -358,6 +373,7 @@ async fn a_checkout_cancelled_half_way_is_finished_by_update() {
     assert_eq!(rev, Rev(2));
     assert_eq!(read(&wc.join("README.md")), "hello\n");
     assert_eq!(read(&wc.join("src/main.rs")), "fn main() {}\n");
+    assert!(!s.f.engine.wc_info(&wc, &ctx()).await.unwrap().incomplete);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -378,6 +394,22 @@ async fn unsupported_requests_fail_with_user_facing_errors() {
             .await
             .unwrap_err();
     assert_eq!(err.code, ErrorCode::WcFormatUnsupported);
+
+    // A pristine-less working copy is refused, never silently created with pristine copies.
+    let err =
+        s.f.engine
+            .checkout(
+                &CheckoutPlan {
+                    store_pristine: false,
+                    ..plan(&url, &wc)
+                },
+                &ctx(),
+            )
+            .await
+            .unwrap_err();
+    assert_eq!(err.code, ErrorCode::WcFormatUnsupported);
+    assert!(err.message.contains("pristine"), "{err}");
+    assert!(!wc.exists(), "a refused checkout must not create anything");
 
     let err =
         s.f.engine
@@ -419,6 +451,108 @@ async fn unsupported_requests_fail_with_user_facing_errors() {
             .await
             .unwrap_err();
     assert_ne!(err.code, ErrorCode::Internal, "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_commit_between_paths_leaves_every_path_at_the_same_revision() {
+    let s = setup();
+    let wc = s.tmp.path().join("wc");
+    s.f.engine
+        .checkout(&plan(&format!("{URL}/trunk"), &wc), &ctx())
+        .await
+        .unwrap();
+    s.f.repo
+        .seed(
+            "carol",
+            "r3",
+            &[
+                put("trunk/README.md", "r3\n"),
+                put("trunk/src/main.rs", "fn main() { r3() }\n"),
+            ],
+        )
+        .unwrap();
+    // r4 lands after the first path was updated and before the second one is.
+    let repo = s.f.repo.clone();
+    *s.after_update.lock().unwrap() = Some(Box::new(move || {
+        repo.seed(
+            "dave",
+            "r4",
+            &[
+                put("trunk/README.md", "r4\n"),
+                put("trunk/src/main.rs", "fn main() { r4() }\n"),
+            ],
+        )
+        .unwrap();
+    }));
+    let req = UpdateRequest {
+        paths: Some(vec!["README.md".into(), "src".into()]),
+        ..update_all()
+    };
+    let rev = s.f.engine.update(&wc_ref(&wc), &req, &ctx()).await.unwrap();
+    assert!(
+        s.after_update.lock().unwrap().is_none(),
+        "r4 was not committed"
+    );
+    assert_eq!(rev, Rev(3));
+    assert_eq!(read(&wc.join("README.md")), "r3\n");
+    assert_eq!(read(&wc.join("src/main.rs")), "fn main() { r3() }\n");
+    // The root was not updated (r2); both updated paths are at r3 and nothing reached r4.
+    let info = s.f.engine.wc_info(&wc, &ctx()).await.unwrap();
+    assert_eq!(info.rev_range, Some((Rev(2), Rev(3))));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn externals_are_never_fetched() {
+    let s = setup();
+    assert!(!s.f.engine.capabilities().externals);
+    s.f.repo
+        .seed(
+            "carol",
+            "externals",
+            &[FakeChange::SetProp(
+                RelPath::new("trunk").unwrap(),
+                PropChange {
+                    name: "svn:externals".into(),
+                    value: Some(Bytes::from_static(b"^/branches/b1 ext\n")),
+                },
+            )],
+        )
+        .unwrap();
+    for ignore_externals in [false, true] {
+        let wc = s.tmp.path().join(format!("wc-{ignore_externals}"));
+        s.f.engine
+            .checkout(
+                &CheckoutPlan {
+                    ignore_externals,
+                    ..plan(&format!("{URL}/trunk"), &wc)
+                },
+                &ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(!wc.join("ext").exists(), "an external was fetched");
+        // The property itself is checked out like any other.
+        let props: Vec<u8> = rusqlite::Connection::open(wc.join(".svn/wc.db"))
+            .unwrap()
+            .query_row(
+                "SELECT properties FROM nodes WHERE local_relpath = '' AND op_depth = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            props.windows(13).any(|w| w == b"svn:externals"),
+            "svn:externals property missing"
+        );
+        s.f.engine
+            .update(&wc_ref(&wc), &update_all(), &ctx())
+            .await
+            .unwrap();
+        assert!(
+            !wc.join("ext").exists(),
+            "an external was fetched by update"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -465,6 +599,7 @@ async fn cancelled_contexts_do_nothing() {
 struct GatedSession {
     inner: FakeRaSession,
     hang: Arc<AtomicBool>,
+    after_update: AfterUpdate,
 }
 
 #[async_trait]
@@ -578,7 +713,12 @@ impl RaSession for GatedSession {
             cancel.cancelled().await;
             return Err(crate::engine::context::cancelled());
         }
-        self.inner.do_update(req, report, editor, cancel).await
+        self.inner.do_update(req, report, editor, cancel).await?;
+        let then = self.after_update.lock().unwrap().take();
+        if let Some(then) = then {
+            then();
+        }
+        Ok(())
     }
     async fn commit_editor(
         &self,
