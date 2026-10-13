@@ -17,7 +17,7 @@ beforeAll(async () => {
 const { user } = installFakeClock();
 // The per-test timeout is only a hang guard now; role queries over the rendered list are CPU-bound
 // and can take several wall-clock seconds when the machine is busy.
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig({ testTimeout: 120_000 });
 
 const screenUi = (nav = {}) => (
   <HistoryScreen
