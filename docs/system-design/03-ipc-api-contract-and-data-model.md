@@ -187,7 +187,7 @@ type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'negotiate-failed' | 
   | 'out-of-date' | 'locked-by-other' | 'lock-token-invalid' | 'wc-busy' | 'wc-needs-cleanup'
   | 'wc-format-unsupported' | 'not-a-working-copy' | 'conflict-blocks-commit' | 'hook-failed' | 'repository-moved' | 'pristine-not-hydrated' | 'wc-invalid-operation' | 'path-not-found'
   | 'disk-full' | 'permission-denied' | 'file-in-use' | 'cancelled' | 'invalid-argument' | 'internal';
-// negotiate-failed: SSO (Negotiate/Kerberos) thất bại và server không cho Basic; action 'sign-in'
+// negotiate-failed: SSO (Negotiate/Kerberos) thất bại và không có Basic để hỏi (server không cho Basic, URL http vì SSO chỉ qua https, token mutual auth sai, hoặc người dùng chọn lại SSO); action 'sign-in'
 // invalid-argument: giá trị sai, grant hết hạn/đã dùng, tùy chọn không hỗ trợ (MVP chỉ ghi format 31)
 ```
 

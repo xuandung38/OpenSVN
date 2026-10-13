@@ -11,10 +11,20 @@ pub enum ErrorCode {
     Timeout,
     /// Credentials are required or were rejected.
     AuthRequired,
-    /// Negotiate (Kerberos single sign-on) was offered by the server but could not be used: no
-    /// ticket, no SPN for the host, the server rejected the ticket, mutual authentication failed,
-    /// or this build has no Negotiate support. Only returned when the server offers no Basic
-    /// fallback; otherwise the user is prompted with `PromptReason::NegotiateFailed`.
+    /// Negotiate (Kerberos single sign-on) was offered by the server but could not be used.
+    ///
+    /// Returned when:
+    /// - Negotiate fails (no ticket, no SPN for the host, the URL host is an IP address, the
+    ///   system would only offer NTLM, the server rejected the ticket, or this build has no
+    ///   Negotiate support) and the server offers no Basic fallback;
+    /// - the server's mutual-authentication token fails verification, even when Basic is offered
+    ///   (the response is discarded);
+    /// - the repository URL is plain `http://` (tokens are only sent over https);
+    /// - the user picks Negotiate in the `PromptReason::NegotiateFailed` prompt instead of
+    ///   entering Basic credentials.
+    ///
+    /// When Negotiate fails and Basic is offered over https, the user is prompted with
+    /// `PromptReason::NegotiateFailed` instead of receiving this error.
     NegotiateFailed,
     /// Server refused the operation (authorization).
     Forbidden,
