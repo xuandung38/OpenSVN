@@ -163,3 +163,51 @@ test("refContainerUrl prefers backend nodes, then the configured layout, then th
   );
   expect(refContainerUrl("tag", ctx({ sourceUrl: `${ROOT}/docs/plan` }))).toBeNull();
 });
+
+test("multi-project repo: only the current project's branches and tags are considered", () => {
+  const nodes = [
+    { kind: "branch" as const, name: "b1", url: `${ROOT}/ProjectB/branches/b1` },
+    { kind: "tag" as const, name: "t1", url: `${ROOT}/ProjectB/tags/t1` },
+    { kind: "branch" as const, name: "a1", url: `${ROOT}/ProjectA/branches/a1` },
+  ];
+  // Working copy at /ProjectA/trunk: copies go to ProjectA, never to the first project listed.
+  const a = ctx({
+    nodes,
+    currentRefUrl: `${ROOT}/ProjectA/trunk`,
+    sourceUrl: `${ROOT}/ProjectA/trunk`,
+  });
+  expect(refContainerUrl("branch", a)).toBe(`${ROOT}/ProjectA/branches`);
+  // ProjectA has no tag yet and ProjectB's tag must not be used: convention for ProjectA.
+  expect(refContainerUrl("tag", a)).toBe(`${ROOT}/ProjectA/tags`);
+  const b = ctx({
+    nodes,
+    currentRefUrl: `${ROOT}/ProjectB/trunk`,
+    sourceUrl: `${ROOT}/ProjectB/trunk`,
+  });
+  expect(refContainerUrl("tag", b)).toBe(`${ROOT}/ProjectB/tags`);
+});
+
+test("multi-project repo with a custom layout uses the {project} of the current ref", () => {
+  const layout = {
+    mode: "custom" as const,
+    trunk: "/{project}/Main",
+    branches: ["/{project}/Forks"],
+    tags: ["/{project}/Releases"],
+  };
+  const nodes = [{ kind: "branch" as const, name: "x", url: `${ROOT}/Other/Forks/x` }];
+  // Current project (Game) has no branch yet: the other project's branch is ignored.
+  expect(
+    refContainerUrl("branch", ctx({ layout, nodes, currentRefUrl: `${ROOT}/Game/Main` })),
+  ).toBe(`${ROOT}/Game/Forks`);
+  expect(
+    refContainerUrl("branch", ctx({ layout, nodes, currentRefUrl: `${ROOT}/Other/Main` })),
+  ).toBe(`${ROOT}/Other/Forks`);
+});
+
+test("unknown project with nodes in several folders is ambiguous, not guessed", () => {
+  const nodes = [
+    { kind: "branch" as const, name: "a", url: `${ROOT}/A/Forks/a` },
+    { kind: "branch" as const, name: "b", url: `${ROOT}/B/Forks/b` },
+  ];
+  expect(refContainerUrl("branch", ctx({ nodes }))).toBeNull();
+});

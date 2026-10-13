@@ -53,24 +53,38 @@ function projectFromPatterns(url: string, root: string, patterns: string[]): str
  * `null` means the destination cannot be derived and the dialog falls back to Location mode.
  */
 export function refContainerUrl(kind: "branch" | "tag", ctx: LayoutContext): string | null {
-  const wanted = kind === "branch" ? "branch" : "tag";
-  const node = ctx.nodes.find((n) => n.kind === wanted);
-  if (node) return parentUrl(node.url, ctx.repoRootUrl);
-
   if (ctx.layout?.mode === "none") return null;
-  if (ctx.layout?.mode === "custom") {
-    const containers = kind === "branch" ? ctx.layout.branches : ctx.layout.tags;
-    const first = containers[0];
-    if (first) {
-      if (!first.includes("{project}")) return urlFromRepoPath(ctx.repoRootUrl, first);
-      const all = [ctx.layout.trunk, ...ctx.layout.branches, ...ctx.layout.tags];
-      const project =
-        projectFromPatterns(ctx.currentRefUrl ?? ctx.sourceUrl, ctx.repoRootUrl, all) ??
-        projectFromPatterns(ctx.sourceUrl, ctx.repoRootUrl, all);
-      return project ? urlFromRepoPath(ctx.repoRootUrl, first.replace("{project}", project)) : null;
-    }
-    return null;
+  const custom = ctx.layout?.mode === "custom" ? ctx.layout : null;
+  const patterns = custom ? [custom.trunk, ...custom.branches, ...custom.tags] : [];
+
+  // Which project does the current ref belong to? Branches of other projects are never candidates:
+  // in a multi-project repo the first branch in the repository may belong to a different project.
+  const projectOf = (url: string): string | null =>
+    custom
+      ? projectFromPatterns(url, ctx.repoRootUrl, patterns)
+      : (projectRootOf(url.replace(/\/+$/, "")) ?? null);
+  const currentProject = projectOf(ctx.currentRefUrl ?? ctx.sourceUrl) ?? projectOf(ctx.sourceUrl);
+
+  const wanted = kind === "branch" ? "branch" : "tag";
+  const sameKind = ctx.nodes.filter((n) => n.kind === wanted);
+  const candidates =
+    currentProject === null
+      ? sameKind
+      : sameKind.filter((n) => projectOf(n.url) === currentProject);
+  const containers = [...new Set(candidates.map((n) => parentUrl(n.url, ctx.repoRootUrl)))];
+  // Unknown project: only trust existing nodes when they all live in one folder.
+  if (containers.length === 1 || (currentProject !== null && containers.length > 0)) {
+    return containers[0] as string;
   }
-  const root = projectRootOf(ctx.currentRefUrl ?? ctx.sourceUrl) ?? projectRootOf(ctx.sourceUrl);
+
+  if (custom) {
+    const first = (kind === "branch" ? custom.branches : custom.tags)[0];
+    if (!first) return null;
+    if (!first.includes("{project}")) return urlFromRepoPath(ctx.repoRootUrl, first);
+    return currentProject
+      ? urlFromRepoPath(ctx.repoRootUrl, first.replace("{project}", currentProject))
+      : null;
+  }
+  const root = currentProject ?? null;
   return root ? joinUrl(root, kind === "branch" ? "branches" : "tags") : null;
 }
