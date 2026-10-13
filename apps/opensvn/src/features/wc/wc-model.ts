@@ -95,6 +95,14 @@ export function tristate(paths: readonly string[], checked: ReadonlySet<string>)
   return n === 0 ? "none" : n === paths.length ? "all" : "some";
 }
 
+/**
+ * Text shown for a status path. The working copy root has the empty path (a property change on
+ * the root, e.g. `svn:ignore`); it is shown as `rootLabel` instead of an empty row.
+ */
+export function displayPath(path: string, rootLabel: string): string {
+  return path === "" ? rootLabel : path;
+}
+
 export function baseName(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }

@@ -106,6 +106,8 @@ pub struct FakeWc {
     pub format: WcFormat,
     pub store_pristine: bool,
     pub nodes: BTreeMap<RelPath, FakeNode>,
+    /// Local-scope ignore rules (`IgnoreScope::Local`), matched in every directory. Rules with
+    /// the `svn:ignore` scope live in the directory's `svn:ignore` property instead.
     pub ignores: Vec<String>,
     /// Simulated stale locks of dead owners (recovered on open).
     pub dead_owner_locks: Vec<String>,
@@ -164,10 +166,21 @@ impl FakeWc {
         }
     }
 
-    /// Whether a path matches an ignore rule.
-    fn ignored(&self, path: &RelPath) -> bool {
+    /// Whether a path matches an ignore rule: a local rule, or a line of its parent directory's
+    /// `svn:ignore` property (which, like svn, applies to that directory's children only).
+    pub fn ignored(&self, path: &RelPath) -> bool {
         let name = path.file_name().unwrap_or("");
-        self.ignores.iter().any(|p| pattern_matches(p, name))
+        let parent_rules = path
+            .parent()
+            .and_then(|dir| self.nodes.get(&dir))
+            .and_then(|dir| dir.props.get("svn:ignore"))
+            .into_iter()
+            .flat_map(|v| v.lines().map(str::trim).filter(|l| !l.is_empty()));
+        self.ignores
+            .iter()
+            .map(String::as_str)
+            .chain(parent_rules)
+            .any(|p| pattern_matches(p, name))
     }
 
     /// Info reported by `wc_info`.
@@ -232,7 +245,8 @@ impl FakeWc {
             || n.changelist.is_some()
             || n.moved_from.is_some()
             || n.moved_to.is_some();
-        if path.is_root() || (!interesting && !force) {
+        // The root is listed for a property change only (svn:ignore, ...), like svn status.
+        if (path.is_root() && !props_modified) || (!interesting && !force) {
             return None;
         }
         let content = n.work.as_deref().unwrap_or_default();
@@ -251,11 +265,17 @@ impl FakeWc {
             moved_from: n.moved_from.clone(),
             moved_to: n.moved_to.clone(),
             changelist: n.changelist.clone(),
-            lock: n.lock.clone(),
+            // The token stays in the fake working copy, like in wc.db: never sent over IPC.
+            lock: n.lock.clone().map(|l| LockInfo { token: None, ..l }),
             needs_lock: n.props.contains_key("svn:needs-lock"),
             remote: None,
             binary: content.iter().take(8000).any(|b| *b == 0),
-            size: (!n.is_dir()).then_some(Size(content.len() as u64)),
+            // No working file (deleted, missing): no size, like the real engine.
+            size: n
+                .work
+                .as_ref()
+                .filter(|_| !n.is_dir())
+                .map(|w| Size(w.len() as u64)),
         })
     }
 
