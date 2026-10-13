@@ -85,4 +85,6 @@ time = { version = "=0.3.55", default-features = false }
 
 # test
 proptest = "=1.12.0"
+# Failpoints are inert unless a crate enables its own `failpoints` feature (`fail/failpoints`).
+fail = "=0.5.1"
 insta = "=1.49.0"
