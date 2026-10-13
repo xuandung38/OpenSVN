@@ -168,18 +168,32 @@ fn load_failure(store: &JournalStore, path: &Path, e: JournalLoadError) -> SvnEr
 /// a commit never starts from a BASE that misses an earlier merged revision.
 ///
 /// Refuses (`WcNeedsCleanup`) while a journal of this working copy has an unknown outcome or a
-/// format this build does not know: committing again before it is resolved could commit the
-/// same change twice or build on a BASE that misses a revision. Journals of other working
-/// copies, journals that only name a transaction and unreadable ones are left to recovery.
+/// format this build does not know, and while a journal file cannot be read at all (its working
+/// copy is unknown, so it may be this one with a `MERGE` already sent): committing again before
+/// it is resolved could commit the same change twice or build on a BASE that misses a revision.
+/// Journals of other working copies, journals that only name a transaction and corrupt files
+/// (recovery sets them aside and reports them) are left to recovery.
 pub(crate) fn finalize_pending_for_wc(store: &JournalStore, db: &WcDb) -> Result<()> {
     for path in store.list()? {
         let data = match JournalStore::load(&path) {
             Ok(d) => d,
-            Err(JournalLoadError::UnsupportedVersion {
-                wcroot: Some(w),
-                error,
-                ..
-            }) if w == db.wcroot() => return Err(error),
+            Err(JournalLoadError::UnsupportedVersion { wcroot, error, .. })
+                if wcroot.as_deref().is_none_or(|w| w == db.wcroot()) =>
+            {
+                return Err(error);
+            }
+            Err(JournalLoadError::Unreadable(e)) => {
+                return Err(SvnError::new(
+                    ErrorCode::WcNeedsCleanup,
+                    format!(
+                        "the commit journal '{}' cannot be read, so it is unknown whether an \
+                         earlier commit of this working copy was applied; make the file readable \
+                         (or move it away after checking the repository log) before committing",
+                        path.display()
+                    ),
+                )
+                .with_child(e));
+            }
             Err(_) => continue,
         };
         if data.wcroot != db.wcroot() {
@@ -189,7 +203,7 @@ pub(crate) fn finalize_pending_for_wc(store: &JournalStore, db: &WcDb) -> Result
             finalize(db, &data, &store.data_dir_of(&data.id))?;
             run_work_queue(db, &CancelToken::new())?;
             store.remove(&data.id)?;
-        } else if data.merge_sent {
+        } else if data.outcome_unknown() {
             return Err(outcome_unknown_blocks(&data));
         }
     }
@@ -267,7 +281,7 @@ async fn process(
         finalize_journal(store, &data, wc, cancel)?;
         return Ok(Outcome::Finalized);
     }
-    if data.merge_sent {
+    if data.outcome_unknown() {
         let ra = ra.ok_or_else(|| needs_session(&data))?;
         authenticate(ra, cancel, authenticated).await?;
         return match reconcile(&data, ra, cancel).await? {
@@ -281,18 +295,18 @@ async fn process(
                 finalize_journal(store, &data, wc, cancel)?;
                 Ok(Outcome::Finalized)
             }
-            Reconciled::NoMatch(why) | Reconciled::Ambiguous(why) => {
-                Ok(Outcome::NeedsUser(SvnError::new(
-                    ErrorCode::WcNeedsCleanup,
-                    format!(
-                        "cannot tell whether the commit '{}' (transaction '{}') was applied: \
+            Reconciled::NoMatch(why)
+            | Reconciled::Ambiguous(why)
+            | Reconciled::NotSearched(why) => Ok(Outcome::NeedsUser(SvnError::new(
+                ErrorCode::WcNeedsCleanup,
+                format!(
+                    "cannot tell whether the commit '{}' (transaction '{}') was applied: \
                          {why}; check the repository log, then update or revert the working \
                          copy and remove the journal",
-                        data.id,
-                        data.txn.as_deref().unwrap_or("?")
-                    ),
-                )))
-            }
+                    data.id,
+                    data.txn.as_deref().unwrap_or("?")
+                ),
+            ))),
         };
     }
     if let Some(txn) = &data.txn {
@@ -326,7 +340,15 @@ pub(crate) enum Reconciled {
     NoMatch(String),
     /// Several revisions match; the reason.
     Ambiguous(String),
+    /// The transaction is gone and more revisions than [`RECOVERY_LOG_SEARCH_LIMIT`] were made
+    /// since the commit started: the log was not searched; the reason.
+    NotSearched(String),
 }
+
+/// Most revisions the log search of [`reconcile`] looks at. A journal settled long after the
+/// crash on a busy repository would otherwise stream an unbounded log; beyond this the journal
+/// is kept and reported for the user.
+pub const RECOVERY_LOG_SEARCH_LIMIT: u64 = 1000;
 
 /// Settles a journal whose `MERGE` may have been sent: deletes the transaction if it still
 /// exists (then it was never merged), otherwise searches the revisions made since the commit
@@ -340,6 +362,16 @@ pub(crate) async fn reconcile(
     data: &JournalData,
     ra: &dyn RaSession,
     cancel: &CancelToken,
+) -> Result<Reconciled> {
+    reconcile_within(data, ra, cancel, RECOVERY_LOG_SEARCH_LIMIT).await
+}
+
+/// [`reconcile`] searching at most `max_revisions` revisions of the log.
+async fn reconcile_within(
+    data: &JournalData,
+    ra: &dyn RaSession,
+    cancel: &CancelToken,
+    max_revisions: u64,
 ) -> Result<Reconciled> {
     let Some(txn) = &data.txn else {
         return Ok(Reconciled::NoMatch(
@@ -358,6 +390,14 @@ pub(crate) async fn reconcile(
     if head <= start {
         return Ok(Reconciled::NotCommitted);
     }
+    if head - start > max_revisions {
+        return Ok(Reconciled::NotSearched(format!(
+            "the transaction is gone and {} revisions (r{}..r{head}) were made since the commit \
+             started, more than the {max_revisions} the automatic search covers",
+            head - start,
+            start + 1
+        )));
+    }
     let Some(message) = data.message.as_deref() else {
         return Ok(Reconciled::NoMatch(
             "the journal does not record the log message".to_owned(),
@@ -373,7 +413,7 @@ pub(crate) async fn reconcile(
         paths: Vec::new(),
         start: Some(Revnum(head)),
         end: Some(Revnum(start + 1)),
-        limit: None,
+        limit: u32::try_from(max_revisions).ok(),
         discover_changed_paths: true,
         strict_node_history: false,
     };
@@ -459,4 +499,63 @@ async fn same_texts(
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod tests {
+    use bytes::Bytes;
+    use svn_ra_api::fake::{FakeChange, FakeRaSession};
+    use svn_types::RelPath;
+
+    use super::*;
+
+    /// A journal whose transaction is gone, started at r0, committing `f` with message "m".
+    fn gone_journal() -> JournalData {
+        let store = JournalStore::new("/nowhere");
+        let mut data = store.begin(
+            "1".to_owned(),
+            "/wc".into(),
+            false,
+            false,
+            Vec::new(),
+            Vec::new(),
+        );
+        data.txn = Some("gone".to_owned());
+        data.merge_sent = true;
+        data.start_youngest = Some(0);
+        data.message = Some("m".to_owned());
+        data
+    }
+
+    #[tokio::test]
+    async fn the_log_search_is_bounded() {
+        let ra = FakeRaSession::new("https://svn.test.local/repo", "uuid").expect("fake");
+        for n in 0..3 {
+            let path = RelPath::new(&format!("f{n}")).expect("path");
+            ra.seed(
+                "other",
+                "x",
+                &[FakeChange::PutFile(path, Bytes::from_static(b"x\n"))],
+            )
+            .expect("seed");
+        }
+        let data = gone_journal();
+        let cancel = CancelToken::new();
+        match reconcile_within(&data, &ra, &cancel, 2)
+            .await
+            .expect("reconcile")
+        {
+            Reconciled::NotSearched(why) => assert!(why.contains("r1..r3"), "{why}"),
+            other => panic!("expected the search to be skipped, got {other:?}"),
+        }
+        // Within the bound the log is searched (and nothing matches).
+        assert!(matches!(
+            reconcile_within(&data, &ra, &cancel, 3)
+                .await
+                .expect("reconcile"),
+            Reconciled::NoMatch(_)
+        ));
+        assert_eq!(RECOVERY_LOG_SEARCH_LIMIT, 1000);
+    }
 }

@@ -23,7 +23,7 @@ use svn_types::{CancelToken, Depth, ErrorCode, PropChange, RelPath};
 
 use super::support::{Fixture, StaticConnector, ctx, fixture_on, put};
 use crate::engine::fake::FakeEngine;
-use crate::engine::real::UnwiredRecovery;
+use crate::engine::real::ClientRecovery;
 use crate::engine::real::wc_status::INCOMING_CAP;
 use crate::engine::{
     CheckoutPlan, DiffOptions, EngineFacade, LockScope, OpContext, StatusQuery, WcRef,
@@ -72,7 +72,7 @@ impl Real {
         let repo = flat_repo();
         let connector = Arc::new(StaticConnector(vec![repo.clone()]));
         Self {
-            f: fixture_on(repo, connector, Arc::new(UnwiredRecovery)),
+            f: fixture_on(repo, connector, Arc::new(ClientRecovery)),
             dir: tempfile::tempdir().unwrap(),
         }
     }
@@ -966,7 +966,7 @@ async fn remote_status_asks_for_a_session_at_the_working_copy_url_with_the_call_
         seen: std::sync::Mutex::new(Vec::new()),
     });
     let real = Real {
-        f: fixture_on(repo, connector.clone(), Arc::new(UnwiredRecovery)),
+        f: fixture_on(repo, connector.clone(), Arc::new(ClientRecovery)),
         dir: tempfile::tempdir().unwrap(),
     };
     let rw = real.checkout("anchored").await;

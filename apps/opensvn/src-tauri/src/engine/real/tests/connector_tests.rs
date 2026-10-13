@@ -17,7 +17,7 @@ use super::support::{fixture_on, standard_repo};
 use crate::auth::AuthBroker;
 use crate::db::AppDb;
 use crate::engine::real::{
-    Anchor, ConnectOptions, HttpConnector, SessionConnector, UnwiredRecovery,
+    Anchor, ClientRecovery, ConnectOptions, HttpConnector, SessionConnector,
 };
 use crate::engine::{EngineFacade, OpContext, WcRef};
 use crate::ops::events::{Recorded, RecordingEvents};
@@ -389,7 +389,7 @@ async fn trunk_only_authorization_allows_checkout_and_update_of_trunk() {
     let f = fixture_on(
         standard_repo(),
         app.connector.clone(),
-        Arc::new(UnwiredRecovery),
+        Arc::new(ClientRecovery),
     );
     let ctx = OpContext::detached();
     let client = f.engine.client_ctx(&ctx);

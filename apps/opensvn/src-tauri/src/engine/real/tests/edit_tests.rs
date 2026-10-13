@@ -11,7 +11,7 @@ use svn_types::{
 
 use super::super::remote_edit::{Edit, Tree, drive};
 use super::support::{StaticConnector, URL, ctx, fixture, fixture_on, standard_repo};
-use crate::engine::real::UnwiredRecovery;
+use crate::engine::real::ClientRecovery;
 use crate::engine::{EditOp, EngineFacade, RemoteEditPlan};
 
 #[tokio::test]
@@ -159,7 +159,7 @@ async fn copy_reports_what_the_repository_cannot_do() {
     // editor and surfaces the editor's refusal unchanged, leaving no transaction behind.
     let repo = standard_repo().without_copies();
     let connector = Arc::new(StaticConnector(vec![repo.clone()]));
-    let f = fixture_on(repo, connector, Arc::new(UnwiredRecovery));
+    let f = fixture_on(repo, connector, Arc::new(ClientRecovery));
     let err = f
         .engine
         .copy_location(&branch_request("branches/b1"), None, &ctx())
