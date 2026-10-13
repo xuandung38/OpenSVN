@@ -102,13 +102,16 @@ async fn begin(
 /// Deletes a leaked server transaction by name. Idempotent: a missing transaction is success.
 pub async fn abort_txn(wire: &RaWire, txn_name: &str) -> Result<()> {
     let cancel = CancelToken::new();
-    let plain = TxnName::plain(txn_name);
-    match merge::delete_txn(wire, &plain, &cancel).await {
-        Ok(()) if wire.caps().vtxn_stub.is_none() => Ok(()),
-        Ok(()) => merge::delete_txn(wire, &TxnName::virtual_txn(txn_name), &cancel).await,
-        Err(e) if e.code == ErrorCode::ServerUnsupported => {
-            merge::delete_txn(wire, &TxnName::virtual_txn(txn_name), &cancel).await
-        }
-        Err(e) => Err(e),
+    // A journaled name does not say whether the transaction was plain or virtual.
+    match merge::delete_txn_found(wire, &TxnName::plain(txn_name), &cancel).await {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        // No plain stub announced: only virtual transactions exist on this server.
+        Err(e) if e.code == ErrorCode::ServerUnsupported => {}
+        Err(e) => return Err(e),
     }
+    if wire.caps().vtxn_stub.is_none() {
+        return Ok(());
+    }
+    merge::delete_txn(wire, &TxnName::virtual_txn(txn_name), &cancel).await
 }

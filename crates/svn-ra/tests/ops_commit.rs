@@ -510,7 +510,8 @@ async fn new_file_without_text_is_created_empty() {
     ed.close_edit().await.unwrap();
     let all = srv.received_requests().await.unwrap();
     let put = all.iter().find(|r| r.method.as_str() == "PUT").unwrap();
-    assert!(put.body.is_empty());
+    assert_eq!(decode_fulltext(&put.body), b"");
+    assert_eq!(&put.body[..3], b"SVN");
 }
 
 #[tokio::test]

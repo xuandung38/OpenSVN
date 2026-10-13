@@ -181,7 +181,7 @@ async fn send_put(job: &PutJob, spill: &Spill) -> Result<()> {
     Ok(())
 }
 
-/// Creates an empty file (`PUT` with an empty body).
+/// Creates an empty file: the server expects a svndiff stream, here just its header.
 pub(super) async fn put_empty(
     wire: &RaWire,
     txn: &TxnName,
@@ -193,7 +193,8 @@ pub(super) async fn put_empty(
         lock: lock.map(LockToken),
         ..PutOptions::default()
     };
-    let req = put_request(wire.urls(), txn, path, Body::Empty, &opts)?;
+    let header = SvndiffEncoder::fulltext(version_of(wire), &[])?;
+    let req = put_request(wire.urls(), txn, path, Body::Bytes(header.into()), &opts)?;
     wire.send_ok(req, cancel).await?;
     Ok(())
 }
