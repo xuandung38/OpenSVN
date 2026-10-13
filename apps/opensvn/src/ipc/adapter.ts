@@ -12,6 +12,6 @@ export type Unlisten = () => void;
 export interface IpcAdapter {
   readonly kind: "tauri" | "mock";
   readonly commands: Commands;
-  /** Subscribe to a backend event by name (`op://progress`, `menu://commit`, ...). */
+  /** Subscribe to a backend event by name (`op://progress`, `menu://wc.commit`, ...). */
   listen(name: string, handler: (payload: unknown) => void): Promise<Unlisten>;
 }

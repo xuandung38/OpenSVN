@@ -115,6 +115,7 @@ export const wcStrings = defineStrings({
     updatedTo: "Updated to r{rev}",
     // Shortcuts help
     shortcutsTitle: "Keyboard shortcuts",
+    menuNotYet: "This menu item is not available yet.",
   },
   vi: {
     welcomeTitle: "Chào mừng đến OpenSVN",
@@ -218,5 +219,6 @@ export const wcStrings = defineStrings({
     opFailed: "{title} thất bại: {message}",
     updatedTo: "Đã update đến r{rev}",
     shortcutsTitle: "Phím tắt",
+    menuNotYet: "Mục menu này chưa có trong phiên bản này.",
   },
 });

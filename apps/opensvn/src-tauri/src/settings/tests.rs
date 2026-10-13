@@ -170,3 +170,17 @@ fn corrupt_stored_value_falls_back_to_default() {
     assert_eq!(s.appearance_theme, Theme::Dark);
     assert_eq!(s.diff_mode, DiffMode::Split);
 }
+
+#[test]
+fn checkout_root_changes_only_through_the_picker_path() {
+    let err = serde_json::from_value::<SettingsPatch>(serde_json::json!({
+        "general.checkoutRoot": "/etc"
+    }))
+    .unwrap_err();
+    assert!(err.to_string().contains("unknown field"), "{err}");
+    let svc = service();
+    assert_eq!(svc.get().general_checkout_root, "~/svn");
+    let s = svc.set_checkout_root("/home/me/work").unwrap();
+    assert_eq!(s.general_checkout_root, "/home/me/work");
+    assert!(svc.set_checkout_root("  ").is_err());
+}

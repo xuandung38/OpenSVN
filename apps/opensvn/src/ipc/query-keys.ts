@@ -3,6 +3,9 @@ import type { WcId } from "./bindings";
 /** Central query-key factory so event handlers and hooks invalidate the same keys. */
 export const queryKeys = {
   workingCopies: ["wcs"] as const,
+  /** Under `workingCopies`, so invalidating the list also refreshes the repository manager. */
+  wcEntries: ["wcs", "entries"] as const,
+  recentUrls: ["recent-urls"] as const,
   status: (wcId: WcId) => ["status", wcId] as const,
   logRoot: ["log"] as const,
   log: (wcId: WcId, path: string, limit: number) => ["log", wcId, path, limit] as const,

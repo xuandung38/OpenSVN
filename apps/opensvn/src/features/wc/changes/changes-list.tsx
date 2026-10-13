@@ -9,7 +9,7 @@ import { SafeText } from "../../../components/ui/safe-text";
 import type { FileStatus } from "../../../ipc/bindings";
 import { cn } from "../../../lib/cn";
 import { useT } from "../../../lib/i18n/i18n";
-import { matchShortcut } from "../shortcuts";
+import { useUiCommand } from "../ui-commands";
 import { useWcActions } from "../use-wc-actions";
 import {
   buildRows,
@@ -88,16 +88,10 @@ export function ChangesList() {
     if (headerRef.current) headerRef.current.indeterminate = overall === "some";
   }, [overall]);
 
-  // Mod+F focuses the file filter (doc 01 8.3).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!matchShortcut(e, "filter")) return;
-      e.preventDefault();
-      document.querySelector<HTMLInputElement>("[data-wc-filter]")?.focus();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  // Mod+F / Edit > Find focuses the file filter (doc 01 8.3); routed by `useWcShortcuts`.
+  useUiCommand("filter", () => {
+    document.querySelector<HTMLInputElement>("[data-wc-filter]")?.focus();
+  });
 
   const targetsFor = (f: FileStatus): FileStatus[] =>
     checked.has(f.path) && checked.size > 1 ? changed.filter((c) => checked.has(c.path)) : [f];
