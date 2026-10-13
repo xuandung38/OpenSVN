@@ -1,0 +1,196 @@
+import { useState } from "react";
+import { ActivityPanel } from "../components/layout/activity-panel";
+import { AppToolbar } from "../components/layout/app-toolbar";
+import { ChangesSidebar } from "../components/layout/changes-sidebar";
+import { MainWindow } from "../components/layout/main-window";
+import { Banner } from "../components/ui/banner";
+import { Button } from "../components/ui/button";
+import { EmptyState } from "../components/ui/empty-state";
+import { Popover, PopoverGroup } from "../components/ui/popover";
+import { SegmentedControl } from "../components/ui/segmented-control";
+import { StatusBar, StatusBarItem } from "../components/ui/status-bar";
+import { Tabs } from "../components/ui/tabs";
+import { useToast } from "../components/ui/toast";
+import { BranchPopoverContent } from "../features/remote/branch/branch-popover";
+import { CreateBranchTagDialog } from "../features/remote/branch/create-branch-tag-dialog";
+import {
+  RemoteBrowse,
+  RemoteHistory,
+  type RemoteView,
+  useRemoteLinks,
+} from "../features/remote/remote-pane";
+import { SettingsSheet } from "../features/remote/settings/settings-sheet";
+import { useLog, useOperations, useStatus, useUpdate, useWorkingCopies } from "../ipc/queries";
+import { useT } from "../lib/i18n/i18n";
+import { applyTheme, readTheme, type ThemeChoice } from "../lib/theme";
+import { shellStrings } from "./shell-strings";
+
+/** Main window wired to the IPC client (real bindings in Tauri, mock adapter in a browser). */
+export function AppShell() {
+  const wcs = useWorkingCopies();
+  const [wcId, setWcId] = useState<string | null>(null);
+  const current = wcs.data?.find((w) => w.id === wcId) ?? wcs.data?.[0] ?? null;
+  const status = useStatus(current?.id ?? null);
+  const log = useLog(current?.id ?? null);
+  const ops = useOperations();
+  const update = useUpdate();
+  const toast = useToast();
+  const [showActivity, setShowActivity] = useState(true);
+  const sh = useT(shellStrings);
+  const [view, setView] = useState<"changes" | RemoteView>("changes");
+  const links = useRemoteLinks(setView);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [createKind, setCreateKind] = useState<"branch" | "tag" | "location" | null>(null);
+  const [theme, setTheme] = useState<ThemeChoice>(readTheme);
+
+  const files = status.data ?? [];
+  const conflicts = files.filter((f) => f.text === "conflicted").length;
+  const running = ops.filter((o) => o.state === "running").length;
+
+  if (wcs.isError) {
+    return (
+      <EmptyState
+        title="Cannot load working copies"
+        description={wcs.error instanceof Error ? wcs.error.message : "Unknown error"}
+        actions={<Button onClick={() => wcs.refetch()}>Retry</Button>}
+      />
+    );
+  }
+
+  const wcPicker = (item: React.ReactNode) => (
+    <Popover trigger={item}>
+      <PopoverGroup>Working copies</PopoverGroup>
+      {(wcs.data ?? []).map((w) => (
+        <button
+          key={w.id}
+          type="button"
+          onClick={() => setWcId(w.id)}
+          className={`flex cursor-pointer justify-between rounded-[5px] border-0 bg-transparent p-1.5 text-left hover:bg-sel ${
+            w.id === current?.id ? "font-semibold" : ""
+          }`}
+        >
+          <span>{w.name}</span>
+          <span className="font-mono text-[11px] text-muted-text">r{w.baseRev}</span>
+        </button>
+      ))}
+    </Popover>
+  );
+
+  return (
+    <MainWindow
+      toolbar={
+        <AppToolbar
+          workingCopyName={current?.name ?? "No working copy"}
+          locationLabel={current?.branch ? "Branch" : "Location"}
+          locationValue={current?.branch?.name ?? current?.pathInRepo ?? "-"}
+          incoming={current?.incoming ?? 0}
+          updating={
+            update.isPending || ops.some((o) => o.handle.kind === "update" && o.state === "running")
+          }
+          activityCount={running}
+          onUpdate={() =>
+            current &&
+            update.mutate(
+              { wcId: current.id, paths: null, rev: null, depth: null },
+              { onError: (e) => toast.show(e.message) },
+            )
+          }
+          onToggleActivity={() => setShowActivity((v) => !v)}
+          wrapWorkingCopy={wcPicker}
+          onOpenSettings={() => setSettingsOpen(true)}
+          wrapLocation={
+            current
+              ? (item) => (
+                  <Popover trigger={item}>
+                    <BranchPopoverContent wc={current} onCreate={setCreateKind} />
+                  </Popover>
+                )
+              : undefined
+          }
+        />
+      }
+      banner={
+        conflicts > 0 ? (
+          <Banner
+            title={`${conflicts} conflict${conflicts > 1 ? "s" : ""}`}
+            actions={<Button small>Resolve</Button>}
+          >
+            Files with conflicts cannot be committed until resolved.
+          </Banner>
+        ) : undefined
+      }
+      sidebar={
+        <ChangesSidebar
+          files={files}
+          log={log.data?.entries ?? []}
+          incomingCount={current?.incoming ?? 0}
+          onCommit={(paths) => toast.show(`Commit of ${paths.length} file(s) requested`)}
+        />
+      }
+      main={
+        <>
+          <Tabs
+            label={sh("views")}
+            className="h-full"
+            keepMounted
+            value={view}
+            onValueChange={(v) => setView(v as "changes" | RemoteView)}
+            tabs={[
+              { id: "changes", label: sh("changes") },
+              { id: "history", label: sh("history") },
+              { id: "browse", label: sh("browse") },
+            ]}
+            panels={{
+              changes: <EmptyState title={sh("selectFile")} description={sh("selectFileHint")} />,
+              history: current ? (
+                <RemoteHistory wc={current} links={links} />
+              ) : (
+                <EmptyState title={sh("noWorkingCopy")} description={sh("noWorkingCopyHint")} />
+              ),
+              browse: current ? (
+                <RemoteBrowse wc={current} links={links} />
+              ) : (
+                <EmptyState title={sh("noWorkingCopy")} description={sh("noWorkingCopyHint")} />
+              ),
+            }}
+          />
+          <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+          {createKind && current && (
+            <CreateBranchTagDialog
+              kind={createKind}
+              sourceUrl={current.url}
+              sourceName={current.branch?.name ?? current.url}
+              repoRootUrl={current.repoRootUrl}
+              repoUuid={current.repoUuid}
+              currentRefUrl={current.branch?.url ?? null}
+              wcId={current.id}
+              onClose={() => setCreateKind(null)}
+            />
+          )}
+        </>
+      }
+      activity={showActivity ? <ActivityPanel ops={ops} /> : undefined}
+      statusBar={
+        <StatusBar>
+          <StatusBarItem tone="ok">Connected</StatusBarItem>
+          <StatusBarItem>{current ? `r${current.baseRev}` : "-"}</StatusBarItem>
+          <StatusBarItem>{files.length} changed</StatusBarItem>
+          <span className="flex-1" />
+          <SegmentedControl<ThemeChoice>
+            label="Theme"
+            value={theme}
+            onChange={(t) => {
+              setTheme(t);
+              applyTheme(t);
+            }}
+            options={[
+              { value: "system", label: "System" },
+              { value: "light", label: "Light" },
+              { value: "dark", label: "Dark" },
+            ]}
+          />
+        </StatusBar>
+      }
+    />
+  );
+}

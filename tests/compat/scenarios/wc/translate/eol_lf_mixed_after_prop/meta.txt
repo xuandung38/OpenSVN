@@ -1,0 +1,10 @@
+svn_version=1.15.0
+prop.svn:eol-style=LF
+rev=11
+author=alice
+date_micros=1791884701216884
+utc_offset_secs=0
+url=file:///tmp/opensvn-golden/repo/eol_lf_mixed_after_prop
+root=file:///tmp/opensvn-golden/repo
+tz=UTC
+path=eol_lf_mixed_after_prop

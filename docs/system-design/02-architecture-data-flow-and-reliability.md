@@ -112,7 +112,7 @@ Tính atomic: server chỉ có revision mới sau MERGE thành công; WC chỉ c
 | Danh sách WC, layout, settings, URL gần đây, cert tin cậy | `app.sqlite` trong thư mục dữ liệu app | `%APPDATA%\OpenSVN`, `~/Library/Application Support/OpenSVN`, `$XDG_DATA_HOME/opensvn` |
 | Cache log/list/blame | `cache.sqlite` (tách riêng, xóa được) | Key `(repo_uuid, path, rev)`; revision bất biến → cache vĩnh viễn |
 | Cache status | `cache.sqlite` | Chỉ để hiển thị nhanh lúc mở; luôn xác minh lại |
-| Mật khẩu | OS credential store (keyring-core) | Key theo origin: `opensvn:<scheme>://<host>:<port>/<realm>:<user>` |
+| Mật khẩu | OS credential store (keyring-core) | Service `opensvn`; account = `scheme\|host\|port\|realm\|user` (mỗi trường escape `%`→`%25`, `\|`→`%7C` nên key là đơn ánh); proxy dùng realm `\u{1}proxy` |
 | Log | `logs/opensvn.YYYY-MM-DD.log` | Xoay 7 ngày, tối đa 100MB |
 
 ## 3. Chi tiết
@@ -178,6 +178,12 @@ Request không idempotent (POST/PUT/MERGE/LOCK) không retry tự động; commi
 | Crash safety | Kill ngẫu nhiên giữa update/commit (1000 vòng/đêm) |
 | Hiệu năng | Benchmark repo tổng hợp 100k file, so svn CLI; chạy nightly, cảnh báo khi chậm > 10% |
 | UI | Vitest component; E2E `tauri-driver` Windows/Linux cho luồng 10.1–10.5 |
+
+### 5.1 Quy ước failpoint (crash suite)
+- Dùng crate `fail`; mỗi crate tự khai feature `failpoints = ["fail/failpoints"]` (mặc định tắt).
+- Tên failpoint: `<crate>.<area>.<point>`, ví dụ `pristine.install.before_rename`, `wc.update.after_merge`.
+- Đặt failpoint tại ranh giới bền vững (trước/sau rename, commit SQLite, ghi work queue), không trong vòng lặp nóng.
+- Feature `failpoints` chỉ bật trong test và crash suite (CI: `cargo test -p svn-wc --features failpoints`, Linux); **không bao giờ** bật trong bản release.
 
 ## 6. Trade-off & xem lại khi lớn lên
 | Quyết định | Đánh đổi | Xem lại khi |
