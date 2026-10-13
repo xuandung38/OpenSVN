@@ -5,6 +5,7 @@ status: pending
 priority: P1
 branch: "main"
 tags: [mvp, rust, tauri, svn, parallel]
+issue: 1
 blockedBy: []
 blocks: []
 supersedes: [261013-1101-cross-platform-svn-desktop-client]
