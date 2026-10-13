@@ -192,6 +192,8 @@ fn accelerators_and_event_names_follow_the_tauri_conventions() {
     assert_eq!(event_name("wc.update"), "menu://wc.update");
 }
 
+// macOS creates native menu items on the main thread only, which test threads are not.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn the_native_menu_builds_for_every_os_description() {
     let app = tauri::test::mock_app();
