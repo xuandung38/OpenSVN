@@ -71,3 +71,14 @@ origin/main merged (#71, #72) with a merge commit. Conflicts: `Cargo.lock` (main
 - Windows and macOS behaviour is still unverified: trailing-dot handling, `open` on bundles and the explorer launch. The symlink tests run on Unix only.
 - The FE helper is not wired to a button yet, because no UI calls `openExternal` in this PR.
 - `installFakeClock()` is not on main (it is on `feat/12b-fe-wc-m1`). The timing-sensitive FE tests still depend on machine load.
+
+## Round 3 (merge of main after #73/#74, last blocking item)
+| Item | Status | Where / tests |
+|---|---|---|
+| Merge origin/main | DONE | Merge commit. Conflicts in `Cargo.toml`, `app_state.rs`, `lib.rs`, `app_tests/{fixture,security}.rs` resolved by keeping both sides: main's `ProgramLauncher` (`launcher`) beside this PR's opener/notifier/menu/updates/secrets; `svn-diff` is now a non-optional dependency as on main. The duplicate `data_dir` field (added on both sides) was folded into one. `commands_settings.rs` got the new `launcher` dep |
+| Allow-list (blocking) | DONE | `doc`, `xls`, `ppt` (legacy binary office, can carry macros), `odt`, `ods`, `odp` (Basic macros) and `rtf` (embedded OLE objects) removed from `DEFAULT_APP_EXTENSIONS`; all seven added to the refused names in `default_app_uses_an_allow_list_not_a_block_list`. Remaining office types: `docx`, `xlsx`, `pptx` |
+| TOCTOU note | DONE | One-line residual-risk note in the `os_integration` module doc |
+| Windows launcher | TODO left | `ShellExecuteW` would need a new direct `windows-sys` dependency (`Win32_UI_Shell`) that cannot be built or run here, so `explorer <path>` stays with a `TODO(windows)` that states the comma-splitting caveat (also on `reveal`'s `/select,`) |
+| History/blame tests | Untouched | The merge did not touch them; migration to `installFakeClock()` is left for the separate PR |
+
+Gates (Linux): fmt pass; clippy `--workspace --all-targets -D warnings` pass; `cargo test -p opensvn -p opensvn-ipc` all pass (app lib 227/227, ipc 4 + 5 + 15 + 3); `pnpm gen:ipc` no drift; `pnpm lint`, `lint:safety`, `typecheck` pass; `pnpm test` 183/183 in 25 files.

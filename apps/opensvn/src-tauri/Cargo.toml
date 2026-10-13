@@ -28,11 +28,11 @@ secure-store.workspace = true
 # `RedactingMakeWriter` wraps every log sink (stderr and the log file) so secrets never reach logs.
 svn-ra.workspace = true
 tracing-subscriber = { workspace = true, features = ["std", "fmt", "registry"] }
-# Only needed by the real engine (working copy database, blame line matching, upload checksums,
-# journal file names).
+# Line diffs: display budget (`tooComplex`) for both engines, blame matching for the real one.
+svn-diff.workspace = true
+# Only needed by the real engine (working copy database, upload checksums, journal file names).
 svn-wc = { workspace = true, optional = true }
 svn-delta = { workspace = true, optional = true }
-svn-diff = { workspace = true, optional = true }
 md-5 = { workspace = true, optional = true }
 sha1 = { workspace = true, optional = true }
 # `fake` ships the in-memory repository that backs FakeEngine (the default engine until the real
@@ -79,7 +79,7 @@ rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }
 
 [features]
 # Registers `engine::real::RealEngine`, the `EngineFacade` backed by the Subversion crates.
-real-engine = ["dep:svn-wc", "dep:svn-delta", "dep:svn-diff", "dep:md-5", "dep:sha1"]
+real-engine = ["dep:svn-wc", "dep:svn-delta", "dep:md-5", "dep:sha1"]
 # Exposes `engine::conformance`, the engine-independent test suite every `EngineFacade` must pass.
 engine-conformance = []
 

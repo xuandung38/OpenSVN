@@ -5,6 +5,9 @@
 //! app" only opens allow-listed document types and plain folders, never symlinks, because a
 //! repository can contain files that run when opened. Editor and terminal are the programs the
 //! user picked in a native dialog (`program_choose`).
+//!
+//! Residual risk: the checks and the launch are not atomic (TOCTOU), so a process that can write
+//! to the working copy could swap the item between the check and the launch.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,14 +17,15 @@ use svn_types::{RelPath, safe_join};
 
 use crate::errors::invalid_argument;
 
-/// File extensions the default application may open: plain documents, images and office files
-/// without macros. Compared case-insensitively. Everything else (programs, scripts, installers,
-/// shortcuts, disk images, archives, web pages, macro-enabled office files, unknown types) is
+/// File extensions the default application may open: plain documents, images and OOXML office
+/// files that cannot hold macros. Compared case-insensitively. Everything else (programs, scripts,
+/// installers, shortcuts, disk images, archives, web pages, legacy binary office files and
+/// OpenDocument files, which may carry macros, RTF, which may embed objects, unknown types) is
 /// refused and the UI offers "Reveal in file manager" instead.
 const DEFAULT_APP_EXTENSIONS: &[&str] = &[
     "txt", "md", "markdown", "rst", "log", "csv", "tsv", "json", "yaml", "yml", "toml", "diff",
-    "patch", "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "pdf", "rtf", "doc",
-    "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp",
+    "patch", "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "pdf", "docx", "xlsx",
+    "pptx",
 ];
 
 /// The side effects of this module, behind a trait so tests can record them.
@@ -196,7 +200,8 @@ impl OsOpener for SystemOpener {
             c.arg("-R").arg(path);
             launch(c)
         } else if cfg!(windows) {
-            // Unverified on Windows: no runner available.
+            // Unverified on Windows: no runner available. Same comma-splitting caveat as
+            // `open_default`: `explorer` splits `/select,<path>` on commas.
             let mut c = Command::new("explorer");
             c.arg(format!("/select,{}", path.display()));
             launch(c)
@@ -216,6 +221,9 @@ impl OsOpener for SystemOpener {
         let mut c = if cfg!(target_os = "macos") {
             Command::new("open")
         } else if cfg!(windows) {
+            // TODO(windows): use ShellExecuteW (needs a direct `windows-sys` dependency with the
+            // `Win32_UI_Shell` feature). `explorer` parses its argument itself and splits it on
+            // commas, so a path containing `,` may open the wrong item or a folder instead.
             Command::new("explorer")
         } else {
             Command::new("xdg-open")

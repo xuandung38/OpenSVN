@@ -18,7 +18,7 @@ use std::borrow::Cow;
 use std::io::{Read, Write};
 
 pub use error::TranslateError;
-pub use keywords::{KeywordContext, Keywords, UtcOffsetAt, utc_offset_zero};
+pub use keywords::{KeywordContext, Keywords, UtcOffsetAt, utc_offset_local, utc_offset_zero};
 
 use engine::Params;
 

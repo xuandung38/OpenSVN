@@ -298,6 +298,10 @@ pub struct FileDiff {
     pub image: Option<ImageSides>,
     /// Text larger than 5 MB: ask before loading.
     pub too_large: Option<bool>,
+    /// The two sides differ too much to diff within the display budget
+    /// (`svn_diff::DISPLAY_MAX_COST`). `left`/`right` are then omitted and the UI offers the
+    /// external diff tool (`diff_external`) instead; it never retries the display diff.
+    pub too_complex: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]

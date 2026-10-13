@@ -104,6 +104,21 @@ test("paths and commands are display-only: no editable path/command inputs", asy
   ).toBe(true);
 });
 
+test("the diff tool is chosen through program_choose (native picker) and can be cleared", async () => {
+  renderApp(<SettingsSheet open onClose={() => undefined} />);
+  const dialog = await screen.findByRole("dialog", { name: "Settings", hidden: true });
+  await userEvent.click(within(dialog).getByRole("button", { name: "Diff & Merge" }));
+  await userEvent.click(await within(dialog).findByRole("button", { name: "Choose…" }));
+  // Only the kind and the arguments cross the IPC boundary; the program path comes from Rust.
+  const call = mockCalls.filter((c) => c.name === "programChoose").at(-1);
+  expect(call?.args).toEqual(["diff-tool", ["{left}", "{right}"]]);
+  const shown = await within(dialog).findByDisplayValue("/usr/bin/meld {left} {right}");
+  expect((shown as HTMLInputElement).readOnly).toBe(true);
+  await userEvent.click(within(dialog).getByRole("button", { name: "Clear" }));
+  expect(await within(dialog).findByDisplayValue("None configured")).toBeTruthy();
+  expect(mockCalls.some((c) => c.name === "programClear" && c.args[0] === "diff-tool")).toBe(true);
+});
+
 test("changing a value and changing it back removes the key, so Save disables again", async () => {
   renderApp(<SettingsSheet open onClose={() => undefined} />);
   const dialog = await screen.findByRole("dialog", { name: "Settings", hidden: true });

@@ -89,6 +89,7 @@ fn build_state<R: tauri::Runtime>(
         // OS credential store only; refuses to save when none is reachable (no fallback).
         secrets: updater::os_secret_store(),
         notifier: Arc::new(notify::TauriNotifier::new(app.handle().clone())),
+        launcher: Arc::new(programs::NativeLauncher),
     })
     .map_err(|e| startup_error(format!("{} {}", e.message, e.detail.unwrap_or_default())))
 }
