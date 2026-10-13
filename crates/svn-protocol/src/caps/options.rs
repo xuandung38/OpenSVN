@@ -5,7 +5,7 @@ use url::Url;
 
 use crate::errors::error_from_response;
 use crate::http::{HttpRequest, Method, ResponseHead};
-use crate::util::{corrupt, parse_revnum};
+use crate::util::{corrupt, parse_revnum, percent_decode};
 use crate::xml::{Ns, XmlEvent, XmlReader, XmlWriter};
 
 const DAV_SVN_PREFIX: &str = "http://subversion.tigris.org/xmlns/dav/svn/";
@@ -146,6 +146,23 @@ fn single(head: &ResponseHead, name: &str) -> Option<String> {
 /// Reduces a stub header value (path or absolute URL on the session origin) to a normalized
 /// absolute path without trailing slash.
 fn stub_path(session: &Url, name: &str, value: &str) -> Result<String> {
+    // The URL parser collapses dot segments (`/svn/repo/..` becomes `/svn`); a server never
+    // needs them, so refuse the raw text instead of trusting what it normalises to.
+    let raw = match value.split_once("://") {
+        Some((_, rest)) => rest.find('/').map_or("", |i| &rest[i..]),
+        None => value,
+    };
+    let raw = raw.split(['?', '#']).next().unwrap_or("");
+    for seg in raw.split('/') {
+        let decoded =
+            percent_decode(seg).map_err(|_| corrupt(format!("{name} header has a bad escape")))?;
+        if decoded == "." || decoded == ".." {
+            return Err(SvnError::new(
+                ErrorCode::UnsafePath,
+                format!("{name} contains a dot segment"),
+            ));
+        }
+    }
     let url = session
         .join(value)
         .map_err(|e| corrupt(format!("{name} header is not a URL: {e}")))?;

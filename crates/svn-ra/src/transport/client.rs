@@ -142,13 +142,14 @@ impl HttpTransport {
         self.send_mode(req, cancel, Interaction::Allowed).await
     }
 
-    /// Like [`Self::send`], but never asks the [`AuthPrompter`]: only credentials already cached
-    /// for the origin and certificates already accepted are used. A 401 that the cached
-    /// credentials do not satisfy fails with `AuthRequired`, and a certificate that would need a
-    /// decision fails with its TLS error.
+    /// Like [`Self::send`], but never asks the user: only credentials already cached for the
+    /// origin, credentials the prompter has stored ([`AuthPrompter::stored_credentials`],
+    /// which shows no UI), Negotiate with an existing ticket and certificates already accepted
+    /// are used. A 401 those do not satisfy fails with `AuthRequired`, and a certificate that
+    /// would need a decision fails with its TLS error.
     ///
-    /// Meant for best-effort background work (such as deleting an abandoned commit
-    /// transaction) that must not pop up a prompt after the user has moved on.
+    /// Meant for background work (remote status, deleting an abandoned commit transaction)
+    /// that must not pop up a prompt after the user has moved on.
     pub async fn send_unattended(
         &self,
         req: HttpRequest,
@@ -311,13 +312,6 @@ impl HttpTransport {
                              authenticate with a small request first",
                         ));
                     }
-                    if interaction == Interaction::Forbidden {
-                        return Err(SvnError::new(
-                            ErrorCode::AuthRequired,
-                            "server requested authentication for an unattended request; \
-                             not prompting",
-                        ));
-                    }
                     sent = self
                         .auth
                         .on_unauthorized(
@@ -325,6 +319,7 @@ impl HttpTransport {
                             &challenges,
                             &sent,
                             origin.channel_binding(),
+                            interaction == Interaction::Allowed,
                             cancel,
                         )
                         .await?;

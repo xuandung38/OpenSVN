@@ -46,8 +46,8 @@ merge/garbage-revision	merge	merge/garbage-revision.xml	corrupt	MERGE answers a 
 locks/path-dotdot	get-locks	locks/path-dotdot.xml	corrupt	lock reported on a path with ..
 locks/path-relative	get-locks	locks/path-relative.xml	corrupt	lock path not absolute in the repository
 options/root-other-host	options	options/root-other-host.headers	reject	repository root on another host
-options/root-not-prefix	options	options/root-not-prefix.headers	gap-same-origin	repository root that is not a prefix of the session URL (KNOWN GAP: accepted; stays same-origin)
-options/root-dotdot	options	options/root-dotdot.headers	gap-same-origin	repository root with .. (KNOWN GAP: normalised to /svn and accepted; stays same-origin)
+options/root-not-prefix	options	options/root-not-prefix.headers	reject	repository root that is not a prefix of the session URL
+options/root-dotdot	options	options/root-dotdot.headers	reject	repository root with a .. segment
 options/me-other-host	options	options/me-other-host.headers	reject	me resource on another host (commits would go there)
 options/stub-other-host	options	options/stub-other-host.headers	reject	protocol-relative stub URL on another host
 options/youngest-garbage	options	options/youngest-garbage.headers	reject	youngest revision overflows
