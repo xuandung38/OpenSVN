@@ -137,17 +137,23 @@ pub(crate) fn scan(
     });
 
     let errors = std::mem::take(&mut *errors.lock().unwrap_or_else(PoisonError::into_inner));
-    if let Some(err) = errors.into_iter().find(|e| {
+    if let Some(err) = errors.iter().find(|e| {
         !e.io_error()
             .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
     }) {
-        return Err(SvnError::new(
-            ErrorCode::PermissionDenied,
-            format!("cannot scan working copy: {err}"),
-        ));
+        return Err(scan_error(err));
     }
     let entries = std::mem::take(&mut *sink.lock().unwrap_or_else(PoisonError::into_inner));
     Ok(entries.into_iter().collect())
+}
+
+/// Converts a walk error, keeping the classification of the underlying I/O error (permission
+/// denied, file in use, disk full, ...). A walk error without one (a symlink loop) is internal.
+fn scan_error(err: &ignore::Error) -> SvnError {
+    let code = err
+        .io_error()
+        .map_or(ErrorCode::Internal, |io| SvnError::from_io("", io).code);
+    SvnError::new(code, format!("cannot scan working copy: {err}"))
 }
 
 /// Relpath of `path` below `base` with `/` separators (`""` for `base` itself).
@@ -163,4 +169,33 @@ fn rel_string(base: &Path, path: &Path) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_error_keeps_io_classification() {
+        let io = |kind| ignore::Error::WithPath {
+            path: "wc/sub".into(),
+            err: Box::new(ignore::Error::Io(std::io::Error::from(kind))),
+        };
+        assert_eq!(
+            scan_error(&io(std::io::ErrorKind::PermissionDenied)).code,
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            scan_error(&io(std::io::ErrorKind::ResourceBusy)).code,
+            ErrorCode::FileInUse
+        );
+        let err = scan_error(&io(std::io::ErrorKind::StorageFull));
+        assert_eq!(err.code, ErrorCode::DiskFull);
+        assert!(err.message.contains("wc/sub"), "{}", err.message);
+        let loop_err = ignore::Error::Loop {
+            ancestor: "a".into(),
+            child: "a/b".into(),
+        };
+        assert_eq!(scan_error(&loop_err).code, ErrorCode::Internal);
+    }
 }

@@ -186,6 +186,29 @@ pub struct StatusOptions {
 /// Pristine texts of a working copy, read straight from `.svn/pristine`.
 pub struct DbPristineSource<'a>(pub &'a WcDb);
 
+impl DbPristineSource<'_> {
+    /// `PRISTINE.hydrated` of a format-32 row; `true` when there is no such row.
+    fn hydrated(
+        &self,
+        sha1: &crate::pristine::Sha1Digest,
+    ) -> Result<bool, crate::pristine::PristineError> {
+        self.0
+            .with_read(|c| {
+                c.query_row(
+                    "SELECT hydrated FROM pristine WHERE checksum = ?1",
+                    [sha1.to_svn_string()],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|h| h != 0)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(true),
+                    other => Err(sql_err(other)),
+                })
+            })
+            .map_err(|e| crate::pristine::PristineError::index(e.message))
+    }
+}
+
 impl PristineSource for DbPristineSource<'_> {
     fn open_text(
         &self,
@@ -199,16 +222,22 @@ impl PristineSource for DbPristineSource<'_> {
             .join("pristine")
             .join(&hex[..2])
             .join(format!("{hex}.svn-base"));
-        std::fs::File::open(&path)
-            .map(|f| Box::new(f) as Box<dyn std::io::Read>)
-            .map_err(|source| match source.kind() {
-                std::io::ErrorKind::NotFound => crate::pristine::PristineError::NotInstalled(*sha1),
-                _ => crate::pristine::PristineError::Io {
-                    op: "open",
-                    path,
-                    source,
-                },
-            })
+        match std::fs::File::open(&path) {
+            Ok(f) => Ok(Box::new(f)),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                // Format 32 keeps the row of a text it did not store (`hydrated = 0`).
+                if self.0.format() >= 32 && !self.hydrated(sha1)? {
+                    Err(crate::pristine::PristineError::NotHydrated(*sha1))
+                } else {
+                    Err(crate::pristine::PristineError::NotInstalled(*sha1))
+                }
+            }
+            Err(source) => Err(crate::pristine::PristineError::Io {
+                op: "open",
+                path,
+                source,
+            }),
+        }
     }
 
     fn text_size(
@@ -895,6 +924,3 @@ fn sendable(p: &Pending, opts: &StatusOptions) -> bool {
         && !(e.text_conflicted || e.prop_conflicted || e.tree_conflicted)
         && e.moved_to.is_none())
 }
-
-#[cfg(test)]
-mod tests;

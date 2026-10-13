@@ -80,3 +80,42 @@ checks that the cold run repairs all 100 000 cache entries.
   - interrupted update (`incomplete`).
 - The cold-path speed (full content compare) could be improved later with more workers or
   mmap; it is not part of the target.
+
+## Review round 1 (PR #71 review 5504289025)
+
+### Fixed
+- **B1** `load_nodes` decoded the property skel with `decode_props` and checks for the
+  `svn:special` key; `had_props` is "decoded list not empty" (svn's
+  `SQLITE_PROPERTIES_AVAILABLE`). Regression oracle case
+  `status_matches_svn_for_svn_special_text_in_other_properties`: `svn:special` inside a property
+  value and inside a longer property name, checked both on the fast path and with the content
+  compare. It fails on the old code (both files `obstructed`) and passes now.
+- Reviewer's extra oracle case added as
+  `status_matches_svn_for_translation_symlinks_and_subdir_target`: `svn:keywords` Id and Rev
+  (Rev with a body edit), `svn:eol-style` CRLF and native, CRLF file rewritten with LF (not
+  modified), same-size content change, touched files, symlink retargeted and replaced by a regular
+  file, and status on the targets `d` and `d/f`.
+- **Follow-up 1** format 32 without pristines: `DbPristineSource::open_text` returns
+  `NotHydrated` for a `hydrated = 0` row, and `compare_with_pristine` then compares the SHA-1 of
+  the repository-normal working text with the recorded checksum, the same as svn 1.15.0's
+  `compare_and_verify` (checked against the 1.15.0 source). Oracle case
+  `status_matches_svn_without_stored_pristines` (svn 1.15, `--store-pristine=no`, touched, eol
+  repaired, keyword, same-size and different-size edits) plus the svn-independent unit test
+  `dehydrated_pristine_is_compared_by_checksum`. The oracle case fails on the old code.
+- **Follow-up 4** `scan.rs` keeps the I/O classification of walk errors (`SvnError::from_io`
+  codes); a walk error without an I/O cause (symlink loop) is `Internal`. Unit test added.
+- **Follow-up 6** the empty `src/status/tests.rs` is removed.
+
+### Not done (still follow-ups)
+- 2 (`wc-locked` / lock token columns), 3 (output order assertion), 5 (lock ownership check for
+  `update_cache`), 7 (`in_scope` allocations).
+
+### Gates (round 1)
+- `cargo fmt --all --check`: pass.
+- `cargo clippy -p svn-wc --all-targets -- -D warnings`: pass. Workspace clippy: see PR comment
+  (first attempt failed with "No space left on device" on the shared host).
+- `OPENSVN_REQUIRE_SVN=1 cargo test -p svn-wc` with svn 1.14.3: 212 passed, 0 failed, 1 ignored
+  (the benchmark); `status_vs_svn` 10/10 (the format-32 case skips on 1.14).
+- Same with `OPENSVN_SVN_BIN` = svn 1.15.0 (nix store): 212 passed, 0 failed, 1 ignored;
+  `status_vs_svn` 10/10 with the format-32 case run.
+- The release benchmark was not re-run.

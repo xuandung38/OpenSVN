@@ -48,9 +48,17 @@ fn flag(hay: &str, name: &str) -> bool {
 
 /// `svn status --xml` of the whole working copy, externals not descended into.
 fn svn_report(wc: &Path, verbose: bool) -> Report {
+    svn_report_of(wc, "", verbose)
+}
+
+/// `svn status --xml` of `target` (a relpath, `""` for the root).
+fn svn_report_of(wc: &Path, target: &str, verbose: bool) -> Report {
     let mut args = vec!["status", "--xml", "--no-ignore", "--ignore-externals"];
     if verbose {
         args.push("-v");
+    }
+    if !target.is_empty() {
+        args.push(target);
     }
     let xml = svn_stdout(wc, &args);
     let mut map = Report::new();
@@ -80,16 +88,22 @@ fn svn_report(wc: &Path, verbose: bool) -> Report {
     map
 }
 
-/// Our report, rendered the way `svn status --xml` prints it (`print_status_xml`).
-fn our_report(wc: &Path, verbose: bool) -> Report {
+/// Our report of `target` (a relpath, `""` for the root), rendered the way `svn status --xml`
+/// prints it (`print_status_xml`).
+fn our_report_of(wc: &Path, target: &str, verbose: bool) -> Report {
     let db = WcDb::open(wc).expect("open");
+    let target = if target.is_empty() {
+        RelPath::root()
+    } else {
+        RelPath::new(target).expect("relpath")
+    };
     let source = DbPristineSource(&db);
     let opts = StatusOptions {
         no_ignore: true,
         get_all: verbose,
         ..StatusOptions::default()
     };
-    status(&db, &source, &RelPath::root(), &opts, &CancelToken::new())
+    status(&db, &source, &target, &opts, &CancelToken::new())
         .expect("status")
         .into_iter()
         .map(|e| {
@@ -116,9 +130,14 @@ fn our_report(wc: &Path, verbose: bool) -> Report {
 
 /// Asserts both reports (default and `-v`) equal svn's, with a per-path diff on failure.
 fn assert_status_matches(wc: &Path) {
+    assert_status_matches_at(wc, "");
+}
+
+/// [`assert_status_matches`] for a status call on `target` (a relpath, `""` for the root).
+fn assert_status_matches_at(wc: &Path, target: &str) {
     for verbose in [false, true] {
-        let expected = svn_report(wc, verbose);
-        let got = our_report(wc, verbose);
+        let expected = svn_report_of(wc, target, verbose);
+        let got = our_report_of(wc, target, verbose);
         if expected != got {
             let mut diff = String::new();
             let keys: BTreeSet<_> = expected.keys().chain(got.keys()).collect();
@@ -128,7 +147,7 @@ fn assert_status_matches(wc: &Path) {
                     diff.push_str(&format!("{k}\n  svn:  {e:?}\n  ours: {g:?}\n"));
                 }
             }
-            panic!("status mismatch (verbose = {verbose}):\n{diff}");
+            panic!("status mismatch (target = {target:?}, verbose = {verbose}):\n{diff}");
         }
     }
 }
@@ -410,4 +429,211 @@ fn status_matches_svn_for_depth_limited_working_copies() {
     write(&files, "a.txt", "changed\n");
     fs::create_dir(files.join("d")).expect("mkdir");
     assert_status_matches(&files);
+}
+
+/// Regression: `svn:special` inside a property value (or a longer property name) must not make a
+/// regular file look like a symlink (it was reported `obstructed`).
+#[test]
+fn status_matches_svn_for_svn_special_text_in_other_properties() {
+    if skip_without_svn() {
+        return;
+    }
+    let base = tempfile::tempdir().expect("tmp");
+    let (_, wc) = trunk_wc(base.path());
+    write(&wc, "note.txt", "n\n");
+    write(&wc, "named.txt", "m\n");
+    svn(&wc, &["add", "-q", "note.txt", "named.txt"]);
+    svn(
+        &wc,
+        &[
+            "propset",
+            "-q",
+            "comment",
+            "this is like svn:special but not",
+            "note.txt",
+        ],
+    );
+    svn(
+        &wc,
+        &["propset", "-q", "my:svn:special:x", "*", "named.txt"],
+    );
+    svn(&wc, &["commit", "-q", "-m", "props"]);
+    svn(&wc, &["update", "-q"]);
+    assert_svn_reports(&wc, "note.txt", "normal", |r| r.props == "normal");
+    assert_svn_reports(&wc, "named.txt", "normal", |r| r.props == "normal");
+    assert_status_matches(&wc);
+    // Content compare path as well (the stat cache no longer matches).
+    for f in ["note.txt", "named.txt"] {
+        let body = fs::read(wc.join(f)).expect("read");
+        fs::write(wc.join(f), body).expect("rewrite");
+    }
+    assert_status_matches(&wc);
+}
+
+/// Translated files (keywords, eol-style), same-size edits, files whose stat cache misses, a
+/// symlink retargeted and then replaced by a regular file, and status on a subdirectory target.
+#[test]
+fn status_matches_svn_for_translation_symlinks_and_subdir_target() {
+    if skip_without_svn() {
+        return;
+    }
+    let base = tempfile::tempdir().expect("tmp");
+    let (_, wc) = trunk_wc(base.path());
+    write(&wc, "kw_id.txt", "$Id$\nbody\n");
+    write(&wc, "kw_rev.txt", "$Rev$\nbody\n");
+    write(&wc, "crlf.txt", "one\ntwo\n");
+    write(&wc, "crlf_lf.txt", "one\ntwo\n");
+    write(&wc, "native.txt", "one\ntwo\n");
+    write(&wc, "same.txt", "aaaa\n");
+    write(&wc, "d/sub.txt", "s\n");
+    let mut added = vec![
+        "kw_id.txt",
+        "kw_rev.txt",
+        "crlf.txt",
+        "crlf_lf.txt",
+        "native.txt",
+        "same.txt",
+        "d/sub.txt",
+    ];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("a.txt", wc.join("link")).expect("symlink");
+        std::os::unix::fs::symlink("b.txt", wc.join("link2")).expect("symlink");
+        added.extend(["link", "link2"]);
+    }
+    let mut args = vec!["add", "-q"];
+    args.extend(&added);
+    svn(&wc, &args);
+    svn(&wc, &["propset", "-q", "svn:keywords", "Id", "kw_id.txt"]);
+    svn(&wc, &["propset", "-q", "svn:keywords", "Rev", "kw_rev.txt"]);
+    svn(
+        &wc,
+        &[
+            "propset",
+            "-q",
+            "svn:eol-style",
+            "CRLF",
+            "crlf.txt",
+            "crlf_lf.txt",
+        ],
+    );
+    svn(
+        &wc,
+        &["propset", "-q", "svn:eol-style", "native", "native.txt"],
+    );
+    svn(&wc, &["commit", "-q", "-m", "translated"]);
+    svn(&wc, &["update", "-q"]);
+    let expanded = fs::read_to_string(wc.join("kw_id.txt")).expect("read");
+    assert!(
+        expanded.starts_with("$Id: "),
+        "keyword not expanded: {expanded}"
+    );
+    assert_status_matches(&wc);
+
+    // Touch every versioned file (same content, new mtime) so the content compare runs.
+    for f in [
+        "a.txt",
+        "b.txt",
+        "c.txt",
+        "kw_id.txt",
+        "kw_rev.txt",
+        "crlf.txt",
+        "native.txt",
+    ] {
+        let body = fs::read(wc.join(f)).expect("read");
+        fs::write(wc.join(f), body).expect("rewrite");
+    }
+    // A CRLF file rewritten with LF: svn repairs the line endings, so it is not modified.
+    write(&wc, "crlf_lf.txt", "one\ntwo\n");
+    // Same size, different content.
+    write(&wc, "same.txt", "bbbb\n");
+    // Keyword file with a body edit.
+    let rev = fs::read_to_string(wc.join("kw_rev.txt")).expect("read");
+    write(&wc, "kw_rev.txt", &rev.replace("body", "edit"));
+    write(&wc, "d/sub.txt", "changed\n");
+    assert_svn_reports(&wc, "crlf_lf.txt", "normal", |_| true);
+    assert_svn_reports(&wc, "same.txt", "modified", |_| true);
+    assert_svn_reports(&wc, "kw_rev.txt", "modified", |_| true);
+    assert_svn_reports(&wc, "kw_id.txt", "normal", |_| true);
+    #[cfg(unix)]
+    {
+        // Retargeted symlink, and a symlink replaced by a regular file.
+        fs::remove_file(wc.join("link")).expect("rm link");
+        std::os::unix::fs::symlink("c.txt", wc.join("link")).expect("symlink");
+        fs::remove_file(wc.join("link2")).expect("rm link2");
+        write(&wc, "link2", "link b.txt");
+        assert_svn_reports(&wc, "link", "modified", |_| true);
+        assert_svn_reports(&wc, "link2", "obstructed", |_| true);
+    }
+    assert_status_matches(&wc);
+    assert_status_matches_at(&wc, "d");
+    assert_status_matches_at(&wc, "d/f");
+}
+
+/// Format 32 with `--store-pristine=no`: no pristine texts on disk. A file that misses the stat
+/// fast path is compared by checksum (svn 1.15) instead of failing the whole status.
+#[test]
+fn status_matches_svn_without_stored_pristines() {
+    if skip_without_svn_1_15() {
+        return;
+    }
+    let base = tempfile::tempdir().expect("tmp");
+    let url = create_repo(base.path());
+    let seed = checkout(base.path(), &url, "seed", &[]);
+    for (f, body) in [
+        ("a.txt", "a\n"),
+        ("b.txt", "b\n"),
+        ("same.txt", "aaaa\n"),
+        ("crlf.txt", "one\ntwo\n"),
+        ("kw.txt", "$Id$\nbody\n"),
+    ] {
+        write(&seed, f, body);
+    }
+    svn(
+        &seed,
+        &[
+            "add", "-q", "a.txt", "b.txt", "same.txt", "crlf.txt", "kw.txt",
+        ],
+    );
+    svn(
+        &seed,
+        &["propset", "-q", "svn:eol-style", "CRLF", "crlf.txt"],
+    );
+    svn(&seed, &["propset", "-q", "svn:keywords", "Id", "kw.txt"]);
+    svn(&seed, &["commit", "-q", "-m", "seed"]);
+    let wc = checkout(
+        base.path(),
+        &url,
+        "wc",
+        &["--compatible-version=1.15", "--store-pristine=no"],
+    );
+    {
+        let db = WcDb::open(&wc).expect("open");
+        assert_eq!(db.format(), 32);
+        assert!(!db.store_pristine());
+    }
+    let pristine_dir = wc.join(".svn/pristine");
+    let stored = fs::read_dir(&pristine_dir)
+        .map(|d| {
+            d.flatten().any(|e| {
+                e.path().is_dir() && fs::read_dir(e.path()).is_ok_and(|mut f| f.next().is_some())
+            })
+        })
+        .unwrap_or(false);
+    assert!(!stored, "scenario setup: pristine texts are stored");
+    assert_status_matches(&wc);
+
+    // Touched but unchanged, CRLF rewritten with LF, keyword file touched: not modified.
+    for f in ["a.txt", "kw.txt"] {
+        let body = fs::read(wc.join(f)).expect("read");
+        fs::write(wc.join(f), body).expect("rewrite");
+    }
+    write(&wc, "crlf.txt", "one\ntwo\n");
+    // Different content of the same size, and of another size.
+    write(&wc, "same.txt", "bbbb\n");
+    write(&wc, "b.txt", "bigger\n");
+    assert_svn_reports(&wc, "a.txt", "normal", |_| true);
+    assert_svn_reports(&wc, "crlf.txt", "normal", |_| true);
+    assert_svn_reports(&wc, "same.txt", "modified", |_| true);
+    assert_status_matches(&wc);
 }

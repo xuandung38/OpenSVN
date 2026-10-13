@@ -11,7 +11,9 @@
 //!    never matches. No file content is read.
 //! 4. Without translation a different size means modified without reading anything.
 //! 5. Otherwise the working file is converted to repository-normal form (keywords contracted,
-//!    line endings normalised with repair) while it is compared with the pristine text.
+//!    line endings normalised with repair) while it is compared with the pristine text. When the
+//!    pristine text is not hydrated (format 32 with `store_pristine = false`) the SHA-1 of the
+//!    repository-normal text is compared with the recorded checksum instead, as svn 1.15 does.
 //!
 //! When the compare proves the file unchanged, the caller may repair the stat cache with the size
 //! and mtime returned in [`Verdict::unchanged_stat`] (svn does so only when it holds the write
@@ -133,36 +135,48 @@ fn compare_with_pristine(
     if !need_translation && working_size != pristine_size {
         return Ok(true);
     }
-    let mut pristine_reader = pristine.open_text(checksum)?;
+    // A dehydrated pristine (format 32, `store_pristine = false`) has no text on disk; svn 1.15
+    // then compares the checksum of the repository-normal working text with the recorded one.
+    let mut pristine_reader = match pristine.open_text(checksum) {
+        Ok(r) => Some(r),
+        Err(crate::pristine::PristineError::NotHydrated(_)) => None,
+        Err(e) => return Err(e.into()),
+    };
 
     let info = translate.filter(|_| need_translation);
     if let Some(info) = info
         && info.special
     {
         let text = read_repo_normal(path)?;
-        return Ok(!same(&mut text.as_slice(), &mut pristine_reader, None)?);
+        return Ok(!match pristine_reader.as_mut() {
+            Some(p) => same(&mut text.as_slice(), p, None)?,
+            None => digest_matches(&mut text.as_slice(), None, checksum)?,
+        });
     }
     let mut working = File::open(path).map_err(|e| io_err("open", path, &e))?;
     let translator = match info {
         Some(info) => Some(ContentTranslator::to_repo_normal(info, true)?),
         None => None,
     };
-    Ok(!same(&mut working, &mut pristine_reader, translator)?)
+    Ok(!match pristine_reader.as_mut() {
+        Some(p) => same(&mut working, p, translator)?,
+        None => digest_matches(&mut working, translator, checksum)?,
+    })
 }
 
-/// Compares `working` (translated on the fly) with `pristine` byte for byte. The working file
-/// is read in the chunk size svn uses so malformed keyword candidates behave identically.
-fn same(
+/// Feeds `working`, translated on the fly, to `sink` in the chunk size svn uses (so malformed
+/// keyword candidates behave identically). Stops early when `sink` returns `false`; returns
+/// whether the whole input was consumed.
+fn drive(
     working: &mut dyn Read,
-    pristine: &mut dyn Read,
     mut translator: Option<ContentTranslator>,
+    mut sink: impl FnMut(&[u8]) -> Result<bool, SvnError>,
 ) -> Result<bool, SvnError> {
     let chunk = translator
         .as_ref()
         .map_or(64 * 1024, ContentTranslator::chunk_size);
     let mut buf = vec![0u8; chunk];
     let mut translated = Vec::new();
-    let mut expected = vec![0u8; chunk.max(64 * 1024)];
     loop {
         let n = read_full(working, &mut buf)?;
         translated.clear();
@@ -175,12 +189,41 @@ fn same(
         {
             t.finish(&mut translated)?;
         }
-        if !matches_prefix(pristine, &translated, &mut expected)? {
+        if !sink(&translated)? {
             return Ok(false);
         }
         if n == 0 {
-            break;
+            return Ok(true);
         }
+    }
+}
+
+/// SHA-1 of the translated working text equals `expected`.
+fn digest_matches(
+    working: &mut dyn Read,
+    translator: Option<ContentTranslator>,
+    expected: &Sha1Digest,
+) -> Result<bool, SvnError> {
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    drive(working, translator, |data| {
+        hasher.update(data);
+        Ok(true)
+    })?;
+    Ok(hasher.finalize().as_slice() == expected.0.as_slice())
+}
+
+/// Compares `working` (translated on the fly) with `pristine` byte for byte.
+fn same(
+    working: &mut dyn Read,
+    pristine: &mut dyn Read,
+    translator: Option<ContentTranslator>,
+) -> Result<bool, SvnError> {
+    let mut expected = vec![0u8; 64 * 1024];
+    if !drive(working, translator, |data| {
+        matches_prefix(pristine, data, &mut expected)
+    })? {
+        return Ok(false);
     }
     // The pristine must end exactly here.
     let mut probe = [0u8; 1];
@@ -213,4 +256,60 @@ fn read_full(reader: &mut dyn Read, buf: &mut [u8]) -> Result<usize, SvnError> {
         }
     }
     Ok(filled)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::pristine::PristineError;
+    use sha1::{Digest, Sha1};
+
+    /// A pristine store whose texts are all dehydrated (format 32, `store_pristine = false`).
+    struct Dehydrated(u64);
+
+    impl PristineSource for Dehydrated {
+        fn open_text(&self, sha1: &Sha1Digest) -> Result<Box<dyn Read>, PristineError> {
+            Err(PristineError::NotHydrated(*sha1))
+        }
+        fn text_size(&self, _: &Sha1Digest) -> Result<u64, PristineError> {
+            Ok(self.0)
+        }
+    }
+
+    fn digest(data: &[u8]) -> Sha1Digest {
+        Sha1Digest(Sha1::digest(data).into())
+    }
+
+    fn check(working: &[u8], pristine: &[u8], translate: Option<TranslateInfo>) -> bool {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("f");
+        std::fs::write(&path, working).expect("write");
+        let recorded = RecordedFile {
+            checksum: Some(digest(pristine)),
+            size: None,
+            mtime_micros: None,
+            translate,
+        };
+        let disk = DiskFile {
+            size: working.len() as u64,
+            mtime_micros: 1,
+        };
+        let pristine = Dehydrated(pristine.len() as u64);
+        file_modified(&path, Some(disk), &recorded, &pristine)
+            .expect("no pristine text must not fail")
+            .modified
+    }
+
+    #[test]
+    fn dehydrated_pristine_is_compared_by_checksum() {
+        assert!(!check(b"same\n", b"same\n", None));
+        assert!(check(b"diff\n", b"same\n", None)); // same size, other content
+        assert!(check(b"longer\n", b"same\n", None)); // size easy-out
+        let crlf = TranslateInfo::from_props(|n| (n == "svn:eol-style").then_some(&b"CRLF"[..]));
+        assert!(!check(b"a\nb\n", b"a\r\nb\r\n", Some(crlf.clone()))); // eol repaired
+        assert!(check(b"a\nc\n", b"a\r\nb\r\n", Some(crlf)));
+        let kw = TranslateInfo::from_props(|n| (n == "svn:keywords").then_some(&b"Rev"[..]));
+        assert!(!check(b"$Rev: 12 $\n", b"$Rev$\n", Some(kw)));
+    }
 }
