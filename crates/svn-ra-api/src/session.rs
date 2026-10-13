@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use svn_types::{
-    CancelToken, DeltaEditor, Depth, DirEntry, LockInfo, LogEntry, NodeKind, PropChange, RelPath,
-    RepoDisplayPath, RepoUrl, Reporter, Result, Revnum, WindowSink,
+    CancelToken, Checksum, DeltaEditor, Depth, DirEntry, LockInfo, LogEntry, NodeKind, PropChange,
+    RelPath, RepoDisplayPath, RepoUrl, Reporter, Result, Revnum, WindowSink,
 };
 use tokio::io::AsyncWrite;
 
@@ -49,6 +49,13 @@ pub struct FileMeta {
     pub rev: Revnum,
     /// Properties of the file at that revision.
     pub props: Vec<PropChange>,
+    /// MD5 of the bytes written to the sink, computed while streaming. Always present, also
+    /// when the server reported no checksum to compare it with.
+    pub md5: Checksum,
+    /// The server reported a checksum for the file and `md5` matched it. `false` means the
+    /// content could not be verified against the server (a mismatch is an error, never
+    /// `false`); callers that need certainty compare `md5` with a checksum they trust.
+    pub verified: bool,
 }
 
 /// Parameters of `log`.
@@ -131,6 +138,10 @@ pub trait RaSession: Send + Sync {
         cancel: &CancelToken,
     ) -> Result<Vec<DirEntry>>;
     /// Streams file content into `sink`.
+    ///
+    /// On error the sink may already hold part of the content, or all of it unverified; the
+    /// caller must discard what was written. On success [`FileMeta::md5`] is the MD5 of the
+    /// bytes written.
     async fn get_file(
         &self,
         path: &RelPath,
@@ -169,7 +180,13 @@ pub trait RaSession: Send + Sync {
         break_lock: bool,
         cancel: &CancelToken,
     ) -> Result<()>;
-    /// Reports every revision of a file in `start..=end`.
+    /// Reports the revisions of a file in `start..=end` that changed its text.
+    ///
+    /// Revisions that changed only the file's properties are **not** passed to `handler`
+    /// (unlike libsvn_ra_serf, which calls its handler for them with no delta), and property
+    /// changes are not reported at all. This is enough for blame; a caller that needs every
+    /// revision or the property history (for example `svn blame -g` or a property log) must
+    /// not rely on this method as it stands.
     async fn file_revs(
         &self,
         path: &RelPath,

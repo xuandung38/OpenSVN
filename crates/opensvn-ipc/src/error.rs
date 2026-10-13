@@ -128,7 +128,8 @@ impl From<&SvnError> for AppError {
 
 /// Engine error code -> (IPC code, retryable, UI actions).
 /// `Corrupt` maps to `wc-needs-cleanup`; `UnsafePath` and `ServerUnsupported` map to `internal`;
-/// `CommitOutcomeUnknown` maps to a non-retryable `network`.
+/// `CommitOutcomeUnknown` maps to a non-retryable `network`; `LimitExceeded` maps to a
+/// non-retryable `invalid-argument` with no actions.
 /// The match is exhaustive on purpose: a new engine code must be mapped explicitly.
 pub fn map_svn_error_code(code: SvnErrorCode) -> (ErrorCode, bool, &'static [ErrorAction]) {
     use ErrorAction as A;
@@ -161,6 +162,8 @@ pub fn map_svn_error_code(code: SvnErrorCode) -> (ErrorCode, bool, &'static [Err
         // Never retryable: re-sending a commit that may already be a revision could apply it
         // twice. The engine message says the outcome is unknown; reconciliation is the caller's.
         S::CommitOutcomeUnknown => (ErrorCode::Network, false, &[]),
+        // A size cap, not corruption: the same request fails again, and cleanup cannot help.
+        S::LimitExceeded => (ErrorCode::InvalidArgument, false, &[]),
         S::Corrupt => (ErrorCode::WcNeedsCleanup, false, &[A::Cleanup]),
         S::ServerUnsupported => (ErrorCode::Internal, false, &[]),
         S::Internal => (ErrorCode::Internal, false, &[]),
