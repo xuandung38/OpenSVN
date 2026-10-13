@@ -2,6 +2,7 @@
 //! [`RaSession`](crate::RaSession) contract, an editor that verifies ordering rules and a no-op reporter.
 
 mod commit_editor;
+mod prefixed;
 mod recording_editor;
 mod repo;
 mod session;

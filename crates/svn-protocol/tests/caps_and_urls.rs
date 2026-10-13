@@ -257,3 +257,71 @@ fn rejects_a_stub_on_another_origin() {
     let err = Capabilities::from_options_response(&session_url(), &head, &f.resp_body).unwrap_err();
     assert_eq!(err.code, ErrorCode::UnsafePath);
 }
+
+/// Capabilities as `caps()` but with another `SVN-Repository-Root`.
+fn caps_with_root(root: &str) -> Capabilities {
+    let mut c = caps();
+    c.repository_root = root.to_owned();
+    c
+}
+
+#[test]
+fn repository_root_must_be_an_ancestor_of_the_session_url() {
+    let at = |u: &str| svn_types::RepoUrl::parse(u).unwrap();
+    // The root itself and every URL below it are fine.
+    for s in [
+        "http://svn.test.local/svn/repo",
+        "http://svn.test.local/svn/repo/trunk/src",
+    ] {
+        UrlBuilder::new(&at(s), &caps()).unwrap();
+    }
+    // A sibling, a parent or a name that merely shares the prefix is refused.
+    for (s, root) in [
+        ("http://svn.test.local/svn/repo", "/elsewhere"),
+        ("http://svn.test.local/svn/repo", "/svn/repo/trunk"),
+        ("http://svn.test.local/svn/repository/trunk", "/svn/repo"),
+    ] {
+        let err = UrlBuilder::new(&at(s), &caps_with_root(root)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnsafePath, "{s} vs {root}");
+    }
+}
+
+#[test]
+fn repository_root_with_other_case_is_accepted_for_visualsvn() {
+    let session = svn_types::RepoUrl::parse("https://svn.test.local/svn/myrepo/Trunk").unwrap();
+    let mut c = caps_with_root("/svn/MyRepo");
+    c.me_resource = "/svn/MyRepo/!svn/me".into();
+    let b = UrlBuilder::new(&session, &c).unwrap();
+    let (rel, folded) = b.locate(session.as_url()).unwrap();
+    assert!(folded);
+    assert_eq!(rel.as_str(), "Trunk");
+    assert_eq!(
+        b.public(&rel).unwrap().as_str(),
+        "https://svn.test.local/svn/MyRepo/Trunk"
+    );
+    // Only the root part folds; the rest keeps its case and a foreign root still fails.
+    let other = url::Url::parse("https://svn.test.local/svn/other/x").unwrap();
+    assert_eq!(b.locate(&other).unwrap_err().code, ErrorCode::UnsafePath);
+    let foreign = url::Url::parse("https://evil.test.local/svn/MyRepo/x").unwrap();
+    assert_eq!(b.locate(&foreign).unwrap_err().code, ErrorCode::UnsafePath);
+}
+
+#[test]
+fn repository_root_with_dot_segments_is_refused() {
+    let f = load("caps/options-200");
+    for root in ["/svn/repo/..", "/svn/repo/./", "/svn/repo/%2e%2e"] {
+        let mut head = f.head();
+        let mut headers = svn_protocol::Headers::new();
+        for (k, v) in head.headers.iter() {
+            if k.eq_ignore_ascii_case("SVN-Repository-Root") {
+                headers.push(k, root);
+            } else {
+                headers.push(k, v);
+            }
+        }
+        head.headers = headers;
+        let err =
+            Capabilities::from_options_response(&session_url(), &head, &f.resp_body).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnsafePath, "{root}");
+    }
+}

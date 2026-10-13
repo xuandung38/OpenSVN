@@ -183,6 +183,18 @@ pub trait AuthPrompter: Send + Sync {
     /// `req.origin` (single-flight). `None` means the user cancelled.
     async fn credentials(&self, req: &CredentialRequest) -> Option<Credentials>;
 
+    /// Credentials saved earlier for `req.origin` (for example in the OS credential store),
+    /// without asking the user. The transport calls this before the first prompt for an
+    /// origin, in interactive and in unattended mode, and uses the answer silently; if the
+    /// server rejects it, an interactive request goes on to [`Self::credentials`] with
+    /// [`PromptReason::Rejected`], an unattended one fails with `AuthRequired`.
+    ///
+    /// Must never show UI. The default has nothing stored.
+    async fn stored_credentials(&self, req: &CredentialRequest) -> Option<Credentials> {
+        let _ = req;
+        None
+    }
+
     /// Asks whether to trust a certificate that failed verification.
     async fn confirm_certificate(&self, info: &CertInfo) -> CertDecision;
 }

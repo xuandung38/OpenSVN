@@ -115,6 +115,8 @@ struct FlightState {
     failures: u8,
     /// The last prompt round ended without credentials.
     denied: bool,
+    /// Stored credentials were already offered for this origin (they are offered once).
+    stored_used: bool,
 }
 
 #[derive(Default)]
@@ -377,12 +379,18 @@ impl AuthManager {
     }
 
     /// Handles a 401: returns credentials to retry with, or the reason authentication failed.
+    ///
+    /// Before the first prompt for an origin the prompter's stored credentials are tried
+    /// silently. When `interactive` is false nothing is ever prompted: without cached or
+    /// stored credentials (or once they are rejected) the request fails with `AuthRequired`.
+    /// Negotiate never prompts, so it is tried in both modes.
     pub(crate) async fn on_unauthorized(
         &self,
         url: &Url,
         challenges: &Challenges,
         sent: &Attached,
         channel_binding: Option<Arc<[u8]>>,
+        interactive: bool,
         cancel: &CancelToken,
     ) -> Result<Attached> {
         let key = HostKey::from_url(url)?;
@@ -475,6 +483,34 @@ impl AuthManager {
             PromptReason::Rejected
         };
         let request = CredentialRequest::new(origin.clone(), u32::from(attempt), offered, reason);
+        let try_stored = attempt == 0 && !lock(&flight.state).stored_used;
+        if try_stored
+            && let Some(creds) = or_cancel(cancel, self.prompter.stored_credentials(&request))
+                .await?
+                .filter(|c| c.method == AuthMethod::Basic)
+        {
+            let header = basic_header(&creds.username, &creds.password)?;
+            let mut state = lock(&flight.state);
+            state.stored_used = true;
+            state.generation += 1;
+            state.credentials = Some(Credential {
+                username: creds.username,
+                password: creds.password,
+            });
+            lock(&self.hosts).insert(key, origin.clone());
+            return Ok(Attached {
+                header: Some(header),
+                origin: Some(origin),
+                generation: state.generation,
+                ..Attached::default()
+            });
+        }
+        if !interactive {
+            return Err(auth_refused(
+                "server requested authentication for an unattended request and no usable \
+                 credentials are stored; not prompting",
+            ));
+        }
         let answer = or_cancel(cancel, self.prompter.credentials(&request)).await?;
         let mut state = lock(&flight.state);
         state.generation += 1;

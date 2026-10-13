@@ -37,6 +37,10 @@ struct Required {
 #[derive(Clone)]
 pub struct FakeRaSession {
     root: RepoUrl,
+    /// URL the session is rooted at (the root unless made with [`Self::at`]).
+    session: RepoUrl,
+    /// `session` relative to `root`; every path argument is relative to it.
+    session_rel: RelPath,
     uuid: String,
     user: String,
     pub(super) state: Arc<Mutex<RepoState>>,
@@ -51,8 +55,11 @@ pub struct FakeRaSession {
 impl FakeRaSession {
     /// Creates an empty repository (revision 0) reachable at `url`.
     pub fn new(url: &str, uuid: &str) -> Result<Self> {
+        let root = RepoUrl::parse(url)?;
         Ok(Self {
-            root: RepoUrl::parse(url)?,
+            session: root.clone(),
+            session_rel: RelPath::root(),
+            root,
             uuid: uuid.to_owned(),
             user: "tester".to_owned(),
             state: Arc::new(Mutex::new(RepoState::new())),
@@ -63,6 +70,23 @@ impl FakeRaSession {
             lock_counter: Arc::new(AtomicU64::new(1)),
             copies: true,
         })
+    }
+
+    /// A session on the same repository rooted at `url` (at or below the repository root, on
+    /// the same origin, otherwise `UnsafePath`), like a session opened at that URL: every path
+    /// argument and the commit editor are relative to it. Clones share the repository.
+    pub fn at(&self, url: &RepoUrl) -> Result<Self> {
+        let session_rel = super::prefixed::rel_of(&self.root, url)?;
+        Ok(Self {
+            session: self.root.join(&session_rel)?,
+            session_rel,
+            ..self.clone()
+        })
+    }
+
+    /// Repository-relative path of a session-relative one.
+    fn abs(&self, path: &RelPath) -> Result<RelPath> {
+        super::prefixed::join(&self.session_rel, path)
     }
 
     /// Sets how many files an update keeps open before closing the oldest (default 4).
@@ -164,7 +188,7 @@ impl RaSession for FakeRaSession {
     }
 
     fn session_url(&self) -> &RepoUrl {
-        &self.root
+        &self.session
     }
 
     async fn ensure_authenticated(&self, cancel: &CancelToken) -> Result<()> {
@@ -232,6 +256,7 @@ impl RaSession for FakeRaSession {
         cancel: &CancelToken,
     ) -> Result<NodeKind> {
         cancel.check()?;
+        let path = &self.abs(path)?;
         let st = self.guard();
         let (_, rv) = st.revision(rev)?;
         Ok(rv.tree.get(path).map_or(NodeKind::None, |n| n.kind()))
@@ -244,6 +269,7 @@ impl RaSession for FakeRaSession {
         cancel: &CancelToken,
     ) -> Result<Option<DirEntry>> {
         cancel.check()?;
+        let path = &self.abs(path)?;
         let st = self.guard();
         let (_, rv) = st.revision(rev)?;
         Ok(RepoState::entry(&rv.tree, path, st.locks.get(path)))
@@ -257,6 +283,7 @@ impl RaSession for FakeRaSession {
         cancel: &CancelToken,
     ) -> Result<Vec<DirEntry>> {
         cancel.check()?;
+        let path = &self.abs(path)?;
         let st = self.guard();
         let (_, rv) = st.revision(rev)?;
         match rv.tree.get(path).map(|n| &n.data) {
@@ -309,6 +336,7 @@ impl RaSession for FakeRaSession {
         cancel: &CancelToken,
     ) -> Result<FileMeta> {
         cancel.check()?;
+        let path = &self.abs(path)?;
         let (rev, content, props) = {
             let st = self.guard();
             let (r, rv) = st.revision(rev)?;
@@ -351,6 +379,18 @@ impl RaSession for FakeRaSession {
         on_entry: &mut (dyn FnMut(LogEntry) -> Result<()> + Send),
         cancel: &CancelToken,
     ) -> Result<()> {
+        let mut paths = req
+            .paths
+            .iter()
+            .map(|p| self.abs(p))
+            .collect::<Result<Vec<_>>>()?;
+        if paths.is_empty() && !self.session_rel.is_root() {
+            paths.push(self.session_rel.clone());
+        }
+        let req = &LogRequest {
+            paths,
+            ..req.clone()
+        };
         let entries: Vec<LogEntry> = {
             let st = self.guard();
             let start = req
@@ -409,6 +449,7 @@ impl RaSession for FakeRaSession {
         cancel: &CancelToken,
     ) -> Result<Vec<LockInfo>> {
         cancel.check()?;
+        let path = &self.abs(path)?;
         let st = self.guard();
         let mut v: Vec<LockInfo> = st
             .locks
@@ -433,6 +474,7 @@ impl RaSession for FakeRaSession {
         cancel: &CancelToken,
     ) -> Result<LockInfo> {
         cancel.check()?;
+        let path = &self.abs(path)?;
         let mut st = self.guard();
         let head = st
             .revisions
@@ -478,6 +520,7 @@ impl RaSession for FakeRaSession {
         cancel: &CancelToken,
     ) -> Result<()> {
         cancel.check()?;
+        let path = &self.abs(path)?;
         let mut st = self.guard();
         let Some(existing) = st.locks.get(path) else {
             return Err(SvnError::new(
@@ -503,6 +546,7 @@ impl RaSession for FakeRaSession {
         handler: &mut dyn FileRevHandler,
         cancel: &CancelToken,
     ) -> Result<()> {
+        let path = &self.abs(path)?;
         let items: Vec<(FileRev, Bytes)> = {
             let st = self.guard();
             let lo = start.map_or(1, |r| r.0.max(1));
@@ -564,7 +608,10 @@ impl RaSession for FakeRaSession {
     ) -> Result<()> {
         drive_update(
             &self.state,
-            &self.root,
+            super::update_drive::SessionAt {
+                repos_root: &self.root,
+                session_rel: &self.session_rel,
+            },
             self.max_open_files,
             req,
             report,
@@ -584,6 +631,7 @@ impl RaSession for FakeRaSession {
         cancel: &CancelToken,
     ) -> Result<Box<dyn CommitEditor>> {
         cancel.check()?;
+        let lock_tokens = &super::prefixed::lock_tokens(&self.session_rel, lock_tokens)?;
         let (txn, tree, base_head) = {
             let mut st = self.guard();
             let txn = format!("{}-fake", st.next_txn);
@@ -608,7 +656,7 @@ impl RaSession for FakeRaSession {
                 || self.user.clone(),
                 |v| String::from_utf8_lossy(v).into_owned(),
             );
-        Ok(Box::new(FakeCommitEditor {
+        let editor: Box<dyn CommitEditor> = Box::new(FakeCommitEditor {
             state: Arc::clone(&self.state),
             observer,
             txn,
@@ -627,7 +675,8 @@ impl RaSession for FakeRaSession {
             touched: Vec::new(),
             root: self.root.clone(),
             copies: self.copies,
-        }))
+        });
+        Ok(super::prefixed::wrap(editor, &self.session_rel))
     }
 
     async fn abort_txn(&self, txn_name: &str) -> Result<()> {

@@ -238,11 +238,9 @@ O = "options"
 write("options", "root-other-host", options(**{"SVN-Repository-Root": "http://evil.test.local/svn/repo"}),
       O, "reject", "repository root on another host")
 write("options", "root-not-prefix", options(**{"SVN-Repository-Root": "/elsewhere"}), O,
-      "gap-same-origin",
-      "repository root that is not a prefix of the session URL (KNOWN GAP: accepted; stays same-origin)")
+      "reject", "repository root that is not a prefix of the session URL")
 write("options", "root-dotdot", options(**{"SVN-Repository-Root": "/svn/repo/.."}), O,
-      "gap-same-origin",
-      "repository root with .. (KNOWN GAP: normalised to /svn and accepted; stays same-origin)")
+      "reject", "repository root with a .. segment")
 write("options", "me-other-host", options(**{"SVN-Me-Resource": "http://evil.test.local/!svn/me"}),
       O, "reject", "me resource on another host (commits would go there)")
 write("options", "stub-other-host", options(**{"SVN-Rev-Root-Stub": "//evil.test.local/svn/repo/!svn/rvr"}),
