@@ -5,4 +5,5 @@
 mod edit_tests;
 mod recovery_tests;
 mod remote_tests;
+mod scaffold_tests;
 mod support;

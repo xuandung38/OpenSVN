@@ -30,8 +30,10 @@ svn-ra.workspace = true
 tracing-subscriber = { workspace = true, features = ["std", "fmt", "registry"] }
 # Line diffs: display budget (`tooComplex`) for both engines, blame matching for the real one.
 svn-diff.workspace = true
-# Only needed by the real engine (working copy database, upload checksums, journal file names).
+# Only needed by the real engine (working copy database, client operations, upload checksums,
+# journal file names).
 svn-wc = { workspace = true, optional = true }
+svn-client = { workspace = true, optional = true }
 svn-delta = { workspace = true, optional = true }
 md-5 = { workspace = true, optional = true }
 sha1 = { workspace = true, optional = true }
@@ -81,7 +83,7 @@ rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }
 
 [features]
 # Registers `engine::real::RealEngine`, the `EngineFacade` backed by the Subversion crates.
-real-engine = ["dep:svn-wc", "dep:svn-delta", "dep:md-5", "dep:sha1"]
+real-engine = ["dep:svn-wc", "dep:svn-client", "dep:svn-delta", "dep:md-5", "dep:sha1"]
 # Exposes `engine::conformance`, the engine-independent test suite every `EngineFacade` must pass.
 engine-conformance = []
 
