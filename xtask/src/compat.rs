@@ -8,15 +8,24 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 
 const PROJECT: &str = "opensvn-compat";
+/// Compose service prefixes always started by `up`.
+const SERVER_TAGS: [&str; 2] = ["svn14", "svn15"];
+/// Extra prefixes started with `up --legacy` (Subversion 1.10.8, 1.9.12, 1.8.19).
+const LEGACY_TAGS: [&str; 3] = ["svn110", "svn19", "svn18"];
 const USAGE: &str = "\
 cargo xtask compat <command>
 
-  up [--no-build]   build images (unless --no-build), start both servers, wait for healthy
+  up [--no-build] [--legacy]
+                    build images (unless --no-build), start the 1.14.5/1.15.0 servers and wait for
+                    healthy; --legacy also starts the 1.10.8, 1.9.12 and 1.8.19 containers
   down [--purge]    stop and remove containers and volumes (--purge also deletes target/compat)
   status            show container state
-  fixtures          create the fixture repos (basic, nolayout) on both servers and verify hashes
+  fixtures [--legacy]
+                    create the fixture repos (basic, nolayout) on both servers and verify hashes
                     (--update-hash records new expected hashes; --large [N] adds the perf repo)
-  run [paths...]    run scenario files/dirs (default: tests/compat/scenarios/harness)";
+  run [--legacy] [paths...]
+                    run scenario files/dirs (default: tests/compat/scenarios/harness; --legacy
+                    includes the harness/legacy smoke scenarios for 1.8-1.10)";
 
 /// Repo root = parent of this crate's directory.
 fn repo_root() -> PathBuf {
@@ -35,7 +44,7 @@ fn compose(root: &Path) -> Command {
     let mut cmd = Command::new("docker");
     cmd.args(["compose", "-f"])
         .arg(root.join("docker").join("compose.yml"))
-        .args(["-p", PROJECT]);
+        .args(["--profile", "legacy", "-p", PROJECT]);
     if let Some(uid) = id_of("-u") {
         cmd.env("HOST_UID", uid);
     }
@@ -81,22 +90,26 @@ pub fn run(args: &[String]) -> Result<()> {
 
 fn up(root: &Path, args: &[String]) -> Result<()> {
     let state = state_dir(root);
-    for sub in ["certs", "work", "logs/svn14", "logs/svn15"] {
+    let legacy = args.iter().any(|a| a == "--legacy");
+    for sub in ["certs", "work"] {
         fs::create_dir_all(state.join(sub)).with_context(|| format!("create {sub}"))?;
+    }
+    for tag in SERVER_TAGS
+        .iter()
+        .chain(legacy.then_some(&LEGACY_TAGS).into_iter().flatten())
+    {
+        fs::create_dir_all(state.join("logs").join(tag))
+            .with_context(|| format!("create logs/{tag}"))?;
     }
     let started = Instant::now();
     let mut cmd = compose(root);
-    cmd.args([
-        "up",
-        "-d",
-        "--wait",
-        "--wait-timeout",
-        "120",
-        "svn14-server",
-        "svn15-server",
-        "svn14-client",
-        "svn15-client",
-    ]);
+    cmd.args(["up", "-d", "--wait", "--wait-timeout", "120"]);
+    for tag in SERVER_TAGS
+        .iter()
+        .chain(legacy.then_some(&LEGACY_TAGS).into_iter().flatten())
+    {
+        cmd.args([format!("{tag}-server"), format!("{tag}-client")]);
+    }
     if !args.iter().any(|a| a == "--no-build") {
         cmd.arg("--build");
     }
@@ -137,7 +150,12 @@ fn fixtures(root: &Path, args: &[String]) -> Result<()> {
             .cloned()
             .unwrap_or_else(|| "100000".into())
     });
-    for server in ["svn14-server", "svn15-server"] {
+    let legacy = args.iter().any(|a| a == "--legacy");
+    let servers = SERVER_TAGS
+        .iter()
+        .chain(legacy.then_some(&LEGACY_TAGS).into_iter().flatten())
+        .map(|t| format!("{t}-server"));
+    for server in servers {
         let mut script = String::from(
             "set -e; for r in basic nolayout; do /fixtures/repos/make-$r.sh /var/svn/repos/$r; done;",
         );
@@ -155,7 +173,7 @@ fn fixtures(root: &Path, args: &[String]) -> Result<()> {
         if update {
             cmd.args(["-e", "FIXTURE_UPDATE_HASH=1"]);
         }
-        cmd.args([server, "bash", "-c", &script]);
+        cmd.args([server.as_str(), "bash", "-c", &script]);
         println!("== fixtures on {server}");
         exec(&mut cmd, "fixture creation")?;
     }
@@ -174,10 +192,10 @@ fn run_scenarios(root: &Path, args: &[String]) -> Result<()> {
         "compat-run",
         "--",
     ]);
-    if args.is_empty() {
+    cmd.args(args);
+    // Only flags given: run the default harness directory.
+    if args.iter().all(|a| a.starts_with("--")) {
         cmd.arg(root.join("tests/compat/scenarios/harness"));
-    } else {
-        cmd.args(args);
     }
     exec(&mut cmd, "compat-run")
 }
