@@ -1,3 +1,6 @@
 # Workspace-wide cargo settings.
 [term]
 color = "auto"
+
+[alias]
+xtask = "run --quiet --package xtask --"

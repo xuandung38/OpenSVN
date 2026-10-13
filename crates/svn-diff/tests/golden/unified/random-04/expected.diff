@@ -1,0 +1,22 @@
+Index: f
+===================================================================
+--- f	(revision 1)
++++ f	(working copy)
+@@ -6,7 +6,7 @@
+ w1 w4
+ w1 w3
+ w0 w4
+-w1 w3
++x4 v4
+ w3 w4
+ w1 w1
+ w1 w1
+@@ -40,5 +40,5 @@
+ w1 w4
+ w4 w1
+ w4 w4
+-w0 w2
+-w1 w2
+\ No newline at end of file
++x3 v0
++x0 v3

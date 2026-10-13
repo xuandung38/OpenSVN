@@ -165,7 +165,11 @@ async fn changed_pinned_certificate_is_reported_distinctly_and_replaces_the_pin_
     let calls = rejecting.cert_calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1);
     assert!(
-        matches!(&calls[0].failure, CertFailure::Other(m) if m.contains("changed")),
+        matches!(
+            calls[0].failure,
+            CertFailure::Changed { old_sha256, new_sha256 }
+                if old_sha256 == old_fp && new_sha256 == sha256_fingerprint(&replacement.cert_der)
+        ),
         "{:?}",
         calls[0].failure
     );
@@ -194,4 +198,30 @@ async fn untrusted_certificate_for_the_wrong_host_is_not_overridable() {
     let err = get(&t, url).await.expect_err("mismatch");
     assert_eq!(err.code, ErrorCode::TlsUntrusted);
     assert_eq!(prompter.cert_prompts(), 0);
+}
+
+#[tokio::test]
+async fn changed_and_hostname_mismatched_is_reported_as_hostname_mismatch() {
+    // Pinned certificate differs from the presented one (changed) and the presented one is for
+    // another host: the hard failure wins, nothing is offered to the user.
+    let first = TestCa::self_signed_leaf(&["localhost"]);
+    let presented = TestCa::self_signed_leaf(&["other.test.local"]);
+    let server = TlsServer::start(&presented, ok_handler()).await;
+    let trust = Arc::new(MemoryTrustStore::new());
+    trust.pin(
+        "localhost",
+        server.addr.port(),
+        sha256_fingerprint(&first.cert_der),
+    );
+    let prompter = ScriptedPrompter::with_cert_decision(CertDecision::AcceptAlways);
+    let t = plain_transport(prompter.clone(), trust.clone(), vec![]);
+    let err = get(&t, server.url("/")).await.expect_err("blocked");
+    assert_eq!(err.code, ErrorCode::TlsUntrusted);
+    assert!(err.message.contains("host name"), "{}", err.message);
+    assert!(!err.message.contains("changed"), "{}", err.message);
+    assert_eq!(prompter.cert_prompts(), 0);
+    assert_eq!(
+        trust.pinned("localhost", server.addr.port()),
+        vec![sha256_fingerprint(&first.cert_der)]
+    );
 }

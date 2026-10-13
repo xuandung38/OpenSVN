@@ -262,18 +262,11 @@ impl HttpTransport {
         }
         let mut info = problem.info.clone();
         if problem.changed {
-            // Distinct report: the dedicated failure kind arrives with the contract update.
-            let old = problem
-                .previous
-                .iter()
-                .map(|fp| hex(fp))
-                .collect::<Vec<_>>()
-                .join(", ");
-            info.failure = CertFailure::Other(format!(
-                "the certificate changed since it was last trusted for this server \
-                 (previous sha256: {old}; new sha256: {})",
-                hex(&fp)
-            ));
+            // Only overridable failures reach this point, so `Changed` never masks a hard one.
+            info.failure = CertFailure::Changed {
+                old_sha256: problem.previous.last().copied().unwrap_or([0; 32]),
+                new_sha256: fp,
+            };
         }
         let decision = tokio::select! {
             biased;
@@ -394,10 +387,6 @@ impl HttpTransport {
             }
         }
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn cancel_error(cancel: &CancelToken) -> AttemptError {
