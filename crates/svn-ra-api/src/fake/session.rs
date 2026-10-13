@@ -44,6 +44,7 @@ pub struct FakeRaSession {
     cert_check: Option<(CertInfo, Arc<dyn AuthPrompter>)>,
     authenticated: Arc<AtomicBool>,
     lock_counter: Arc<AtomicU64>,
+    copies: bool,
 }
 
 impl FakeRaSession {
@@ -59,6 +60,7 @@ impl FakeRaSession {
             cert_check: None,
             authenticated: Arc::new(AtomicBool::new(false)),
             lock_counter: Arc::new(AtomicU64::new(1)),
+            copies: true,
         })
     }
 
@@ -66,6 +68,14 @@ impl FakeRaSession {
     #[must_use]
     pub fn with_max_open_files(mut self, n: usize) -> Self {
         self.max_open_files = n;
+        self
+    }
+
+    /// Makes commit editors from this session refuse copies with `ServerUnsupported`, like a
+    /// server without copy support.
+    #[must_use]
+    pub fn without_copies(mut self) -> Self {
+        self.copies = false;
         self
     }
 
@@ -600,6 +610,7 @@ impl RaSession for FakeRaSession {
             next_id: 0,
             touched: Vec::new(),
             root: self.root.clone(),
+            copies: self.copies,
         }))
     }
 
