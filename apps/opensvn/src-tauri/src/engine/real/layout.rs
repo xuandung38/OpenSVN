@@ -39,32 +39,31 @@ impl RealEngine {
                 .list(&root, None, Depth::Immediates, &ctx.cancel)
                 .await?
                 .into_iter()
-                .filter(|e| e.kind == NodeKind::Dir)
+                .filter(|e| e.kind == NodeKind::Dir && server_name_ok(&e.name))
                 .map(|e| e.name)
                 .collect()
         } else {
             vec![String::new()]
         };
-        let base = repo_root_url.trim_end_matches('/');
+        let repos_root = session.repos_root().clone();
         let mut out = Vec::new();
         for project in &projects {
             let expand = |p: &str| p.replace(PROJECT, project).trim_matches('/').to_owned();
             for t in &trunks {
-                let path = expand(t);
-                if let Ok(rp) = RelPath::new(&path)
-                    && session.check_path(&rp, None, &ctx.cancel).await? == NodeKind::Dir
-                {
+                let Ok(rp) = RelPath::new(&expand(t)) else {
+                    continue;
+                };
+                if session.check_path(&rp, None, &ctx.cancel).await? == NodeKind::Dir {
                     out.push(BranchNode {
                         kind: BranchKind::Trunk,
                         name: "trunk".into(),
-                        url: format!("{base}/{path}"),
+                        url: repos_root.join(&rp)?.to_string(),
                     });
                 }
             }
             for (patterns, kind) in [(&branches, BranchKind::Branch), (&tags, BranchKind::Tag)] {
                 for pattern in patterns {
-                    let path = expand(pattern);
-                    let Ok(rp) = RelPath::new(&path) else {
+                    let Ok(rp) = RelPath::new(&expand(pattern)) else {
                         continue;
                     };
                     if session.check_path(&rp, None, &ctx.cancel).await? != NodeKind::Dir {
@@ -74,17 +73,40 @@ impl RealEngine {
                         .list(&rp, None, Depth::Immediates, &ctx.cancel)
                         .await?
                     {
-                        if e.kind == NodeKind::Dir {
-                            out.push(BranchNode {
-                                kind,
-                                url: format!("{base}/{path}/{}", e.name),
-                                name: e.name,
-                            });
+                        if e.kind != NodeKind::Dir {
+                            continue;
                         }
+                        // Server names are untrusted: validate them and let the URL encode them.
+                        let Some(path) = server_child(&rp, &e.name) else {
+                            continue;
+                        };
+                        out.push(BranchNode {
+                            kind,
+                            url: repos_root.join(&path)?.to_string(),
+                            name: e.name,
+                        });
                     }
                 }
             }
         }
         Ok(out)
     }
+}
+
+/// Whether a directory name listed by the server is safe to use as a path segment.
+fn server_name_ok(name: &str) -> bool {
+    let ok = !name.contains('/') && RelPath::from_server(name).is_ok();
+    if !ok {
+        tracing::warn!(name, "skipping a repository directory with an unsafe name");
+    }
+    ok
+}
+
+/// `parent/name` for a directory name listed by the server, `None` when the name is unsafe.
+fn server_child(parent: &RelPath, name: &str) -> Option<RelPath> {
+    if !server_name_ok(name) {
+        return None;
+    }
+    let child = RelPath::from_server(name).ok()?;
+    parent.child(child.as_str()).ok()
 }

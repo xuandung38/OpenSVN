@@ -5,9 +5,8 @@ use std::path::Path;
 use bytes::Bytes;
 use opensvn_ipc::time_fmt::timestamp_to_iso;
 use opensvn_ipc::{
-    BlameLine, BranchKind, BranchNode, ChangeAction, ChangedPath, CopyFrom, CopyLocationRequest,
-    EntryKind, FileDiff, Layout, LogEntry, LogGetRequest, LogPage, PathKind, RepoEntry, RepoInfo,
-    Rev, Size, TextSide,
+    BlameLine, BranchKind, BranchNode, CopyLocationRequest, EntryKind, FileDiff, Layout,
+    LogGetRequest, LogPage, RepoEntry, RepoInfo, Rev, Size, TextSide,
 };
 use svn_ra_api::fake::{FakeChange, FakeRaSession};
 use svn_ra_api::{LogRequest, RaSession};
@@ -15,9 +14,10 @@ use svn_types::{ErrorCode, NodeKind, RelPath, Revnum, SvnError};
 
 use super::FakeEngine;
 use super::state::rel;
-use super::text::{is_binary, match_lines, text_side};
 use crate::engine::context::{OpContext, ProgressUpdate};
 use crate::engine::facade::{DiffOptions, EditOp, LockScope, LogScope, RemoteEditPlan, WcRef};
+use crate::engine::mapping::{self, entry_kind, revnum};
+use crate::engine::text::{is_binary, match_lines, text_side};
 
 /// Largest file `repo_cat` returns inline.
 const CAT_LIMIT: usize = 5 * 1024 * 1024;
@@ -26,10 +26,6 @@ const UPLOAD_LIMIT: u64 = 64 * 1024 * 1024;
 
 fn internal(msg: impl Into<String>) -> SvnError {
     SvnError::new(ErrorCode::Internal, msg)
-}
-
-fn revnum(r: Option<Rev>) -> Option<Revnum> {
-    r.map(|r| Revnum(r.0))
 }
 
 impl FakeEngine {
@@ -93,22 +89,12 @@ impl FakeEngine {
             let (author, date) = self.rev_author_date(&session, created, ctx).await?;
             out.push(RepoEntry {
                 name: e.name,
-                kind: if e.kind == NodeKind::Dir {
-                    EntryKind::Dir
-                } else {
-                    EntryKind::File
-                },
+                kind: entry_kind(e.kind),
                 size: e.size.map(Size),
                 created_rev: Rev(created.0),
                 last_author: author,
                 date,
-                lock: e.lock.map(|l| opensvn_ipc::LockInfo {
-                    owner: l.owner,
-                    comment: l.comment,
-                    created_at: timestamp_to_iso(l.created),
-                    token: None,
-                    mine: false,
-                }),
+                lock: e.lock.map(mapping::lock),
             });
         }
         out.sort_by(|a, b| {
@@ -352,7 +338,7 @@ impl FakeEngine {
         let next_rev = (matched.len() > limit).then(|| Rev(matched[limit].rev.0));
         matched.truncate(limit);
         Ok(LogPage {
-            entries: matched.into_iter().map(map_log_entry).collect(),
+            entries: matched.into_iter().map(mapping::log_entry).collect(),
             next_rev,
         })
     }
@@ -739,40 +725,5 @@ impl FakeEngine {
             }
         }
         Ok(out)
-    }
-}
-
-fn map_log_entry(e: svn_types::LogEntry) -> LogEntry {
-    let paths: Vec<ChangedPath> = e
-        .changed_paths
-        .into_iter()
-        .map(|c| ChangedPath {
-            path: c.path.to_string(),
-            action: match c.action {
-                svn_types::ChangeAction::Added => ChangeAction::A,
-                svn_types::ChangeAction::Modified => ChangeAction::M,
-                svn_types::ChangeAction::Deleted => ChangeAction::D,
-                svn_types::ChangeAction::Replaced => ChangeAction::R,
-            },
-            kind: match c.kind {
-                NodeKind::File => PathKind::File,
-                NodeKind::Dir => PathKind::Dir,
-                _ => PathKind::Unknown,
-            },
-            copy_from: c.copy_from.map(|(path, rev)| CopyFrom {
-                path: path.to_string(),
-                rev: Rev(rev.0),
-            }),
-            text_mods: Some(c.text_mods),
-            prop_mods: Some(c.prop_mods),
-        })
-        .collect();
-    LogEntry {
-        rev: Rev(e.rev.0),
-        author: e.author,
-        date: e.date.map_or_else(String::new, timestamp_to_iso),
-        message: e.message.unwrap_or_default(),
-        changed_paths: (!paths.is_empty()).then_some(paths),
-        has_children: Some(e.has_children),
     }
 }

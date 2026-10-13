@@ -14,11 +14,11 @@ use svn_ra_api::{CommitEditor, CommitInfo, CommitObserver, RaSession, Replayable
 use svn_types::{Checksum, DirId, ErrorCode, NodeKind, RelPath, Revnum, SvnError};
 
 use super::RealEngine;
-use super::mapping::{self, revnum};
 use super::remote::internal;
 use super::wc_read::blocking;
 use crate::engine::context::OpContext;
 use crate::engine::facade::{EditOp, EngineResult, RemoteEditPlan};
+use crate::engine::mapping::{self, revnum};
 
 /// Largest local file `remote_edit` uploads.
 const UPLOAD_LIMIT: u64 = 64 * 1024 * 1024;
@@ -53,9 +53,15 @@ pub(super) struct Tree {
 }
 
 impl Tree {
-    /// Records `edit` at `path`; one path carries one change, and entries that are removed,
-    /// copied or uploaded have no children of their own in the same commit.
+    /// Records `edit` at `path`; one path carries one change, entries that are removed, copied
+    /// or uploaded have no children of their own in the same commit, and the root is never a
+    /// target.
     pub(super) fn insert(&mut self, path: &RelPath, edit: Edit) -> EngineResult<()> {
+        // The commit drive opens the root and only edits entries below it: an edit of the root
+        // itself would be dropped silently, so it is refused.
+        if path.is_root() {
+            return Err(internal("the repository root itself cannot be edited"));
+        }
         let mut node = self;
         for name in path.components() {
             if matches!(

@@ -67,9 +67,11 @@ impl JournalStore {
         }
     }
 
-    /// File name derived from the root path: stable, and safe whatever characters the path holds.
+    /// File name derived from the canonical root path: stable whichever spelling of the root
+    /// (relative, through a symlink, with `..`) the caller used, and safe whatever characters
+    /// the path holds.
     fn file_for(&self, wc_root: &Path) -> PathBuf {
-        let digest = Sha1::digest(wc_root.to_string_lossy().as_bytes());
+        let digest = Sha1::digest(canonical(wc_root).to_string_lossy().as_bytes());
         let name: String = digest.iter().map(|b| format!("{b:02x}")).collect();
         self.dir.join(format!("{name}.json"))
     }
@@ -87,7 +89,7 @@ impl JournalStore {
         }
         let record = JournalRecord {
             version: VERSION,
-            wc_root: wc_root.to_string_lossy().into_owned(),
+            wc_root: canonical(wc_root).to_string_lossy().into_owned(),
             repo_root_url: repo_root_url.to_owned(),
             phase: JournalPhase::Started,
         };
@@ -131,6 +133,15 @@ impl JournalStore {
         Ok(Some(record))
     }
 
+    /// Moves an unreadable journal of `wc_root` aside (`<name>.json.corrupt`, replacing an older
+    /// one) so it no longer blocks commits but stays available for diagnosis.
+    pub fn quarantine(&self, wc_root: &Path) -> Result<PathBuf> {
+        let path = self.file_for(wc_root);
+        let aside = path.with_extension("json.corrupt");
+        svn_types::rename_replacing(&path, &aside)?;
+        Ok(aside)
+    }
+
     /// Removes the journal of `wc_root` (no error when there is none).
     pub fn clear(&self, wc_root: &Path) -> Result<()> {
         let path = self.file_for(wc_root);
@@ -140,6 +151,12 @@ impl JournalStore {
             Err(e) => Err(SvnError::from_io(format!("remove {}", path.display()), &e)),
         }
     }
+}
+
+/// Canonical form of a working copy root; the path as given when it cannot be resolved (the
+/// key must still be computable for a root that disappeared).
+fn canonical(wc_root: &Path) -> PathBuf {
+    std::fs::canonicalize(wc_root).unwrap_or_else(|_| wc_root.to_path_buf())
 }
 
 fn write_record(path: &Path, record: &JournalRecord) -> Result<()> {
