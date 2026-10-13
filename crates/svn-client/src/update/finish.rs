@@ -12,7 +12,7 @@ use super::editor::{UpdateEditor, failpoint};
 use super::props::merge_props;
 use super::state::DirState;
 use crate::ctx::UpdateAction;
-use crate::wc::{inspect, txn};
+use crate::wc::inspect;
 
 /// Work items that remove the versioned content below `rel` bottom-up. Directories are removed
 /// without recursion, so unversioned files inside survive.
@@ -59,9 +59,9 @@ impl UpdateEditor {
             return Ok(());
         }
         if inspect::subtree_has_local_changes(&db, wc)? {
-            let replaced = db.read_node(wc)?.is_some_and(|c| {
-                c.op_depth > 0 && c.presence != Presence::BaseDeleted
-            });
+            let replaced = db
+                .read_node(wc)?
+                .is_some_and(|c| c.op_depth > 0 && c.presence != Presence::BaseDeleted);
             let reason = if replaced {
                 TreeReason::Replaced
             } else {
@@ -107,7 +107,6 @@ impl UpdateEditor {
             return Ok(());
         }
         let rev = self.rev()?;
-        let wc_id = db.wc_id();
         let old_pristine = d
             .base
             .as_ref()
@@ -176,15 +175,15 @@ impl UpdateEditor {
         if let Some(tc) = &d.tree_conflict {
             conflicts.push(NewConflict::Tree(tc.reason.clone(), tc.action.clone()));
         }
-        db.with_write(|tx| {
-            txn::base_add(tx, wc_id, &d.wc, &node)?;
+        db.with_txn(|t| {
+            t.base_add(&d.wc, &node)?;
             if d.base.is_some() || overlay.is_some() {
-                txn::set_actual_props(tx, wc_id, &d.wc, overlay.as_ref())?;
+                t.set_actual_props(&d.wc, overlay.as_ref())?;
             }
             if !conflicts.is_empty() {
-                conflict_record::record(tx, wc_id, &d.wc, &info, conflicts)?;
+                conflict_record::record(t, &d.wc, &info, conflicts)?;
             }
-            txn::queue_work(tx, &work)
+            t.queue_work(&work)
         })?;
         self.run_queue()?;
         if let Some(a) = action {
@@ -200,18 +199,17 @@ impl UpdateEditor {
         self.run_queue()?;
         let rev = self.rev()?;
         let db = self.s.db.clone();
-        let wc_id = db.wc_id();
         let target = self.target_wc.clone();
         let relocation = match (&self.s.switch_relpath, self.old_target()) {
             (Some(new), Some(old)) if !old.is_empty() => Some((old.to_owned(), new.clone())),
             _ => None,
         };
         let skipped = self.skipped.clone();
-        db.with_write(|tx| {
+        db.with_txn(|t| {
             if let Some((old, new)) = &relocation {
-                txn::relocate_subtree(tx, wc_id, &target, old, new)?;
+                t.relocate_subtree(&target, old, new)?;
             }
-            txn::bump_revisions(tx, wc_id, &target, rev, &skipped)
+            t.bump_revisions(&target, rev, &skipped)
         })
         .map_err(|e: SvnError| e)?;
         self.mark_finished();

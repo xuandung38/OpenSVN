@@ -21,7 +21,7 @@ use super::editor::{UpdateEditor, failpoint};
 use super::props::merge_props;
 use super::state::{FileState, NewText, tmp_dir};
 use crate::ctx::UpdateAction;
-use crate::wc::{adapters, inspect, txn};
+use crate::wc::inspect;
 
 /// Files above this size are not merged in memory; they become a conflict instead.
 const MAX_MERGE_BYTES: u64 = 64 * 1024 * 1024;
@@ -37,7 +37,11 @@ fn prop_changed(old: &Props, new: &Props, name: &str) -> bool {
 /// Working copy relative path of a stored pristine text.
 fn pristine_relpath(sha1: &Sha1Digest) -> String {
     let hex = sha1.to_hex();
-    format!("{}/pristine/{}/{hex}.svn-base", svn_wc::db::ADM_DIR, &hex[..2])
+    format!(
+        "{}/pristine/{}/{hex}.svn-base",
+        svn_wc::db::ADM_DIR,
+        &hex[..2]
+    )
 }
 
 fn read_limited(mut r: impl Read, limit: u64) -> Result<Option<Vec<u8>>> {
@@ -67,22 +71,17 @@ impl UpdateEditor {
         f: FileState,
         text_checksum: Option<Checksum>,
     ) -> Result<()> {
-        let new_text = f
-            .text
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        let new_text = f.text.lock().unwrap_or_else(PoisonError::into_inner).take();
         if let (Some(cs), Some(nt)) = (&text_checksum, &new_text) {
             let ok = match cs {
                 Checksum::Md5(m) => *m == nt.md5,
                 Checksum::Sha1(s) => *s == nt.sha1,
             };
             if !ok {
-                return Err(corrupt(format!(
-                    "checksum mismatch for the new text of '{}'",
-                    f.wc
-                ))
-                .with_svn_code(200_014));
+                return Err(
+                    corrupt(format!("checksum mismatch for the new text of '{}'", f.wc))
+                        .with_svn_code(200_014),
+                );
             }
         }
         if f.skipped {
@@ -91,9 +90,11 @@ impl UpdateEditor {
         let db = Arc::clone(&self.s.db);
         let wc = f.wc.clone();
         let rev = self.rev()?;
-        let wc_id = db.wc_id();
         let old = f.base.clone();
-        let old_pristine: Props = old.as_ref().and_then(|b| b.properties.clone()).unwrap_or_default();
+        let old_pristine: Props = old
+            .as_ref()
+            .and_then(|b| b.properties.clone())
+            .unwrap_or_default();
         let actual: Props = if old.is_some() {
             db.actual_props(&wc)?
         } else {
@@ -104,7 +105,7 @@ impl UpdateEditor {
         // 1. New pristine text.
         let (new_checksum, new_sha) = match &new_text {
             Some(nt) => {
-                let mut store = adapters::pristine_store(&db);
+                let mut store = db.pristine_store();
                 let mut file = File::open(&nt.path)
                     .map_err(|e| SvnError::from_io("cannot open the new text", &e))?;
                 let rec = store.install(
@@ -116,7 +117,10 @@ impl UpdateEditor {
             }
             None => {
                 let cs = old.as_ref().and_then(|b| b.checksum.clone());
-                (cs.clone(), cs.as_deref().and_then(Sha1Digest::from_svn_string))
+                (
+                    cs.clone(),
+                    cs.as_deref().and_then(Sha1Digest::from_svn_string),
+                )
             }
         };
         let old_checksum = old.as_ref().and_then(|b| b.checksum.clone());
@@ -151,19 +155,19 @@ impl UpdateEditor {
             .any(|n| prop_changed(&old_pristine, &pm.new_pristine, n));
         let disk_exists = fs::symlink_metadata(crate::wc::abs_path(&db, &wc)?).is_ok();
 
-        if let Some(tc) = &f.tree_conflict {
-            if !matches!(tc.reason, TreeReason::Deleted | TreeReason::Unversioned) {
-                // Replaced locally: leave the node and the disk alone, only record the conflict.
-                return self.record_tree_conflict(
-                    &wc,
-                    old.as_ref(),
-                    &f.new_repos,
-                    NodeKind::File,
-                    tc.reason.clone(),
-                    tc.action.clone(),
-                    false,
-                );
-            }
+        if let Some(tc) = &f.tree_conflict
+            && !matches!(tc.reason, TreeReason::Deleted | TreeReason::Unversioned)
+        {
+            // Replaced locally: leave the node and the disk alone, only record the conflict.
+            return self.record_tree_conflict(
+                &wc,
+                old.as_ref(),
+                &f.new_repos,
+                NodeKind::File,
+                tc.reason.clone(),
+                tc.action.clone(),
+                false,
+            );
         }
 
         if keep_working_tree {
@@ -184,7 +188,9 @@ impl UpdateEditor {
                 );
             }
         } else if text_changed {
-            let base_node = old.as_ref().ok_or_else(|| corrupt("open file without base"))?;
+            let base_node = old
+                .as_ref()
+                .ok_or_else(|| corrupt("open file without base"))?;
             let local_mod = disk_exists && inspect::text_modified(&db, &wc, base_node)?;
             if !local_mod {
                 work.push(
@@ -257,7 +263,12 @@ impl UpdateEditor {
                 );
             }
         }
-        if action == UpdateAction::Update && !f.added && !text_changed && pm.applied == false && work.is_empty() {
+        if action == UpdateAction::Update
+            && !f.added
+            && !text_changed
+            && !pm.applied
+            && work.is_empty()
+        {
             // Nothing visible changed (a pure revision bump); keep the event stream quiet.
         }
 
@@ -292,8 +303,14 @@ impl UpdateEditor {
             repos_uuid: self.s.uuid.clone(),
             repos_relpath: f.new_repos.clone(),
             revision: rev,
-            changed_rev: f.entry.rev.or_else(|| old.as_ref().and_then(|b| b.changed_rev)),
-            changed_date: f.entry.date.or_else(|| old.as_ref().and_then(|b| b.changed_date)),
+            changed_rev: f
+                .entry
+                .rev
+                .or_else(|| old.as_ref().and_then(|b| b.changed_rev)),
+            changed_date: f
+                .entry
+                .date
+                .or_else(|| old.as_ref().and_then(|b| b.changed_date)),
             changed_author: f
                 .entry
                 .author
@@ -322,23 +339,26 @@ impl UpdateEditor {
             new_side.as_ref(),
         );
         failpoint!("update.after_merge3_before_txn");
-        db.with_write(|tx| {
-            txn::base_add(tx, wc_id, &wc, &node)?;
+        db.with_txn(|t| {
+            t.base_add(&wc, &node)?;
             if obstructed {
-                txn::mark_base_deleted(tx, wc_id, &wc, NodeKind::File)?;
+                t.mark_base_deleted(&wc, NodeKind::File)?;
             }
             if old.is_some() || overlay.is_some() {
-                txn::set_actual_props(tx, wc_id, &wc, overlay.as_ref())?;
+                t.set_actual_props(&wc, overlay.as_ref())?;
             }
             if !conflicts.is_empty() {
-                conflict_record::record(tx, wc_id, &wc, &info, conflicts)?;
+                conflict_record::record(t, &wc, &info, conflicts)?;
             }
-            txn::queue_work(tx, &work)
+            t.queue_work(&work)
         })?;
         failpoint!("update.after_txn_before_queue");
         self.run_queue()?;
         self.emit(&wc, NodeKind::File, action);
-        if matches!(action, UpdateAction::Conflicted | UpdateAction::TreeConflicted) {
+        if matches!(
+            action,
+            UpdateAction::Conflicted | UpdateAction::TreeConflicted
+        ) {
             self.skipped.push(wc);
         }
         Ok(())
@@ -359,7 +379,11 @@ impl UpdateEditor {
         let rel_str = wc.as_str();
         let old_rev = base.revision.unwrap_or(0);
         let ext = preserved_extension(rel_str, &self.s.ctx.config.preserved_conflict_exts);
-        let labels = TextMarkerLabels::for_update(i64::try_from(old_rev).ok(), i64::try_from(new_rev).unwrap_or(0), ext);
+        let labels = TextMarkerLabels::for_update(
+            i64::try_from(old_rev).ok(),
+            i64::try_from(new_rev).unwrap_or(0),
+            ext,
+        );
         let old_sha = base
             .checksum
             .as_deref()
@@ -368,11 +392,17 @@ impl UpdateEditor {
         let mime = inspect::prop_value(new_props, "svn:mime-type")
             .or_else(|| inspect::prop_value(actual, "svn:mime-type"))
             .and_then(|v| std::str::from_utf8(v).ok());
-        let store = adapters::pristine_store(db);
+        let store = db.pristine_store();
         let sources_ok = {
-            let old_size = store.path_of(&old_sha).metadata().map(|m| m.len()).unwrap_or(0);
+            let old_size = store
+                .path_of(&old_sha)
+                .metadata()
+                .map(|m| m.len())
+                .unwrap_or(0);
             let new_size = fs::metadata(&new_text.path).map(|m| m.len()).unwrap_or(0);
-            let mine_size = fs::metadata(crate::wc::abs_path(db, wc)?).map(|m| m.len()).unwrap_or(0);
+            let mine_size = fs::metadata(crate::wc::abs_path(db, wc)?)
+                .map(|m| m.len())
+                .unwrap_or(0);
             old_size.max(new_size).max(mine_size) <= MAX_MERGE_BYTES
         };
         let treat_binary = diff_as_binary_by_mime(mime) || !sources_ok;
@@ -397,13 +427,11 @@ impl UpdateEditor {
                 merged: None,
             });
         }
-        let base_bytes = read_limited(
-            store.open_text(&old_sha)?,
-            MAX_MERGE_BYTES,
-        )?
-        .ok_or_else(|| corrupt("base text too large to merge"))?;
+        let base_bytes = read_limited(store.open_text(&old_sha)?, MAX_MERGE_BYTES)?
+            .ok_or_else(|| corrupt("base text too large to merge"))?;
         let theirs = read_limited(
-            File::open(&new_text.path).map_err(|e| SvnError::from_io("cannot open the new text", &e))?,
+            File::open(&new_text.path)
+                .map_err(|e| SvnError::from_io("cannot open the new text", &e))?,
             MAX_MERGE_BYTES,
         )?
         .ok_or_else(|| corrupt("new text too large to merge"))?;
@@ -487,7 +515,10 @@ fn install_merged(rel: &str, tmp: &tempfile::TempPath, _conflicted: bool) -> Res
 
 /// Markers for a conflict whose working file is left untouched: svn keeps the user's version in
 /// place and records no `.mine` file for it, so that marker and its work items are dropped.
-fn without_mine_marker(db: &WcDb, m: svn_wc::conflicts::markers::TextMarkers) -> (TextConflict, Vec<WorkItem>) {
+fn without_mine_marker(
+    db: &WcDb,
+    m: svn_wc::conflicts::markers::TextMarkers,
+) -> (TextConflict, Vec<WorkItem>) {
     let mut conflict = m.conflict;
     let mine = conflict.mine.take();
     let mut staged: Option<String> = None;
@@ -500,7 +531,9 @@ fn without_mine_marker(db: &WcDb, m: svn_wc::conflicts::markers::TextMarkers) ->
             _ => items.push(item),
         }
     }
-    items.retain(|i| !matches!(i, WorkItem::FileRemove { relpath } if Some(relpath) == staged.as_ref()));
+    items.retain(
+        |i| !matches!(i, WorkItem::FileRemove { relpath } if Some(relpath) == staged.as_ref()),
+    );
     // Both files only exist to feed the dropped items.
     for rel in mine.iter().chain(staged.iter()) {
         let _ = fs::remove_file(db.wcroot().join(rel));

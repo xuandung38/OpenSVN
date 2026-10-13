@@ -30,14 +30,27 @@ fn letters(s: &WcStatus) -> String {
         _ => ' ',
     };
     let c6 = if s.tree_conflict { 'C' } else { ' ' };
-    format!("{c0}{c1}{c6} {}", s.path)
+    let path = if s.path.is_root() {
+        ".".to_owned()
+    } else {
+        s.path.to_string()
+    };
+    format!("{c0}{c1}{c6} {path}")
 }
 
 /// `svn status` lines reduced to text, property and tree-conflict columns plus the path.
 fn svn_letters(oracle: &opensvn_svn_oracle::Oracle, wc: &Path) -> Vec<String> {
     let mut v: Vec<String> = svn_status(oracle, wc, &[])
         .lines()
-        .filter(|l| !l.trim_start().starts_with('>') && !l.starts_with("Summary") && !l.starts_with("  "))
+        .filter(|l| {
+            // Tree-conflict detail lines, the summary, and the changelist group headers
+            // (`--- Changelist 'name':` preceded by an empty line) carry no item status.
+            !l.trim_start().starts_with('>')
+                && !l.starts_with("Summary")
+                && !l.starts_with("  ")
+                && !l.starts_with("--- Changelist")
+                && !l.is_empty()
+        })
         .map(|l| {
             let c: Vec<char> = l.chars().collect();
             format!("{}{}{} {}", c[0], c[1], c[6], &l[8..])
@@ -52,7 +65,12 @@ async fn our_letters(wc: &Path) -> Vec<String> {
         .await
         .expect("status")
         .iter()
-        .filter(|s| s.path.as_str() != "" || s.text != NodeStatus::Normal)
+        .filter(|s| {
+            !s.path.is_root()
+                || s.text != NodeStatus::Normal
+                || matches!(s.props, PropStatus::Modified | PropStatus::Conflicted)
+                || s.tree_conflict
+        })
         .map(letters)
         .collect();
     v.sort();
@@ -60,17 +78,33 @@ async fn our_letters(wc: &Path) -> Vec<String> {
 }
 
 /// Working copy at r1 made by this client with a representative mix of local changes made by svn.
-async fn local_changes() -> Option<(opensvn_svn_oracle::Oracle, Repo, Sandbox, std::path::PathBuf)> {
+async fn local_changes() -> Option<(
+    opensvn_svn_oracle::Oracle,
+    Repo,
+    Sandbox,
+    std::path::PathBuf,
+)> {
     let oracle = oracle()?;
     let repo = Repo::new(&oracle);
     build_r1(&repo);
     let sb = Sandbox::new();
     let ours = sb.path("wc");
-    checkout(&ctx(), &repo.fake(None), &ours, None, Depth::Infinity, false, &CancelToken::new())
-        .await
-        .expect("checkout");
+    checkout(
+        &ctx(),
+        &repo.fake(None),
+        &ours,
+        None,
+        Depth::Infinity,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("checkout");
     write(&ours.join("README"), "hello\nthere\nworld\n");
-    write(&ours.join("docs/guide.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nSEVEN\n");
+    write(
+        &ours.join("docs/guide.txt"),
+        "one\ntwo\nthree\nfour\nfive\nsix\nSEVEN\n",
+    );
     repo.svn(&ours, &["propset", "-q", "color", "green", "docs"]);
     repo.svn(&ours, &["propset", "-q", "extra", "1", "README"]);
     write(&ours.join("added.txt"), "new\nfile\n");
@@ -88,13 +122,17 @@ async fn local_changes() -> Option<(opensvn_svn_oracle::Oracle, Repo, Sandbox, s
 
 #[tokio::test(flavor = "multi_thread")]
 async fn local_status_matches_svn_status() {
-    let Some((oracle, _repo, _sb, ours)) = local_changes().await else { return };
+    let Some((oracle, _repo, _sb, ours)) = local_changes().await else {
+        return;
+    };
     assert_eq!(our_letters(&ours).await, svn_letters(&oracle, &ours));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn status_reports_changelist_and_ignored_items() {
-    let Some((_o, _repo, _sb, ours)) = local_changes().await else { return };
+    let Some((_o, _repo, _sb, ours)) = local_changes().await else {
+        return;
+    };
     let all = status(
         &ctx(),
         &ours,
@@ -106,7 +144,11 @@ async fn status_reports_changelist_and_ignored_items() {
     )
     .await
     .expect("status");
-    let find = |p: &str| all.iter().find(|s| s.path.as_str() == p).unwrap_or_else(|| panic!("{p} missing"));
+    let find = |p: &str| {
+        all.iter()
+            .find(|s| s.path.as_str() == p)
+            .unwrap_or_else(|| panic!("{p} missing"))
+    };
     assert_eq!(find("README").changelist.as_deref(), Some("work"));
     assert_eq!(find("build.o").text, NodeStatus::Ignored);
     assert_eq!(find("x.tmp").text, NodeStatus::Ignored);
@@ -116,7 +158,9 @@ async fn status_reports_changelist_and_ignored_items() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn diff_matches_svn_diff_byte_for_byte() {
-    let Some((_o, repo, _sb, ours)) = local_changes().await else { return };
+    let Some((_o, repo, _sb, ours)) = local_changes().await else {
+        return;
+    };
     let expected = repo.svn(&ours, &["diff"]);
     let got = diff(&ctx(), &ours, &DiffOptions::default(), &CancelToken::new())
         .await
@@ -131,19 +175,40 @@ async fn status_and_diff_after_conflicting_update_match_svn() {
     let seed = build_r1(&repo);
     let sb = Sandbox::new();
     let ours = sb.path("wc");
-    checkout(&ctx(), &repo.fake(Some(1)), &ours, None, Depth::Infinity, false, &CancelToken::new())
-        .await
-        .expect("checkout");
+    checkout(
+        &ctx(),
+        &repo.fake(Some(1)),
+        &ours,
+        None,
+        Depth::Infinity,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("checkout");
     write(&ours.join("README"), "hello\nmine\n");
-    write(&ours.join("docs/guide.txt"), "ONE\ntwo\nthree\nfour\nfive\nsix\nseven\n");
+    write(
+        &ours.join("docs/guide.txt"),
+        "ONE\ntwo\nthree\nfour\nfive\nsix\nseven\n",
+    );
     write(&seed.join("README"), "hello\ntheirs\n");
-    write(&seed.join("docs/guide.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nSEVEN\n");
+    write(
+        &seed.join("docs/guide.txt"),
+        "one\ntwo\nthree\nfour\nfive\nsix\nSEVEN\n",
+    );
     repo.svn(&seed, &["rm", "-q", "empty.txt"]);
     repo.svn(&seed, &["commit", "-q", "-m", "r2"]);
     write(&ours.join("empty.txt"), "edited\n");
-    update(&ctx(), &repo.fake(None), &ours, None, Depth::Unknown, &CancelToken::new())
-        .await
-        .expect("update");
+    update(
+        &ctx(),
+        &repo.fake(None),
+        &ours,
+        None,
+        Depth::Unknown,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("update");
     assert_eq!(our_letters(&ours).await, svn_letters(&oracle, &ours));
     let expected = repo.svn(&ours, &["diff"]);
     let got = diff(&ctx(), &ours, &DiffOptions::default(), &CancelToken::new())

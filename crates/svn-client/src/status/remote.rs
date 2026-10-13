@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use svn_ra_api::{RaSession, UpdateMode, UpdateRequest};
 use svn_types::{
     CancelToken, Checksum, DeltaEditor, Depth, DirId, FileId, LockInfo, NodeKind, PropChange,
-    RelPath, RemoteStatus, Result, Revnum, SvnError, WindowSink, WcStatus,
+    RelPath, RemoteStatus, Result, Revnum, SvnError, WcStatus, WindowSink,
 };
 use svn_wc::db::WcDb;
 
@@ -67,7 +67,10 @@ fn is_real_prop(name: &str) -> bool {
 
 impl DeltaEditor for StatusEditor {
     fn set_target_revision(&mut self, rev: Revnum) -> Result<()> {
-        self.out.lock().unwrap_or_else(PoisonError::into_inner).revision = Some(rev);
+        self.out
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .revision = Some(rev);
         Ok(())
     }
     fn open_root(&mut self, _: Option<Revnum>) -> Result<DirId> {
@@ -79,7 +82,12 @@ impl DeltaEditor for StatusEditor {
         self.note(join_rel(&self.anchor, path)?, NodeKind::None, true);
         Ok(())
     }
-    fn add_directory(&mut self, path: &RelPath, _: DirId, _: Option<(&str, Revnum)>) -> Result<DirId> {
+    fn add_directory(
+        &mut self,
+        path: &RelPath,
+        _: DirId,
+        _: Option<(&str, Revnum)>,
+    ) -> Result<DirId> {
         let wc = join_rel(&self.anchor, path)?;
         self.note(wc.clone(), NodeKind::Dir, false);
         self.next += 1;
@@ -170,7 +178,13 @@ pub async fn fetch(
         files: Default::default(),
         next: 0,
     };
-    let report = build_report(Arc::clone(&db), anchor.clone(), target.clone(), depth, repos_root);
+    let report = build_report(
+        Arc::clone(&db),
+        anchor.clone(),
+        target.clone(),
+        depth,
+        repos_root,
+    );
     session
         .do_update(
             UpdateRequest {

@@ -27,6 +27,7 @@ impl Ctx<'_> {
 
     /// Reports `node` at `report_path` (anchor relative); `parent_repos` is where the parent
     /// expects the child, which decides between `set_path` and `link_path`.
+    #[allow(clippy::too_many_arguments)]
     fn report_entry(
         &self,
         r: &mut dyn Reporter,
@@ -50,12 +51,24 @@ impl Ctx<'_> {
         let switched = parent_repos.is_some_and(|p| repos_child(p, name) != repos);
         let rev_differs = parent_rev != Some(rev.0);
         let non_default_depth = node.kind == NodeKind::Dir && depth != Depth::Infinity;
-        if !(force || switched || rev_differs || start_empty || token.is_some() || non_default_depth)
+        if !(force
+            || switched
+            || rev_differs
+            || start_empty
+            || token.is_some()
+            || non_default_depth)
         {
             return Ok(false);
         }
         if switched {
-            r.link_path(report_path, &self.url_of(&repos)?, rev, depth, start_empty, token.as_deref())?;
+            r.link_path(
+                report_path,
+                &self.url_of(&repos)?,
+                rev,
+                depth,
+                start_empty,
+                token.as_deref(),
+            )?;
         } else {
             r.set_path(report_path, rev, depth, start_empty, token.as_deref())?;
         }
@@ -95,7 +108,10 @@ impl Ctx<'_> {
                 Presence::Normal | Presence::Incomplete => {}
             }
             let depth = match node.kind {
-                NodeKind::Dir => node.depth.filter(|d| *d != Depth::Unknown).unwrap_or(Depth::Infinity),
+                NodeKind::Dir => node
+                    .depth
+                    .filter(|d| *d != Depth::Unknown)
+                    .unwrap_or(Depth::Infinity),
                 _ => Depth::Infinity,
             };
             self.report_entry(
@@ -141,11 +157,17 @@ pub fn build_report(
         };
         let _ = ctx.anchor;
         let recorded = if node.kind == NodeKind::Dir {
-            node.depth.filter(|d| *d != Depth::Unknown).unwrap_or(Depth::Infinity)
+            node.depth
+                .filter(|d| *d != Depth::Unknown)
+                .unwrap_or(Depth::Infinity)
         } else {
             Depth::Infinity
         };
-        let report_depth = if depth == Depth::Unknown { recorded } else { depth };
+        let report_depth = if depth == Depth::Unknown {
+            recorded
+        } else {
+            depth
+        };
         let parent_repos = match target_wc.parent() {
             Some(p) => db.read_base(&p)?.and_then(|n| n.repos_relpath),
             None => None,

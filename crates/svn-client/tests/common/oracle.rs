@@ -98,7 +98,8 @@ impl Repo {
             if upto.is_some_and(|n| i >= n) {
                 break;
             }
-            s.seed("tester", "replay", &changes).expect("replay revision");
+            s.seed("tester", "replay", &changes)
+                .expect("replay revision");
         }
         s
     }
@@ -192,7 +193,10 @@ pub fn parse_dump(data: &[u8]) -> Vec<Vec<FakeChange>> {
             known_props.retain(|k, _| k != &path && !k.starts_with(&format!("{path}/")));
             continue;
         }
-        assert!(get("Node-copyfrom-path").is_none(), "copies are not supported");
+        assert!(
+            get("Node-copyfrom-path").is_none(),
+            "copies are not supported"
+        );
         let kind = get("Node-kind").expect("kind");
         let plen: usize = get("Prop-content-length").map_or(0, |v| v.parse().expect("plen"));
         let tlen: Option<usize> = get("Text-content-length").map(|v| v.parse().expect("tlen"));
@@ -250,7 +254,11 @@ pub fn tree_snapshot(root: &Path) -> BTreeMap<String, (bool, Vec<u8>, bool)> {
                 continue;
             }
             let path = e.path();
-            let rel = path.strip_prefix(root).expect("strip").to_string_lossy().replace('\\', "/");
+            let rel = path
+                .strip_prefix(root)
+                .expect("strip")
+                .to_string_lossy()
+                .replace('\\', "/");
             let md = std::fs::symlink_metadata(&path).expect("md");
             if md.is_dir() {
                 out.insert(rel, (true, Vec::new(), false));
@@ -279,7 +287,13 @@ fn props_text(blob: Option<Vec<u8>>) -> String {
     let mut p = parse_proplist(&Skel::parse(&b).expect("skel")).expect("props");
     p.sort();
     p.iter()
-        .map(|(k, v)| format!("{}={}", String::from_utf8_lossy(k), String::from_utf8_lossy(v)))
+        .map(|(k, v)| {
+            format!(
+                "{}={}",
+                String::from_utf8_lossy(k),
+                String::from_utf8_lossy(v)
+            )
+        })
         .collect::<Vec<_>>()
         .join(";")
 }
@@ -386,9 +400,21 @@ pub fn write(path: &Path, text: &str) {
 }
 
 pub fn assert_same(oracle: &Oracle, theirs: &Path, ours: &Path, what: &str) {
-    assert_eq!(tree_snapshot(ours), tree_snapshot(theirs), "{what}: working files differ");
-    assert_eq!(nodes_snapshot(ours), nodes_snapshot(theirs), "{what}: NODES rows differ");
-    assert_eq!(actual_snapshot(ours), actual_snapshot(theirs), "{what}: ACTUAL rows differ");
+    assert_eq!(
+        tree_snapshot(ours),
+        tree_snapshot(theirs),
+        "{what}: working files differ"
+    );
+    assert_eq!(
+        nodes_snapshot(ours),
+        nodes_snapshot(theirs),
+        "{what}: NODES rows differ"
+    );
+    assert_eq!(
+        actual_snapshot(ours),
+        actual_snapshot(theirs),
+        "{what}: ACTUAL rows differ"
+    );
     assert_eq!(
         svn_status(oracle, ours, &[]),
         svn_status(oracle, theirs, &[]),
@@ -401,12 +427,21 @@ pub fn build_r1(repo: &Repo) -> std::path::PathBuf {
     let seed = repo.checkout("seed");
     write(&seed.join("README"), "hello\nworld\n");
     write(&seed.join("run.sh"), "#!/bin/sh\necho hi\n");
-    write(&seed.join("docs/guide.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nseven\n");
+    write(
+        &seed.join("docs/guide.txt"),
+        "one\ntwo\nthree\nfour\nfive\nsix\nseven\n",
+    );
     write(&seed.join("src/lib/deep.rs"), "fn deep() {}\n");
     write(&seed.join("empty.txt"), "");
-    repo.svn(&seed, &["add", "-q", "README", "run.sh", "docs", "src", "empty.txt"]);
+    repo.svn(
+        &seed,
+        &["add", "-q", "README", "run.sh", "docs", "src", "empty.txt"],
+    );
     repo.svn(&seed, &["propset", "-q", "svn:executable", "*", "run.sh"]);
-    repo.svn(&seed, &["propset", "-q", "svn:eol-style", "native", "docs/guide.txt"]);
+    repo.svn(
+        &seed,
+        &["propset", "-q", "svn:eol-style", "native", "docs/guide.txt"],
+    );
     repo.svn(&seed, &["propset", "-q", "color", "red", "docs"]);
     repo.svn(&seed, &["commit", "-q", "-m", "r1"]);
     seed

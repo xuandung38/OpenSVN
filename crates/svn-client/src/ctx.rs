@@ -104,7 +104,12 @@ impl UpdateSummary {
     pub fn conflicts(&self) -> Vec<&RelPath> {
         self.events
             .iter()
-            .filter(|e| matches!(e.action, UpdateAction::Conflicted | UpdateAction::TreeConflicted))
+            .filter(|e| {
+                matches!(
+                    e.action,
+                    UpdateAction::Conflicted | UpdateAction::TreeConflicted
+                )
+            })
             .map(|e| &e.path)
             .collect()
     }

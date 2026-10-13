@@ -16,6 +16,6 @@ pub mod wc;
 
 pub use checkout::checkout;
 pub use ctx::{ClientConfig, ClientCtx, ProgressFn, UpdateAction, UpdateEvent, UpdateSummary};
-pub use ops::{switch, update};
 pub use diff::{DiffOptions, diff};
+pub use ops::{switch, update};
 pub use status::{StatusOptions, status, status_remote};

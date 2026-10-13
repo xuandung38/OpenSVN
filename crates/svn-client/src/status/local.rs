@@ -3,14 +3,13 @@
 use std::collections::BTreeSet;
 use std::fs;
 
-use rusqlite::params;
 use svn_diff::diff_as_binary_by_mime;
 use svn_types::{
     CancelToken, Depth, ErrorCode, LockInfo, NodeKind, NodeStatus, PropStatus, RelPath,
     RepoDisplayPath, Result, Timestamp, WcStatus,
 };
 use svn_wc::conflicts::ConflictSkel;
-use svn_wc::db::{Node, Presence, WcDb, sql_err};
+use svn_wc::db::{Node, Presence, WcDb};
 
 use super::StatusOptions;
 use super::ignore::{DEFAULT_GLOBAL_IGNORES, is_ignored, split_global, split_property};
@@ -23,7 +22,10 @@ fn disk_kind(db: &WcDb, rel: &RelPath) -> Result<(Option<NodeKind>, Option<u64>)
         Ok(m) if m.file_type().is_symlink() => Ok((Some(NodeKind::Symlink), Some(m.len()))),
         Ok(m) => Ok((Some(NodeKind::File), Some(m.len()))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((None, None)),
-        Err(e) => Err(svn_types::SvnError::from_io(format!("cannot stat '{rel}'"), &e)),
+        Err(e) => Err(svn_types::SvnError::from_io(
+            format!("cannot stat '{rel}'"),
+            &e,
+        )),
     }
 }
 
@@ -40,17 +42,7 @@ fn lock_of(db: &WcDb, rel: &RelPath, repos_path: &str) -> Result<Option<LockInfo
 }
 
 fn moved_from(db: &WcDb, rel: &RelPath) -> Result<Option<RelPath>> {
-    let found: Option<String> = db.with_read(|c| {
-        use rusqlite::OptionalExtension;
-        c.query_row(
-            "SELECT local_relpath FROM nodes WHERE wc_id = ?1 AND moved_to = ?2 LIMIT 1",
-            params![db.wc_id(), rel.as_str()],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(sql_err)
-    })?;
-    found.map(|p| RelPath::new(&p)).transpose()
+    db.moved_from(rel)
 }
 
 /// Status of one versioned node, `None` for nodes that are not part of the working copy.
@@ -63,7 +55,10 @@ fn node_status(db: &WcDb, rel: &RelPath, cur: &Node) -> Result<Option<WcStatus>>
         Presence::BaseDeleted => NodeStatus::Deleted,
         Presence::Incomplete => NodeStatus::Incomplete,
         Presence::Normal if cur.op_depth > 0 => {
-            if base.as_ref().is_some_and(|b| b.presence == Presence::Normal) {
+            if base
+                .as_ref()
+                .is_some_and(|b| b.presence == Presence::Normal)
+            {
                 NodeStatus::Replaced
             } else {
                 NodeStatus::Added
@@ -71,10 +66,7 @@ fn node_status(db: &WcDb, rel: &RelPath, cur: &Node) -> Result<Option<WcStatus>>
         }
         Presence::Normal => NodeStatus::Normal,
     };
-    let versioned_here = matches!(
-        cur.presence,
-        Presence::Normal | Presence::Incomplete
-    );
+    let versioned_here = matches!(cur.presence, Presence::Normal | Presence::Incomplete);
     if versioned_here {
         match (on_disk, cur.kind) {
             (None, _) => text = NodeStatus::Missing,
@@ -136,25 +128,38 @@ fn node_status(db: &WcDb, rel: &RelPath, cur: &Node) -> Result<Option<WcStatus>>
     } else {
         None
     };
-    let mime = inspect::prop_value(&actual, "svn:mime-type").and_then(|v| std::str::from_utf8(v).ok());
+    let mime =
+        inspect::prop_value(&actual, "svn:mime-type").and_then(|v| std::str::from_utf8(v).ok());
     Ok(Some(WcStatus {
         path: rel.clone(),
         kind: cur.kind,
         text,
         props,
         tree_conflict,
-        moved_from: if cur.moved_here { moved_from(db, rel)? } else { None },
+        moved_from: if cur.moved_here {
+            moved_from(db, rel)?
+        } else {
+            None
+        },
         moved_to: cur.moved_to.clone(),
         changelist: db.changelist(rel)?,
         lock_is_mine: lock.is_some(),
         lock,
         needs_lock: inspect::prop_value(&actual, "svn:needs-lock").is_some(),
         binary: cur.kind == NodeKind::File && diff_as_binary_by_mime(mime),
-        size: if cur.kind == NodeKind::File { size } else { None },
+        size: if cur.kind == NodeKind::File {
+            size
+        } else {
+            None
+        },
         remote: None,
         switched,
         depth: cur.depth.unwrap_or(Depth::Unknown),
-        base_rev: base.as_ref().and_then(|b| b.revision).or(cur.revision).map(svn_types::Revnum),
+        base_rev: base
+            .as_ref()
+            .and_then(|b| b.revision)
+            .or(cur.revision)
+            .map(svn_types::Revnum),
     }))
 }
 
@@ -219,10 +224,10 @@ impl Walker<'_> {
             return Ok(());
         };
         let status = node_status(self.db, rel, &cur)?;
-        if let Some(s) = status {
-            if self.opts.show_unmodified || is_interesting(&s) {
-                self.out.push(s);
-            }
+        if let Some(s) = status
+            && (self.opts.show_unmodified || is_interesting(&s))
+        {
+            self.out.push(s);
         }
         if cur.kind != NodeKind::Dir
             || !matches!(cur.presence, Presence::Normal | Presence::Incomplete)
