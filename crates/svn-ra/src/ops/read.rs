@@ -106,11 +106,15 @@ pub(crate) async fn stat(
     Ok(Some(entry))
 }
 
-/// Caps for a recursive (`Depth::Infinity`) listing, which costs one request per directory. A
-/// listing that would go beyond either cap fails instead of returning a partial result.
+/// Caps for directory listings. A listing that would go beyond either cap fails with
+/// [`ErrorCode::LimitExceeded`] instead of returning a partial result.
+///
+/// The entry cap applies to every depth and is enforced while an answer streams in, so a
+/// single huge directory is never buffered beyond it. The level cap only matters for a
+/// recursive (`Depth::Infinity`) listing, which costs one request per directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ListLimits {
-    /// Most entries a listing may return.
+    /// Most entries a listing may hold (for `Files`, the directory's children of any kind).
     pub max_entries: usize,
     /// Deepest level below the listed directory that may be visited (1 = its children).
     pub max_depth: usize,
@@ -125,19 +129,38 @@ impl Default for ListLimits {
     }
 }
 
-fn limit_exceeded(what: &str, max: usize) -> SvnError {
-    corrupt(format!(
-        "recursive listing exceeds the limit of {max} {what}; list a smaller subtree"
-    ))
+fn too_many_entries(max: usize) -> SvnError {
+    SvnError::new(
+        ErrorCode::LimitExceeded,
+        format!(
+            "the folder listing has more than {max} entries, which is more than OpenSVN \
+             lists at once; list a smaller folder or a lower depth"
+        ),
+    )
+}
+
+fn too_deep(max: usize) -> SvnError {
+    SvnError::new(
+        ErrorCode::LimitExceeded,
+        format!(
+            "the folder tree is more than {max} levels deep, which is more than OpenSVN \
+             lists at once; list a smaller folder or a lower depth"
+        ),
+    )
 }
 
 /// One `Depth: 1` listing: the directory's own entry and its children with their repository
 /// paths. Children the protocol layer refuses (other origin, unsafe names) are skipped with a
 /// warning rather than failing the whole listing.
+///
+/// At most `budget` children are accepted: one more fails with [`ErrorCode::LimitExceeded`]
+/// while the answer is still streaming (`max` is the overall cap, for the message).
 async fn list_one(
     wire: &RaWire,
     rev: Revnum,
     dir: &RelPath,
+    budget: usize,
+    max: usize,
     cancel: &CancelToken,
 ) -> Result<(DirEntry, Vec<(RelPath, DirEntry)>)> {
     let req = propfind::list_request(wire.urls(), rev, dir)?;
@@ -152,6 +175,9 @@ async fn list_one(
             Ok((p, entry)) if &p == dir => own = Some(entry),
             Ok((p, entry)) if p.parent().as_ref() == Some(dir) => {
                 if seen.insert(p.clone()) {
+                    if children.len() >= budget {
+                        return Err(too_many_entries(max));
+                    }
                     children.push((p, entry));
                 } else {
                     tracing::warn!("skipping a repeated listing entry");
@@ -176,8 +202,9 @@ async fn list_one(
 /// Lists the directory `path` at `rev`. `Files` keeps only files, `Immediates` all children,
 /// `Infinity` the whole subtree (names below the first level are paths relative to `path`).
 ///
-/// An `Infinity` listing is bounded by the wire's [`ListLimits`] and fails with `Corrupt` when
-/// it would exceed them. Repeated entries in an answer are listed once.
+/// Every listing is bounded by the wire's [`ListLimits`] and fails with
+/// [`ErrorCode::LimitExceeded`] when it would exceed them. Repeated entries in an answer are
+/// listed once.
 pub(crate) async fn list(
     wire: &RaWire,
     path: &RelPath,
@@ -193,7 +220,9 @@ pub(crate) async fn list(
     }
     let rev = peg(wire, rev, cancel).await?;
     let repo = wire.repo_path(path)?;
-    let (own, children) = list_one(wire, rev, &repo, cancel).await?;
+    let limits = wire.list_limits();
+    let max = limits.max_entries;
+    let (own, children) = list_one(wire, rev, &repo, max, max, cancel).await?;
     if own.kind != NodeKind::Dir {
         return Err(SvnError::new(
             ErrorCode::PathNotFound,
@@ -212,22 +241,20 @@ pub(crate) async fn list(
         Depth::Infinity => {
             // Depth-first, one PROPFIND per directory, like `svn ls -R` against servers
             // without `list-report`.
-            let limits = wire.list_limits();
             let mut stack: Vec<(RelPath, DirEntry, usize)> =
                 children.into_iter().rev().map(|(p, e)| (p, e, 1)).collect();
             while let Some((p, mut e, level)) = stack.pop() {
                 cancel.check()?;
                 if level > limits.max_depth {
-                    return Err(limit_exceeded("levels", limits.max_depth));
-                }
-                if out.len() >= limits.max_entries {
-                    return Err(limit_exceeded("entries", limits.max_entries));
+                    return Err(too_deep(limits.max_depth));
                 }
                 e.name = relative_name(&repo, &p)?;
                 let is_dir = e.kind == NodeKind::Dir;
                 out.push(e);
                 if is_dir {
-                    let (_, below) = list_one(wire, rev, &p, cancel).await?;
+                    // Everything already accepted (listed or still on the stack) counts.
+                    let budget = max.saturating_sub(out.len() + stack.len());
+                    let (_, below) = list_one(wire, rev, &p, budget, max, cancel).await?;
                     stack.extend(below.into_iter().rev().map(|(c, e)| (c, e, level + 1)));
                 }
             }
