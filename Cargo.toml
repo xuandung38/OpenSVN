@@ -77,6 +77,10 @@ keyring-core = "=1.0.1"
 apple-native-keyring-store = "=1.0.2"
 windows-native-keyring-store = "=1.1.0"
 zbus-secret-service-keyring-store = "=1.0.1"
+# Negotiate (SPNEGO/Kerberos) SSO: SSPI on Windows through cross-krb5's safe wrapper, GSSAPI on
+# macOS/Linux through libgssapi (opt-in `svn-ra/negotiate-gssapi`; needs gssapi headers + libclang).
+cross-krb5 = { version = "=0.5.0", default-features = false }
+libgssapi = { version = "=0.11.0", default-features = false }
 
 # desktop app and IPC contract (specta is pre-release: keep the exact pins in step)
 # `common-controls-v6` is off: it makes every Windows binary that links tauri (including unit test

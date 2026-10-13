@@ -157,12 +157,102 @@ fn is_name_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
 }
 
-/// Scrubs URL userinfo and sensitive header values from `text`.
-pub fn redact_text(text: &str) -> Cow<'_, str> {
-    match redact_userinfo(text) {
-        Cow::Borrowed(t) => redact_headers_in_text(t),
-        Cow::Owned(s) => Cow::Owned(redact_headers_in_text(&s).into_owned()),
+/// Masks `opaquelocktoken:<id>` wherever it appears (XML bodies, `If` values, log text).
+fn redact_lock_tokens(text: &str) -> Cow<'_, str> {
+    const MARK: &str = "opaquelocktoken:";
+    if !text.contains(MARK) {
+        return Cow::Borrowed(text);
     }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find(MARK) {
+        let (head, tail) = rest.split_at(pos + MARK.len());
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | ')' | '"' | '\'' | ','))
+            .unwrap_or(tail.len());
+        out.push_str(MASK);
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
+}
+
+/// Keys whose value is a secret when written as `key=value` or `key: value` in free text.
+const SECRET_KEYS: [&str; 5] = ["password", "passwd", "pwd", "secret", "token"];
+
+/// Masks the value after `password=`-style keys, up to whitespace or a closing delimiter.
+fn redact_secret_pairs(text: &str) -> Cow<'_, str> {
+    let lower = text.to_ascii_lowercase();
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let mut copied = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let Some(key) = SECRET_KEYS
+            .iter()
+            .find(|k| lower.as_bytes()[i..].starts_with(k.as_bytes()))
+        else {
+            i += 1;
+            continue;
+        };
+        let mut j = i + key.len();
+        let boundary_before = i == 0 || !is_name_char(bytes[i - 1]);
+        if matches!(bytes.get(j), Some(b'"' | b'\'')) {
+            j += 1;
+        }
+        if !boundary_before || !matches!(bytes.get(j), Some(b'=' | b':')) {
+            i += 1;
+            continue;
+        }
+        j += 1;
+        while matches!(bytes.get(j), Some(b' ' | b'\t')) {
+            j += 1;
+        }
+        let quote = bytes.get(j).copied().filter(|b| matches!(b, b'"' | b'\''));
+        let start = j + usize::from(quote.is_some());
+        let mut k = start;
+        while k < bytes.len() {
+            let b = bytes[k];
+            let stop = match quote {
+                Some(q) => b == q,
+                None => b.is_ascii_whitespace() || matches!(b, b'&' | b',' | b';' | b'<' | b'"'),
+            };
+            if stop {
+                break;
+            }
+            k += 1;
+        }
+        out.push_str(&text[copied..start]);
+        out.push_str(MASK);
+        copied = k;
+        i = k.max(i + 1);
+    }
+    if copied == 0 && out.is_empty() {
+        return Cow::Borrowed(text);
+    }
+    out.push_str(&text[copied..]);
+    Cow::Owned(out)
+}
+
+/// Scrubs URL userinfo, sensitive header values, lock tokens and `password=` pairs from `text`.
+pub fn redact_text(text: &str) -> Cow<'_, str> {
+    let a = redact_userinfo(text);
+    let b = redact_headers_in_text(&a);
+    let c = redact_lock_tokens(&b);
+    let d = redact_secret_pairs(&c);
+    if matches!(
+        (&a, &b, &c, &d),
+        (
+            Cow::Borrowed(_),
+            Cow::Borrowed(_),
+            Cow::Borrowed(_),
+            Cow::Borrowed(_)
+        )
+    ) {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(d.into_owned())
 }
 
 /// Writer that buffers one log record and redacts it when flushed or dropped.
