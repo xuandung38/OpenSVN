@@ -117,4 +117,7 @@ export const mockSettings: Settings = {
   "integrations.webRevisionUrl": "",
   "integrations.webFileUrl": "",
   "diff.externalTool": null,
+  "diff.mergeTool": null,
+  "tools.editor": null,
+  "tools.terminal": null,
 };
