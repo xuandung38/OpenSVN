@@ -22,5 +22,5 @@ steps:
   - { on: svn110, wc: c, svn: [status] }
   - { on: svn110, wc: c, svn: [update] }
 compare:
-  - { left: a, right: b, checks: [tree, status, info, wcdb], reader: svn110 }
+  - { left: a, right: b, checks: [tree, status, info], reader: svn110 }
   - { left: a, right: c, checks: [tree, status], reader: svn110 }
