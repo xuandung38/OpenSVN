@@ -40,8 +40,13 @@ pub struct IgnoreAddRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CheckoutRequest {
     pub url: String,
-    /// Folder chosen with `path_pick`; becomes the working copy root.
+    /// Folder chosen with `path_pick` (or minted by `checkout_root_grant`). With `dest_name` it is
+    /// the parent folder and the working copy is created in a new child folder; without it the
+    /// folder itself becomes the working copy root. An existing, non-empty target is refused.
     pub dest: PathGrantId,
+    /// Name of the new folder created inside `dest`: one path component, no separators, not `.` or
+    /// `..`, no reserved Windows name (`CON`, `NUL`, `COM1`, ...), no trailing dot or space.
+    pub dest_name: Option<String>,
     pub rev: Option<Rev>,
     pub depth: Depth,
     pub sparse: Option<Vec<SparseEntry>>,

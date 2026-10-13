@@ -13,7 +13,9 @@ pub mod engine;
 mod errors;
 mod events;
 pub mod lock_ownership;
+mod menu;
 mod ops;
+mod os_shell;
 mod path_grants;
 mod preview;
 mod programs;
@@ -71,6 +73,7 @@ fn build_state<R: tauri::Runtime>(
         picker: Arc::new(programs::NativeProgramPicker),
         path_picker: Arc::new(path_grants::NativePathPicker),
         launcher: Arc::new(programs::NativeLauncher),
+        revealer: Arc::new(os_shell::NativeRevealer),
     })
     .map_err(|e| startup_error(format!("{} {}", e.message, e.detail.unwrap_or_default())))
 }
@@ -114,6 +117,10 @@ pub fn run() {
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
+            // A missing menu bar must not stop the app; the shortcuts work without it.
+            if let Err(e) = menu::install(app) {
+                tracing::warn!(error = %e, "menu bar could not be installed");
+            }
             let state = build_state(app)?;
             app.manage(state);
             tauri::async_runtime::spawn(finish_startup(app.handle().clone()));

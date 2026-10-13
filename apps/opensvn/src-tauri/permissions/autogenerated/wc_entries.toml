@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wc-entries"
+description = "Enables the wc_entries command without any pre-configured scope."
+commands.allow = ["wc_entries"]
+
+[[permission]]
+identifier = "deny-wc-entries"
+description = "Denies the wc_entries command without any pre-configured scope."
+commands.deny = ["wc_entries"]

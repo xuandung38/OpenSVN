@@ -74,6 +74,8 @@ export const MENU_EVENTS: readonly MenuEventName[] = [
   "menu://update",
   "menu://refresh",
   "menu://add-working-copy",
+  "menu://checkout",
+  "menu://switch-repository",
   "menu://settings",
   "menu://about",
 ];

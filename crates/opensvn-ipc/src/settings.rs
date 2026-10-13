@@ -67,14 +67,17 @@ where
     Option::<T>::deserialize(d).map(Some)
 }
 
-/// `plain` keys hold a value; `nullable` keys may also be cleared; `program` keys exist in
-/// `Settings` only (they launch programs and change through the native picker, never a patch). In `SettingsPatch` a plain key
+/// `plain` keys hold a value; `nullable` keys may also be cleared; `picked` keys hold a local
+/// folder and `program` keys a program to launch: both exist in `Settings` only and change through a
+/// native picker, never a patch (a WebView must not choose where the app writes or what it runs). In
+/// `SettingsPatch` a plain key
 /// is `absent = unchanged | value = set`, a nullable key is `absent = unchanged | null = clear |
 /// value = set` (`Option<Option<T>>`, exported to TS as an optional `T | null`).
 macro_rules! settings_structs {
     (
         plain { $( $(#[$pm:meta])* $pf:ident : $pt:ty = $pk:literal ),+ $(,)? }
         nullable { $( $(#[$nm:meta])* $nf:ident : $nt:ty = $nk:literal ),* $(,)? }
+        picked { $( $(#[$km:meta])* $kf:ident : $kt:ty = $kk:literal ),+ $(,)? }
         program { $( $(#[$gm:meta])* $gf:ident : $gt:ty = $gk:literal ),+ $(,)? }
     ) => {
         /// All settings with their effective values.
@@ -82,6 +85,7 @@ macro_rules! settings_structs {
         pub struct Settings {
             $( $(#[$pm])* #[serde(rename = $pk)] pub $pf: $pt, )+
             $( $(#[$nm])* #[serde(rename = $nk)] pub $nf: Option<$nt>, )*
+            $( $(#[$km])* #[serde(rename = $kk)] pub $kf: $kt, )+
             $( $(#[$gm])* #[serde(rename = $gk)] pub $gf: Option<$gt>, )+
         }
 
@@ -115,7 +119,6 @@ macro_rules! settings_structs {
 
 settings_structs! {
     plain {
-        general_checkout_root: String = "general.checkoutRoot",
         general_check_interval_min: u32 = "general.checkIntervalMin",
         general_language: Language = "general.language",
         appearance_theme: Theme = "appearance.theme",
@@ -132,6 +135,11 @@ settings_structs! {
         integrations_web_file_url: String = "integrations.webFileUrl",
     }
     nullable {}
+    picked {
+        /// Parent folder offered for new checkouts. `~` stands for the home folder. Changes only
+        /// through `checkout_root_choose` (native folder dialog).
+        general_checkout_root: String = "general.checkoutRoot",
+    }
     program {
         /// `null` when no external tool is configured.
         diff_external_tool: ExternalDiffTool = "diff.externalTool",

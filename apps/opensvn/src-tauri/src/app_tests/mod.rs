@@ -3,6 +3,7 @@
 mod commands_flow;
 mod commands_paths;
 mod commands_remote;
+mod commands_repo_manager;
 mod commands_settings;
 mod fixture;
 mod security;
