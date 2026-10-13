@@ -393,6 +393,7 @@ fn write_atomically(
 /// `svn_io_remove_file2(path, ignore_enoent = TRUE)`.
 fn remove_file_if_present(path: &Path) -> Result<(), WorkQueueError> {
     // Windows refuses to delete read-only files (needs-lock files are read-only).
+    // Unverified on Windows (no Windows CI).
     #[cfg(windows)]
     let _ = flags::set_read_write(path);
     match fs::remove_file(path) {
@@ -495,6 +496,7 @@ fn set_mtime(path: &Path, micros: i64) -> Result<(), WorkQueueError> {
         .map_err(WorkQueueError::io("set mtime of", path))
 }
 
+/// Unverified on Windows (no Windows CI): relies on `FILE_WRITE_ATTRIBUTES` access (0x0100).
 #[cfg(windows)]
 fn open_for_times(path: &Path) -> std::io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
