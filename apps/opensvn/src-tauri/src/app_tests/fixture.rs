@@ -18,7 +18,7 @@ use crate::engine::FakeEngine;
 use crate::engine::fake::demo_wc_root;
 use crate::ops::events::{Recorded, RecordingEvents};
 use crate::path_grants::{MAIN_WINDOW, PathPicker};
-use crate::programs::ProgramPicker;
+use crate::programs::{ProgramLauncher, ProgramPicker};
 
 /// File dialog double: returns the scripted choice.
 #[derive(Default)]
@@ -55,11 +55,28 @@ impl ProgramPicker for Scripted {
     }
 }
 
+/// Launcher double: records what would have been started, with the staged files' contents.
+#[derive(Default)]
+pub struct RecordingLauncher {
+    pub launched: Mutex<Vec<(PathBuf, Vec<String>)>>,
+}
+
+impl ProgramLauncher for RecordingLauncher {
+    fn launch(&self, program: &std::path::Path, args: &[String]) -> Result<(), AppError> {
+        self.launched
+            .lock()
+            .unwrap()
+            .push((program.to_path_buf(), args.to_vec()));
+        Ok(())
+    }
+}
+
 pub struct Fixture {
     pub app: tauri::App<MockRuntime>,
     pub events: Arc<RecordingEvents>,
     pub picker: Arc<Scripted>,
     pub paths: Arc<ScriptedPaths>,
+    pub launcher: Arc<RecordingLauncher>,
     pub engine: Arc<FakeEngine>,
     _dir: tempfile::TempDir,
 }
@@ -72,12 +89,14 @@ impl Fixture {
         let events = Arc::new(RecordingEvents::default());
         let picker = Arc::new(Scripted::default());
         let paths = Arc::new(ScriptedPaths::default());
+        let launcher = Arc::new(RecordingLauncher::default());
         let state = AppState::build(AppDeps {
             data_dir: dir.path().to_path_buf(),
             engine: engine.clone(),
             events: events.clone(),
             picker: picker.clone(),
             path_picker: paths.clone(),
+            launcher: launcher.clone(),
         })
         .unwrap();
         let app = tauri::test::mock_app();
@@ -87,6 +106,7 @@ impl Fixture {
             events,
             picker,
             paths,
+            launcher,
             engine,
             _dir: dir,
         }

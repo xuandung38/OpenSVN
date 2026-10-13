@@ -192,6 +192,7 @@ fn ipc_app(f: &Fixture) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRu
         events: std::sync::Arc::new(crate::ops::events::RecordingEvents::default()),
         picker: f.picker.clone(),
         path_picker: f.paths.clone(),
+        launcher: f.launcher.clone(),
     })
     .unwrap();
     app.manage(state);

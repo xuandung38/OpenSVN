@@ -5,17 +5,19 @@
 //! program in a native file dialog and confirms the exact command line in a native message
 //! dialog; only then is the setting stored.
 
+pub mod external_diff;
 mod native;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use opensvn_ipc::{AppError, ExternalDiffTool, ProgramKind, Settings};
+use opensvn_ipc::{AppError, ErrorAction, ExternalDiffTool, ProgramKind, Settings};
 use tokio::sync::Mutex;
 
 use crate::settings::SettingsService;
 
+pub use external_diff::{NativeLauncher, ProgramLauncher};
 pub use native::NativeProgramPicker;
 
 /// Native dialogs used to choose and confirm a program.
@@ -156,6 +158,19 @@ impl ProgramService {
         }
         self.settings
             .set_program(kind, Some(ExternalDiffTool { path, args }))
+    }
+
+    /// The configured external diff tool, checked again before use: the program must still exist
+    /// and be executable, and the stored arguments must still pass validation.
+    pub fn external_diff_tool(&self) -> Result<(PathBuf, Vec<String>), AppError> {
+        let Some(tool) = self.settings.get().diff_external_tool else {
+            let mut e = refuse("No external diff tool is configured. Choose one in Settings.");
+            e.actions = Some(vec![ErrorAction::OpenSettings]);
+            return Err(e);
+        };
+        validate_args(&tool.args)?;
+        let program = validate_program(Path::new(&tool.path))?;
+        Ok((program, tool.args))
     }
 
     /// Removes the configured program. Clearing cannot launch anything, so no dialog is shown.

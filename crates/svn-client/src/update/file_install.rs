@@ -96,12 +96,13 @@ impl UpdateEditor {
             .as_ref()
             .and_then(|b| b.properties.clone())
             .unwrap_or_default();
-        // A node deleted locally is shadowed: only BASE moves on, its working properties do not
-        // exist and nothing is merged into ACTUAL (svn records just the tree conflict).
-        let shadowed = f
-            .tree_conflict
-            .as_ref()
-            .is_some_and(|t| t.reason == TreeReason::Deleted);
+        // A node deleted or replaced locally, or lying below such a directory, is shadowed: only
+        // BASE moves on, nothing is merged into ACTUAL and the working layer is left alone (svn
+        // records just the tree conflict).
+        let shadowed = f.shadow.is_some()
+            || f.tree_conflict
+                .as_ref()
+                .is_some_and(|t| matches!(t.reason, TreeReason::Deleted | TreeReason::Replaced));
         let actual: Props = if shadowed {
             old_pristine.clone()
         } else if old.is_some() {
@@ -147,12 +148,12 @@ impl UpdateEditor {
         let mut keep_fileinfo = true;
         // Merge results the queued work installs; deleted again unless the transaction commits.
         let mut merge_tmp: Vec<tempfile::TempPath> = Vec::new();
-        // Local delete versus edit, or an unversioned file in the way of an add: BASE moves
-        // forward and the working tree stays as it is.
-        let keep_working_tree = f.shadow.is_some()
+        // Local delete or replace versus edit, or an unversioned file in the way of an add: BASE
+        // moves forward and the working tree stays as it is.
+        let keep_working_tree = shadowed
             || f.tree_conflict
                 .as_ref()
-                .is_some_and(|t| matches!(t.reason, TreeReason::Deleted | TreeReason::Unversioned));
+                .is_some_and(|t| t.reason == TreeReason::Unversioned);
         let obstructed = f
             .tree_conflict
             .as_ref()
@@ -165,21 +166,6 @@ impl UpdateEditor {
             .iter()
             .any(|n| prop_changed(&old_pristine, &pm.new_pristine, n));
         let disk_exists = fs::symlink_metadata(crate::wc::abs_path(&db, &wc)?).is_ok();
-
-        if let Some(tc) = &f.tree_conflict
-            && !matches!(tc.reason, TreeReason::Deleted | TreeReason::Unversioned)
-        {
-            // Replaced locally: leave the node and the disk alone, only record the conflict.
-            return self.record_tree_conflict(
-                &wc,
-                old.as_ref(),
-                &f.new_repos,
-                NodeKind::File,
-                tc.reason.clone(),
-                tc.action.clone(),
-                false,
-            );
-        }
 
         if keep_working_tree {
             action = UpdateAction::TreeConflicted;
