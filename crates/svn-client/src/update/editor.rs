@@ -286,24 +286,29 @@ impl UpdateEditor {
         let in_target = wc.starts_with(&self.target_wc);
         let mut skipped = p.skipped;
         let mut tree_conflict = None;
+        let mut shadow = if skipped { None } else { p.shadow };
         if !skipped && in_target {
             if self.s.db.conflict(&wc)?.is_some() {
                 skipped = true;
+                shadow = None;
                 self.skipped.push(wc.clone());
                 self.emit(&wc, NodeKind::Dir, UpdateAction::Skipped);
-            } else if let Some(cur) = cur.as_ref().filter(|c| c.op_depth > 0) {
-                if cur.presence == Presence::BaseDeleted {
-                    tree_conflict = Some(PendingTreeConflict {
-                        reason: TreeReason::Deleted,
-                        action: TreeAction::Edit,
-                    });
+            } else if shadow.is_none()
+                && let Some(cur) = cur.as_ref().filter(|c| c.op_depth > 0)
+            {
+                // Deleted or replaced locally: the drive goes on below with BASE only (svn's
+                // `shadowed` directory), the working layer stays as it is and the tree
+                // conflict is recorded once, on this directory, when it closes.
+                let reason = if cur.presence == Presence::BaseDeleted {
+                    TreeReason::Deleted
                 } else {
-                    tree_conflict = Some(PendingTreeConflict {
-                        reason: TreeReason::Replaced,
-                        action: TreeAction::Edit,
-                    });
-                }
-                skipped = true;
+                    TreeReason::Replaced
+                };
+                tree_conflict = Some(PendingTreeConflict {
+                    reason,
+                    action: TreeAction::Edit,
+                });
+                shadow = Some(cur.op_depth);
             }
         }
         let depth = base
@@ -340,7 +345,7 @@ impl UpdateEditor {
                 depth,
                 limit,
                 not_present_on_drop,
-                shadow: None,
+                shadow,
                 prop_changes: Vec::new(),
                 entry: EntryProps::default(),
                 tree_conflict,
@@ -514,6 +519,11 @@ impl DeltaEditor for UpdateEditor {
         let kind = self.s.db.read_base(&wc)?.map_or(NodeKind::File, |b| b.kind);
         if !p.admits(kind) {
             return Ok(());
+        }
+        if p.shadow.is_some() {
+            // Below a shadowed directory only BASE goes away; the working layer and the disk
+            // stay, and the conflict is the one of the shadowed root.
+            return self.s.db.with_txn(|t| t.base_remove(&wc));
         }
         self.delete_node(&wc, parent)
     }

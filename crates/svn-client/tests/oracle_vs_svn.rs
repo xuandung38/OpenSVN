@@ -713,3 +713,152 @@ async fn update_depth_files_matches_svn() {
 async fn update_depth_immediates_matches_svn() {
     depth_case(Depth::Immediates).await;
 }
+
+// ---- F1 (PR #74 follow-up): BASE moves on under a local delete or replace -------------------
+
+/// After a shadowed tree conflict on `path`: `svn resolve --accept working` on both copies, an
+/// unrelated r3, a second update of both, and the comparison. The second update must not raise
+/// the conflict again, BASE of `path` must sit at HEAD, and the real svn must be able to commit
+/// the (identical) state, i.e. it is not out of date.
+async fn resolve_then_update_again(o: &Oracle, t: &Path, w: &Path, path: &str, what: &str) {
+    let svn = |cwd: &Path, args: &[&str]| {
+        let mut c = o.svn();
+        c.args(args).current_dir(cwd);
+        let out = c.output().expect("svn");
+        assert!(
+            out.status.success(),
+            "{what}: svn {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    for wc in [t, w] {
+        svn(wc, &["resolve", "-q", "--accept", "working", path]);
+    }
+    assert_same(o, t, w, &format!("{what}: after resolve"));
+
+    let seed = t.parent().expect("parent").join("seed");
+    svn(&seed, &["update", "-q"]);
+    write(&seed.join("run.sh"), "#!/bin/sh\necho r3\n");
+    svn(&seed, &["commit", "-q", "-m", "r3"]);
+    svn(t, &["update", "-q", "--accept", "postpone"]);
+    let fake = fake_from(o, &t.parent().expect("parent").join("repo"));
+    update(&ctx(), &fake, w, None, Depth::Unknown, &CancelToken::new())
+        .await
+        .unwrap_or_else(|e| panic!("{what}: second update failed: {e}"));
+    assert_same(o, t, w, &format!("{what}: second update"));
+    let st = svn_status(o, w, &[]);
+    assert!(
+        !st.lines()
+            .any(|l| l.starts_with('C') || l.get(6..7) == Some("C")),
+        "{what}: the second update raised a conflict again:\n{st}"
+    );
+    assert!(
+        nodes_snapshot(w)
+            .iter()
+            .any(|r| r.starts_with(&format!("{path}|0|normal|")) && r.contains("|Some(3)|")),
+        "{what}: BASE of {path} is not at HEAD: {:?}",
+        nodes_snapshot(w)
+    );
+    // Same rows as ours: svn commits it without an out-of-date error.
+    svn(t, &["commit", "-q", "-m", "commit the local change"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_edit_of_locally_replaced_file_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "replace-vs-edit",
+        |repo, wc, _| {
+            repo.svn(wc, &["rm", "-q", "README"]);
+            write(&wc.join("README"), "brand new\n");
+            repo.svn(wc, &["add", "-q", "README"]);
+        },
+        |_, seed| write(&seed.join("README"), "hello\nworld\nserver\n"),
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "replace vs edit");
+    let rows: Vec<String> = nodes_snapshot(&w)
+        .into_iter()
+        .filter(|r| r.starts_with("README|"))
+        .collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows[0].starts_with("README|0|normal|file|Some(2)|"),
+        "BASE moves to r2: {rows:?}"
+    );
+    assert!(
+        rows[1].starts_with("README|1|normal|file|None|None|"),
+        "the replacement stays: {rows:?}"
+    );
+    assert_eq!(read(&w.join("README")), "brand new\n");
+    resolve_then_update_again(&o, &t, &w, "README", "replace vs edit").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_edit_under_locally_deleted_dir_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "deleted-dir-vs-edit",
+        |repo, wc, _| {
+            repo.svn(wc, &["rm", "-q", "docs"]);
+        },
+        |repo, seed| {
+            write(
+                &seed.join("docs/guide.txt"),
+                "one\ntwo\nthree\nfour\nfive\nsix\nSEVEN\n",
+            );
+            write(&seed.join("docs/new.txt"), "new\n");
+            write(&seed.join("docs/sub/deeper.txt"), "deeper\n");
+            repo.svn(seed, &["add", "-q", "docs/new.txt", "docs/sub"]);
+            repo.svn(seed, &["propset", "-q", "color", "blue", "docs"]);
+            repo.svn(seed, &["propset", "-q", "shade", "dark", "docs/guide.txt"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "deleted dir vs edit");
+    for p in ["docs", "docs/guide.txt"] {
+        assert!(
+            nodes_snapshot(&w)
+                .iter()
+                .any(|r| r.starts_with(&format!("{p}|0|normal|")) && r.contains("|Some(2)|")),
+            "BASE of {p} moves to r2: {:?}",
+            nodes_snapshot(&w)
+        );
+    }
+    assert!(!w.join("docs").exists(), "the local delete stays");
+    resolve_then_update_again(&o, &t, &w, "docs", "deleted dir vs edit").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_edit_under_locally_replaced_dir_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "replaced-dir-vs-edit",
+        |repo, wc, _| {
+            repo.svn(wc, &["rm", "-q", "docs"]);
+            // The replacement re-adds a file the server edits, and one it also adds.
+            write(&wc.join("docs/guide.txt"), "mine\n");
+            write(&wc.join("docs/new.txt"), "my new\n");
+            repo.svn(wc, &["add", "-q", "docs"]);
+        },
+        |repo, seed| {
+            write(
+                &seed.join("docs/guide.txt"),
+                "one\ntwo\nthree\nfour\nfive\nsix\nSEVEN\n",
+            );
+            write(&seed.join("docs/new.txt"), "server new\n");
+            write(&seed.join("docs/other.txt"), "other\n");
+            repo.svn(seed, &["add", "-q", "docs/new.txt", "docs/other.txt"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "replaced dir vs edit");
+    assert_eq!(read(&w.join("docs/guide.txt")), "mine\n");
+    resolve_then_update_again(&o, &t, &w, "docs", "replaced dir vs edit").await;
+}

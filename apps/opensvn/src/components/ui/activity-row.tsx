@@ -7,12 +7,20 @@ export interface ActivityRowProps {
   percent: number | null;
   state: "running" | "done" | "failed";
   onCancel?: () => void;
+  /** Localised label of the cancel button (defaults to "Cancel"). */
+  cancelLabel?: string;
 }
 
 const ICON = { running: "●", done: "✓", failed: "✕" } as const;
 
 /** Activity panel row: grid `20px 1fr 160px 70px` (icon, description, progress, percent). */
-export function ActivityRow({ title, percent, state, onCancel }: ActivityRowProps) {
+export function ActivityRow({
+  title,
+  percent,
+  state,
+  onCancel,
+  cancelLabel = "Cancel",
+}: ActivityRowProps) {
   const failed = state === "failed";
   const pct = percent === null ? null : Math.max(0, Math.min(100, Math.round(percent)));
   return (
@@ -48,7 +56,7 @@ export function ActivityRow({ title, percent, state, onCancel }: ActivityRowProp
             onClick={onCancel}
             className="cursor-pointer border-0 bg-transparent text-accent-text"
           >
-            Cancel
+            {cancelLabel}
           </button>
         )}
       </span>

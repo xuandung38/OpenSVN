@@ -194,9 +194,25 @@ export function AppearancePage({ settings, draft, set }: PageProps) {
   );
 }
 
+/** Default arguments for a newly chosen diff tool: the two copies, left then right. */
+const DEFAULT_DIFF_TOOL_ARGS = ["{left}", "{right}"];
+
 export function DiffMergePage({ settings, draft, set }: PageProps) {
   const t = useT(settingsStrings);
+  const toast = useToast();
+  const qc = useQueryClient();
   const tool = settings["diff.externalTool"];
+  // Rust shows the native file picker and the confirmation; the WebView never sends a path.
+  const program = useMutation({
+    mutationFn: (choose: boolean) =>
+      unwrap(
+        choose
+          ? ipc().commands.programChoose("diff-tool", tool?.args ?? DEFAULT_DIFF_TOOL_ARGS)
+          : ipc().commands.programClear("diff-tool"),
+      ),
+    onSuccess: (next) => qc.setQueryData(queryKeys.settings, next),
+    onError: (e) => toast.show(e.message),
+  });
   return (
     <div className="flex flex-col gap-3">
       <span>{t("diffMode")}</span>
@@ -221,7 +237,14 @@ export function DiffMergePage({ settings, draft, set }: PageProps) {
             value={tool ? `${tool.path} ${tool.args.join(" ")}` : t("noExternalTool")}
             className="flex-1 font-mono text-[12px]"
           />
-          <Button disabled>{t("changeFolder")}</Button>
+          <Button disabled={program.isPending} onClick={() => program.mutate(true)}>
+            {t("chooseProgram")}
+          </Button>
+          {tool && (
+            <Button disabled={program.isPending} onClick={() => program.mutate(false)}>
+              {t("clearProgram")}
+            </Button>
+          )}
         </div>
       </Field>
     </div>
