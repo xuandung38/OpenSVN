@@ -23,7 +23,7 @@ use svn_wc::WcDb;
 use svn_wc::db::{LockOwner, sql_err};
 
 use super::RealEngine;
-use super::journal::{JournalPhase, JournalRecord};
+use super::journal::{JournalLoadError, JournalPhase, JournalRecord};
 use super::wc_read::{blocking, describe, open_db};
 use crate::engine::context::OpContext;
 use crate::engine::facade::{EngineResult, RecoveryReport, WcOpened};
@@ -224,13 +224,35 @@ impl RealEngine {
         let record = match self.journals.load(wc_root) {
             Ok(Some(record)) => record,
             Ok(None) => return Ok(()),
-            Err(e) => {
-                // Keeping an unreadable journal would block every later commit; it is moved
-                // aside (kept for diagnosis) and the user is told that a commit was interrupted.
-                tracing::warn!(error = %e, "setting an unreadable commit journal aside");
-                if let Err(e) = self.journals.quarantine(wc_root) {
-                    tracing::warn!(error = %e, "could not set the commit journal aside");
-                    self.clear_journal(wc_root);
+            Err(JournalLoadError::Unreadable(e)) => {
+                // Possibly temporary (permissions, another program holding the file): the
+                // journal stays and the next open tries again.
+                tracing::warn!(error = %e, "commit journal could not be read; kept for the next open");
+                add_once(&mut report.needs_user_action, ROOT);
+                return Ok(());
+            }
+            Err(JournalLoadError::UnsupportedVersion { version, error }) => {
+                // Another app version knows what this journal means; this one must not act on it
+                // or move it. Commits stay blocked with the same explanation.
+                tracing::error!(error = %error, version, "commit journal of an unknown format left untouched");
+                add_once(&mut report.needs_user_action, ROOT);
+                return Ok(());
+            }
+            Err(JournalLoadError::Corrupt(e)) => {
+                // A damaged journal would block every later commit: it is moved aside (kept for
+                // diagnosis) and the user is told that a commit was interrupted. It is never
+                // deleted: when it cannot be moved it stays and keeps blocking commits.
+                match self.journals.quarantine(wc_root) {
+                    Ok(aside) => tracing::warn!(
+                        error = %e,
+                        aside = %aside.display(),
+                        "corrupt commit journal set aside"
+                    ),
+                    Err(q) => tracing::error!(
+                        error = %e,
+                        quarantine_error = %q,
+                        "corrupt commit journal could not be set aside; left in place"
+                    ),
                 }
                 add_once(&mut report.needs_user_action, ROOT);
                 return Ok(());
