@@ -132,7 +132,16 @@ impl UpdateEditor {
         };
         let mut conflicts: Vec<NewConflict> = Vec::new();
         let mut keep_fileinfo = true;
-        let tree_only_base = f.tree_conflict.as_ref().is_some_and(|t| t.reason == TreeReason::Deleted);
+        // Local delete versus edit, or an unversioned file in the way of an add: BASE moves
+        // forward and the working tree stays as it is.
+        let keep_working_tree = f
+            .tree_conflict
+            .as_ref()
+            .is_some_and(|t| matches!(t.reason, TreeReason::Deleted | TreeReason::Unversioned));
+        let obstructed = f
+            .tree_conflict
+            .as_ref()
+            .is_some_and(|t| t.reason == TreeReason::Unversioned);
         let mut new_props_changed_translation = false;
         for name in ["svn:eol-style", "svn:keywords", "svn:special"] {
             new_props_changed_translation |= prop_changed(&old_pristine, &pm.new_pristine, name);
@@ -143,7 +152,7 @@ impl UpdateEditor {
         let disk_exists = fs::symlink_metadata(crate::wc::abs_path(&db, &wc)?).is_ok();
 
         if let Some(tc) = &f.tree_conflict {
-            if tc.reason != TreeReason::Deleted {
+            if !matches!(tc.reason, TreeReason::Deleted | TreeReason::Unversioned) {
                 // Replaced locally: leave the node and the disk alone, only record the conflict.
                 return self.record_tree_conflict(
                     &wc,
@@ -152,12 +161,12 @@ impl UpdateEditor {
                     NodeKind::File,
                     tc.reason.clone(),
                     tc.action.clone(),
+                    false,
                 );
             }
         }
 
-        if tree_only_base {
-            // Local delete versus incoming edit: BASE moves forward, the working tree stays.
+        if keep_working_tree {
             action = UpdateAction::TreeConflicted;
         } else if f.added {
             if f.adopt_existing && disk_exists {
@@ -315,6 +324,9 @@ impl UpdateEditor {
         failpoint!("update.after_merge3_before_txn");
         db.with_write(|tx| {
             txn::base_add(tx, wc_id, &wc, &node)?;
+            if obstructed {
+                txn::mark_base_deleted(tx, wc_id, &wc, NodeKind::File)?;
+            }
             if old.is_some() || overlay.is_some() {
                 txn::set_actual_props(tx, wc_id, &wc, overlay.as_ref())?;
             }
@@ -378,10 +390,10 @@ impl UpdateEditor {
             )
         };
         if treat_binary {
-            let m = make_markers()?;
+            let (markers, marker_items) = without_mine_marker(db, make_markers()?);
             return Ok(TextMerge::Conflict {
-                markers: m.conflict,
-                marker_items: m.work_items,
+                markers,
+                marker_items,
                 merged: None,
             });
         }
@@ -410,10 +422,10 @@ impl UpdateEditor {
                 return Err(SvnError::new(ErrorCode::Cancelled, "merge cancelled"));
             }
             Err(DiffError::TooComplex) => {
-                let m = make_markers()?;
+                let (markers, marker_items) = without_mine_marker(db, make_markers()?);
                 return Ok(TextMerge::Conflict {
-                    markers: m.conflict,
-                    marker_items: m.work_items,
+                    markers,
+                    marker_items,
                     merged: None,
                 });
             }
@@ -471,4 +483,27 @@ fn install_merged(rel: &str, tmp: &tempfile::TempPath, _conflicted: bool) -> Res
         .to_skel(),
         WorkItem::FileRemove { relpath: src }.to_skel(),
     ])
+}
+
+/// Markers for a conflict whose working file is left untouched: svn keeps the user's version in
+/// place and records no `.mine` file for it, so that marker and its work items are dropped.
+fn without_mine_marker(db: &WcDb, m: svn_wc::conflicts::markers::TextMarkers) -> (TextConflict, Vec<WorkItem>) {
+    let mut conflict = m.conflict;
+    let mine = conflict.mine.take();
+    let mut staged: Option<String> = None;
+    let mut items: Vec<WorkItem> = Vec::new();
+    for item in m.work_items {
+        match &item {
+            WorkItem::FileTranslate { dst, src, .. } if Some(dst) == mine.as_ref() => {
+                staged = Some(src.clone());
+            }
+            _ => items.push(item),
+        }
+    }
+    items.retain(|i| !matches!(i, WorkItem::FileRemove { relpath } if Some(relpath) == staged.as_ref()));
+    // Both files only exist to feed the dropped items.
+    for rel in mine.iter().chain(staged.iter()) {
+        let _ = fs::remove_file(db.wcroot().join(rel));
+    }
+    (conflict, items)
 }

@@ -1,6 +1,8 @@
 //! Shared helpers for the integration tests.
 #![allow(dead_code, clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+pub mod oracle;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

@@ -189,6 +189,7 @@ impl UpdateEditor {
         kind: NodeKind,
         reason: TreeReason,
         action: TreeAction,
+        copy_base: bool,
     ) -> Result<()> {
         let (old, new) = self.side(base, new_repos, kind);
         let info = conflict_record::operation_info(
@@ -200,6 +201,9 @@ impl UpdateEditor {
         );
         let wc_id = self.s.db.wc_id();
         self.s.db.with_write(|tx| {
+            if copy_base {
+                txn::convert_base_to_copy(tx, wc_id, wc)?;
+            }
             conflict_record::record(tx, wc_id, wc, &info, vec![NewConflict::Tree(reason, action)])
         })?;
         self.skipped.push(wc.clone());
@@ -418,6 +422,7 @@ impl DeltaEditor for UpdateEditor {
                         NodeKind::Dir,
                         TreeReason::Added,
                         TreeAction::Add,
+                        false,
                     )?;
                     skipped = true;
                 }
@@ -429,6 +434,7 @@ impl DeltaEditor for UpdateEditor {
                         NodeKind::Dir,
                         TreeReason::Unversioned,
                         TreeAction::Add,
+                        false,
                     )?;
                     skipped = true;
                 }
@@ -670,21 +676,19 @@ impl UpdateEditor {
                             NodeKind::File,
                             TreeReason::Added,
                             TreeAction::Add,
+                            false,
                         )?;
                         skipped = true;
                     } else if self.disk_kind(&wc)?.is_some() {
                         if self.s.allow_unversioned_obstructions {
                             adopt_existing = true;
                         } else {
-                            self.record_tree_conflict(
-                                &wc,
-                                None,
-                                &new_repos,
-                                NodeKind::File,
-                                TreeReason::Unversioned,
-                                TreeAction::Add,
-                            )?;
-                            skipped = true;
+                            // The server's file becomes BASE, the local one stays on disk as
+                            // an unversioned obstruction (recorded at close).
+                            tree_conflict = Some(PendingTreeConflict {
+                                reason: TreeReason::Unversioned,
+                                action: TreeAction::Add,
+                            });
                         }
                     }
                 }
