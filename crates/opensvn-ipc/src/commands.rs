@@ -188,6 +188,8 @@ pub enum CertDecision {
     Reject,
     AcceptOnce,
     AcceptAlways,
+    // Replace the pinned certificate (valid only when the certificate changed).
+    ReplacePin,
 }
 
 /// Credential metadata only; never contains a password.

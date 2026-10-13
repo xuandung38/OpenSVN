@@ -1,9 +1,9 @@
 //! `S:get-locks-report`: all locks at or below a path.
 
-use svn_types::{Depth, ErrorCode, RelPath, Result, SvnError};
+use svn_types::{Depth, ErrorCode, LockInfo, RelPath, Result, SvnError};
 
 use crate::caps::{UrlBuilder, advertise_caps};
-use crate::display_path::{RepoDisplayPath, RepoLock};
+use crate::display_path::RepoDisplayPath;
 use crate::http::{HttpRequest, Method, ResponseParser, parse_chunked};
 use crate::limits::ParserLimits;
 use crate::util::{corrupt, decode_text_field, parse_timestamp, validate_lock_token};
@@ -54,7 +54,7 @@ const FIELDS: [&str; 6] = [
     "expirationdate",
 ];
 
-/// Incremental parser emitting one [`RepoLock`] per `S:lock`.
+/// Incremental parser emitting one [`LockInfo`] per `S:lock`.
 #[derive(Default)]
 pub struct GetLocksParser {
     xml: XmlReader,
@@ -80,7 +80,7 @@ impl GetLocksParser {
         }
     }
 
-    fn run(&mut self, events: Vec<XmlEvent>) -> Result<Vec<RepoLock>> {
+    fn run(&mut self, events: Vec<XmlEvent>) -> Result<Vec<LockInfo>> {
         let mut out = Vec::new();
         for ev in events {
             match ev {
@@ -146,12 +146,12 @@ impl GetLocksParser {
     }
 }
 
-fn finish_lock(b: Building) -> Result<RepoLock> {
+fn finish_lock(b: Building) -> Result<LockInfo> {
     let need = |v: Option<String>, what: &str| {
         v.filter(|s| !s.is_empty())
             .ok_or_else(|| corrupt(format!("S:lock without {what}")))
     };
-    Ok(RepoLock {
+    Ok(LockInfo {
         path: RepoDisplayPath::parse(&need(b.path, "S:path")?)?,
         token: validate_lock_token(&need(b.token, "S:token")?)?,
         owner: need(b.owner, "S:owner")?,
@@ -166,9 +166,9 @@ fn finish_lock(b: Building) -> Result<RepoLock> {
 }
 
 impl ResponseParser for GetLocksParser {
-    type Item = RepoLock;
+    type Item = LockInfo;
 
-    fn feed(&mut self, chunk: &[u8]) -> Result<Vec<RepoLock>> {
+    fn feed(&mut self, chunk: &[u8]) -> Result<Vec<LockInfo>> {
         if self.failed {
             return Err(corrupt("parser used after an error"));
         }
@@ -177,7 +177,7 @@ impl ResponseParser for GetLocksParser {
         result
     }
 
-    fn finish(&mut self) -> Result<Vec<RepoLock>> {
+    fn finish(&mut self) -> Result<Vec<LockInfo>> {
         if self.failed {
             return Err(corrupt("parser used after an error"));
         }
@@ -188,6 +188,6 @@ impl ResponseParser for GetLocksParser {
 }
 
 /// Parses a complete get-locks-report body.
-pub fn parse_get_locks(body: &[u8]) -> Result<Vec<RepoLock>> {
+pub fn parse_get_locks(body: &[u8]) -> Result<Vec<LockInfo>> {
     parse_chunked(&mut GetLocksParser::new(), body, 0)
 }
