@@ -31,6 +31,11 @@ use md5::Md5;
 use sha1::{Digest, Sha1};
 use svn_types::{ErrorCode, SvnError, rename_replacing};
 
+/// `SvnError::svn_code` of a converted [`PristineError::NotHydrated`]. It lies outside the range
+/// svn itself uses and tells the caller to fetch the text through RA. A dedicated `ErrorCode`
+/// would be cleaner (proposed contract addition).
+pub const NOT_HYDRATED_SVN_CODE: u32 = 900_001;
+
 /// File suffix of stored pristines.
 const SUFFIX: &str = ".svn-base";
 
@@ -182,7 +187,9 @@ pub enum PristineError {
     /// No row (or no file) for this checksum.
     #[error("pristine text {0:?} is not in the store")]
     NotInstalled(Sha1Digest),
-    /// Row exists but the text was dehydrated; it must be fetched from the repository.
+    /// Row exists but the text was dehydrated; it must be fetched from the repository. P11 must
+    /// match this variant before converting to `SvnError` (the conversion carries
+    /// [`NOT_HYDRATED_SVN_CODE`] as a fallback signal).
     #[error("pristine text {0:?} is not hydrated (fetch it from the repository)")]
     NotHydrated(Sha1Digest),
     /// The working copy format only allows reading pristines (format 32).

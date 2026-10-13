@@ -318,6 +318,8 @@ fn errors_convert_to_svn_errors() {
     assert_eq!((e.code, e.svn_code), (ErrorCode::Corrupt, Some(200_014)));
     let e: SvnError = PristineError::NotInstalled(Sha1Digest([0; 20])).into();
     assert_eq!((e.code, e.svn_code), (ErrorCode::Corrupt, Some(155_017)));
+    let e: SvnError = PristineError::NotHydrated(Sha1Digest([0; 20])).into();
+    assert_eq!(e.svn_code, Some(NOT_HYDRATED_SVN_CODE));
     let e: SvnError = PristineError::index("boom").into();
     assert_eq!(e.code, ErrorCode::Internal);
 }
