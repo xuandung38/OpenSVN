@@ -74,9 +74,10 @@ struct FileState {
 /// certificate and gives up after a short timeout.
 ///
 /// `close_edit` deletes the transaction after a failure only when the transaction was certainly
-/// not merged: the failure came before the `MERGE` was sent, or the server answered the `MERGE`
-/// with a non-2xx status. If the `MERGE` was sent and its result is unknown (cancellation, a
-/// transport failure, an unreadable 2xx answer), the transaction is kept and `close_edit`
+/// not merged: the failure came before the `MERGE` was sent, or the server refused the `MERGE`
+/// definitely (a 4xx other than 408, or a 5xx carrying mod_dav_svn's `D:error` body). If the
+/// `MERGE` was sent and its result is unknown (cancellation, a transport failure, 408/502/504,
+/// a bare 5xx, an unreadable 2xx answer), the transaction is kept and `close_edit`
 /// fails with [`ErrorCode::CommitOutcomeUnknown`], whose message names the transaction. The
 /// caller then checks the repository (youngest revision, or whether the transaction still
 /// exists) before retrying or calling [`super::abort_txn`].

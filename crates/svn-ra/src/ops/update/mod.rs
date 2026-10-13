@@ -11,4 +11,4 @@ mod wire;
 
 pub use driver::run_update;
 pub use wire::RaWire;
-pub(crate) use wire::{error_of, headers_of};
+pub(crate) use wire::{error_of, headers_of, read_limited};
