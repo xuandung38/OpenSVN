@@ -1,0 +1,516 @@
+//! Repository reads, locks, blame, downloads and the shared engine suite.
+
+use std::path::{Path, PathBuf};
+
+use opensvn_ipc::{EntryKind, Layout, LogGetRequest, LogTarget, Rev, WcFormat, WcId};
+use svn_ra_api::fake::FakeChange;
+use svn_types::{ErrorCode, RelPath, SvnError};
+
+use super::support::{URL, add_base_file, count_rows, ctx, dir, fixture, make_wc, put};
+use crate::engine::conformance::{self, Harness, PlantedOwner};
+use crate::engine::real::RealEngine;
+use crate::engine::{CheckoutPlan, EngineFacade, LockScope, LogScope, OpContext, WcRef};
+
+/// Harness that runs the repository scenarios of the shared suite against the real engine.
+struct RealHarness {
+    fixture: super::support::Fixture,
+    scratch: tempfile::TempDir,
+}
+
+impl Harness for RealHarness {
+    fn engine(&self) -> &dyn EngineFacade {
+        &self.fixture.engine
+    }
+    fn repo_url(&self) -> String {
+        URL.to_owned()
+    }
+    fn work_dir(&self) -> PathBuf {
+        self.scratch.path().join("work")
+    }
+    fn write_file(&self, _root: &Path, _rel: &str, _content: &str) -> Result<(), SvnError> {
+        Err(SvnError::new(ErrorCode::Internal, "no working copy writes"))
+    }
+    fn scratch_dir(&self) -> PathBuf {
+        self.scratch.path().to_path_buf()
+    }
+    fn plant_lock(&self, _root: &Path, _dir: &str, _owner: PlantedOwner) -> Result<(), SvnError> {
+        Err(SvnError::new(ErrorCode::Internal, "no working copy writes"))
+    }
+}
+
+fn harness() -> RealHarness {
+    RealHarness {
+        fixture: fixture(),
+        scratch: tempfile::tempdir().unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn shared_suite_repository_reads() {
+    conformance::repository_reads(&harness()).await;
+}
+
+#[tokio::test]
+async fn shared_suite_repository_content_tools() {
+    conformance::repository_content_tools(&harness()).await;
+}
+
+#[tokio::test]
+async fn working_copy_operations_report_that_they_are_not_wired() {
+    let f = fixture();
+    let plan = CheckoutPlan {
+        url: format!("{URL}/trunk"),
+        path: PathBuf::from("/nowhere"),
+        rev: None,
+        depth: opensvn_ipc::Depth::Infinity,
+        sparse: None,
+        format: WcFormat::V31,
+        store_pristine: true,
+        ignore_externals: false,
+    };
+    let err = f.engine.checkout(&plan, &ctx()).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(err.message.starts_with("not wired"), "{}", err.message);
+}
+
+#[tokio::test]
+async fn info_and_list_report_authors_dates_and_directories_first() {
+    let f = fixture();
+    let info = f.engine.repo_info(URL, &ctx()).await.unwrap();
+    assert_eq!(info.repo_root_url, URL);
+    assert_eq!(info.repo_uuid, "real-uuid");
+    assert_eq!(info.youngest_rev, Rev(1));
+    let file = f
+        .engine
+        .repo_info(&format!("{URL}/trunk/README.md"), &ctx())
+        .await
+        .unwrap();
+    assert_eq!(file.kind, EntryKind::File);
+
+    let entries = f
+        .engine
+        .repo_list(&format!("{URL}/trunk"), Some(Rev(1)), &ctx())
+        .await
+        .unwrap();
+    assert_eq!(entries[0].name, "src");
+    assert_eq!(entries[0].kind, EntryKind::Dir);
+    let readme = entries.iter().find(|e| e.name == "README.md").unwrap();
+    assert_eq!(readme.created_rev, Rev(1));
+    // Author and date come from the server's directory entry; the in-memory repository has none.
+    assert_eq!(readme.size.map(|s| s.0), Some(6));
+
+    let missing = f
+        .engine
+        .repo_info(&format!("{URL}/trunk/none"), &ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, ErrorCode::PathNotFound);
+    let foreign = f
+        .engine
+        .repo_info("https://elsewhere.test/repo", &ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(foreign.code, ErrorCode::Network);
+}
+
+#[tokio::test]
+async fn encoded_urls_address_paths_with_spaces() {
+    let f = fixture();
+    f.repo
+        .seed("bob", "Spaced name", &[put("trunk/a b.txt", "spaced\n")])
+        .unwrap();
+    let text = f
+        .engine
+        .repo_cat(&format!("{URL}/trunk/a%20b.txt"), None, &ctx())
+        .await
+        .unwrap();
+    assert_eq!(text.content, "spaced\n");
+}
+
+#[tokio::test]
+async fn cat_refuses_files_above_the_inline_limit() {
+    let f = fixture();
+    let big = "x".repeat(super::super::remote::CAT_LIMIT + 1);
+    f.repo
+        .seed("bob", "Big file", &[put("trunk/big.txt", &big)])
+        .unwrap();
+    let err = f
+        .engine
+        .repo_cat(&format!("{URL}/trunk/big.txt"), None, &ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(err.message.contains("too large"));
+}
+
+#[tokio::test]
+async fn cancelled_calls_stop_before_touching_the_repository() {
+    let f = fixture();
+    let cancelled = OpContext::detached();
+    cancelled.cancel.cancel();
+    assert_eq!(
+        f.engine.repo_info(URL, &cancelled).await.unwrap_err().code,
+        ErrorCode::Cancelled
+    );
+    assert_eq!(
+        f.engine
+            .repo_list(&format!("{URL}/trunk"), None, &cancelled)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Cancelled
+    );
+}
+
+fn log_request(limit: u32, filter: Option<&str>) -> LogGetRequest {
+    LogGetRequest {
+        target: LogTarget::Url {
+            url: format!("{URL}/trunk"),
+        },
+        from_rev: None,
+        to_rev: None,
+        limit,
+        stop_on_copy: None,
+        with_paths: false,
+        filter: filter.map(str::to_owned),
+    }
+}
+
+fn seed_history(f: &super::support::Fixture) {
+    for (author, msg, body) in [
+        ("bob", "Fix typo", "hello world\n"),
+        ("carol", "Add feature", "hello world\nfeature\n"),
+        ("bob", "Tidy up", "hello world\nfeature\ntidy\n"),
+    ] {
+        f.repo
+            .seed(author, msg, &[put("trunk/README.md", body)])
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn log_pages_are_newest_first_and_link_to_the_next_page() {
+    let f = fixture();
+    seed_history(&f);
+    let scope = LogScope::Url(format!("{URL}/trunk"));
+    let first = f
+        .engine
+        .log(&scope, &log_request(2, None), &ctx())
+        .await
+        .unwrap();
+    let revs: Vec<u64> = first.entries.iter().map(|e| e.rev.0).collect();
+    assert_eq!(revs, vec![4, 3]);
+    assert_eq!(first.next_rev, Some(Rev(2)));
+
+    let mut next = log_request(2, None);
+    next.from_rev = first.next_rev;
+    let second = f.engine.log(&scope, &next, &ctx()).await.unwrap();
+    let revs: Vec<u64> = second.entries.iter().map(|e| e.rev.0).collect();
+    assert_eq!(revs, vec![2, 1]);
+    assert_eq!(second.next_rev, None);
+}
+
+#[tokio::test]
+async fn log_filter_matches_author_and_message_case_insensitively() {
+    let f = fixture();
+    seed_history(&f);
+    let scope = LogScope::Url(format!("{URL}/trunk"));
+    let by_author = f
+        .engine
+        .log(&scope, &log_request(10, Some("BOB")), &ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        by_author
+            .entries
+            .iter()
+            .map(|e| e.rev.0)
+            .collect::<Vec<_>>(),
+        vec![4, 2]
+    );
+    let by_message = f
+        .engine
+        .log(&scope, &log_request(10, Some("feature")), &ctx())
+        .await
+        .unwrap();
+    assert_eq!(by_message.entries.len(), 1);
+    assert_eq!(by_message.entries[0].author.as_deref(), Some("carol"));
+}
+
+#[tokio::test]
+async fn blame_attributes_each_line_to_the_revision_that_introduced_it() {
+    let f = fixture();
+    seed_history(&f);
+    let lines = f
+        .engine
+        .blame(&format!("{URL}/trunk/README.md"), None, &ctx())
+        .await
+        .unwrap();
+    let got: Vec<(u64, &str, &str)> = lines
+        .iter()
+        .map(|l| (l.rev.0, l.author.as_deref().unwrap_or(""), l.text.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (2, "bob", "hello world"),
+            (3, "carol", "feature"),
+            (4, "bob", "tidy"),
+        ]
+    );
+    let at_rev3 = f
+        .engine
+        .blame(&format!("{URL}/trunk/README.md"), Some(Rev(3)), &ctx())
+        .await
+        .unwrap();
+    assert_eq!(at_rev3.len(), 2);
+    assert_eq!(at_rev3[1].rev, Rev(3));
+}
+
+#[tokio::test]
+async fn blame_rejects_binary_files_and_missing_paths() {
+    let f = fixture();
+    f.repo
+        .seed(
+            "bob",
+            "Binary",
+            &[FakeChange::PutFile(
+                RelPath::new("trunk/blob.bin").unwrap(),
+                bytes::Bytes::from_static(&[0, 159, 146, 150]),
+            )],
+        )
+        .unwrap();
+    let err = f
+        .engine
+        .blame(&format!("{URL}/trunk/blob.bin"), None, &ctx())
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("binary"), "{}", err.message);
+    let missing = f
+        .engine
+        .blame(&format!("{URL}/trunk/none.txt"), None, &ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, ErrorCode::PathNotFound);
+}
+
+#[tokio::test]
+async fn repo_save_writes_a_complete_file_or_nothing() {
+    let f = fixture();
+    let out = tempfile::tempdir().unwrap();
+    let target = out.path().join("README.md");
+    f.engine
+        .repo_save(&format!("{URL}/trunk/README.md"), None, &target, &ctx())
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello\n");
+
+    let relative = f
+        .engine
+        .repo_save(
+            &format!("{URL}/trunk/README.md"),
+            None,
+            Path::new("rel.txt"),
+            &ctx(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(relative.code, ErrorCode::Internal);
+
+    let missing = out.path().join("missing.txt");
+    let err = f
+        .engine
+        .repo_save(&format!("{URL}/trunk/none"), None, &missing, &ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PathNotFound);
+    assert!(!missing.exists());
+
+    let cancelled = OpContext::detached();
+    cancelled.cancel.cancel();
+    let other = out.path().join("cancelled.txt");
+    let err = f
+        .engine
+        .repo_save(&format!("{URL}/trunk/README.md"), None, &other, &cancelled)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Cancelled);
+    let leftovers: Vec<_> = std::fs::read_dir(out.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(leftovers, vec!["README.md".to_owned()], "no partial files");
+}
+
+#[tokio::test]
+async fn custom_layout_expands_projects() {
+    let f = fixture();
+    f.repo
+        .seed(
+            "bob",
+            "Project layout",
+            &[
+                dir("proj"),
+                dir("proj/trunk"),
+                dir("proj/branches"),
+                dir("proj/branches/feature-x"),
+                dir("proj/tags"),
+            ],
+        )
+        .unwrap();
+    let layout = Layout::Custom {
+        trunk: "/{project}/trunk".into(),
+        branches: vec!["/{project}/branches".into()],
+        tags: vec!["/{project}/tags".into()],
+    };
+    let nodes = f.engine.branches_list(URL, &layout, &ctx()).await.unwrap();
+    assert!(nodes.iter().any(|n| n.url == format!("{URL}/proj/trunk")));
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.name == "feature-x" && n.url == format!("{URL}/proj/branches/feature-x"))
+    );
+}
+
+#[tokio::test]
+async fn url_locks_are_visible_in_listings_until_released() {
+    let f = fixture();
+    let file = format!("{URL}/trunk/README.md");
+    let scope = LockScope::Urls(vec![file.clone()]);
+    f.engine
+        .lock(&scope, Some("editing"), false, &ctx())
+        .await
+        .unwrap();
+    let list = f
+        .engine
+        .repo_list(&format!("{URL}/trunk"), None, &ctx())
+        .await
+        .unwrap();
+    let lock = list
+        .iter()
+        .find(|e| e.name == "README.md")
+        .and_then(|e| e.lock.clone())
+        .expect("lock in listing");
+    assert_eq!(lock.comment.as_deref(), Some("editing"));
+    assert!(!lock.mine && lock.token.is_none());
+
+    let again = f
+        .engine
+        .lock(&scope, None, false, &ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(again.code, ErrorCode::LockedByOther);
+    f.engine
+        .lock(&scope, None, true, &ctx())
+        .await
+        .expect("steal");
+
+    f.engine.unlock(&scope, true, &ctx()).await.unwrap();
+    let list = f
+        .engine
+        .repo_list(&format!("{URL}/trunk"), None, &ctx())
+        .await
+        .unwrap();
+    assert!(
+        list.iter()
+            .find(|e| e.name == "README.md")
+            .unwrap()
+            .lock
+            .is_none()
+    );
+}
+
+fn wc_ref(root: &Path) -> WcRef {
+    WcRef {
+        id: WcId("wc".into()),
+        root: root.to_path_buf(),
+    }
+}
+
+#[tokio::test]
+async fn working_copy_locks_are_recorded_in_wc_db_and_cleared_on_unlock() {
+    let f = fixture();
+    let (_tmp, root) = make_wc(1);
+    add_base_file(&root, "README.md", "trunk/README.md", 1);
+    let scope = LockScope::Wc {
+        wc: wc_ref(&root),
+        paths: vec!["README.md".into()],
+    };
+    f.engine
+        .lock(&scope, Some("mine"), false, &ctx())
+        .await
+        .unwrap();
+    assert_eq!(count_rows(&root, "lock"), 1);
+    let on_server = f
+        .engine
+        .repo_list(&format!("{URL}/trunk"), None, &ctx())
+        .await
+        .unwrap();
+    assert!(
+        on_server
+            .iter()
+            .find(|e| e.name == "README.md")
+            .unwrap()
+            .lock
+            .is_some()
+    );
+
+    f.engine.unlock(&scope, false, &ctx()).await.unwrap();
+    assert_eq!(count_rows(&root, "lock"), 0);
+    let on_server = f
+        .engine
+        .repo_list(&format!("{URL}/trunk"), None, &ctx())
+        .await
+        .unwrap();
+    assert!(
+        on_server
+            .iter()
+            .find(|e| e.name == "README.md")
+            .unwrap()
+            .lock
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn locking_a_path_that_is_not_in_the_repository_fails_before_any_server_call() {
+    let f = fixture();
+    let (_tmp, root) = make_wc(1);
+    let scope = LockScope::Wc {
+        wc: wc_ref(&root),
+        paths: vec!["new-file.txt".into()],
+    };
+    let err = f
+        .engine
+        .lock(&scope, None, false, &ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PathNotFound);
+    assert_eq!(count_rows(&root, "lock"), 0);
+}
+
+#[tokio::test]
+async fn working_copy_log_follows_the_repository_path_of_the_node() {
+    let f = fixture();
+    seed_history(&f);
+    let (_tmp, root) = make_wc(4);
+    add_base_file(&root, "README.md", "trunk/README.md", 4);
+    let page = f
+        .engine
+        .log(
+            &LogScope::Wc {
+                wc: wc_ref(&root),
+                path: "README.md".into(),
+            },
+            &log_request(10, None),
+            &ctx(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 4);
+}
+
+#[allow(dead_code)]
+fn assert_engine_is_object_safe(e: &RealEngine) -> &dyn EngineFacade {
+    e
+}
