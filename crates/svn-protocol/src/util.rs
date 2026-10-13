@@ -1,6 +1,6 @@
 //! Small helpers shared by the protocol modules.
 
-use svn_types::{ErrorCode, RelPath, Revnum, SvnError, Timestamp};
+use svn_types::{ErrorCode, Revnum, SvnError, Timestamp};
 
 /// Error for data that violates the wire protocol.
 pub(crate) fn corrupt(msg: impl Into<String>) -> SvnError {
@@ -38,18 +38,22 @@ pub(crate) fn parse_revnum(s: &str) -> Result<Revnum, SvnError> {
 }
 
 /// Validates a repository-absolute path (`/trunk/a.txt`) received from the server and returns it
-/// unchanged. Used for display-only fields (log paths, lock paths): structural rules only, so a
-/// repository containing names that are awkward on Windows can still be browsed.
+/// unchanged. Used only for display-only values: structure rules only (absolute, no empty, `.` or
+/// `..` segment, no NUL or other control character), so names such as `aux.c` or `a:b` that are
+/// legal in a repository can still be shown.
 pub(crate) fn validate_display_path(path: &str) -> Result<String, SvnError> {
     let rel = path
         .strip_prefix('/')
         .ok_or_else(|| corrupt(format!("repository path is not absolute: {path:?}")))?;
-    RelPath::new(rel).map_err(|_| {
-        SvnError::new(
+    let bad = !rel.is_empty()
+        && (rel.chars().any(char::is_control)
+            || rel.split('/').any(|s| matches!(s, "" | "." | "..")));
+    if bad {
+        return Err(SvnError::new(
             ErrorCode::UnsafePath,
             format!("unsafe repository path from server: {path:?}"),
-        )
-    })?;
+        ));
+    }
     Ok(path.to_owned())
 }
 
