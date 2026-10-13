@@ -783,20 +783,6 @@ fn commit_nodes_accepts_the_child_items_svn_gathers_for_a_replaced_root() {
     );
 }
 
-/// Two more revisions: r2 changes `d/f2` and `d/sub/g`, r3 deletes `d/f1`.
-fn more_history(wc: &Path) {
-    write(wc, "d/f2", "two\n");
-    write(wc, "d/sub/g", "three\n");
-    svn(wc, &["commit", "-q", "-m", "r2"]);
-    svn(wc, &["rm", "-q", "d/f1"]);
-    svn(wc, &["commit", "-q", "-m", "r3"]);
-}
-
-fn copy_d_to_dc(db: &WcDb, wc: &Path) {
-    cp(&wc.join("d"), &wc.join("dc"));
-    db.op_copy(&rp("d"), &rp("dc"), &[]).expect("cp");
-}
-
 #[test]
 fn copy_of_a_mixed_revision_directory_layers_like_svn() {
     check_after(
