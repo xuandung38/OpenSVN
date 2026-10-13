@@ -30,7 +30,7 @@ pub(super) enum Edit {
     Mkdir,
     /// Remove the entry.
     Delete,
-    /// New entry copied from `(repository path, revision)`.
+    /// New entry copied from `(source URL, revision)`.
     Copy {
         from: String,
         rev: Revnum,
@@ -190,11 +190,6 @@ async fn digest_local_file(path: &Path) -> EngineResult<([u8; 16], u64)> {
     .await
 }
 
-/// Absolute repository path for a copy source.
-fn fspath(p: &RelPath) -> String {
-    format!("/{p}")
-}
-
 impl RealEngine {
     /// Commits `tree` as one revision through a commit editor.
     async fn commit_tree(
@@ -247,14 +242,14 @@ impl RealEngine {
                 format!("/{from} does not exist at r{}", rev.0),
             ));
         }
-        tree.insert(
-            to,
-            Edit::Copy {
-                from: fspath(from),
-                rev,
-                kind,
-            },
-        )
+        // Commit editors take the copy source as a URL, like svn's RA layer.
+        let from = session
+            .repos_root()
+            .join(from)?
+            .as_url()
+            .as_str()
+            .to_owned();
+        tree.insert(to, Edit::Copy { from, rev, kind })
     }
 
     /// Locates `url`; every URL of one plan must belong to the repository of the first one.

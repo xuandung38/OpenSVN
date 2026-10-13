@@ -6,11 +6,13 @@
 //! still `not implemented` stubs.
 
 mod remote;
+mod repo_manager;
 mod system;
 mod working_copy;
 mod write_ops;
 
 pub use remote::*;
+pub use repo_manager::*;
 pub use system::*;
 pub use working_copy::*;
 pub use write_ops::*;

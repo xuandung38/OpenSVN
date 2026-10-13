@@ -105,6 +105,21 @@ type Layout =
 | `wc_rename` | `{ wcId, name }` | `void` |
 | `wc_open` | `{ wcId }` → bắt đầu watcher + status nền | `WorkingCopy` |
 | `wc_close` | `{ wcId }` | `void` |
+| `wc_entries` | — (trình quản lý repository) | `WcEntry[]`: mọi WC đã đăng ký kể cả WC mất/đã di chuyển (`wc_list` bỏ qua chúng) |
+| `wc_locate` | `{ wcId, grant: PathGrantId }` (thư mục mới của WC đã bị di chuyển; phải cùng repo UUID, chưa đăng ký dưới mục khác; repo root URL được cập nhật theo WC tìm thấy, vì WC có thể đã relocate) | `WorkingCopy` |
+| `recent_urls` | — | `string[]` (20 URL gần nhất, mới nhất trước) |
+| `checkout_root_grant` | — | `PathGrantInfo`: grant thư mục cho `general.checkoutRoot` (Rust tạo thư mục nếu thiếu; `~` = thư mục home) |
+| `checkout_root_choose` | — | `Settings`: Rust mở dialog chọn thư mục native và lưu `general.checkoutRoot` (không đổi nếu hủy) |
+
+```ts
+interface WcEntry {
+  id: WcId; name: string;            // name: tên hiển thị, chỉ lưu trong app.sqlite (wc_rename không đổi tên thư mục)
+  rootPath: string; repoRootUrl: string; repoUuid: string;
+  url: string | null;                // null khi không đọc được WC
+  addedAt: string; lastOpenedAt: string | null;
+  missing: boolean; problem: string | null;  // missing: thư mục mất/bị chuyển → UI đề nghị "Locate…" hoặc "Remove"
+}
+```
 
 ### 3.2 Status & thay đổi local
 | Command | Input | Output |
@@ -121,7 +136,7 @@ type Layout =
 ### 3.3 Thao tác ghi trên WC (đều trả `OperationHandle`)
 | Command | Input |
 |---|---|
-| `checkout` | `{ url, dest: PathGrantId, rev?, depth: Depth, sparse?: SparseSpec, format: 31 \| 32, storePristine, ignoreExternals }` |
+| `checkout` | `{ url, dest: PathGrantId, destName: string \| null, rev?, depth: Depth, sparse?: SparseSpec, format: 31 \| 32, storePristine, ignoreExternals }`. Có `destName`: `dest` là thư mục cha, WC được tạo trong thư mục con mới `destName` (một thành phần đường dẫn: không `/` `\\`, không `.`/`..`, không ký tự `<>:"\|?*`/điều khiển, không ký tự định dạng ẩn (Unicode Cf: bidi, zero-width, BOM…), không tên thư mục quản trị `.svn`/`_svn` và các biến thể (hoa/thường, Unicode, dấu chấm/khoảng trắng cuối, `SVN~1`), không tên dành riêng Windows `CON`/`NUL`/`COM0`–`COM9`/`LPT¹`…, không kết thúc bằng dấu chấm/khoảng trắng, ≤ 255 byte; kiểm trước khi dùng grant; lỗi tên là `invalid_argument` với `detail` = tên bị từ chối, khi đó grant chưa bị dùng). Không có `destName`: chính `dest` là gốc WC. Đích đã tồn tại mà không rỗng (hoặc là file/symlink) bị từ chối. Thành công → WC được đăng ký, `op://finished` trả `{ kind: 'checkedOut', wcId, newRev }`; thất bại/hủy → thư mục do lần checkout này tạo được xóa nếu vẫn rỗng |
 | `update` | `{ wcId, paths?, rev?, depth? }` |
 | `switch` | `{ wcId, url, rev? }` |
 | `commit` | `{ wcId, paths, message, keepLocks, autoAddRemove: true }` |
@@ -160,18 +175,16 @@ type Layout =
 | `auth_respond { requestId, response }` | Trả lời prompt: `{kind:'credentials',username,password,save}`, `{kind:'negotiate'}` (SSO, chỉ khi `offered` có `negotiate`), `{kind:'certificate',decision}` hoặc `{kind:'cancel'}`. Prompt không trả lời sau 5 phút coi như hủy. Rust kiểm `decision` theo lỗi thật (`CertDecision::is_valid_for`): `acceptOnce`/`acceptAlways` chỉ cho `unknown-issuer`/`self-signed`; `replacePin` chỉ cho `changed` (thay pin cũ, transport nhận `ReplacePin`); mọi lỗi khác (hết hạn, sai host, revoked...) chỉ có `reject`. Tổ hợp không hợp lệ bị coi là `reject` và không lưu gì |
 | `accounts_list`, `accounts_sign_out { realm }` | Quản lý credential |
 | `certs_list`, `certs_remove { key: {host, port, sha256} }` | Chứng chỉ đã tin cậy vĩnh viễn (Settings → Certificates); xóa thì lần kết nối sau hỏi lại |
-| `checkout_root_choose` | Dialog native chọn thư mục checkout mặc định, lưu vào `general.checkoutRoot`, trả `Settings` |
-| `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.checkoutRoot"`, `patch` chỉ chứa khóa cần đổi. `SettingsPatch` **không có** các khóa chạy chương trình (`diff.externalTool`, `diff.mergeTool`, `tools.editor`, `tools.terminal`); khóa lạ bị từ chối khi deserialize |
-| `program_choose { kind, args }`, `program_clear { kind }` | Đặt/xóa chương trình ngoài (`kind`: `diff-tool` \| `merge-tool` \| `editor` \| `terminal`). Rust mở dialog chọn file native rồi dialog xác nhận native (mỗi tham số một dòng, có quote; từ chối ký tự điều khiển/bidi); trả `Settings` mới (không đổi nếu người dùng hủy) |
+| `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.language"`, `patch` chỉ chứa khóa cần đổi. `SettingsPatch` **không có** các khóa chạy chương trình (`diff.externalTool`, `diff.mergeTool`, `tools.editor`, `tools.terminal`) và **không có** `general.checkoutRoot` (nơi app ghi; chỉ đổi qua `checkout_root_choose`); khóa lạ bị từ chối với lỗi `invalid-argument` |
+| `program_choose { kind, args }`, `program_clear { kind }` | Đặt/xóa chương trình ngoài (`kind`: `diff-tool` \| `merge-tool` \| `editor` \| `terminal`). Rust mở dialog chọn file native rồi dialog xác nhận native (mỗi tham số một dòng, có quote; từ chối ký tự điều khiển/bidi/vô hình theo quy tắc chung `display_text::is_deceptive`); trả `Settings` mới (không đổi nếu người dùng hủy) |
 | `path_pick { request }` | Dialog native chọn thư mục / file / nơi lưu (`PickRequest`), trả `PathGrantInfo \| null` (xem §3.6). `title` (≤ 120 ký tự) và `suggestedName` (≤ 255, không có `/` `\`, không phải `.`/`..`) không được chứa ký tự điều khiển, bidi hay zero-width, nếu có thì lỗi `invalid-argument`. `displayName` hiện các ký tự đó dạng `\u{XXXX}` |
 | `updater_token_set { token }`, `updater_token_clear`, `updater_token_status` | Token GitHub đọc bản cập nhật: chỉ lưu trong kho credential của OS (Keychain / Credential Manager / Secret Service), không bao giờ vào file, settings hay bộ nhớ dự phòng; không có kho OS thì `set` lỗi. Chỉ ghi, `status` chỉ trả `boolean` |
 | `update_check`, `update_install` | Người dùng chủ động. Trước khi gửi token, mọi endpoint trong `plugins.updater.endpoints` và URL tải về phải là `https://api.github.com/repos/<repo phát hành>/...` (không port, không userinfo, không `..`/ký tự phân cách mã hóa); sai thì `invalid-argument`, không gửi request |
-
-| `reveal_in_os { wcId, path }`, `open_external { wcId, path, with: 'default' \| 'editor' \| 'terminal' }` | Tích hợp OS |
+| `reveal_in_os { wcId, path }` | Hiện mục trong trình quản lý file; `path` là relpath trong WC (quy tắc tên như từ server), `""` = thư mục gốc WC. Mục không tồn tại → lỗi `path-not-found`. Không thành phần nào dưới gốc WC được là symlink (kể cả symlink trỏ vào trong WC hoặc symlink hỏng), và đích sau khi canonicalize phải nằm trong gốc WC đã canonicalize; đường dẫn canonical được đưa cho trình quản lý file |
+| `open_external { wcId, path, with: 'default' \| 'editor' \| 'terminal' }` | `path` là relpath trong WC (kiểm bằng `RelPath`/`safe_join`, phải tồn tại). `with: 'default'` chỉ mở loại tài liệu trong allow-list và thư mục thường, không bao giờ symlink; còn lại từ chối kèm action `reveal-in-file-manager`. `editor`/`terminal` dùng chương trình đã chọn qua `program_choose`, chưa cấu hình thì lỗi kèm action `open-settings` |
 | `diagnostics_preview { options: { hidePaths, hideCommitMessages } }` | Dựng gói chẩn đoán trong bộ nhớ (secret luôn bị gỡ) và trả `{ token, entries: { name, size, content }[] }` để người dùng xem **toàn bộ nội dung** trước khi lưu |
 | `diagnostics_export { token }` | Mở dialog lưu file native, ghi zip đúng nội dung đã xem (token dùng một lần), trả đường dẫn đã lưu hoặc `null` nếu hủy. Không gửi đi đâu |
-| `reveal_in_os { wcId, path }`, `open_external { wcId, path, with }` | `path` là relpath trong WC (kiểm bằng `RelPath`/`safe_join`, phải tồn tại). `with: 'default'` từ chối file chạy được (exe, script, `.app`, bit thực thi...); `editor`/`terminal` dùng chương trình đã chọn qua `program_choose`, chưa cấu hình thì lỗi kèm action `open-settings` |
-| `menu_set_layout { hasLayout }` | Đổi menu native giữa Branch và Location. Menu native phát event `menu://<id>` (id ví dụ `wc.update`, `file.checkout`) mà UI lắng nghe |
+| `menu_set_layout { hasLayout }` | Đổi menu native giữa Branch và Location. Menu native (một menu duy nhất, `menu.rs`) phát event `menu://<id>` chỉ cho mục của chính nó (id ví dụ `wc.update`, `file.checkout`, `file.switch-repo`, `app.settings`); mục native (copy, paste, quit) và mục Rust tự xử lý (zoom, Exit) không phát event (xem §3.7). UI chạy cùng hành động như phím tắt tương ứng và bỏ qua "echo" khi một lần bấm phím đến cả dạng menu event lẫn keydown |
 
 ### 3.6 Đường dẫn cục bộ ngoài WC: PathGrant
 WebView **không bao giờ** gửi đường dẫn thô cho thao tác đọc/ghi ngoài WC đã đăng ký (thư mục checkout, nơi lưu `repo_save`, file upload, WC cần thêm). Những đường dẫn đó đến từ dialog native (`path_pick`) hoặc kéo-thả native; Rust giữ đường dẫn thật và trả một mã mờ:
@@ -183,7 +196,15 @@ type PickRequest =
   | { kind: 'saveFile'; suggestedName: string; title?: string };
 interface DroppedPaths { grants: PathGrantInfo[]; position: { x: number; y: number }; }  // event fs://dropped
 ```
-Grant dùng một lần, hết hạn sau 5 phút, gắn với cửa sổ `main`; dùng sai loại (file/thư mục) cũng làm grant mất hiệu lực. Đường dẫn trong WC đã đăng ký là relpath, được kiểm bằng `RelPath` (chặn `..`, tuyệt đối, ký tự lạ). Rust xử lý `WindowEvent::DragDrop` và phát `fs://dropped`; UI không được hành động theo đường dẫn từ API kéo-thả của JS (không cấp quyền window nên API đó không dùng được).
+Grant dùng một lần, hết hạn sau 5 phút, gắn với cửa sổ `main`; dùng sai loại (file/thư mục) cũng làm grant mất hiệu lực. Đường dẫn trong WC đã đăng ký là relpath, được kiểm bằng `RelPath` (chặn `..`, tuyệt đối, ký tự lạ). Rust có thể tự mint grant cho thư mục do chính nó quản lý (`checkout_root_grant` cho `general.checkoutRoot`, giá trị chỉ đến từ dialog native hoặc mặc định). Rust xử lý `WindowEvent::DragDrop` và phát `fs://dropped`; UI không được hành động theo đường dẫn từ API kéo-thả của JS (không cấp quyền window nên API đó không dùng được).
+
+### 3.7 Menu native
+Menu bar do Rust dựng (`menu.rs`, `menu_spec`): một menu duy nhất, cấu trúc và phím tắt theo doc 01 §8 (OpenSVN trên macOS · File · Edit · View · Working Copy · Branch/Location · Selection · Window trên macOS · Help). Mỗi mục là một trong ba loại, có test Rust giữ đúng theo cả hai chiều:
+- **Mục của UI:** phát event không payload `menu://<id>` (id = id mục, ví dụ `menu://wc.update`, `menu://file.checkout`, `menu://edit.find`, `menu://view.diff-mode`). UI đăng ký đúng danh sách `MENU_EVENTS` (`src/ipc/events.ts`), mỗi event có hành động trong `MENU_ACTIONS` (`use-wc-shortcuts.ts`, cùng tập khóa, có test). Mục chưa làm (phase sau, ví dụ Merge, Properties, Sparse) báo "chưa có" bằng toast thay vì không làm gì.
+- **Mục Rust tự xử lý** (`native_action`): Zoom in/out/Actual size (đổi zoom webview) và Exit; không phát event.
+- **Mục native** (undo/redo/cut/copy/paste/select all, hide, quit, minimize, full screen, about): vai trò của hệ điều hành; không phát event.
+
+Id lạ không bao giờ thành event. UI chạy cùng hành động với phím tắt tương ứng và bỏ qua "echo": nếu cùng hành động vừa chạy từ nguồn kia (keydown hoặc menu event, theo bất kỳ thứ tự nào) trong 400 ms thì lần thứ hai bị bỏ (accelerator native có thể gửi cả hai). Hành động thuộc về component (lọc file, đổi chế độ diff, ẩn khoảng trắng) cũng đi qua bộ định tuyến này (`ui-commands.ts`) để echo được bỏ đúng một lần.
 
 ## 4. Lỗi
 ```ts
@@ -199,6 +220,7 @@ type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'negotiate-failed' | 
   | 'disk-full' | 'permission-denied' | 'file-in-use' | 'cancelled' | 'invalid-argument' | 'internal';
 // negotiate-failed: SSO (Negotiate/Kerberos) thất bại và không có Basic để hỏi (server không cho Basic, URL http vì SSO chỉ qua https, token mutual auth sai, hoặc người dùng chọn lại SSO); action 'sign-in'
 // invalid-argument: giá trị sai, grant hết hạn/đã dùng, tùy chọn không hỗ trợ (MVP chỉ ghi format 31)
+//   cũng dùng khi yêu cầu hợp lệ nhưng kết quả vượt giới hạn của engine (engine `LimitExceeded`, vd liệt kê thư mục quá số mục cho phép); retryable=false, không có action (không gợi ý Cleanup vì dữ liệu không hỏng), message bảo người dùng liệt kê thư mục nhỏ hơn hoặc depth thấp hơn
 ```
 
 ## 5. Events (Rust → UI)
@@ -206,7 +228,7 @@ type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'negotiate-failed' | 
 |---|---|---|
 | `op://started` | `OperationHandle` | Activity |
 | `op://progress` | `Progress` (throttle ≤ 10/s/op) | Activity, nút Update |
-| `op://finished` | `{ opId, result }` (kết quả theo loại, vd `{ newRev }`) | toast, invalidate query |
+| `op://finished` | `{ opId, result }` (kết quả theo loại, vd `{ kind: 'newRev', newRev }`; checkout: `{ kind: 'checkedOut', wcId: WcId \| null, newRev }`) | toast, invalidate query; checkout → mở WC mới |
 | `op://failed` | `{ opId, error: AppError }` | Activity, banner |
 | `wc://status-changed` | `{ wcId, changed: FileStatus[], removed: string[] }` (delta) | tab Changes |
 | `wc://revision-changed` | `{ wcId, baseRev, revRange? }` | toolbar, History |
@@ -273,7 +295,7 @@ Log theo path dùng `log_path_by_path`; khi khoảng revision chưa nằm trong 
 ### 6.3 Settings (key chính)
 | Key | Kiểu | Mặc định |
 |---|---|---|
-| `general.checkoutRoot` | string | `~/svn` |
+| `general.checkoutRoot` | string (chỉ đọc qua `settings_set`; đổi bằng `checkout_root_choose`) | `~/svn` |
 | `general.checkIntervalMin` | number | 10 |
 | `general.language` | `'vi' \| 'en'` | theo OS |
 | `appearance.theme` | `'system' \| 'light' \| 'dark'` | system |

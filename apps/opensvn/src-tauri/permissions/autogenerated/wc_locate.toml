@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wc-locate"
+description = "Enables the wc_locate command without any pre-configured scope."
+commands.allow = ["wc_locate"]
+
+[[permission]]
+identifier = "deny-wc-locate"
+description = "Denies the wc_locate command without any pre-configured scope."
+commands.deny = ["wc_locate"]

@@ -75,6 +75,21 @@ pub enum ErrorCode {
     FileInUse,
     /// Operation was cancelled.
     Cancelled,
+    /// A commit's final request (`MERGE`) reached the server, but its answer never arrived or
+    /// could not be read (cancellation, a broken connection, an unreadable success response).
+    /// The commit may or may not have become a revision.
+    ///
+    /// The server transaction is deliberately kept: deleting it could race a commit that is
+    /// still being applied. The message names the transaction; callers that journaled it
+    /// (`CommitObserver::on_txn_created`) reconcile later: if the youngest revision carries the
+    /// commit, it happened; otherwise remove the transaction with `abort_txn`. Never retry the
+    /// commit blindly: it could be applied twice.
+    CommitOutcomeUnknown,
+    /// The request is valid but its result would exceed a size limit the engine enforces to
+    /// bound memory and work (for example a directory listing with more entries than the
+    /// listing cap). Nothing is wrong with the data; the user can ask for less (a smaller
+    /// subtree, a lower depth). Retrying the same request fails the same way.
+    LimitExceeded,
     /// Data on disk or on the wire is corrupt or violates a protocol rule.
     Corrupt,
     /// Server lacks a required capability.

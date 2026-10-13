@@ -362,4 +362,43 @@ impl FakeEngine {
             Ok(())
         })
     }
+
+    /// Pretends the working copy folder at `from` was moved to `to` (`to = None`: deleted). The
+    /// working copy at `from` can no longer be read, like a folder moved in the file manager.
+    pub fn simulate_moved_wc(&self, from: &Path, to: Option<&Path>) -> Result<(), SvnError> {
+        let mut wcs = self
+            .wcs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut wc = wcs.remove(from).ok_or_else(|| {
+            SvnError::new(
+                ErrorCode::NotAWorkingCopy,
+                format!("{} is not a working copy", from.display()),
+            )
+        })?;
+        if let Some(to) = to {
+            wc.root = to.to_path_buf();
+            wcs.insert(to.to_path_buf(), wc);
+        }
+        Ok(())
+    }
+
+    /// Pretends the working copy at `root` belongs to another repository (`uuid`) or was relocated
+    /// to another repository root URL.
+    pub fn simulate_repository(
+        &self,
+        root: &Path,
+        uuid: Option<&str>,
+        repo_root_url: Option<&str>,
+    ) -> Result<(), SvnError> {
+        self.with_wc(root, |wc| {
+            if let Some(u) = uuid {
+                wc.uuid = u.to_owned();
+            }
+            if let Some(r) = repo_root_url {
+                wc.repo_root_url = r.to_owned();
+            }
+            Ok(())
+        })
+    }
 }
