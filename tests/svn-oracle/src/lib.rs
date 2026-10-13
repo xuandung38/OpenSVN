@@ -8,9 +8,13 @@
 //! - `OPENSVN_SVNADMIN_BIN`: path to `svnadmin`. When unset, `svnadmin` is taken from the same
 //!   directory as `OPENSVN_SVN_BIN` (so both come from one installation), or from PATH if
 //!   `OPENSVN_SVN_BIN` has no directory part.
-//! - `OPENSVN_REQUIRE_SVN`: `1|true|yes|on` (case-insensitive) makes a missing or too-old binary an
-//!   error; `0|false|no|off` or unset lets [`Oracle::resolve`] return `Ok(None)` so the test skips.
-//!   Any other value is an error, never a silent skip.
+//! - `OPENSVN_REQUIRE_SVN`: `1|true|yes|on` (case-insensitive) makes a *missing* (or unrunnable)
+//!   binary an error; `0|false|no|off` or unset lets [`Oracle::resolve`] return `Ok(None)` so
+//!   the test skips. Any other value is an error, never a silent skip.
+//!
+//! A binary that exists but is *older* than the test's [`MinVersion`] always skips with a message
+//! naming the found and required versions, even under `OPENSVN_REQUIRE_SVN` (Windows only has
+//! SlikSVN 1.14.5; Linux and macOS enforce >= 1.15 when svn is installed in CI).
 //!
 //! Both binaries' versions are checked. Commands from [`Oracle::svn`] carry an isolated
 //! `--config-dir` (a temp dir owned by the [`Oracle`]) and `--non-interactive`; all commands
@@ -61,16 +65,6 @@ pub enum OracleError {
         /// Why it failed.
         reason: String,
     },
-    /// Binary older than required, and `OPENSVN_REQUIRE_SVN` is on.
-    #[error("svn oracle `{bin}` is {found}, need >= {required}")]
-    TooOld {
-        /// Binary that was tried.
-        bin: String,
-        /// Version found.
-        found: String,
-        /// Version required.
-        required: String,
-    },
     /// `OPENSVN_REQUIRE_SVN` has a value that is not a recognised boolean.
     #[error("OPENSVN_REQUIRE_SVN={0:?} is not one of 1,true,yes,on,0,false,no,off")]
     InvalidRequireValue(String),
@@ -107,7 +101,15 @@ impl Oracle {
         let mut versions = Vec::new();
         for bin in [&svn, &svnadmin] {
             match check_binary(bin, min) {
-                Ok(v) => versions.push(v),
+                Ok(Found::Usable(v)) => versions.push(v),
+                Ok(Found::TooOld {
+                    found,
+                    required: need,
+                }) => {
+                    // Never fatal: the installed svn simply cannot serve this test.
+                    eprintln!("skipping: `{bin}` is {found}, test needs >= {need}");
+                    return Ok(None);
+                }
                 Err(err) if required => return Err(err),
                 Err(err) => {
                     eprintln!("skipping: {err}; set OPENSVN_REQUIRE_SVN=1 to make this fatal");
@@ -192,20 +194,24 @@ fn sibling_svnadmin(svn: &str) -> String {
     }
 }
 
-fn check_binary(bin: &str, min: MinVersion) -> Result<(u32, u32, u32), OracleError> {
+enum Found {
+    Usable((u32, u32, u32)),
+    TooOld { found: String, required: String },
+}
+
+fn check_binary(bin: &str, min: MinVersion) -> Result<Found, OracleError> {
     let found = probe_version(bin).map_err(|reason| OracleError::Missing {
         bin: bin.to_string(),
         reason,
     })?;
     let (major, minor) = min.pair();
     if (found.0, found.1) < (major, minor) {
-        return Err(OracleError::TooOld {
-            bin: bin.to_string(),
+        return Ok(Found::TooOld {
             found: format!("{}.{}.{}", found.0, found.1, found.2),
             required: format!("{major}.{minor}"),
         });
     }
-    Ok(found)
+    Ok(Found::Usable(found))
 }
 
 type VersionResult = Result<(u32, u32, u32), String>;
@@ -313,21 +319,19 @@ mod tests {
     }
 
     #[test]
-    fn svnadmin_is_taken_from_the_svn_directory_and_its_version_is_checked() -> TestResult {
+    fn svnadmin_comes_from_the_svn_directory_and_too_old_always_skips() -> TestResult {
         let tmp = tempfile::tempdir()?;
         let svn = stub(tmp.path(), "svn", "1.15.0")?;
-        let admin = stub(tmp.path(), "svnadmin", "1.14.5")?;
+        stub(tmp.path(), "svnadmin", "1.14.5")?;
         let base = vec![("OPENSVN_SVN_BIN", svn.to_string_lossy().into_owned())];
 
-        // svnadmin 1.14.5 next to svn 1.15.0 is too old for a 1.15 requirement.
+        // The sibling svnadmin 1.14.5 is too old for 1.15: skip, even when svn is required.
         assert!(Oracle::resolve_with(env(base.clone()), MinVersion::V1_15)?.is_none());
         let mut required = base.clone();
         required.push(("OPENSVN_REQUIRE_SVN", "TRUE".into()));
-        let err = Oracle::resolve_with(env(required), MinVersion::V1_15).err();
-        assert!(
-            matches!(&err, Some(OracleError::TooOld { bin, .. }) if *bin == admin.to_string_lossy()),
-            "expected TooOld for svnadmin, got {err:?}"
-        );
+        assert!(Oracle::resolve_with(env(required.clone()), MinVersion::V1_15)?.is_none());
+        // ... but usable when the test only needs 1.14.
+        assert!(Oracle::resolve_with(env(required), MinVersion::V1_14)?.is_some());
         // An explicit override wins over the sibling lookup.
         let good = stub(tmp.path(), "admin-new", "1.15.1")?;
         let mut over = base;
