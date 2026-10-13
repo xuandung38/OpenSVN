@@ -18,6 +18,10 @@ fn mvp_limit(msg: &str) -> AppError {
     e
 }
 
+/// Checks out into a new folder (`dest_name`) inside the granted parent folder, or into the granted
+/// folder itself. The target must not exist or be an empty folder. On success the working copy is
+/// registered and its id returned in `OpResult::CheckedOut`; a folder this checkout created is
+/// removed again when the checkout fails or is cancelled while it is still empty.
 #[tauri::command]
 #[specta::specta]
 pub async fn checkout(
@@ -28,12 +32,18 @@ pub async fn checkout(
         if request.format != WcFormat::V31 {
             return Err(mvp_limit("Only working copy format 31 can be created."));
         }
+        // Checked before the grant is redeemed so a typo does not spend the user's folder choice.
+        if let Some(name) = request.dest_name.as_deref() {
+            crate::wc::checkout_target::validate_folder_name(name)?;
+        }
+        let dest = state.redeem_dir(&request.dest)?;
+        let target = crate::wc::checkout_target::prepare(&dest, request.dest_name.as_deref())?;
         if let Err(e) = state.db.recent_url_touch(&request.url) {
             tracing::warn!(error = %e, "could not record recent URL");
         }
         let plan = crate::engine::CheckoutPlan {
             url: request.url.clone(),
-            path: state.redeem_dir(&request.dest)?,
+            path: target.path.clone(),
             rev: request.rev,
             depth: request.depth,
             sparse: request.sparse.clone(),
@@ -47,12 +57,23 @@ pub async fn checkout(
             OperationKind::Checkout,
             title,
             move |engine, ctx| async move {
-                let info = engine.checkout(&plan, &ctx).await?;
+                let info = match engine.checkout(&plan, &ctx).await {
+                    Ok(info) => info,
+                    Err(e) => {
+                        target.discard_if_empty();
+                        return Err(e);
+                    }
+                };
                 // Register the new working copy so the UI can open it right after `op://finished`.
-                if let Err(e) = wcs.add_existing(&info.root_path).await {
-                    tracing::warn!(code = ?e.code, "checked out working copy was not registered");
-                }
-                Ok(OpResult::NewRev {
+                let wc_id = match wcs.add_existing(&info.root_path).await {
+                    Ok(wc) => Some(wc.id),
+                    Err(e) => {
+                        tracing::warn!(code = ?e.code, "checked out working copy was not registered");
+                        None
+                    }
+                };
+                Ok(OpResult::CheckedOut {
+                    wc_id,
                     new_rev: info.base_rev,
                 })
             },

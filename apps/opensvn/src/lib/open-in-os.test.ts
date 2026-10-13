@@ -36,6 +36,27 @@ test("a refused item is revealed in the file manager instead", async () => {
   expect(c.revealInOs).toHaveBeenCalledWith("wc1", "setup.exe");
 });
 
+test("a symlinked item: the default app refuses, the reveal fallback refuses too, and the user gets that refusal", async () => {
+  const link: AppError = {
+    ...refused,
+    message: "This item is not opened automatically.",
+    path: "notes.txt",
+  };
+  const revealRefused: AppError = {
+    ...refused,
+    message:
+      "This item is a symbolic link. Only real files and folders inside the working copy are shown.",
+    path: "notes.txt",
+    actions: null,
+  };
+  const c = fake({ status: "error", error: link });
+  c.revealInOs.mockResolvedValueOnce({ status: "error", error: revealRefused });
+  const outcome = await openWithDefaultApp(c, "wc1", "notes.txt");
+  expect(c.revealInOs).toHaveBeenCalledWith("wc1", "notes.txt");
+  expect(outcome).toEqual({ kind: "failed", error: revealRefused });
+  expect(outcome.kind === "failed" && outcome.error.message).toMatch(/symbolic link/);
+});
+
 test("other errors are returned without revealing", async () => {
   const missing: AppError = { ...refused, code: "path-not-found", actions: null };
   const c = fake({ status: "error", error: missing });

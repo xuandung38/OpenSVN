@@ -3545,6 +3545,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "dunce",
  "futures-util",
  "md-5",
  "notify",

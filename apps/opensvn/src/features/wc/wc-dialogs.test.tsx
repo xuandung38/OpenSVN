@@ -33,62 +33,163 @@ const option = (name: RegExp) => screen.findByRole("option", { name });
 const dialog = (name: string) => screen.findByRole("dialog", { name, hidden: true });
 const lastCall = (name: string) => mockCalls.filter((c) => c.name === name).at(-1);
 
-test("checkout: URL is validated, the folder comes from a native pick as a grant, never a path", async () => {
+test("checkout: name follows the URL, parent is the default folder granted by Rust, new WC opens", async () => {
   renderApp(<AppShell />);
   await option(/renderer\.ts/);
   await user().keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
   const dlg = await dialog("Checkout repository");
   const submit = within(dlg).getByRole("button", { name: "Checkout" }) as HTMLButtonElement;
   expect(submit.disabled).toBe(true);
+  // Recent URLs are offered as suggestions.
+  await waitFor(() => expect(dlg.querySelectorAll("datalist option").length).toBe(2));
 
-  await user().type(within(dlg).getByRole("textbox", { name: "Repository URL" }), "ftp://nope");
+  const urlBox = within(dlg).getByRole("combobox", { name: "Repository URL" });
+  await user().type(urlBox, "ftp://nope");
   expect(within(dlg).getByRole("alert").textContent).toContain("http(s), svn or file URL");
-  await user().clear(within(dlg).getByRole("textbox", { name: "Repository URL" }));
-  await user().type(
-    within(dlg).getByRole("textbox", { name: "Repository URL" }),
-    "https://svn.example.com/repos/game/branches/feature-x",
-  );
-  expect(submit.disabled).toBe(true); // still no destination
-
-  await user().click(within(dlg).getByRole("button", { name: "Choose folder…" }));
-  await waitFor(() => expect(submit.disabled).toBe(false));
+  await user().clear(urlBox);
+  await user().type(urlBox, "https://svn.example.com/repos/game/branches/feature-x");
+  const name = within(dlg).getByRole("textbox", { name: "Folder name" }) as HTMLInputElement;
+  expect(name.value).toBe("feature-x");
+  expect(within(dlg).getByText("Creates /Users/dev/work/feature-x")).toBeTruthy();
+  expect(within(dlg).getByText("/Users/dev/work (default)")).toBeTruthy();
   await user().selectOptions(within(dlg).getByRole("combobox", { name: "Scope" }), "immediates");
+  await waitFor(() => expect(submit.disabled).toBe(false));
   await user().click(submit);
 
   await waitFor(() => expect(lastCall("checkout")).toBeTruthy());
   const req = lastCall("checkout")?.args[0] as Record<string, unknown>;
-  expect(String(req.dest)).toMatch(/^grant-/);
+  expect(String(req.dest)).toMatch(/^grant-root-/);
+  expect(req.destName).toBe("feature-x");
   expect(req.depth).toBe("immediates");
   expect(req.format).toBe(31);
   expect(req).not.toHaveProperty("path");
-  expect(await screen.findByText("Checkout started")).toBeTruthy();
-  // The finished checkout registers a new working copy.
-  await waitFor(async () => {
-    const list = await mockAdapter.commands.wcList();
-    expect(list.status === "ok" && list.data.length).toBe(3);
-  });
+  expect(mockCalls.some((c) => c.name === "checkoutRootGrant")).toBe(true);
+  // The finished checkout is registered, opened and becomes the current repository.
+  expect(await screen.findByText("Checked out feature-x")).toBeTruthy();
+  await waitFor(() => expect(lastCall("wcOpen")?.args[0]).toMatch(/^wc-checkout-/));
+  expect(
+    await screen.findByRole("button", { name: /Current repository\s*feature-x/ }),
+  ).toBeTruthy();
+  expect(screen.queryByRole("dialog", { name: "Checkout repository", hidden: true })).toBeNull();
 });
 
-test("checkout: a consumed grant is dropped and the user must choose the folder again", async () => {
+test("checkout: a picked parent is single use; a refused target asks to choose it again", async () => {
   renderApp(<AppShell />);
   await option(/renderer\.ts/);
   await user().keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
   const dlg = await dialog("Checkout repository");
   await user().type(
-    within(dlg).getByRole("textbox", { name: "Repository URL" }),
+    within(dlg).getByRole("combobox", { name: "Repository URL" }),
     "https://svn.example.com/repos/game/trunk",
   );
-  await user().click(within(dlg).getByRole("button", { name: "Choose folder…" }));
+  const name = within(dlg).getByRole("textbox", { name: "Folder name" }) as HTMLInputElement;
+  expect(name.value).toBe("game");
   const submit = within(dlg).getByRole("button", { name: "Checkout" }) as HTMLButtonElement;
+
+  // Names the backend would refuse are caught early.
+  for (const [bad, message] of [
+    ["CON", "This name is reserved by Windows."],
+    ["../up", "The name must not contain / or \\."],
+    ["dot.", "The name must not start with a space or end with a dot or space."],
+  ]) {
+    await user().clear(name);
+    await user().type(name, bad as string);
+    expect(within(dlg).getByRole("alert").textContent).toBe(message);
+    expect(submit.disabled).toBe(true);
+  }
+
+  // A folder that already exists with content is refused by the backend.
+  await user().clear(name);
+  await user().type(name, "game-client");
+  await user().click(within(dlg).getByRole("button", { name: "Change…" }));
+  expect(await within(dlg).findByText("game-assets")).toBeTruthy();
+  expect(within(dlg).getByText("Creates game-assets/game-client")).toBeTruthy();
   await waitFor(() => expect(submit.disabled).toBe(false));
-  // Someone else uses up the single-use grant (the first grant after a reset is grant-1).
-  await mockAdapter.commands.wcAddExisting("grant-1");
   await user().click(submit);
-  expect(
-    await within(dlg).findByText("The folder choice expired. Choose the folder again."),
-  ).toBeTruthy();
+  expect(await within(dlg).findByText(/already exists and is not empty/)).toBeTruthy();
+  expect(within(dlg).getByText("Choose the parent folder again.")).toBeTruthy();
   expect(within(dlg).getByText("No folder chosen")).toBeTruthy();
   expect(submit.disabled).toBe(true);
+
+  await user().click(within(dlg).getByRole("button", { name: "Change…" }));
+  await user().clear(name);
+  await user().type(name, "game-2");
+  await waitFor(() => expect(submit.disabled).toBe(false));
+});
+
+test("checkout: a folder name the backend refuses keeps the picked parent", async () => {
+  renderApp(<AppShell />);
+  await option(/renderer\.ts/);
+  await user().keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
+  const dlg = await dialog("Checkout repository");
+  await user().type(
+    within(dlg).getByRole("combobox", { name: "Repository URL" }),
+    "https://svn.example.com/repos/game/trunk",
+  );
+  const name = within(dlg).getByRole("textbox", { name: "Folder name" }) as HTMLInputElement;
+  const submit = within(dlg).getByRole("button", { name: "Checkout" }) as HTMLButtonElement;
+  await user().click(within(dlg).getByRole("button", { name: "Change…" }));
+  expect(await within(dlg).findByText("game-assets")).toBeTruthy();
+
+  // Refused before the grant is redeemed: the parent stays chosen, no re-pick needed.
+  await user().clear(name);
+  await user().type(name, "refused-by-backend");
+  await waitFor(() => expect(submit.disabled).toBe(false));
+  await user().click(submit);
+  expect(await within(dlg).findByText(/Invalid folder name/)).toBeTruthy();
+  expect(within(dlg).queryByText("Choose the parent folder again.")).toBeNull();
+  expect(within(dlg).getByText("game-assets")).toBeTruthy();
+  const picks = mockCalls.filter((c) => c.name === "pathPick").length;
+
+  await user().clear(name);
+  await user().type(name, "game-3");
+  await waitFor(() => expect(submit.disabled).toBe(false));
+  await user().click(submit);
+  await waitFor(() =>
+    expect((lastCall("checkout")?.args[0] as Record<string, unknown> | undefined)?.destName).toBe(
+      "game-3",
+    ),
+  );
+  expect(mockCalls.filter((c) => c.name === "pathPick").length).toBe(picks);
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: "Checkout repository", hidden: true })).toBeNull(),
+  );
+});
+
+test("checkout: progress is shown with Cancel; cancelling returns to the form", async () => {
+  setMockOpDuration(60_000);
+  renderApp(<AppShell />);
+  await option(/renderer\.ts/);
+  await user().keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
+  const dlg = await dialog("Checkout repository");
+  await user().type(
+    within(dlg).getByRole("combobox", { name: "Repository URL" }),
+    "https://svn.example.com/repos/game/trunk",
+  );
+  await user().click(within(dlg).getByRole("button", { name: "Checkout" }));
+  const cancel = await within(dlg).findByRole("button", { name: "Cancel checkout" });
+  expect(within(dlg).getByRole("progressbar", { name: "Checking out…" })).toBeTruthy();
+  expect(within(dlg).getByRole("button", { name: "Continue in background" })).toBeTruthy();
+  await user().click(cancel);
+  expect(await within(dlg).findByText("The checkout was cancelled.")).toBeTruthy();
+  expect(lastCall("opCancel")).toBeTruthy();
+  expect(within(dlg).getByRole("combobox", { name: "Repository URL" })).toBeTruthy();
+});
+
+test("checkout: Browse… shows the repository folders and picking one sets the URL", async () => {
+  renderApp(<AppShell />);
+  await option(/renderer\.ts/);
+  await user().keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
+  const dlg = await dialog("Checkout repository");
+  const urlBox = within(dlg).getByRole("combobox", { name: "Repository URL" }) as HTMLInputElement;
+  await user().type(urlBox, "https://svn.example.com/repos/game/trunk");
+  await user().click(within(dlg).getByRole("button", { name: "Browse…" }));
+  const tree = await within(dlg).findByRole("tree", { name: "Repository folders" });
+  await user().click(await within(tree).findByRole("treeitem", { name: /branches/ }));
+  expect(urlBox.value).toBe("https://svn.example.com/repos/game/branches");
+  expect(
+    (within(dlg).getByRole("textbox", { name: "Folder name" }) as HTMLInputElement).value,
+  ).toBe("branches");
 });
 
 test("welcome: adding an existing working copy goes through path_pick and the grant", async () => {

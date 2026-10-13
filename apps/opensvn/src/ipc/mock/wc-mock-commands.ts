@@ -19,6 +19,7 @@ import type {
   RevertRequest,
   UnlockRequest,
   UpdateRequest,
+  WcEntry,
   WorkingCopy,
 } from "../bindings";
 import { MOCK_WC_ID, mockSettings, mockWorkingCopies } from "./data";
@@ -30,7 +31,7 @@ type Reply<T> = Promise<{ status: "ok"; data: T } | { status: "error"; error: Ap
 /** Helpers the adapter shares with this module (kept as parameters to avoid an import cycle). */
 export interface MockDeps {
   ok: <T>(data: T) => Reply<T>;
-  fail: (code: AppError["code"], message: string) => Reply<never>;
+  fail: (code: AppError["code"], message: string, detail?: string | null) => Reply<never>;
   simulateOp: (
     kind: OperationKind,
     title: string,
@@ -43,21 +44,66 @@ export interface MockDeps {
 
 interface State {
   wcs: WorkingCopy[];
+  /** Registered working copies whose folder is gone (shown with "Locate…"). */
+  missing: WcEntry[];
+  lastOpened: Map<string, string>;
+  recentUrls: string[];
   status: Map<string, FileStatus[]>;
   grants: Map<string, string>;
   youngest: number;
   seq: number;
 }
 
+/** A registered working copy whose folder was moved, for the repository manager demo. */
+export const MOCK_MISSING_WC: WcEntry = {
+  id: "wc-missing",
+  name: "old-prototype",
+  rootPath: "/Users/dev/work/old-prototype",
+  repoRootUrl: "https://svn.example.com/repos/game",
+  repoUuid: "00000000-0000-0000-0000-000000000001",
+  url: null,
+  addedAt: "2026-05-02T10:00:00Z",
+  lastOpenedAt: "2026-09-30T16:20:00Z",
+  missing: true,
+  problem: "/Users/dev/work/old-prototype is not a working copy",
+};
+
 function initialState(): State {
   return {
     wcs: structuredClone(mockWorkingCopies),
+    missing: [structuredClone(MOCK_MISSING_WC)],
+    lastOpened: new Map([[MOCK_WC_ID, "2026-10-13T08:30:00Z"]]),
+    recentUrls: ["https://svn.example.com/repos/game/trunk", "https://svn.example.com/repos/docs"],
     status: new Map([[MOCK_WC_ID, freshMainStatus()]]),
     grants: new Map(),
     youngest: MOCK_YOUNGEST,
     seq: 0,
   };
 }
+
+function entryOf(w: WorkingCopy): WcEntry {
+  return {
+    id: w.id,
+    name: w.name,
+    rootPath: w.rootPath,
+    repoRootUrl: w.repoRootUrl,
+    repoUuid: w.repoUuid,
+    url: w.url,
+    addedAt: "2026-01-01T00:00:00Z",
+    lastOpenedAt: state.lastOpened.get(w.id) ?? null,
+    missing: false,
+    problem: null,
+  };
+}
+
+/**
+ * Folder names the mock backend refuses although the dialog's own check accepts them (the backend
+ * is the authority; this simulates a rule the front end does not mirror).
+ */
+const BACKEND_REFUSED_NAMES = new Set(["refused-by-backend"]);
+
+/** Folder names the mock treats as existing, non-empty folders in every parent. */
+const OCCUPIED_NAMES = new Set(["game-client", "design-docs"]);
 
 let state = initialState();
 
@@ -135,9 +181,64 @@ export function wcMockCommands(deps: MockDeps) {
       return ok({ id, displayName, kind: "dir" as const });
     },
     wcList: () => ok([...state.wcs]),
+    wcEntries: () => ok([...state.wcs.map(entryOf), ...state.missing]),
     wcOpen: (wcId: string) => {
       const wc = forWc(wcId);
-      return wc ? ok(wc) : fail("not-a-working-copy", "Unknown working copy");
+      if (!wc) return fail("not-a-working-copy", "Unknown working copy");
+      state.lastOpened.set(wcId, new Date().toISOString());
+      return ok(wc);
+    },
+    wcClose: (wcId: string) =>
+      forWc(wcId) ? ok(null) : fail("not-a-working-copy", "Unknown working copy"),
+    wcRename: (wcId: string, name: string) => {
+      const n = name.trim();
+      if (!n || n.length > 200)
+        return fail("invalid-argument", "The name must be 1 to 200 characters.");
+      if (!forWc(wcId) && !state.missing.some((m) => m.id === wcId)) {
+        return fail("not-a-working-copy", "This working copy is not in the list.");
+      }
+      patchWc(wcId, { name: n });
+      state.missing = state.missing.map((m) => (m.id === wcId ? { ...m, name: n } : m));
+      return ok(null);
+    },
+    wcRemove: (wcId: string) => {
+      const before = state.wcs.length + state.missing.length;
+      state.wcs = state.wcs.filter((w) => w.id !== wcId);
+      state.missing = state.missing.filter((m) => m.id !== wcId);
+      state.status.delete(wcId);
+      return state.wcs.length + state.missing.length < before
+        ? ok(null)
+        : fail("not-a-working-copy", "This working copy is not in the list.");
+    },
+    wcLocate: (wcId: string, grant: string) => {
+      const entry = state.missing.find((m) => m.id === wcId);
+      if (!entry) return fail("not-a-working-copy", "This working copy is not in the list.");
+      const folder = consumeGrant(grant);
+      if (!folder) return fail("invalid-argument", BAD_GRANT);
+      const wc: WorkingCopy = {
+        ...(structuredClone(mockWorkingCopies[0]) as WorkingCopy),
+        id: entry.id,
+        name: entry.name,
+        rootPath: `/Users/dev/work/${folder}`,
+        incoming: 0,
+      };
+      state.missing = state.missing.filter((m) => m.id !== wcId);
+      state.wcs = [...state.wcs, wc];
+      state.status.set(wc.id, []);
+      state.lastOpened.set(wc.id, new Date().toISOString());
+      return ok(wc);
+    },
+    revealInOs: (wcId: string) =>
+      forWc(wcId) ? ok(null) : fail("invalid-argument", "The folder no longer exists."),
+    recentUrls: () => ok([...state.recentUrls]),
+    checkoutRootGrant: () => {
+      const id = `grant-root-${++state.seq}`;
+      state.grants.set(id, baseName(mockSettings["general.checkoutRoot"]));
+      return ok({
+        id,
+        displayName: baseName(mockSettings["general.checkoutRoot"]),
+        kind: "dir" as const,
+      });
     },
     statusGet: (req: { wcId: string }) => ok([...statusOf(req.wcId)]),
     statusRefresh: (wcId: string) => ok(simulateOp("status-refresh", "Refresh status", wcId)),
@@ -150,23 +251,51 @@ export function wcMockCommands(deps: MockDeps) {
         }),
       ),
     checkout: (req: CheckoutRequest) => {
-      const name = consumeGrant(req.dest);
-      if (!name) return fail("invalid-argument", BAD_GRANT);
-      const handle = simulateOp("checkout", `Checkout ${req.url}`, null, undefined, () => {
-        const wc: WorkingCopy = {
-          ...(structuredClone(mockWorkingCopies[0]) as WorkingCopy),
-          id: `wc-checkout-${++state.seq}`,
-          name,
-          rootPath: `/Users/dev/work/${name}`,
-          url: req.url,
-          baseRev: req.rev ?? state.youngest,
-          incoming: 0,
-          branch: null,
-        };
-        state.wcs = [...state.wcs, wc];
-        state.status.set(wc.id, []);
-        deps.emit("wc://incoming", { wcId: wc.id, count: 0, latestRev: state.youngest });
-      });
+      const name = req.destName;
+      if (
+        name !== null &&
+        (!name ||
+          /[\\/]/.test(name) ||
+          name === "." ||
+          name === ".." ||
+          BACKEND_REFUSED_NAMES.has(name))
+      ) {
+        // Like the backend: checked before the grant is redeemed; `detail` is the refused name.
+        return fail("invalid-argument", "Invalid folder name: the name is not allowed.", name);
+      }
+      const parent = consumeGrant(req.dest);
+      if (!parent) return fail("invalid-argument", BAD_GRANT);
+      const folder = name ?? parent;
+      if (OCCUPIED_NAMES.has(folder)) {
+        return fail(
+          "invalid-argument",
+          "The checkout folder already exists and is not empty. Choose another name or an empty folder.",
+        );
+      }
+      state.recentUrls = [req.url, ...state.recentUrls.filter((u) => u !== req.url)];
+      const wcId = `wc-checkout-${++state.seq}`;
+      const newRev = req.rev ?? state.youngest;
+      const handle = simulateOp(
+        "checkout",
+        `Checkout ${req.url}`,
+        null,
+        { kind: "checkedOut", wcId, newRev },
+        () => {
+          const wc: WorkingCopy = {
+            ...(structuredClone(mockWorkingCopies[0]) as WorkingCopy),
+            id: wcId,
+            name: folder,
+            rootPath: `/Users/dev/work/${folder}`,
+            url: req.url,
+            baseRev: newRev,
+            incoming: 0,
+            branch: null,
+          };
+          state.wcs = [...state.wcs, wc];
+          state.status.set(wc.id, []);
+          deps.emit("wc://incoming", { wcId: wc.id, count: 0, latestRev: state.youngest });
+        },
+      );
       return ok(handle);
     },
     diffGet: (req: DiffGetRequest) =>

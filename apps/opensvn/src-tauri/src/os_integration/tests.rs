@@ -239,6 +239,52 @@ fn symlinks_are_never_opened_with_the_default_app() {
     open_external(&r, d.path(), "real/doc.txt", OpenWith::Default, None, None).unwrap();
 }
 
+/// The UI's fallback for a refused default app is "reveal instead" (`openWithDefaultApp`). For a
+/// symlink the reveal is refused too, and that refusal (not a silent no-op) is what the user sees.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_item_refused_by_the_default_app_is_not_revealed_either() {
+    use std::os::unix::fs::symlink;
+    let d = wc();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.txt"), b"x").unwrap();
+    symlink(
+        outside.path().join("secret.txt"),
+        d.path().join("notes.txt"),
+    )
+    .unwrap();
+    symlink(outside.path(), d.path().join("docs")).unwrap();
+    std::fs::write(d.path().join("inside.txt"), b"x").unwrap();
+    symlink("inside.txt", d.path().join("alias.txt")).unwrap();
+    let r = Recorder::default();
+    // A link through a folder that leaves the working copy is refused before the default-app
+    // check, without offering the reveal fallback at all.
+    let escaped = open_external(
+        &r,
+        d.path(),
+        "docs/secret.txt",
+        OpenWith::Default,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(escaped.actions, None, "{}", escaped.message);
+    for n in ["notes.txt", "docs/secret.txt", "alias.txt"] {
+        if n != "docs/secret.txt" {
+            let opened = open_external(&r, d.path(), n, OpenWith::Default, None, None).unwrap_err();
+            refused_with_reveal(&opened, n);
+        }
+        let revealed = reveal_in_os(&r, d.path(), n).unwrap_err();
+        assert!(
+            revealed.message.contains("symbolic link"),
+            "{n}: {}",
+            revealed.message
+        );
+        assert_eq!(revealed.actions, None, "{n}: no second fallback is offered");
+    }
+    assert!(r.calls.lock().unwrap().is_empty());
+}
+
 #[cfg(unix)]
 #[test]
 fn an_execute_bit_also_blocks_the_default_app() {

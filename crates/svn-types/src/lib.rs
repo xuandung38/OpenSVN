@@ -12,6 +12,7 @@ mod model;
 mod rel_path;
 mod safe_join;
 
+pub use admin_name::is_any_admin_dir_name;
 pub use cancel::{CancelToken, Cancelled};
 pub use display_path::RepoDisplayPath;
 pub use editor::{DeltaEditor, Reporter, TxDeltaOp, TxDeltaWindow, WindowSink};
