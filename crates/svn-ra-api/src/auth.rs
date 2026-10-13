@@ -36,8 +36,6 @@ pub enum PromptReason {
     Rejected,
     /// Negotiate (SSO) was attempted and failed; the user may fall back to Basic.
     NegotiateFailed,
-    /// Previously stored credentials were refused because they are no longer valid.
-    Expired,
 }
 
 /// Everything the transport tells the app when it needs credentials.
@@ -75,6 +73,12 @@ impl CredentialRequest {
 }
 
 /// Why the TLS certificate needs a decision.
+///
+/// When several problems apply to one certificate, report the most severe one: hostname
+/// mismatch, expired, revoked and not-yet-valid outrank `Changed`, which outranks
+/// `SelfSigned` and `UnknownIssuer`. A certificate that is both changed and hostname-mismatched
+/// is reported as `HostnameMismatch`, never as `Changed`, so the user is not offered a way to
+/// trust it. Only the transport classifies; this type just carries the result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CertFailure {
