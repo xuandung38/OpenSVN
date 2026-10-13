@@ -121,20 +121,44 @@ export type AppError = {
 	actions: ErrorAction[] | null,
 };
 
+/**  Authentication scheme the server offers. */
+export type AuthMethodKind = "basic" | 
+/**  Single sign-on (Windows SSO / Kerberos). */
+"negotiate";
+
 export type AuthPrompt = {
 	requestId: string,
 	kind: AuthPromptKind,
 	realm: string,
 	url: string,
 	cert: CertSummary | null,
+	/**  Why credentials are requested; `None` for certificate prompts. */
+	reason: AuthPromptReason | null,
+	/**  Failed tries so far in this prompt sequence, starting at 0. */
+	attempt: number,
+	/**  Schemes the server offers (credentials prompts; empty for certificate prompts). */
+	offered: AuthMethodKind[],
 };
 
 export type AuthPromptEvent = AuthPrompt;
 
 export type AuthPromptKind = "credentials" | "certificate";
 
+/**  Why credentials are requested (mirrors the transport's prompt reason). */
+export type AuthPromptReason = 
+/**  First request for this origin. */
+"initial" | 
+/**  The server rejected the credentials just offered. */
+"rejected" | 
+/**  Single sign-on failed; the user may fall back to a password. */
+"negotiate-failed" | 
+/**  Stored credentials are no longer valid. */
+"expired";
+
 /**  Response of `auth_respond`'s input (answer to an `auth://prompt`). */
-export type AuthResponse = { kind: "credentials"; username: string; password: SecretText; save: boolean } | { kind: "certificate"; decision: CertDecision } | { kind: "cancel" };
+export type AuthResponse = { kind: "credentials"; username: string; password: SecretText; save: boolean } | { kind: "certificate"; decision: CertDecision } | 
+/**  Use single sign-on (only valid when the prompt offered `negotiate`). */
+{ kind: "negotiate" } | { kind: "cancel" };
 
 export type Banner = {
 	wcId: WcId,
@@ -170,6 +194,14 @@ export type BranchRef = {
 
 export type CertDecision = "reject" | "acceptOnce" | "acceptAlways";
 
+/**  Why a TLS certificate needs a decision. */
+export type CertFailureInfo = "unknownIssuer" | "selfSigned" | "expired" | "notYetValid" | "hostnameMismatch" | "revoked" | 
+/**  A different certificate than the pinned one; "always trust" is not offered. */
+({ changed: {
+	oldSha256: string,
+	newSha256: string,
+} }) & { other?: never } | ({ other: string }) & { changed?: never };
+
 export type CertSummary = {
 	host: string,
 	subject: string,
@@ -177,7 +209,7 @@ export type CertSummary = {
 	notBefore: string,
 	notAfter: string,
 	sha256: string,
-	failure: string,
+	failure: CertFailureInfo,
 };
 
 export type ChangeAction = "A" | "M" | "D" | "R";
