@@ -27,3 +27,20 @@ Branch: `test/fe-fake-clock` (from `origin/main` @ f4f712b)
 
 ## Remaining
 - After #81 lands, migrate `settings.test.tsx` the same way; until then the full suite is not 3/3 under heavy load.
+
+## Follow-up after #81 merged
+- Merged `origin/main` (merge commit 1e05d1b; clean, no conflicts).
+- Migrated `features/remote/settings/settings.test.tsx` to `installFakeClock()` (17 `userEvent.*` -> `user().*`,
+  per-file hang guard 120 s). No assertion changed.
+- `wc/repos/repo-manager.test.tsx` and `wc/wc-dialogs.test.tsx` were already on `installFakeClock` in #81; unchanged.
+- `components/list/keyboard.test.tsx` has no findBy/waitFor (only the hang guard); left on real timers.
+- After this, no FE test file uses findBy/waitFor on real timers.
+
+### Verification
+- Load: 4x `yes > /dev/null` (4 vCPUs), `pnpm -C apps/opensvn test` x3 at default config:
+  run1 199/199 (140 s), run2 199/199 (166 s), run3 199/199 (181 s) -> 3/3.
+- Non-vacuity: settings.test `findByText(/Must start with https/)` -> `httpsX`, and the waitFor target
+  `accountsSignOut` -> `accountsSignOutX`: both failed (`Unable to find an element`, `expected false to be true`).
+  repo-manager.test `findByText("URL copied")` -> `"URL copiedX"`: failed. All reverted.
+- Gates (unloaded): install --frozen-lockfile ok, lint ok, typecheck ok, lint:safety ok, test 28 files / 199 tests ok,
+  build + check-dist ok.
