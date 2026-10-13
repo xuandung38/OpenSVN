@@ -198,6 +198,10 @@ pub enum PristineError {
     /// The row exists but its text was dehydrated; re-hydration is not supported in the MVP.
     #[error("pristine text {0:?} is dehydrated and cannot be re-hydrated in this version")]
     RehydrateUnsupported(Sha1Digest),
+    /// A shared helper failed (for example `rename_replacing`); the classification of the
+    /// underlying I/O error (disk full, permission denied, file in use) is kept.
+    #[error(transparent)]
+    Svn(#[from] SvnError),
     /// The database side failed.
     #[error("pristine index: {0}")]
     Index(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -229,6 +233,7 @@ impl From<PristineError> for SvnError {
                 ref path,
                 ref source,
             } => SvnError::from_io(format!("{op} '{}'", path.display()), source),
+            PristineError::Svn(e) => e,
             PristineError::Index(_) => SvnError::new(ErrorCode::Internal, err.to_string()),
         }
     }
@@ -379,11 +384,7 @@ impl<I: PristineIndex> PristineStore<I> {
         ));
         // Replaces an orphan file (no row) that may be truncated or damaged; on Windows this
         // clears the read-only attribute and retries sharing violations.
-        rename_replacing(&tmp_path, &dest).map_err(|e| PristineError::Io {
-            op: "rename to",
-            path: dest.clone(),
-            source: std::io::Error::other(e.to_string()),
-        })?;
+        rename_replacing(&tmp_path, &dest)?;
         // A pristine is immutable, like svn leaves it.
         let mut perms = fs::metadata(&dest)
             .map_err(PristineError::io("stat", &dest))?
