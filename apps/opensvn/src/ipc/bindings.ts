@@ -80,6 +80,11 @@ export const commands = {
 	displayName: string,
 	kind: GrantKind,
 } | null, AppError>(__TAURI_INVOKE("path_pick", { request })),
+	/**
+	 *  Builds the diagnostics bundle in memory and returns every file's text for review. Nothing is
+	 *  written yet.
+	 */
+	diagnosticsPreview: (options: DiagnosticsOptions) => typedError<DiagnosticsPreview, AppError>(__TAURI_INVOKE("diagnostics_preview", { options })),
 	/**  Switches the native menu between the Branch and the Location variant. */
 	menuSetLayout: (hasLayout: boolean) => typedError<null, AppError>(__TAURI_INVOKE("menu_set_layout", { hasLayout })),
 	certsList: () => typedError<TrustedCert[], AppError>(__TAURI_INVOKE("certs_list")),
@@ -91,7 +96,11 @@ export const commands = {
 	revealInOs: (wcId: WcId, path: string) => typedError<null, AppError>(__TAURI_INVOKE("reveal_in_os", { wcId, path })),
 	/**  Opens an item of a working copy with the default app, the editor or the terminal. */
 	openExternal: (wcId: WcId, path: string, openWith: OpenWith) => typedError<null, AppError>(__TAURI_INVOKE("open_external", { wcId, path, openWith })),
-	diagnosticsExport: () => typedError<string, AppError>(__TAURI_INVOKE("diagnostics_export")),
+	/**
+	 *  Saves the previewed bundle as a zip. The destination is chosen in a native save dialog;
+	 *  returns the saved path, or `None` when the user cancels the dialog.
+	 */
+	diagnosticsExport: (token: string) => typedError<string | null, AppError>(__TAURI_INVOKE("diagnostics_export", { token })),
 };
 
 /** Events */
@@ -286,6 +295,32 @@ export type CopyLocationRequest = {
 };
 
 export type Depth = "empty" | "files" | "immediates" | "infinity";
+
+/**  One file of the bundle as the user sees it. */
+export type DiagnosticsEntry = {
+	/**  Path inside the zip. */
+	name: string,
+	/**  Size in bytes. */
+	size: number,
+	/**  Full text that will be saved. */
+	content: string,
+};
+
+/**  What to hide besides secrets (which are always removed). */
+export type DiagnosticsOptions = {
+	/**  Replace the home folder and working copy paths with placeholders. */
+	hidePaths: boolean,
+	/**  Remove commit messages from log lines. */
+	hideCommitMessages: boolean,
+};
+
+/**  The bundle awaiting the user's decision. */
+export type DiagnosticsPreview = {
+	/**  Pass to `diagnostics_export` to save exactly these contents. */
+	token: string,
+	/**  Files in the bundle. */
+	entries: DiagnosticsEntry[],
+};
 
 export type DiffGetRequest = {
 	target: DiffTarget,

@@ -60,6 +60,7 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             program_choose,
             program_clear,
             path_pick,
+            diagnostics_preview,
             menu_set_layout,
             certs_list,
             certs_remove,
