@@ -1,0 +1,24 @@
+HTTP/1.1 200 OK
+Date: Mon, 01 Jan 2024 00:00:00 GMT
+Server: Apache
+Cache-Control: no-cache
+Content-Type: text/xml
+Content-Length: 479
+
+<?xml version="1.0" encoding="utf-8"?>
+<D:merge-response xmlns:D="DAV:">
+<D:updated-set>
+<D:response>
+<D:href>/svn/basic/!svn/vcc/default</D:href>
+<D:propstat><D:prop>
+<D:resourcetype><D:baseline/></D:resourcetype>
+
+<D:version-name>11</D:version-name>
+<D:creationdate>2024-01-02T00:00:00.000000Z</D:creationdate>
+<D:creator-displayname>tester</D:creator-displayname>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+</D:response>
+</D:updated-set>
+</D:merge-response>

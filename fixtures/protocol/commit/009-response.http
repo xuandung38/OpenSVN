@@ -1,0 +1,16 @@
+HTTP/1.1 201 Created
+Date: Mon, 01 Jan 2024 00:00:00 GMT
+Server: Apache
+X-SVN-Result-Fulltext-MD5: 68be89147b787be33b6edd740b97d74d
+Location: http://svn.test.local/svn/basic/!svn/txr/10-a/trunk/added.txt
+Content-Type: text/html; charset=ISO-8859-1
+Content-Length: 253
+
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<title>201 Created</title>
+</head><body>
+<h1>Created</h1>
+<p>Resource /svn/basic/!svn/txr/10-a/trunk/added.txt has been created.</p>
+</body></html>
