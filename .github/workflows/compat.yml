@@ -54,13 +54,17 @@ jobs:
       # run from docker/ (like `cd docker && docker buildx bake -f compose.yml`), so the compose
       # contexts `./svn-server` / `./svn-client` resolve there; the default git context does not.
       # Pull requests only read the cache; main refreshes it. A cache outage never fails the job.
+      # Bake ignores compose `profiles`, so the targets are listed explicitly: without this list
+      # every PR would also compile the 1.8/1.9/1.10 legacy images.
       - name: Build images
         uses: docker/bake-action@018cb6412ab401ebaa809aa5f85966b74628600f # v7.4.0
         with:
           source: ./docker
           files: ./compose.yml
+          targets: certs,svn14-server,svn14-client,svn15-server,svn15-client
           load: true
           set: |
+            *.args.SVN_MAKE_JOBS=4
             *.cache-from=type=gha,scope=compat-images
             ${{ github.event_name == 'push' && '*.cache-to=type=gha,scope=compat-images,mode=max,ignore-error=true' || '' }}
 
@@ -104,13 +108,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # `run --legacy` also runs the default scenarios (svn14/svn15) and the legacy smokes read
+      # svn15 working copies, so this job needs every target, listed explicitly.
       - name: Build images
         uses: docker/bake-action@018cb6412ab401ebaa809aa5f85966b74628600f # v7.4.0
         with:
           source: ./docker
           files: ./compose.yml
+          targets: certs,svn14-server,svn14-client,svn15-server,svn15-client,svn110-server,svn110-client,svn19-server,svn19-client,svn18-server,svn18-client
           load: true
           set: |
+            *.args.SVN_MAKE_JOBS=4
             *.cache-from=type=gha,scope=compat-images
             *.cache-to=type=gha,scope=compat-images,mode=max,ignore-error=true
       - name: Install Rust toolchain from rust-toolchain.toml

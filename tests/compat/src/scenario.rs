@@ -14,6 +14,9 @@
 //! ```
 //! Placeholders usable in `svn` args and `sh` commands: `{url}` (repo URL), `{repo}` (repo
 //! name), `{wc}` (container path of the step's working copy).
+//!
+//! A step with `fails_with: E155021` is a negative step: it passes only when the command exits
+//! non-zero and its stderr contains the given text.
 
 use std::path::Path;
 
@@ -109,6 +112,10 @@ pub struct Step {
     /// Instructions for `tortoise-manual` steps.
     #[serde(default)]
     pub note: Option<String>,
+    /// Negative step: the command must exit non-zero and its stderr must contain this text
+    /// (e.g. `E155021` when an old client refuses a newer working copy format).
+    #[serde(default)]
+    pub fails_with: Option<String>,
 }
 
 /// What a comparison inspects.
@@ -296,6 +303,16 @@ impl Scenario {
                     "step {i}: note is only valid for tortoise-manual"
                 )));
             }
+            if let Some(needle) = &step.fails_with {
+                if step.svn.is_none() && step.sh.is_none() {
+                    return Err(bad(format!("step {i}: fails_with needs svn or sh")));
+                }
+                if step.on == Actor::Engine || needle.trim().is_empty() {
+                    return Err(bad(format!(
+                        "step {i}: fails_with needs non-empty text and an svn actor"
+                    )));
+                }
+            }
             if step.svn.as_ref().is_some_and(Vec::is_empty) {
                 return Err(bad(format!("step {i}: svn args are empty")));
             }
@@ -390,5 +407,17 @@ compare:
         ));
         let y = "name: t\nrepo: r\nsteps:\n  - { on: tortoise-manual, wc: a, note: click }\n";
         assert!(Scenario::from_yaml(y).is_ok());
+    }
+
+    #[test]
+    fn fails_with_is_validated() {
+        let ok = "name: n\nrepo: r\nsteps:\n  - { on: svn18, wc: a, svn: [status], fails_with: E155021 }\n";
+        assert!(Scenario::from_yaml(ok).is_ok());
+        let empty =
+            "name: n\nrepo: r\nsteps:\n  - { on: svn18, wc: a, svn: [status], fails_with: '' }\n";
+        assert!(Scenario::from_yaml(empty).is_err());
+        let engine =
+            "name: n\nrepo: r\nsteps:\n  - { on: engine, wc: a, svn: [status], fails_with: E1 }\n";
+        assert!(Scenario::from_yaml(engine).is_err());
     }
 }
