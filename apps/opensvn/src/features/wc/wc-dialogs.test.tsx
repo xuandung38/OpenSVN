@@ -1,7 +1,14 @@
 import { act, configure, screen, waitFor, within } from "@testing-library/react";
 import { beforeAll, beforeEach, expect, test, vi } from "vitest";
 import { AppShell } from "../../app/app-shell";
-import { mockAdapter, mockCalls, mockEmit, setMockOpDuration } from "../../ipc/mock/adapter";
+import {
+  mockAdapter,
+  mockCalls,
+  mockEmit,
+  setMockEngineCapabilities,
+  setMockOpDuration,
+  setMockProgressTotal,
+} from "../../ipc/mock/adapter";
 import { resetWcMock } from "../../ipc/mock/wc-mock-commands";
 import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../test-utils";
 import { WcSessionProvider } from "./wc-session";
@@ -27,6 +34,8 @@ beforeEach(() => {
   resetWcMock();
   mockCalls.length = 0;
   setMockOpDuration(40);
+  setMockProgressTotal(100);
+  setMockEngineCapabilities({ externals: true });
 });
 
 const option = (name: RegExp) => screen.findByRole("option", { name });
@@ -62,6 +71,8 @@ test("checkout: name follows the URL, parent is the default folder granted by Ru
   expect(req.destName).toBe("feature-x");
   expect(req.depth).toBe("immediates");
   expect(req.format).toBe(31);
+  expect(req.storePristine).toBe(true);
+  expect(req.ignoreExternals).toBe(false);
   expect(req).not.toHaveProperty("path");
   expect(mockCalls.some((c) => c.name === "checkoutRootGrant")).toBe(true);
   // The finished checkout is registered, opened and becomes the current repository.
@@ -171,9 +182,51 @@ test("checkout: progress is shown with Cancel; cancelling returns to the form", 
   expect(within(dlg).getByRole("progressbar", { name: "Checking out…" })).toBeTruthy();
   expect(within(dlg).getByRole("button", { name: "Continue in background" })).toBeTruthy();
   await user().click(cancel);
-  expect(await within(dlg).findByText("The checkout was cancelled.")).toBeTruthy();
+  expect(await within(dlg).findByText(/^The checkout was cancelled\./)).toBeTruthy();
   expect(lastCall("opCancel")).toBeTruthy();
   expect(within(dlg).getByRole("combobox", { name: "Repository URL" })).toBeTruthy();
+});
+
+test("checkout: no externals option; an engine that fetches them shows no note", async () => {
+  renderApp(<AppShell />);
+  await option(/renderer\.ts/);
+  await user().keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
+  const dlg = await dialog("Checkout repository");
+  await waitFor(() => expect(lastCall("engineCapabilities")).toBeTruthy());
+  expect(within(dlg).queryByRole("checkbox")).toBeNull();
+  expect(within(dlg).queryByText(/Externals are not fetched yet/)).toBeNull();
+});
+
+test("checkout: an engine without externals says they are not fetched and links the issue", async () => {
+  setMockEngineCapabilities({ externals: false });
+  renderApp(<AppShell />);
+  await option(/renderer\.ts/);
+  await user().keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
+  const dlg = await dialog("Checkout repository");
+  expect(await within(dlg).findByText(/Externals are not fetched yet/)).toBeTruthy();
+  const link = within(dlg).getByRole("link", { name: "Tracking issue" });
+  expect(link.getAttribute("href")).toBe("https://github.com/xuandung38/OpenSVN/issues/97");
+  expect(within(dlg).queryByRole("checkbox")).toBeNull();
+});
+
+test("checkout: progress without a total is indeterminate and counts items", async () => {
+  // First tick at 22.5% of the duration, within the find timeout.
+  setMockOpDuration(20_000);
+  setMockProgressTotal(null);
+  renderApp(<AppShell />);
+  await option(/renderer\.ts/);
+  await user().keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
+  const dlg = await dialog("Checkout repository");
+  await user().type(
+    within(dlg).getByRole("combobox", { name: "Repository URL" }),
+    "https://svn.example.com/repos/game/trunk",
+  );
+  await user().click(within(dlg).getByRole("button", { name: "Checkout" }));
+  expect(await within(dlg).findByText("1 items")).toBeTruthy();
+  const bar = within(dlg).getByRole("progressbar", { name: "Checking out…" });
+  expect(bar.hasAttribute("value")).toBe(false);
+  expect(bar.hasAttribute("max")).toBe(false);
+  await user().click(within(dlg).getByRole("button", { name: "Cancel checkout" }));
 });
 
 test("checkout: Browse… shows the repository folders and picking one sets the URL", async () => {

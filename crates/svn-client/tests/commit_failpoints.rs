@@ -654,3 +654,81 @@ async fn merge_refused_as_out_of_date_drops_the_journal_after_checking_the_log()
     assert_eq!(dump_rows(&e.wc), before);
     assert_eq!(e.youngest().await, 2);
 }
+
+/// Writes a version 1 journal (no `merge_sent` marker) of this working copy naming `txn`.
+fn plant_v1_journal(e: &Env, txn: &str) -> PathBuf {
+    std::fs::create_dir_all(&e.state).expect("state dir");
+    let path = e.state.join("commit-v1.json");
+    let v1 = serde_json::json!({
+        "version": 1,
+        "id": "v1",
+        "wcroot": e.db.wcroot(),
+        "keep_locks": false,
+        "keep_changelist": false,
+        "txn": txn,
+        "merged": null,
+        "items": [],
+    });
+    std::fs::write(&path, serde_json::to_vec(&v1).expect("json")).expect("write");
+    path
+}
+
+/// #92 review: a version 1 journal naming a transaction may have been left during the MERGE.
+/// The transaction still there: deleted now, so the commit never happened and the journal goes.
+#[tokio::test]
+async fn a_v1_journal_whose_transaction_still_exists_is_aborted() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "changed\n");
+    e.ra.inner.fail_next_merge(FakeMergeFault::LostBeforeMerge);
+    e.commit().await.expect_err("unknown");
+    let txn = e.only_journal().txn.expect("txn");
+    // Replace it with the version 1 journal an older build would have left.
+    for p in JournalStore::new(&e.state).list().expect("list") {
+        std::fs::remove_file(p).expect("rm");
+    }
+    plant_v1_journal(&e, &txn);
+    e.assert_next_commit_refused().await;
+
+    let report = e.recover_wc(true).await;
+    assert_eq!(report.aborted, vec!["v1".to_owned()], "{report:?}");
+    assert!(e.ra.inner.open_txns().is_empty());
+    e.assert_no_journal();
+}
+
+/// The transaction of a version 1 journal is gone: it may have been merged, and the journal
+/// has no start revision or message to search the log with, so it is kept for the user.
+#[tokio::test]
+async fn a_v1_journal_whose_transaction_is_gone_needs_the_user() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    let path = plant_v1_journal(&e, "gone-txn");
+    let before = std::fs::read(&path).expect("read");
+    let report = e.recover_wc(true).await;
+    assert_eq!(report.needs_user.len(), 1, "{report:?}");
+    assert!(report.aborted.is_empty());
+    assert_eq!(std::fs::read(&path).expect("kept"), before, "untouched");
+    e.assert_next_commit_refused().await;
+    assert_eq!(e.youngest().await, 1);
+}
+
+/// #92 review: a journal file that cannot be read may belong to this working copy and say the
+/// MERGE was sent, so it blocks new commits until it is readable again.
+#[tokio::test]
+async fn an_unreadable_journal_blocks_new_commits() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    // Something that lists as a journal but cannot be read as a file.
+    let bad = e.state.join("commit-unreadable.json");
+    std::fs::create_dir_all(&bad).expect("dir");
+    write(&e.wc, "d/f1", "changed\n");
+    let err = e.commit().await.expect_err("blocked");
+    assert_eq!(err.code, ErrorCode::WcNeedsCleanup, "{err}");
+    assert!(err.message.contains("cannot be read"), "{err}");
+    assert_eq!(e.youngest().await, 1, "nothing committed");
+    assert!(bad.is_dir(), "kept");
+
+    std::fs::remove_dir(&bad).expect("readable again");
+    let res = e.commit().await.expect("commit").expect("some");
+    assert_eq!(res.revision.0, 2);
+}

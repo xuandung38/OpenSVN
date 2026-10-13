@@ -1,22 +1,22 @@
-//! Opening a working copy: description, lock recovery, work queue and commit journal.
+//! Opening a working copy: description, lock recovery, work queue and commit journals.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use opensvn_ipc::{Rev, WcFormat, WcId};
-use svn_ra_api::{CommitObserver, RaSession};
-use svn_types::{CancelToken, ErrorCode, LockOwnershipStore, RelPath};
+use svn_client::commit::journal::{JournalData, JournalStore};
+use svn_ra_api::fake::FakeMergeFault;
+use svn_ra_api::{CommitInfo, CommitObserver, RaSession};
+use svn_types::{CancelToken, ErrorCode, LockOwnershipStore, RelPath, SvnError};
 use svn_wc::WcDb;
 
 use super::super::RecoveryHooks;
-use super::super::UnwiredRecovery;
-use super::super::journal::{JournalLoadError, JournalPhase, JournalRecord, JournalStore};
 use super::support::{
-    OLD_BOOT, ScriptedConnector, ScriptedSession, URL, add_base_dir, add_base_file, count_rows,
-    ctx, fixture, fixture_on, fixture_with, make_wc, plant_dead_app_lock, plant_lock_row,
-    plant_work_item, standard_repo,
+    OLD_BOOT, ScriptedConnector, ScriptedSession, StaticConnector, URL, add_base_dir,
+    add_base_file, checkout_trunk, client_commit, count_rows, ctx, fixture, fixture_on,
+    fixture_with, make_wc, plant_dead_app_lock, plant_lock_row, plant_work_item, standard_repo,
 };
 use crate::engine::{EngineFacade, EngineResult, OpContext, WcRef};
 
@@ -24,29 +24,17 @@ use crate::engine::{EngineFacade, EngineResult, OpContext, WcRef};
 #[derive(Default)]
 struct Finishing {
     queues: AtomicU32,
-    finalized: AtomicU32,
 }
 
 #[async_trait]
 impl RecoveryHooks for Finishing {
-    async fn run_work_queue(&self, db: &WcDb, _ctx: &OpContext) -> EngineResult<()> {
+    async fn run_work_queue(&self, db: &Arc<WcDb>, _ctx: &OpContext) -> EngineResult<()> {
         self.queues.fetch_add(1, Ordering::SeqCst);
         db.with_write(|tx| {
             tx.execute("DELETE FROM work_queue", [])
                 .map(|_| ())
                 .map_err(svn_wc::db::sql_err)
         })
-    }
-
-    async fn finalize_commit(
-        &self,
-        _db: &WcDb,
-        record: &JournalRecord,
-        _ctx: &OpContext,
-    ) -> EngineResult<()> {
-        assert!(matches!(record.phase, JournalPhase::Merged { .. }));
-        self.finalized.fetch_add(1, Ordering::SeqCst);
-        Ok(())
     }
 }
 
@@ -198,7 +186,8 @@ async fn work_queue_runs_when_nobody_else_holds_a_lock() {
 }
 
 #[tokio::test]
-async fn unfinished_work_without_a_runner_is_reported_for_cleanup() {
+async fn unfinished_work_that_cannot_run_is_reported_for_cleanup() {
+    // The planted item is not a valid work item: running it fails and it stays.
     let f = fixture();
     let (_tmp, root) = make_wc(1);
     plant_work_item(&root);
@@ -208,239 +197,13 @@ async fn unfinished_work_without_a_runner_is_reported_for_cleanup() {
 }
 
 #[tokio::test]
-async fn a_leaked_server_transaction_is_deleted_from_the_journal() {
-    let f = fixture();
-    let (_tmp, root) = make_wc(1);
-    let journal = f.engine.journals.begin(&root, URL).unwrap();
-    // The app dies after the transaction exists and before MERGE.
-    let editor = f
-        .repo
-        .commit_editor(
-            "lost",
-            &[],
-            &[],
-            false,
-            Arc::new(journal),
-            &CancelToken::new(),
-        )
-        .await
-        .unwrap();
-    drop(editor);
-    assert_eq!(f.repo.open_txns().len(), 1);
-    let record = f.engine.journals.load(&root).unwrap().unwrap();
-    assert!(matches!(record.phase, JournalPhase::TxnCreated { .. }));
-
-    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
-    assert!(opened.recovery.recovered.is_empty() && opened.recovery.needs_user_action.is_empty());
-    assert!(f.repo.open_txns().is_empty(), "transaction deleted");
-    assert!(
-        f.engine.journals.load(&root).unwrap().is_none(),
-        "journal removed"
-    );
-}
-
-/// Runs a commit of one new file up to MERGE and "crashes" before the working copy is updated.
-async fn crash_after_merge(f: &super::support::Fixture, root: &Path) {
-    let journal = f.engine.journals.begin(root, URL).unwrap();
-    let mut editor = f
-        .repo
-        .commit_editor(
-            "merged",
-            &[],
-            &[],
-            false,
-            Arc::new(journal),
-            &CancelToken::new(),
-        )
-        .await
-        .unwrap();
-    let head = f.repo.youngest_rev(&CancelToken::new()).await.unwrap();
-    let root_dir = editor.open_root(Some(head)).await.unwrap();
-    let dir = editor
-        .add_directory(&RelPath::new("extra").unwrap(), root_dir, None)
-        .await
-        .unwrap();
-    editor.close_directory(dir).await.unwrap();
-    editor.close_directory(root_dir).await.unwrap();
-    editor.close_edit().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_merged_commit_is_finalized_not_aborted() {
-    let hooks = Arc::new(Finishing::default());
-    let f = fixture_with(hooks.clone());
-    let (_tmp, root) = make_wc(1);
-    crash_after_merge(&f, &root).await;
-    let record = f.engine.journals.load(&root).unwrap().unwrap();
-    assert_eq!(record.phase, JournalPhase::Merged { rev: 2 });
-
-    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
-    assert_eq!(opened.recovery.recovered, vec![String::new()]);
-    assert_eq!(hooks.finalized.load(Ordering::SeqCst), 1);
-    assert!(f.engine.journals.load(&root).unwrap().is_none());
-    // The revision stays: recovery never undoes a merged commit.
-    assert_eq!(f.repo.youngest_rev(&CancelToken::new()).await.unwrap().0, 2);
-}
-
-#[tokio::test]
-async fn a_merged_commit_that_cannot_be_finalized_is_kept_and_reported() {
-    let f = fixture();
-    let (_tmp, root) = make_wc(1);
-    crash_after_merge(&f, &root).await;
-    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
-    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
-    assert!(
-        f.engine.journals.load(&root).unwrap().is_some(),
-        "journal kept"
-    );
-}
-
-#[tokio::test]
-async fn journals_are_per_working_copy_and_do_not_overlap() {
-    let f = fixture();
-    let (_a, root_a) = make_wc(1);
-    let (_b, root_b) = make_wc(1);
-    let first = f.engine.journals.begin(&root_a, URL).unwrap();
-    let second = f.engine.journals.begin(&root_b, URL).unwrap();
-    let blocked = f.engine.journals.begin(&root_a, URL).unwrap_err();
-    assert_eq!(blocked.code, ErrorCode::WcNeedsCleanup);
-    first.complete().unwrap();
-    assert!(f.engine.journals.load(&root_a).unwrap().is_none());
-    assert!(f.engine.journals.load(&root_b).unwrap().is_some());
-    second.complete().unwrap();
-}
-
-#[tokio::test]
-async fn a_corrupt_journal_is_set_aside_and_does_not_block_opening() {
-    let f = fixture();
-    let (_tmp, root) = make_wc(1);
-    let journal = f.engine.journals.begin(&root, URL).unwrap();
-    // Damage the file the journal wrote.
-    let dir = f.state.path().join("commit-journal");
-    let file = std::fs::read_dir(&dir)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    std::fs::write(&file, b"{ not json").unwrap();
-    let err = JournalStore::new(f.state.path().to_path_buf())
-        .load(&root)
-        .unwrap_err();
-    assert!(matches!(err, JournalLoadError::Corrupt(_)), "{err:?}");
-    assert_eq!(err.error().code, ErrorCode::Corrupt);
-
-    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
-    assert_eq!(
-        opened.recovery.needs_user_action,
-        vec![String::new()],
-        "the interrupted commit is reported, not silently forgotten"
-    );
-    assert!(
-        !file.exists(),
-        "the damaged journal no longer blocks commits"
-    );
-    let aside = file.with_extension("json.corrupt");
-    assert_eq!(
-        std::fs::read(&aside).unwrap(),
-        b"{ not json",
-        "kept for diagnosis"
-    );
-    f.engine
-        .journals
-        .begin(&root, URL)
-        .unwrap()
-        .complete()
-        .unwrap();
-    drop(journal);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn journals_are_keyed_by_the_canonical_root() {
-    let f = fixture();
-    let (tmp, root) = make_wc(1);
-    let link = tmp.path().join("link");
-    std::os::unix::fs::symlink(&root, &link).unwrap();
-    let journal = f.engine.journals.begin(&link, URL).unwrap();
-    let record = f
-        .engine
-        .journals
-        .load(&root)
-        .unwrap()
-        .expect("same journal");
-    let canonical = std::fs::canonicalize(&root).unwrap();
-    assert_eq!(record.wc_root, canonical.to_string_lossy());
-    let blocked = f.engine.journals.begin(&root, URL).unwrap_err();
-    assert_eq!(blocked.code, ErrorCode::WcNeedsCleanup);
-    journal.complete().unwrap();
-}
-
-/// Fixture whose sessions fail `abort_txn` with `abort_error`, with a journal of a commit that
-/// died after creating transaction `txn-1`.
-fn txn_fixture(
-    abort_error: Option<ErrorCode>,
-) -> (
-    super::support::Fixture,
-    Arc<ScriptedSession>,
-    tempfile::TempDir,
-    std::path::PathBuf,
-) {
-    let repo = standard_repo();
-    let session = Arc::new(ScriptedSession::new(repo.clone(), abort_error));
-    let f = fixture_on(
-        repo,
-        Arc::new(ScriptedConnector(session.clone())),
-        Arc::new(UnwiredRecovery),
-    );
-    let (tmp, root) = make_wc(1);
-    let journal = f.engine.journals.begin(&root, URL).unwrap();
-    journal.on_txn_created("txn-1").unwrap();
-    (f, session, tmp, root)
-}
-
-#[tokio::test]
-async fn a_transaction_the_server_no_longer_knows_clears_the_journal() {
-    let (f, session, _tmp, root) = txn_fixture(Some(ErrorCode::PathNotFound));
-    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
-    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
-    assert!(
-        f.engine.journals.load(&root).unwrap().is_none(),
-        "a lost transaction must not block commits forever"
-    );
-    assert_eq!(
-        session.calls(),
-        vec!["auth", "abort"],
-        "signed in before the abort"
-    );
-    f.engine
-        .journals
-        .begin(&root, URL)
-        .unwrap()
-        .complete()
-        .unwrap();
-}
-
-#[tokio::test]
-async fn a_temporary_abort_failure_keeps_the_journal_for_the_next_open() {
-    let (f, session, _tmp, root) = txn_fixture(Some(ErrorCode::Network));
-    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
-    assert!(opened.recovery.needs_user_action.is_empty());
-    assert!(
-        f.engine.journals.load(&root).unwrap().is_some(),
-        "retried later"
-    );
-    assert_eq!(session.calls(), vec!["auth", "abort"]);
-}
-
-#[tokio::test]
 async fn ensure_authenticated_signs_in_to_the_working_copy_repository_only_when_interactive() {
     let repo = standard_repo();
     let session = Arc::new(ScriptedSession::new(repo.clone(), None));
     let f = fixture_on(
         repo,
         Arc::new(ScriptedConnector(session.clone())),
-        Arc::new(UnwiredRecovery),
+        Arc::new(super::super::ClientRecovery),
     );
     let (_tmp, root) = make_wc(1);
     let wc = WcRef {
@@ -456,91 +219,61 @@ async fn ensure_authenticated_signs_in_to_the_working_copy_repository_only_when_
     assert_eq!(session.calls(), vec!["auth"]);
 }
 
-#[tokio::test]
-async fn a_merged_commit_is_not_finalized_while_a_foreign_lock_is_held() {
-    let hooks = Arc::new(Finishing::default());
-    let f = fixture_with(hooks.clone());
-    let (_tmp, root) = make_wc(1);
-    crash_after_merge(&f, &root).await;
-    plant_lock_row(&root, "");
+// --- Commit journals (svn-client's, below `<state_dir>/commit-journals/`) ---------------------
 
-    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
-    assert_eq!(
-        hooks.finalized.load(Ordering::SeqCst),
-        0,
-        "never under a foreign lock"
+/// Fixture whose sessions are the scripted session over the standard repository.
+fn scripted(abort_error: Option<ErrorCode>) -> (super::support::Fixture, Arc<ScriptedSession>) {
+    let repo = standard_repo();
+    let session = Arc::new(ScriptedSession::new(repo.clone(), abort_error));
+    let f = fixture_on(
+        repo,
+        Arc::new(ScriptedConnector(session.clone())),
+        Arc::new(super::super::ClientRecovery),
     );
-    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
-    assert!(
-        f.engine.journals.load(&root).unwrap().is_some(),
-        "journal kept"
+    (f, session)
+}
+
+/// Root of the working copy at `root` as the engine's handle names it (journals are keyed by it).
+fn wcroot_of(root: &Path) -> PathBuf {
+    WcDb::open(root).unwrap().wcroot().to_path_buf()
+}
+
+/// Writes a journal of the working copy `wcroot` that has reached `txn` (if any), with
+/// `merge_sent` as given and nothing merged; returns its file.
+fn plant_journal(
+    f: &super::support::Fixture,
+    wcroot: &Path,
+    txn: Option<&str>,
+    merge_sent: bool,
+) -> PathBuf {
+    let store = JournalStore::new(f.engine.commit_journal_dir());
+    let id = store.new_id();
+    let mut data: JournalData = store.begin(
+        id.clone(),
+        wcroot.to_path_buf(),
+        false,
+        false,
+        Vec::new(),
+        Vec::new(),
     );
-
-    // Once the other program is done, the next open finalizes.
-    let db = WcDb::open(&root).unwrap();
-    db.with_write(|tx| {
-        tx.execute("DELETE FROM wc_lock", [])
-            .map(|_| ())
-            .map_err(svn_wc::db::sql_err)
-    })
-    .unwrap();
-    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
-    assert_eq!(opened.recovery.recovered, vec![String::new()]);
-    assert_eq!(hooks.finalized.load(Ordering::SeqCst), 1);
-    assert!(f.engine.journals.load(&root).unwrap().is_none());
+    data.txn = txn.map(str::to_owned);
+    data.merge_sent = merge_sent;
+    data.start_youngest = Some(0);
+    data.message = Some("lost commit".to_owned());
+    store.write(&data).unwrap();
+    store.file_of(&id)
 }
 
-/// Hooks whose work queue run fails; counts finalizations.
-#[derive(Default)]
-struct StuckQueue {
-    finalized: AtomicU32,
-}
-
-#[async_trait]
-impl RecoveryHooks for StuckQueue {
-    async fn run_work_queue(&self, _db: &WcDb, _ctx: &OpContext) -> EngineResult<()> {
-        Err(svn_types::SvnError::new(ErrorCode::Internal, "stuck"))
-    }
-
-    async fn finalize_commit(
-        &self,
-        _db: &WcDb,
-        _record: &JournalRecord,
-        _ctx: &OpContext,
-    ) -> EngineResult<()> {
-        self.finalized.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn a_merged_commit_is_not_finalized_over_unfinished_work() {
-    let hooks = Arc::new(StuckQueue::default());
-    let f = fixture_with(hooks.clone());
-    let (_tmp, root) = make_wc(1);
-    crash_after_merge(&f, &root).await;
-    plant_work_item(&root);
-    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
-    assert_eq!(hooks.finalized.load(Ordering::SeqCst), 0);
-    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
-    assert!(f.engine.journals.load(&root).unwrap().is_some());
-}
-
-/// Path of the only journal file of the fixture's state directory.
-fn journal_file(f: &super::support::Fixture) -> std::path::PathBuf {
-    let dir = f.state.path().join("commit-journal");
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
+/// Journal files present, sorted.
+fn journals(f: &super::support::Fixture) -> Vec<PathBuf> {
+    JournalStore::new(f.engine.commit_journal_dir())
+        .list()
         .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .collect();
-    assert_eq!(files.len(), 1, "{files:?}");
-    files.pop().unwrap()
 }
 
-/// Names below the journal directory, sorted.
+/// Names in the journal directory (journals, data directories, set-aside files), sorted.
 fn journal_dir_listing(f: &super::support::Fixture) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(f.state.path().join("commit-journal"))
+    let mut names: Vec<String> = std::fs::read_dir(f.engine.commit_journal_dir())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
@@ -548,141 +281,360 @@ fn journal_dir_listing(f: &super::support::Fixture) -> Vec<String> {
     names
 }
 
-/// Fixture with finishing hooks and a journal file of `root` holding `contents`.
-fn fixture_with_journal(
-    contents: &[u8],
-) -> (
-    super::support::Fixture,
-    Arc<Finishing>,
-    tempfile::TempDir,
-    std::path::PathBuf,
-    std::path::PathBuf,
-) {
-    let hooks = Arc::new(Finishing::default());
-    let f = fixture_with(hooks.clone());
-    let (tmp, root) = make_wc(1);
-    drop(f.engine.journals.begin(&root, URL).unwrap());
-    let file = journal_file(&f);
-    std::fs::write(&file, contents).unwrap();
-    (f, hooks, tmp, root, file)
+/// Observer that records nothing (a transaction left behind by a crashed commit).
+struct Ignore;
+
+impl CommitObserver for Ignore {
+    fn on_txn_created(&self, _txn: &str) -> svn_types::Result<()> {
+        Ok(())
+    }
+    fn on_merged(&self, _info: &CommitInfo) -> svn_types::Result<()> {
+        Ok(())
+    }
+}
+
+/// Opens a server transaction and abandons it, as a commit that died before MERGE does.
+async fn leak_txn(repo: &svn_ra_api::fake::FakeRaSession) -> String {
+    let editor = repo
+        .commit_editor(
+            "lost",
+            &[],
+            &[],
+            false,
+            Arc::new(Ignore),
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap();
+    drop(editor);
+    let txns = repo.open_txns();
+    assert_eq!(txns.len(), 1);
+    txns[0].clone()
 }
 
 #[tokio::test]
-async fn a_current_format_journal_that_does_not_parse_is_set_aside() {
-    let (f, hooks, _tmp, root, file) = fixture_with_journal(br#"{"version":1,"phase":"exploded"}"#);
-    let err = f.engine.journals.load(&root).unwrap_err();
-    assert!(matches!(err, JournalLoadError::Corrupt(_)), "{err:?}");
+async fn opening_without_journals_never_connects() {
+    let (f, session) = scripted(None);
+    let (_tmp, root) = make_wc(1);
+    let other = plant_journal(&f, Path::new("/elsewhere/wc"), Some("t"), true);
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert!(opened.recovery.recovered.is_empty() && opened.recovery.needs_user_action.is_empty());
+    assert!(session.connects().is_empty(), "{:?}", session.connects());
+    assert!(
+        other.exists(),
+        "another working copy's journal is not touched"
+    );
+}
+
+#[tokio::test]
+async fn a_leaked_server_transaction_is_deleted_over_an_unattended_session() {
+    let (f, session) = scripted(None);
+    let (_tmp, root) = make_wc(1);
+    let txn = leak_txn(&f.repo).await;
+    plant_journal(&f, &wcroot_of(&root), Some(&txn), false);
 
     let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
-    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
-    assert!(!file.exists());
-    assert_eq!(
-        std::fs::read(file.with_extension("json.corrupt")).unwrap(),
-        br#"{"version":1,"phase":"exploded"}"#
-    );
-    assert_eq!(hooks.finalized.load(Ordering::SeqCst), 0);
+    assert!(opened.recovery.recovered.is_empty() && opened.recovery.needs_user_action.is_empty());
+    assert!(f.repo.open_txns().is_empty(), "transaction deleted");
+    assert!(journals(&f).is_empty(), "journal removed");
+    assert_eq!(session.connects(), vec![false], "opening never prompts");
+    assert_eq!(session.calls(), vec!["auth", "abort"], "signed in first");
 }
 
 #[tokio::test]
-async fn a_journal_of_an_unknown_format_is_kept_untouched_and_not_finalized() {
-    let contents = format!(
-        r#"{{"version":2,"wc_root":"x","repo_root_url":"{URL}","phase":"merged","rev":2,"extra":true}}"#
-    );
-    let (f, hooks, _tmp, root, file) = fixture_with_journal(contents.as_bytes());
-    match f.engine.journals.load(&root).unwrap_err() {
-        JournalLoadError::UnsupportedVersion { version, .. } => assert_eq!(version, 2),
-        other => panic!("expected an unsupported version, got {other:?}"),
-    }
-    let before = journal_dir_listing(&f);
+async fn an_unknown_merge_outcome_with_the_transaction_still_there_is_dropped() {
+    let (f, _session) = scripted(None);
+    let (_tmp, root) = make_wc(1);
+    let txn = leak_txn(&f.repo).await;
+    plant_journal(&f, &wcroot_of(&root), Some(&txn), true);
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert!(opened.recovery.needs_user_action.is_empty(), "{opened:?}");
+    assert!(f.repo.open_txns().is_empty());
+    assert!(journals(&f).is_empty());
+}
 
+#[tokio::test]
+async fn an_unknown_merge_outcome_the_log_does_not_settle_is_kept_for_the_user() {
+    let (f, _session) = scripted(None);
+    let (_tmp, root) = make_wc(1);
+    // The transaction is gone and r1 is not this commit.
+    let file = plant_journal(&f, &wcroot_of(&root), Some("gone"), true);
+    let before = std::fs::read(&file).unwrap();
     for _ in 0..2 {
         let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
         assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
         assert!(opened.recovery.recovered.is_empty());
     }
-    assert_eq!(hooks.finalized.load(Ordering::SeqCst), 0, "never finalized");
-    assert_eq!(
-        std::fs::read(&file).unwrap(),
-        contents.as_bytes(),
-        "untouched"
-    );
-    assert_eq!(journal_dir_listing(&f), before, "not moved aside");
-
-    let err = f.engine.journals.begin(&root, URL).unwrap_err();
-    assert_eq!(err.code, ErrorCode::WcNeedsCleanup);
-    assert!(
-        err.message.contains("journal format 2"),
-        "the refusal explains itself: {err}"
-    );
+    assert_eq!(std::fs::read(&file).unwrap(), before, "journal untouched");
 }
 
 #[tokio::test]
-async fn a_journal_that_cannot_be_read_is_kept_for_the_next_open() {
-    let (f, hooks, _tmp, root, file) = fixture_with_journal(b"");
-    // Something that exists but cannot be read as a file: a directory in its place.
+async fn a_temporary_abort_failure_keeps_the_journal_and_reports_it() {
+    let (f, session) = scripted(Some(ErrorCode::Network));
+    let (_tmp, root) = make_wc(1);
+    plant_journal(&f, &wcroot_of(&root), Some("txn-1"), false);
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    assert_eq!(journals(&f).len(), 1, "retried on the next open");
+    assert_eq!(session.calls(), vec!["auth", "abort"]);
+}
+
+#[tokio::test]
+async fn without_a_connection_the_journal_stays_and_is_reported() {
+    let repo = standard_repo();
+    let f = fixture_on(
+        repo,
+        Arc::new(StaticConnector(Vec::new())),
+        Arc::new(super::super::ClientRecovery),
+    );
+    let (_tmp, root) = make_wc(1);
+    plant_journal(&f, &wcroot_of(&root), Some("txn-1"), true);
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    assert_eq!(journals(&f).len(), 1);
+}
+
+#[tokio::test]
+async fn a_corrupt_journal_is_set_aside_and_reported() {
+    let f = fixture();
+    let (_tmp, root) = make_wc(1);
+    let file = plant_journal(&f, &wcroot_of(&root), None, false);
+    std::fs::write(&file, b"{ not json").unwrap();
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    assert!(!file.exists(), "no longer counts as a journal");
+    let aside = file.with_extension("json.corrupt");
+    assert_eq!(std::fs::read(aside).unwrap(), b"{ not json", "kept");
+    let again = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert!(again.recovery.needs_user_action.is_empty(), "reported once");
+}
+
+#[tokio::test]
+async fn a_journal_of_an_unknown_format_is_left_untouched() {
+    let f = fixture();
+    let (_tmp, root) = make_wc(1);
+    let file = plant_journal(&f, &wcroot_of(&root), None, false);
+    let contents = serde_json::json!({
+        "version": 99,
+        "wcroot": wcroot_of(&root),
+        "something": "new",
+    })
+    .to_string();
+    std::fs::write(&file, &contents).unwrap();
+    let before = journal_dir_listing(&f);
+    for _ in 0..2 {
+        let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+        assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    }
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), contents);
+    assert_eq!(journal_dir_listing(&f), before, "not moved aside");
+
+    // Another working copy's journal of an unknown format is not this one's business.
+    let (_tmp2, other) = make_wc(1);
+    let opened = f.engine.open_wc(&other, &ctx()).await.unwrap();
+    assert!(opened.recovery.needs_user_action.is_empty());
+}
+
+#[tokio::test]
+async fn a_journal_that_cannot_be_read_is_kept_and_reported() {
+    let f = fixture();
+    let (_tmp, root) = make_wc(1);
+    let file = plant_journal(&f, &wcroot_of(&root), None, false);
+    // Something that lists as a journal but cannot be read as a file.
     std::fs::remove_file(&file).unwrap();
     std::fs::create_dir(&file).unwrap();
     std::fs::write(file.join("inside"), b"keep").unwrap();
-    let err = f.engine.journals.load(&root).unwrap_err();
-    assert!(matches!(err, JournalLoadError::Unreadable(_)), "{err:?}");
     let before = journal_dir_listing(&f);
-
     let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
     assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
     assert_eq!(journal_dir_listing(&f), before, "nothing moved or removed");
     assert_eq!(std::fs::read(file.join("inside")).unwrap(), b"keep");
+}
 
-    // Once readable again, the next open recovers it as usual.
-    std::fs::remove_dir_all(&file).unwrap();
-    let journal = f.engine.journals.begin(&root, URL).unwrap();
-    journal
-        .on_merged(&svn_ra_api::CommitInfo {
-            revision: svn_types::Revnum(2),
-            date: None,
-            author: None,
-            post_commit_err: None,
-        })
-        .unwrap();
-    drop(journal);
+#[tokio::test]
+async fn nothing_is_settled_while_a_foreign_lock_is_held() {
+    let (f, session) = scripted(None);
+    let (_tmp, root) = make_wc(1);
+    let txn = leak_txn(&f.repo).await;
+    plant_journal(&f, &wcroot_of(&root), Some(&txn), false);
+    plant_lock_row(&root, "");
     let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
-    assert_eq!(opened.recovery.recovered, vec![String::new()]);
-    assert_eq!(hooks.finalized.load(Ordering::SeqCst), 1);
+    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    assert_eq!(journals(&f).len(), 1);
+    assert_eq!(f.repo.open_txns(), vec![txn]);
+    assert!(session.connects().is_empty());
 }
 
-#[tokio::test]
-async fn an_earlier_quarantined_journal_is_never_replaced() {
-    let (f, _hooks, _tmp, root, file) = fixture_with_journal(b"garbage");
-    std::fs::write(file.with_extension("json.corrupt"), b"older").unwrap();
+/// Hooks whose work queue run always fails.
+struct StuckQueue;
 
-    f.engine.open_wc(&root, &ctx()).await.unwrap();
-    assert!(!file.exists());
-    assert_eq!(
-        std::fs::read(file.with_extension("json.corrupt")).unwrap(),
-        b"older"
-    );
-    assert_eq!(
-        std::fs::read(file.with_extension("json.corrupt.1")).unwrap(),
-        b"garbage"
-    );
-}
-
-#[tokio::test]
-async fn a_corrupt_journal_that_cannot_be_set_aside_stays_in_place() {
-    let (f, _hooks, _tmp, root, file) = fixture_with_journal(b"garbage");
-    // Every quarantine slot is taken: setting it aside fails.
-    std::fs::write(file.with_extension("json.corrupt"), b"old").unwrap();
-    for n in 1..8 {
-        std::fs::write(file.with_extension(format!("json.corrupt.{n}")), b"old").unwrap();
+#[async_trait]
+impl RecoveryHooks for StuckQueue {
+    async fn run_work_queue(&self, _db: &Arc<WcDb>, _ctx: &OpContext) -> EngineResult<()> {
+        Err(SvnError::new(ErrorCode::Internal, "stuck"))
     }
-    let before = journal_dir_listing(&f);
+}
+
+#[tokio::test]
+async fn nothing_is_settled_over_unfinished_work() {
+    let f = fixture_with(Arc::new(StuckQueue));
+    let (_tmp, root) = make_wc(1);
+    let txn = leak_txn(&f.repo).await;
+    plant_journal(&f, &wcroot_of(&root), Some(&txn), false);
+    plant_work_item(&root);
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    assert_eq!(journals(&f).len(), 1);
+    assert_eq!(f.repo.open_txns(), vec![txn]);
+}
+
+/// Path of the journal earlier app builds kept for the working copy at `root`.
+fn legacy_file(f: &super::support::Fixture, root: &Path) -> PathBuf {
+    use sha1::{Digest, Sha1};
+    let canonical = std::fs::canonicalize(root).unwrap();
+    let digest = Sha1::digest(canonical.to_string_lossy().as_bytes());
+    let name: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    f.state
+        .path()
+        .join("commit-journal")
+        .join(format!("{name}.json"))
+}
+
+#[tokio::test]
+async fn a_legacy_journal_is_set_aside_never_deleted_and_reported_once() {
+    let f = fixture();
+    let (_tmp, root) = make_wc(1);
+    let file = legacy_file(&f, &root);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let contents = format!(
+        r#"{{"version":1,"wc_root":"x","repo_root_url":"{URL}","phase":"merged","rev":2}}"#
+    );
+    std::fs::write(&file, &contents).unwrap();
+    // An earlier set-aside copy is never replaced.
+    let first = file.with_extension("json.legacy");
+    std::fs::write(&first, b"older").unwrap();
 
     let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
     assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
-    assert_eq!(std::fs::read(&file).unwrap(), b"garbage", "never deleted");
-    assert_eq!(journal_dir_listing(&f), before);
+    assert!(opened.recovery.recovered.is_empty(), "nothing done from it");
+    assert!(!file.exists());
+    assert_eq!(std::fs::read(&first).unwrap(), b"older");
     assert_eq!(
-        f.engine.journals.begin(&root, URL).unwrap_err().code,
-        ErrorCode::WcNeedsCleanup,
-        "commits stay blocked until the user looks"
+        std::fs::read_to_string(file.with_extension("json.legacy.1")).unwrap(),
+        contents
     );
+    let again = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert!(again.recovery.needs_user_action.is_empty(), "reported once");
+}
+
+#[tokio::test]
+async fn a_legacy_journal_that_cannot_be_set_aside_stays_and_keeps_being_reported() {
+    let f = fixture();
+    let (_tmp, root) = make_wc(1);
+    let file = legacy_file(&f, &root);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"old").unwrap();
+    std::fs::write(file.with_extension("json.legacy"), b"x").unwrap();
+    for n in 1..8 {
+        std::fs::write(file.with_extension(format!("json.legacy.{n}")), b"x").unwrap();
+    }
+    for _ in 0..2 {
+        let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+        assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    }
+    assert_eq!(std::fs::read(&file).unwrap(), b"old", "never deleted");
+}
+
+/// A commit whose MERGE was applied but whose answer was lost (the app was killed or the
+/// connection dropped after the MERGE was sent): the next open finds it in the log and
+/// finalizes the working copy without a manual step.
+#[tokio::test]
+async fn a_commit_applied_after_the_merge_was_sent_is_finalized_on_open() {
+    let (f, session) = scripted(None);
+    let (_tmp, root) = checkout_trunk(&f).await;
+    std::fs::write(root.join("README.md"), "changed\n").unwrap();
+    f.repo.fail_next_merge(FakeMergeFault::LostAfterMerge);
+    let err = client_commit(&f, &root, &f.repo, "edit readme")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::CommitOutcomeUnknown, "{err}");
+    assert_eq!(f.repo.youngest_rev(&CancelToken::new()).await.unwrap().0, 2);
+    assert_eq!(journals(&f).len(), 1);
+
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.recovered, vec![String::new()]);
+    assert!(opened.recovery.needs_user_action.is_empty(), "{opened:?}");
+    assert!(journals(&f).is_empty());
+    assert_eq!(session.connects(), vec![false]);
+    let base: i64 = WcDb::open(&root)
+        .unwrap()
+        .with_read(|c| {
+            c.query_row(
+                "SELECT revision FROM nodes WHERE local_relpath = 'README.md' AND op_depth = 0",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(svn_wc::db::sql_err)
+        })
+        .unwrap();
+    assert_eq!(base, 2, "the working copy has the committed revision");
+    assert_eq!(
+        std::fs::read_to_string(root.join("README.md")).unwrap(),
+        "changed\n"
+    );
+
+    // The next commit goes through.
+    std::fs::write(root.join("README.md"), "again\n").unwrap();
+    let res = client_commit(&f, &root, &f.repo, "again").await.unwrap();
+    assert_eq!(res.unwrap().revision.0, 3);
+}
+
+/// The MERGE was sent but never applied: the open deletes the transaction and drops the
+/// journal; the working copy keeps its local change for the next commit.
+#[tokio::test]
+async fn a_commit_lost_before_the_merge_is_dropped_on_open() {
+    let (f, _session) = scripted(None);
+    let (_tmp, root) = checkout_trunk(&f).await;
+    std::fs::write(root.join("README.md"), "changed\n").unwrap();
+    f.repo.fail_next_merge(FakeMergeFault::LostBeforeMerge);
+    client_commit(&f, &root, &f.repo, "edit readme")
+        .await
+        .unwrap_err();
+    assert_eq!(f.repo.open_txns().len(), 1);
+
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert!(opened.recovery.needs_user_action.is_empty(), "{opened:?}");
+    assert!(f.repo.open_txns().is_empty());
+    assert!(journals(&f).is_empty());
+    let res = client_commit(&f, &root, &f.repo, "retry").await.unwrap();
+    assert_eq!(res.unwrap().revision.0, 2);
+}
+
+/// A merged commit is never finalized while another program holds a lock; once it is gone, the
+/// next open finalizes.
+#[tokio::test]
+async fn a_merged_commit_waits_for_a_foreign_lock() {
+    let (f, _session) = scripted(None);
+    let (_tmp, root) = checkout_trunk(&f).await;
+    std::fs::write(root.join("README.md"), "changed\n").unwrap();
+    f.repo.fail_next_merge(FakeMergeFault::LostAfterMerge);
+    client_commit(&f, &root, &f.repo, "edit readme")
+        .await
+        .unwrap_err();
+    plant_lock_row(&root, "");
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    assert_eq!(journals(&f).len(), 1);
+
+    WcDb::open(&root)
+        .unwrap()
+        .with_write(|tx| {
+            tx.execute("DELETE FROM wc_lock", [])
+                .map(|_| ())
+                .map_err(svn_wc::db::sql_err)
+        })
+        .unwrap();
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.recovered, vec![String::new()]);
+    assert!(journals(&f).is_empty());
 }
