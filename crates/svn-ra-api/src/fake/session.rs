@@ -594,10 +594,12 @@ impl RaSession for FakeRaSession {
             tree,
             base_head,
             changed: Vec::new(),
+            dir_bases: HashMap::new(),
             dirs: HashMap::new(),
             files: HashMap::new(),
             next_id: 0,
             touched: Vec::new(),
+            root: self.root.clone(),
         }))
     }
 

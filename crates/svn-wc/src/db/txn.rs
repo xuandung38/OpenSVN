@@ -13,8 +13,9 @@ use rusqlite::{Connection, params};
 use svn_types::{Depth, ErrorCode, NodeKind, RelPath, Result, SvnError};
 
 use super::actual;
+use super::misc::LockInfo;
 use super::nodes::{self, Node, Presence, Props, kind_word, parent_text, relpath_depth};
-use super::ops::{self, BaseNode, scope_sql};
+use super::ops::{self, BaseNode, CommitInfo, scope_sql};
 use super::{WcDb, sql_err};
 use crate::conflicts::{Conflict, ConflictSkel, OperationInfo};
 use crate::skel::Skel;
@@ -202,6 +203,72 @@ impl WcTxn<'_> {
         Ok(())
     }
 
+    /// Folds a committed path into BASE (same rows as [`WcDb::commit_nodes`] for one entry):
+    /// parents before children, idempotent when the path was already committed at
+    /// `info.new_rev`.
+    pub fn commit_node(&self, path: &RelPath, info: &CommitInfo) -> Result<()> {
+        ops::commit_node(self.conn, self.wc_id, path, info)
+    }
+
+    // ---- repository lock cache ----------------------------------------------------------
+
+    /// Caches `lock` for the BASE node at `path` (`svn_wc__db_lock_add`): the row is keyed by
+    /// the node's repository location and replaces an older one. `PathNotFound` without BASE.
+    pub fn lock_add(&self, path: &RelPath, lock: &LockInfo) -> Result<()> {
+        let n = self
+            .conn
+            .execute(
+                "INSERT OR REPLACE INTO lock (repos_id, repos_relpath, lock_token, lock_owner, \
+                 lock_comment, lock_date) SELECT repos_id, repos_path, ?3, ?4, ?5, ?6 FROM nodes \
+                 WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = 0 \
+                 AND repos_id IS NOT NULL AND repos_path IS NOT NULL",
+                params![
+                    self.wc_id,
+                    path.as_str(),
+                    lock.token,
+                    lock.owner,
+                    lock.comment,
+                    lock.date
+                ],
+            )
+            .map_err(sql_err)?;
+        if n == 0 {
+            return Err(SvnError::new(
+                ErrorCode::PathNotFound,
+                format!("'{path}' has no BASE node to lock"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Drops the cached lock of the BASE node at `path` (`svn_wc__db_lock_remove`). A path
+    /// without BASE or without a cached lock is left alone, so this can be repeated.
+    pub fn lock_remove(&self, path: &RelPath) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM lock WHERE EXISTS (SELECT 1 FROM nodes n WHERE n.wc_id = ?1 \
+                 AND n.local_relpath = ?2 AND n.op_depth = 0 AND n.repos_id = lock.repos_id \
+                 AND n.repos_path = lock.repos_relpath)",
+                params![self.wc_id, path.as_str()],
+            )
+            .map_err(sql_err)?;
+        Ok(())
+    }
+
+    /// Like [`lock_remove`](Self::lock_remove), but only when the cached lock still has
+    /// `token`: a lock taken again since then is left alone.
+    pub fn lock_remove_token(&self, path: &RelPath, token: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM lock WHERE lock_token = ?3 AND EXISTS (SELECT 1 FROM nodes n \
+                 WHERE n.wc_id = ?1 AND n.local_relpath = ?2 AND n.op_depth = 0 \
+                 AND n.repos_id = lock.repos_id AND n.repos_path = lock.repos_relpath)",
+                params![self.wc_id, path.as_str(), token],
+            )
+            .map_err(sql_err)?;
+        Ok(())
+    }
+
     /// Paths of the BASE children of `path`.
     fn base_children(&self, path: &RelPath) -> Result<Vec<RelPath>> {
         let mut stmt = self
@@ -324,6 +391,12 @@ impl WcTxn<'_> {
         actual::write_props(self.conn, self.wc_id, path, props)
     }
 
+    /// Sets the working property list of `path` like [`WcDb::set_props`]: the overlay is
+    /// dropped when `props` equals the pristine properties.
+    pub fn set_props(&self, path: &RelPath, props: &Props) -> Result<()> {
+        ops::set_props(self.conn, self.wc_id, path, props)
+    }
+
     /// Adds `conflicts` to the conflict record of `path`: a conflict of a kind that is already
     /// recorded replaces the old one, and the operation info is replaced by `info`. Legacy
     /// conflict columns and the `older/left/right_checksum` columns are left untouched.
@@ -344,6 +417,16 @@ impl WcTxn<'_> {
             skel.add(c)?;
         }
         actual::write_conflict_data(self.conn, self.wc_id, path, &skel.to_skel())
+    }
+
+    /// Replaces the conflict record of `path` like [`WcDb::mark_conflict`].
+    pub fn write_conflict(&self, path: &RelPath, record: &actual::ConflictRecord) -> Result<()> {
+        actual::write_conflict(self.conn, self.wc_id, path, record)
+    }
+
+    /// Drops every conflict of `path` like [`WcDb::resolve`].
+    pub fn clear_conflict(&self, path: &RelPath) -> Result<()> {
+        actual::clear_conflict(self.conn, self.wc_id, path)
     }
 
     // ---- stat cache and work queue ------------------------------------------------------
