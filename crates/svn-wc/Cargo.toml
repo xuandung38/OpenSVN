@@ -16,6 +16,7 @@ failpoints = ["dep:fail", "fail/failpoints"]
 
 [dependencies]
 svn-types.workspace = true
+ignore.workspace = true
 svn-diff.workspace = true
 unicode-normalization.workspace = true
 thiserror.workspace = true

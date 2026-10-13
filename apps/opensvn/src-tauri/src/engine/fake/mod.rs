@@ -12,7 +12,6 @@ mod remote_ops;
 mod seed;
 mod state;
 mod sync_ops;
-mod text;
 #[cfg(test)]
 mod tick_tests;
 
@@ -94,7 +93,7 @@ impl FakeEngine {
             if !rest.is_empty() && !rest.starts_with('/') {
                 continue; // `https://h/repo2` is not below `https://h/repo`
             }
-            let decoded = text::percent_decode(rest.trim_matches('/'));
+            let decoded = super::text::percent_decode(rest.trim_matches('/'));
             return Ok((repo.clone(), RelPath::new(&decoded)?));
         }
         Err(SvnError::new(

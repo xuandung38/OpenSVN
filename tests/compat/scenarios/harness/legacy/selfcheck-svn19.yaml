@@ -1,0 +1,11 @@
+# Self-check for the Subversion 1.9.12 image: two svn19 checkouts of the same revision must compare
+# equal on every axis (legacy profile: `cargo xtask compat up --legacy`).
+name: selfcheck-svn19
+description: svn19 vs svn19, read-only checkout
+server: svn19
+repo: basic
+steps:
+  - { on: svn19, wc: a, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn19, wc: b, svn: [checkout, "{url}/trunk", "."] }
+compare:
+  - { left: a, right: b, checks: [tree, status, info, wcdb], reader: svn19 }

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:update-report xmlns:S="svn:" xmlns:V="http://subversion.tigris.org/xmlns/dav/" xmlns:D="DAV:" send-all="true" inline-props="true">
+<S:target-revision rev="5"/>
+<S:open-directory rev="4">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/5/trunk</D:href></D:checked-in>
+<S:add-file name="evil. ">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/5/trunk/x</D:href></D:checked-in>
+<S:txdelta>U1ZOAA==</S:txdelta>
+</S:add-file>
+</S:open-directory>
+</S:update-report>
