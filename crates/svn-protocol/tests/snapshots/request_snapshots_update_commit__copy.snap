@@ -1,0 +1,10 @@
+---
+source: crates/svn-protocol/tests/request_snapshots_update_commit.rs
+expression: "render(&copy_request(&u, Revnum(7), &rel(\"trunk/a b\"), t,\n&rel(\"branches/c\")).unwrap())"
+---
+COPY http://svn.test.local/svn/repo/!svn/rvr/7/trunk/a%20b
+Destination: http://svn.test.local/svn/repo/!svn/txr/12-ab/branches/c
+Overwrite: F
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
