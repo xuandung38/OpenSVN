@@ -137,6 +137,9 @@ pub struct CopyLocationRequest {
     pub to_url: String,
     pub message: String,
     pub switch_wc_id: Option<WcId>,
+    /// Copy the working copy (including its local changes) instead of `from_url`; `from_url` and
+    /// `from_rev` are then ignored.
+    pub from_wc: Option<WcId>,
 }
 
 /// Text that must never reach logs: `Debug` prints a fixed placeholder. On the wire it is a
