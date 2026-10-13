@@ -462,7 +462,9 @@ pub async fn remote_edit_and_copy(h: &dyn Harness) {
                 to_url: format!("{url}/branches/conformance"),
                 message: "Branch".into(),
                 switch_wc_id: None,
+                from_wc: None,
             },
+            None,
             &ctx(),
         )
         .await
@@ -598,7 +600,9 @@ pub async fn switch_to_a_branch(h: &dyn Harness) {
             to_url: format!("{url}/branches/switch-target"),
             message: "Branch for switch".into(),
             switch_wc_id: None,
+            from_wc: None,
         },
+        None,
         &ctx(),
     )
     .await

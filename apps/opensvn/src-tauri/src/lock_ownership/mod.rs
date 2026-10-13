@@ -3,12 +3,17 @@
 //! holder from a stale row left by a crashed process.
 //!
 //! A row stores the owner's pid, the boot session and the process start time. Classification:
+//! * the recorded boot id is exact (Linux `boot_id`, macOS boot session UUID) and differs from the
+//!   current one: the machine rebooted, **dead**;
 //! * no live process with that pid: **dead**;
-//! * the pid is alive but its start time differs from the recorded one: the pid was recycled,
-//!   **dead**;
+//! * the pid is alive but its start stamp differs from the recorded one: the pid was recycled,
+//!   **dead** (on Linux the stamp is ticks since boot, so a clock change never moves it);
 //! * the pid is alive with a matching start time and the same boot session: **alive**;
 //! * the pid is alive with a matching start time but the boot id differs (a clock change moved a
 //!   derived boot time): **unknown**. Unknown owners are never taken over automatically.
+//!
+//! Rows written before the Linux start stamp became ticks since boot hold wall-clock seconds and
+//! classify as **dead** on Linux (see "Upgrade notes" in `docs/deployment-guide.md`).
 //!
 //! Callers pass a canonical `wcroot` (see [`LockOwnershipStore`]); this store also canonicalizes
 //! when the path exists and removes the Windows verbatim prefix so one folder has one key.
@@ -24,9 +29,6 @@ use svn_types::{ErrorCode, LockOwnershipStore, RelPath, Result, SvnError};
 use crate::db::{AppDb, DbError, now_iso};
 
 pub use alive_probe::{OsProcessProbe, ProcessProbe, current_boot_id};
-
-/// Allowed difference between a recorded and a current process start time (seconds).
-const START_TIME_TOLERANCE_SECS: u64 = 2;
 
 /// State of a recorded lock owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,10 +75,13 @@ impl SqliteLockOwnership {
     }
 
     fn classify(&self, pid: u32, boot_id: &str, recorded_start: Option<u64>) -> Liveness {
+        if self.probe.rebooted_since(boot_id) {
+            return Liveness::Dead; // nothing survives a reboot, whoever has the pid now
+        }
         let Some(now_start) = self.probe.start_time(pid) else {
             return Liveness::Dead;
         };
-        if recorded_start.is_some_and(|s| s.abs_diff(now_start) > START_TIME_TOLERANCE_SECS) {
+        if recorded_start.is_some_and(|s| !self.probe.same_process(s, now_start)) {
             return Liveness::Dead; // the pid now belongs to a different process
         }
         if self.probe.same_boot(boot_id) {

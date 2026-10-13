@@ -77,6 +77,40 @@ pub fn sha256_fingerprint(der: &[u8]) -> [u8; 32] {
     Sha256::digest(der).into()
 }
 
+/// RFC 5929 `tls-server-end-point` channel binding data for a server certificate:
+/// `"tls-server-end-point:" || hash(cert)`, where the hash is the certificate's signature hash,
+/// upgraded to SHA-256 for MD5 and SHA-1. `None` when the signature algorithm defines no single
+/// hash (for example Ed25519) or the certificate does not parse; no binding is sent then.
+pub(crate) fn tls_server_end_point(der: &[u8]) -> Option<Vec<u8>> {
+    use x509_parser::signature_algorithm::SignatureAlgorithm;
+    let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
+    let alg = &cert.signature_algorithm;
+    let hash_oid = match SignatureAlgorithm::try_from(alg).ok()? {
+        SignatureAlgorithm::RSASSA_PSS(params) => params.hash_algorithm_oid().to_id_string(),
+        _ => alg.algorithm.to_id_string(),
+    };
+    let digest: Vec<u8> = match hash_oid.as_str() {
+        // md5/sha1/sha256 with RSA, ecdsa-with-SHA1/SHA256, and the bare SHA-1/SHA-256 hash OIDs.
+        "1.2.840.113549.1.1.4"
+        | "1.2.840.113549.1.1.5"
+        | "1.2.840.113549.1.1.11"
+        | "1.2.840.10045.4.1"
+        | "1.2.840.10045.4.3.2"
+        | "1.3.14.3.2.26"
+        | "2.16.840.1.101.3.4.2.1" => Sha256::digest(der).to_vec(),
+        "1.2.840.113549.1.1.12" | "1.2.840.10045.4.3.3" | "2.16.840.1.101.3.4.2.2" => {
+            sha2::Sha384::digest(der).to_vec()
+        }
+        "1.2.840.113549.1.1.13" | "1.2.840.10045.4.3.4" | "2.16.840.1.101.3.4.2.3" => {
+            sha2::Sha512::digest(der).to_vec()
+        }
+        _ => return None,
+    };
+    let mut data = b"tls-server-end-point:".to_vec();
+    data.extend_from_slice(&digest);
+    Some(data)
+}
+
 /// A rejected certificate waiting for the transport to act on it.
 #[derive(Debug, Clone)]
 pub(crate) struct CertProblem {
@@ -481,6 +515,35 @@ mod tests {
     use rustls::OtherError;
 
     use super::*;
+
+    #[allow(clippy::expect_used)]
+    fn cert_with(alg: &'static rcgen::SignatureAlgorithm) -> Vec<u8> {
+        let key = rcgen::KeyPair::generate_for(alg).expect("key");
+        rcgen::CertificateParams::new(vec!["svn.example.com".to_owned()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("cert")
+            .der()
+            .to_vec()
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn channel_binding_uses_the_certificate_signature_hash() {
+        let prefix = b"tls-server-end-point:".as_slice();
+        let der = cert_with(&rcgen::PKCS_ECDSA_P256_SHA256);
+        let cb = tls_server_end_point(&der).expect("sha256");
+        assert_eq!(&cb[..prefix.len()], prefix);
+        assert_eq!(&cb[prefix.len()..], sha256_fingerprint(&der).as_slice());
+
+        let der = cert_with(&rcgen::PKCS_ECDSA_P384_SHA384);
+        let cb = tls_server_end_point(&der).expect("sha384");
+        assert_eq!(&cb[prefix.len()..], sha2::Sha384::digest(&der).as_slice());
+
+        // Ed25519 has no RFC 5929 hash: no binding rather than a wrong one.
+        assert_eq!(tls_server_end_point(&cert_with(&rcgen::PKCS_ED25519)), None);
+        assert_eq!(tls_server_end_point(b"not a certificate"), None);
+    }
 
     fn other(msg: &str) -> TlsError {
         #[derive(Debug)]

@@ -114,6 +114,7 @@ export function CreateBranchTagDialog({
           toUrl,
           message: finalMessage,
           switchWcId: switchAfter && wcId ? wcId : null,
+          fromWc: null,
         }),
       ),
     onSuccess: () => {

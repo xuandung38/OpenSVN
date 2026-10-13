@@ -126,6 +126,7 @@ impl OperationManager {
         let pending_for_reporter = Arc::clone(&pending_progress);
         let progress_events = Arc::clone(&events);
         let ctx = OpContext {
+            interactive: true,
             cancel,
             progress: ProgressReporter::new(move |u| {
                 let sample = to_progress(&progress_id, u);

@@ -457,3 +457,87 @@ async fn opening_recovers_dead_owner_locks_and_only_reports_foreign_ones() {
     f.state().recover_all().await;
     assert!(f.events.all().len() > before);
 }
+
+#[tokio::test]
+async fn open_working_copy_republishes_status_when_files_change() {
+    // The fake working copy does not exist on disk, so the service falls back to periodic rescans.
+    let timing = crate::status::StatusTiming {
+        debounce: Duration::from_millis(20),
+        fallback_poll: Duration::from_millis(40),
+    };
+    let f = Fixture::with_timing(Duration::ZERO, timing).await;
+    let wc = f.add_demo_wc().await;
+    commands::wc_open(f.state(), wc.id.clone()).await.unwrap();
+    assert_eq!(f.state().watchers.active(), 1);
+    f.engine
+        .edit_file(
+            &crate::engine::fake::demo_wc_root(),
+            "src/main.rs",
+            b"fn main() { changed(); }\n",
+        )
+        .unwrap();
+    let mut seen = false;
+    for _ in 0..200 {
+        seen = f.events.all().iter().any(|r| match r {
+            Recorded::Status(s) => s.changed.iter().any(|c| c.path == "src/main.rs"),
+            _ => false,
+        });
+        if seen {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(seen, "edit was announced as a status delta");
+    commands::wc_close(f.state(), wc.id).await.unwrap();
+    assert_eq!(f.state().watchers.active(), 0);
+}
+
+#[tokio::test]
+async fn poller_announces_incoming_for_open_working_copies_only() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    f.state().start_poller(Some(Duration::from_millis(30)));
+
+    // not opened yet: nothing is checked
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(
+        !f.events
+            .all()
+            .iter()
+            .any(|r| matches!(r, Recorded::Incoming(_)))
+    );
+
+    commands::wc_open(f.state(), wc.id.clone()).await.unwrap();
+    let mut count = None;
+    for _ in 0..200 {
+        count = f.events.all().into_iter().find_map(|r| match r {
+            Recorded::Incoming(i) => Some(i.count),
+            _ => None,
+        });
+        if count.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(count, Some(2), "two revisions touched trunk since r8");
+    assert_eq!(commands::wc_list(f.state()).await.unwrap()[0].incoming, 2);
+
+    // closing stops the checks
+    commands::wc_close(f.state(), wc.id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let seen = f
+        .events
+        .all()
+        .iter()
+        .filter(|r| matches!(r, Recorded::Incoming(_)))
+        .count();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let later = f
+        .events
+        .all()
+        .iter()
+        .filter(|r| matches!(r, Recorded::Incoming(_)))
+        .count();
+    assert_eq!(seen, later);
+    f.state().poller.lock().unwrap().as_ref().unwrap().stop();
+}
