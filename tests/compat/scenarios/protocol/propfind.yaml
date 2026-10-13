@@ -1,0 +1,26 @@
+# See log.yaml for the status of this format.
+scenarios:
+  - id: protocol-stat-dir
+    description: Depth 0 PROPFIND on a directory becomes a DirEntry
+    reference: { client: svn 1.15.0, command: "svn info ${URL}/trunk/src" }
+    fixture: crates/svn-protocol/tests/data/propfind/stat-dir
+    compare: [kind, created_rev, last_author, time]
+  - id: protocol-stat-file
+    description: Depth 0 PROPFIND on a file with a custom property
+    reference: { client: svn 1.15.0, command: "svn info ${URL}/trunk/a.txt" }
+    fixture: crates/svn-protocol/tests/data/propfind/stat-file
+    compare: [kind, size, created_rev, has_props]
+  - id: protocol-list-depth1
+    description: Depth 1 PROPFIND on a directory
+    reference: { client: svn 1.15.0, command: "svn list --xml ${URL}/trunk" }
+    fixture: crates/svn-protocol/tests/data/propfind/list-depth1
+    compare: [name, kind, size]
+  - id: protocol-allprop
+    description: allprop exposes svn:*, custom and DAV-level properties
+    reference: { client: svn 1.15.0, command: "svn proplist -v ${URL}/trunk/a.txt" }
+    fixture: crates/svn-protocol/tests/data/propfind/allprop-file
+    compare: [properties]
+  - id: protocol-options-v2
+    description: OPTIONS yields stubs and capabilities; a server without SVN-Me-Resource is refused
+    fixture: crates/svn-protocol/tests/data/caps/options-200
+    expect_refused: crates/svn-protocol/tests/data/caps/options-200-no-v2-headers
