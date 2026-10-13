@@ -2,13 +2,12 @@
 //! `repo_cat` returns text (size-limited); `repo_save` streams to disk as an operation.
 
 use opensvn_ipc::{
-    AppError, BranchNode, CopyLocationRequest, Layout, LayoutDetection, LockRequest, LockTargets,
-    LogGetRequest, LogPage, LogTarget, OpResult, OperationHandle, OperationKind, PathGrantId,
-    RemoteEditRequest, RemoteOp, RepoEntry, RepoInfo, Rev, TextSide, UnlockRequest,
+    AppError, BranchNode, CopyLocationRequest, EntryKind, Layout, LayoutDetection, LockRequest,
+    LockTargets, LogGetRequest, LogPage, LogTarget, OpResult, OperationHandle, OperationKind,
+    PathGrantId, RemoteEditRequest, RemoteOp, RepoEntry, RepoInfo, Rev, TextSide, UnlockRequest,
 };
 use tauri::State;
 
-use super::stub;
 use crate::app_state::{AppState, leaf};
 use crate::boundary::guard;
 use crate::engine::{EditOp, LockScope, LogScope, OpContext, RemoteEditPlan};
@@ -323,7 +322,38 @@ pub async fn layout_set(
     .await
 }
 
-stub!(layout_detect(repo_root_url: String, url: String) -> LayoutDetection);
+/// Lists directories through the engine for layout detection.
+struct EngineDirs(std::sync::Arc<dyn crate::engine::EngineFacade>);
+
+#[async_trait::async_trait]
+impl crate::layout::DirLister for EngineDirs {
+    async fn dirs(&self, url: &str) -> Result<Vec<String>, AppError> {
+        match self.0.repo_list(url, None, &OpContext::detached()).await {
+            Ok(entries) => Ok(entries
+                .into_iter()
+                .filter(|e| e.kind == EntryKind::Dir)
+                .map(|e| e.name)
+                .collect()),
+            // A folder that does not exist simply has no layout below it.
+            Err(e) if e.code == svn_types::ErrorCode::PathNotFound => Ok(Vec::new()),
+            Err(e) => Err(AppError::from(&e)),
+        }
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn layout_detect(
+    state: State<'_, AppState>,
+    repo_root_url: String,
+    url: String,
+) -> Result<LayoutDetection, AppError> {
+    guard(async {
+        let lister = EngineDirs(std::sync::Arc::clone(&state.engine));
+        crate::layout::detect(&lister, &repo_root_url, &url).await
+    })
+    .await
+}
 
 #[tauri::command]
 #[specta::specta]
@@ -333,12 +363,19 @@ pub async fn copy_location(
 ) -> Result<OperationHandle, AppError> {
     guard(async {
         let switch_to = request.switch_wc_id.clone();
+        let source = request
+            .from_wc
+            .as_ref()
+            .map(|id| state.wcs.resolve(id).map(|r| r.wc))
+            .transpose()?;
         let to_url = request.to_url.clone();
         let title = format!("Copy to {}", leaf(&request.to_url));
         match switch_to {
             None => Ok(
                 state.start_op(OperationKind::Copy, title, move |engine, ctx| async move {
-                    let new_rev = engine.copy_location(&request, &ctx).await?;
+                    let new_rev = engine
+                        .copy_location(&request, source.as_ref(), &ctx)
+                        .await?;
                     Ok(OpResult::NewRev { new_rev })
                 }),
             ),
@@ -347,7 +384,9 @@ pub async fn copy_location(
                 &wc_id,
                 title,
                 move |engine, wc, ctx| async move {
-                    let new_rev = engine.copy_location(&request, &ctx).await?;
+                    let new_rev = engine
+                        .copy_location(&request, source.as_ref(), &ctx)
+                        .await?;
                     // Switch the working copy to the location that was just created.
                     engine.switch(&wc, &to_url, Some(new_rev), &ctx).await?;
                     Ok(OpResult::NewRev { new_rev })
