@@ -19,7 +19,7 @@ RESPONSE 200
 < DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
 < Allow: OPTIONS,GET,HEAD,POST,DELETE,TRACE,PROPFIND,PROPPATCH,COPY,MOVE,LOCK,UNLOCK,CHECKOUT
 < SVN-Youngest-Rev: 5
-< SVN-Repository-UUID: b578b0f4-fca8-48bc-8594-a88d6cdb14e7
+< SVN-Repository-UUID: 7462d98e-4071-4508-b797-d2922b5cda8f
 < SVN-Repository-MergeInfo: yes
 < DAV: http://subversion.tigris.org/xmlns/dav/svn/replay-rev-resource
 < SVN-Repository-Root: /svn/repo

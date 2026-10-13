@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-program-choose"
+description = "Enables the program_choose command without any pre-configured scope."
+commands.allow = ["program_choose"]
+
+[[permission]]
+identifier = "deny-program-choose"
+description = "Denies the program_choose command without any pre-configured scope."
+commands.deny = ["program_choose"]

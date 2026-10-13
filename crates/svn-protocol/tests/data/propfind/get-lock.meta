@@ -3,6 +3,6 @@ REQUEST PROPFIND /svn/repo/trunk/a.txt
 > Content-Type: text/xml
 > Depth: 0
 RESPONSE 207
-< X-SVN-Creation-Date: 2026-10-13T09:04:56.949003Z
+< X-SVN-Creation-Date: 2026-10-13T09:45:12.389643Z
 < X-SVN-Lock-Owner: alice
 < Content-Type: text/xml; charset="utf-8"

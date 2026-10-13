@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:update-report xmlns:S="svn:" xmlns:V="http://subversion.tigris.org/xmlns/dav/" xmlns:D="DAV:" send-all="true" inline-props="true">
+<S:target-revision rev="11"/>
+<S:open-directory rev="6">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/11/trunk</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">11</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:33.854827Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+<S:open-file name="a.txt" rev="6">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/10/trunk/a.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">10</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:31.525398Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+<S:set-prop name="svn:eol-style">native</S:set-prop>
+<S:txdelta base-checksum="8a0f797527924039c70f708e5cb4de6e">U1ZOAAAaKwMRGgCRb25lCmVkaXRlZApsaW5lcwo=</S:txdelta><S:prop><V:md5-checksum>befc24ce2a3e42083596f4db32602d04</V:md5-checksum></S:prop></S:open-file>
+<S:add-file name="copy.txt" sha1-checksum="53b5aef8a8eb7d2f886cd30d6ce77898807db7da">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/11/trunk/copy.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">11</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:33.854827Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+<S:set-prop name="custom:tag">v&lt;1&gt;&amp;"q"</S:set-prop>
+<S:set-prop name="svn:eol-style">native</S:set-prop>
+<S:txdelta>U1ZOAAAAIwEjo2hlbGxvCndvcmxkCm1vcmUKYW5kIG1vcmUKb25lCm1vcmUK</S:txdelta><S:prop><V:md5-checksum>4070121357ab063ec32be9baa01551bb</V:md5-checksum></S:prop></S:add-file>
+<S:add-directory name="fresh" bc-url="/svn/repo/!svn/bc/10/trunk/fresh">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/10/trunk/fresh</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">10</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:31.525398Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+<S:add-file name="empty.txt" sha1-checksum="da39a3ee5e6b4b0d3255bfef95601890afd80709">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/10/trunk/fresh/empty.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">10</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:31.525398Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+<S:txdelta>U1ZOAA==</S:txdelta><S:prop><V:md5-checksum>d41d8cd98f00b204e9800998ecf8427e</V:md5-checksum></S:prop></S:add-file>
+<S:add-file name="f.txt" sha1-checksum="ca02969e73890f8ea6d6ec35dca6c1c2a56c6554">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/10/trunk/fresh/f.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">10</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:31.525398Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+<S:txdelta>U1ZOAAAABgEGhmZyZXNoCg==</S:txdelta><S:prop><V:md5-checksum>a00afb7c433b1a8fab592af77ed20eef</V:md5-checksum></S:prop></S:add-file>
+</S:add-directory>
+<S:open-directory name="src" rev="6">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/10/trunk/src</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">10</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:31.525398Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+<S:set-prop name="custom:note">x&lt;y</S:set-prop>
+<S:set-prop name="svn:mergeinfo">/branches/b1:5-7</S:set-prop>
+<S:delete-entry name="b.txt" rev="10"/>
+</S:open-directory>
+</S:open-directory>
+</S:update-report>
