@@ -10,3 +10,21 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+keyring-core.workspace = true
+secrecy.workspace = true
+svn-types.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { workspace = true, features = ["keychain"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store.workspace = true
+
+# Pure-Rust Secret Service client (zbus); no libdbus/libsecret C dependency.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+zbus-secret-service-keyring-store = { workspace = true, features = ["crypto-rust"] }
+
+[dev-dependencies]
+keyring-core.workspace = true
+proptest.workspace = true

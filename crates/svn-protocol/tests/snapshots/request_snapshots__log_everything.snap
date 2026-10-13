@@ -1,0 +1,11 @@
+---
+source: crates/svn-protocol/tests/request_snapshots.rs
+expression: "render(&log_request(&u, Revnum(100), &rel(\"trunk\"), &everything).unwrap())"
+---
+REPORT http://svn.test.local/svn/repo/!svn/rvr/100/trunk
+Content-Type: text/xml
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+
+<S:log-report xmlns:S="svn:"><S:start-revision>100</S:start-revision><S:end-revision>1</S:end-revision><S:limit>50</S:limit><S:discover-changed-paths/><S:strict-node-history/><S:include-merged-revisions/><S:revprop>svn:author</S:revprop><S:revprop>custom:x</S:revprop><S:path>a</S:path><S:path></S:path><S:encode-binary-props/></S:log-report>
