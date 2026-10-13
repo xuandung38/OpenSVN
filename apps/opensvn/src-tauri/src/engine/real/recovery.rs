@@ -1,24 +1,26 @@
 //! Opening a working copy: describe it and repair what a crash left behind.
 //!
 //! Order, before the first write of the session:
-//! 1. Directory locks (`WC_LOCK`) held by a process that is gone are released. Only locks that the
-//!    ownership registry knows to belong to a dead process are touched; any other lock (another
-//!    program, an unknown owner, a registry that lost its row) is reported for the user to decide.
-//! 2. When nothing else holds a lock, unfinished work queue items are run.
+//! 1. Directory locks (`WC_LOCK`) left by a dead process of this app are released through
+//!    [`WcDb::wc_cleanup_locks`]: a row goes only when the ownership registry reports its owner
+//!    dead **and** the `.svn/tmp/opensvn-lock-*` marker of that exact row (directory and levels)
+//!    exists. Every other row (svn CLI, TortoiseSVN, an unknown owner, a record without marker)
+//!    stays and is reported for the user to decide.
+//! 2. When no foreign lock is left, unfinished work queue items are run.
 //! 3. An interrupted commit is cleaned up from its journal: a leaked server transaction is
-//!    deleted, a merged commit is finalized in the working copy.
+//!    deleted, a merged commit is finalized in the working copy (only when no foreign lock and no
+//!    unfinished work is left).
 //!
 //! Recovery that needs the working copy layer goes through [`RecoveryHooks`]; a hook that fails
 //! leaves the work in place and reports the working copy for the user to clean up.
 
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use svn_types::{ErrorCode, RelPath, RepoUrl, SvnError};
+use svn_types::{ErrorCode, LockOwnershipStore, RepoUrl, SvnError};
 use svn_wc::WcDb;
-use svn_wc::db::sql_err;
+use svn_wc::db::{LockOwner, sql_err};
 
 use super::RealEngine;
 use super::journal::{JournalPhase, JournalRecord};
@@ -73,8 +75,12 @@ const ROOT: &str = "";
 
 /// What the lock step found.
 struct LockOutcome {
+    /// Directories whose stale lock of a dead app process was removed.
     recovered: Vec<String>,
-    foreign: Vec<String>,
+    /// Directories the user has to look at (foreign rows, dead records without a marker).
+    needs_user_action: Vec<String>,
+    /// A lock row of another program is still in place: nothing may write to the working copy.
+    foreign_held: bool,
 }
 
 fn add_once(list: &mut Vec<String>, dir: &str) {
@@ -83,43 +89,39 @@ fn add_once(list: &mut Vec<String>, dir: &str) {
     }
 }
 
-/// Releases dead-owner locks and lists the rest.
-fn recover_locks(
-    db: &WcDb,
-    store: &dyn svn_types::LockOwnershipStore,
-) -> EngineResult<LockOutcome> {
-    let wc_id = db.wc_id();
-    let held: BTreeSet<String> = db.with_read(|c| {
+/// Releases the stale locks of dead app processes and lists every lock that is left.
+fn recover_locks(db: &WcDb, owner: LockOwner) -> EngineResult<LockOutcome> {
+    db.set_lock_owner(owner);
+    let cleanup = db.wc_cleanup_locks()?;
+    // This handle holds no lock of its own, so every row still there belongs to someone else.
+    let left: Vec<String> = db.with_read(|c| {
         let mut stmt = c
             .prepare("SELECT local_dir_relpath FROM wc_lock WHERE wc_id = ?1")
             .map_err(sql_err)?;
         let rows = stmt
-            .query_map([wc_id], |r| r.get::<_, String>(0))
+            .query_map([db.wc_id()], |r| r.get::<_, String>(0))
             .map_err(sql_err)?;
         rows.collect::<Result<_, _>>().map_err(sql_err)
     })?;
-    let dead: Vec<RelPath> = store.owned_by_dead_process(db.wcroot())?;
-    let (recovered, foreign): (Vec<String>, Vec<String>) = held
-        .into_iter()
-        .partition(|dir| dead.iter().any(|d| d.as_str() == dir));
-    if !recovered.is_empty() {
-        db.with_write(|tx| {
-            for dir in &recovered {
-                tx.execute(
-                    "DELETE FROM wc_lock WHERE wc_id = ?1 AND local_dir_relpath = ?2",
-                    (wc_id, dir),
-                )
-                .map_err(sql_err)?;
-            }
-            Ok(())
-        })?;
+    let mut needs_user_action = Vec::new();
+    for dir in cleanup
+        .needs_user_action
+        .iter()
+        .map(|d| d.as_str())
+        .chain(left.iter().map(String::as_str))
+    {
+        add_once(&mut needs_user_action, dir);
     }
-    // Forget every dead record, also those without a row (the lock was already released): the
-    // registry must not keep describing locks that no longer exist.
-    for dir in &dead {
-        store.forget(db.wcroot(), dir)?;
-    }
-    Ok(LockOutcome { recovered, foreign })
+    needs_user_action.sort();
+    Ok(LockOutcome {
+        recovered: cleanup
+            .recovered
+            .iter()
+            .map(|d| d.as_str().to_owned())
+            .collect(),
+        needs_user_action,
+        foreign_held: !left.is_empty(),
+    })
 }
 
 fn queue_is_pending(db: &WcDb) -> EngineResult<bool> {
@@ -156,48 +158,66 @@ impl RealEngine {
         Ok(WcOpened { info, recovery })
     }
 
+    pub(super) fn lock_owner(&self) -> LockOwner {
+        LockOwner {
+            store: self.lock_ownership.clone() as Arc<dyn LockOwnershipStore>,
+            pid: std::process::id(),
+            boot_id: self.boot_id.clone(),
+        }
+    }
+
     async fn recover(&self, db: &Arc<WcDb>, ctx: &OpContext) -> EngineResult<RecoveryReport> {
-        let (handle, store) = (db.clone(), self.lock_ownership.clone());
-        let locks = blocking(move || recover_locks(&handle, store.as_ref())).await?;
+        let (handle, owner) = (db.clone(), self.lock_owner());
+        let locks = blocking(move || recover_locks(&handle, owner)).await?;
         let mut report = RecoveryReport {
             recovered: locks.recovered,
-            needs_user_action: locks.foreign,
+            needs_user_action: locks.needs_user_action,
         };
         // Work items cannot run while somebody else holds a directory lock.
-        if report.needs_user_action.is_empty() {
-            self.recover_work_queue(db, &mut report, ctx).await?;
-        }
-        self.recover_commit(db, &mut report, ctx).await?;
+        let work_left = if locks.foreign_held {
+            let handle = db.clone();
+            blocking(move || queue_is_pending(&handle)).await?
+        } else {
+            !self.recover_work_queue(db, &mut report, ctx).await?
+        };
+        self.recover_commit(db, &mut report, locks.foreign_held || work_left, ctx)
+            .await?;
         Ok(report)
     }
 
     /// Runs unfinished work items; a failure leaves them in place for the user's cleanup.
+    /// Returns whether the queue is empty afterwards.
     async fn recover_work_queue(
         &self,
         db: &Arc<WcDb>,
         report: &mut RecoveryReport,
         ctx: &OpContext,
-    ) -> EngineResult<()> {
+    ) -> EngineResult<bool> {
         let handle = db.clone();
         if !blocking(move || queue_is_pending(&handle)).await? {
-            return Ok(());
+            return Ok(true);
         }
         match self.recovery.run_work_queue(db, ctx).await {
-            Ok(()) => add_once(&mut report.recovered, ROOT),
-            Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
+            Ok(()) => {
+                add_once(&mut report.recovered, ROOT);
+                Ok(true)
+            }
+            Err(e) if e.code == ErrorCode::Cancelled => Err(e),
             Err(e) => {
                 tracing::warn!(error = %e, "unfinished work queue items need cleanup");
                 add_once(&mut report.needs_user_action, ROOT);
+                Ok(false)
             }
         }
-        Ok(())
     }
 
-    /// Cleans up after an interrupted commit using its journal.
+    /// Cleans up after an interrupted commit using its journal. `wc_busy` (a foreign lock or
+    /// unfinished work items) keeps a merged commit from being finalized.
     async fn recover_commit(
         &self,
         db: &Arc<WcDb>,
         report: &mut RecoveryReport,
+        wc_busy: bool,
         ctx: &OpContext,
     ) -> EngineResult<()> {
         let wc_root = db.wcroot();
@@ -205,10 +225,14 @@ impl RealEngine {
             Ok(Some(record)) => record,
             Ok(None) => return Ok(()),
             Err(e) => {
-                // Keeping an unreadable journal would block every later commit, and the only
-                // thing it could still name is a server transaction the server expires itself.
-                tracing::warn!(error = %e, "discarding an unreadable commit journal");
-                self.clear_journal(wc_root);
+                // Keeping an unreadable journal would block every later commit; it is moved
+                // aside (kept for diagnosis) and the user is told that a commit was interrupted.
+                tracing::warn!(error = %e, "setting an unreadable commit journal aside");
+                if let Err(e) = self.journals.quarantine(wc_root) {
+                    tracing::warn!(error = %e, "could not set the commit journal aside");
+                    self.clear_journal(wc_root);
+                }
+                add_once(&mut report.needs_user_action, ROOT);
                 return Ok(());
             }
         };
@@ -217,12 +241,24 @@ impl RealEngine {
             JournalPhase::TxnCreated { txn } => match self.abort_txn(&record, txn, ctx).await {
                 Ok(()) => self.clear_journal(wc_root),
                 Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
+                Err(e) if e.code == ErrorCode::PathNotFound => {
+                    // The server no longer knows the transaction: it expired, was removed, or
+                    // was merged right before the crash. Retrying can never succeed, so the
+                    // journal goes; whether the commit landed is for the user to check.
+                    tracing::warn!(error = %e, txn, "the abandoned transaction is gone");
+                    self.clear_journal(wc_root);
+                    add_once(&mut report.needs_user_action, ROOT);
+                }
                 Err(e) => {
                     // Network or sign-in problems are temporary: the journal stays, the next
                     // open tries again. The working copy itself is untouched.
                     tracing::warn!(error = %e, txn, "could not delete the abandoned transaction");
                 }
             },
+            JournalPhase::Merged { rev } if wc_busy => {
+                tracing::warn!(rev, "merged commit waits until the working copy is free");
+                add_once(&mut report.needs_user_action, ROOT);
+            }
             JournalPhase::Merged { rev } => {
                 match self.recovery.finalize_commit(db, &record, ctx).await {
                     Ok(()) => {
@@ -248,6 +284,8 @@ impl RealEngine {
     ) -> EngineResult<()> {
         let url = RepoUrl::parse(&record.repo_root_url)?;
         let session = self.connector.connect(&url, &ctx.cancel).await?;
+        // Sign in first, so a prompt never happens in the middle of the delete.
+        session.ensure_authenticated(&ctx.cancel).await?;
         session.abort_txn(txn).await
     }
 

@@ -343,3 +343,35 @@ fn a_path_carries_one_change_and_removed_entries_have_no_children() {
     // An entry that already has children below it cannot become a delete.
     assert!(tree.insert(&path("n"), Edit::Delete).is_err());
 }
+
+#[test]
+fn the_repository_root_is_never_an_edit_target() {
+    let mut tree = Tree::default();
+    for edit in [Edit::Mkdir, Edit::Delete] {
+        let err = tree.insert(&RelPath::root(), edit).unwrap_err();
+        assert!(err.message.contains("repository root"), "{err}");
+    }
+}
+
+#[tokio::test]
+async fn deleting_the_repository_root_creates_no_revision() {
+    let f = fixture();
+    let before = f.engine.repo_info(URL, &ctx()).await.unwrap().youngest_rev;
+    let err = f
+        .engine
+        .remote_edit(
+            &RemoteEditPlan {
+                ops: vec![EditOp::Delete {
+                    url: URL.to_owned(),
+                }],
+                message: "Delete everything".into(),
+            },
+            &ctx(),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("repository root"), "{err}");
+    let after = f.engine.repo_info(URL, &ctx()).await.unwrap().youngest_rev;
+    assert_eq!(after, before, "no empty revision was committed");
+    assert!(f.repo.open_txns().is_empty());
+}

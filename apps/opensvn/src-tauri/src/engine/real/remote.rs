@@ -10,11 +10,12 @@ use svn_ra_api::{LogRequest, RaSession};
 use svn_types::{CancelToken, ErrorCode, NodeKind, RelPath, Revnum, SvnError, rename_replacing};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-use super::mapping::{self, entry_kind, revnum};
-use super::text::{CappedBuf, is_binary, text_side};
+use super::text::CappedBuf;
 use super::{RealEngine, wc_read};
 use crate::engine::context::{OpContext, ProgressUpdate};
 use crate::engine::facade::{DiffOptions, EngineResult, LogScope};
+use crate::engine::mapping::{self, entry_kind, revnum};
+use crate::engine::text::{is_binary, text_side};
 
 /// Largest file `repo_cat` and revision diffs return inline.
 pub(super) const CAT_LIMIT: usize = 5 * 1024 * 1024;

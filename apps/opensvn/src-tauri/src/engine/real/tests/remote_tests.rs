@@ -6,12 +6,25 @@ use opensvn_ipc::{EntryKind, Layout, LogGetRequest, LogTarget, Rev, WcFormat, Wc
 use svn_ra_api::fake::FakeChange;
 use svn_types::{ErrorCode, RelPath, SvnError};
 
-use super::support::{URL, add_base_file, count_rows, ctx, dir, fixture, make_wc, put};
+use super::support::{
+    URL, add_base_dir, add_base_file, count_rows, ctx, dir, fixture, make_wc, plant_dead_app_lock,
+    plant_lock_row, put,
+};
 use crate::engine::conformance::{self, Harness, PlantedOwner};
 use crate::engine::real::RealEngine;
 use crate::engine::{CheckoutPlan, EngineFacade, LockScope, LogScope, OpContext, WcRef};
 
-/// Harness that runs the repository scenarios of the shared suite against the real engine.
+/// Harness that runs the shared suite against the real engine.
+///
+/// Groups that run here: `repository_reads`, `repository_content_tools`,
+/// `cancellation_and_errors`. The others are skipped on purpose until the working copy layer
+/// (`svn-client`) is wired, because each one starts with a checkout or needs status/commit:
+/// `commit_and_update_cycle`, `schedule_and_revert`, `conflict_blocks_commit_until_resolved`,
+/// `lock_and_unlock` (WC scope + status), `working_copy_metadata_operations`,
+/// `switch_to_a_branch`, `open_recovers_dead_locks_and_reports_foreign_ones` (its recovery part
+/// runs below through `plant_lock` on a `svn-wc` working copy). `remote_edit_and_copy` is skipped
+/// because the in-memory repository's commit editor refuses copy-from; copy driving is covered
+/// in `edit_tests`.
 struct RealHarness {
     fixture: super::support::Fixture,
     scratch: tempfile::TempDir,
@@ -33,8 +46,12 @@ impl Harness for RealHarness {
     fn scratch_dir(&self) -> PathBuf {
         self.scratch.path().to_path_buf()
     }
-    fn plant_lock(&self, _root: &Path, _dir: &str, _owner: PlantedOwner) -> Result<(), SvnError> {
-        Err(SvnError::new(ErrorCode::Internal, "no working copy writes"))
+    fn plant_lock(&self, root: &Path, dir: &str, owner: PlantedOwner) -> Result<(), SvnError> {
+        match owner {
+            PlantedOwner::DeadProcess => plant_dead_app_lock(root, &self.fixture.store, dir),
+            PlantedOwner::Foreign => plant_lock_row(root, dir),
+        }
+        Ok(())
     }
 }
 
@@ -53,6 +70,38 @@ async fn shared_suite_repository_reads() {
 #[tokio::test]
 async fn shared_suite_repository_content_tools() {
     conformance::repository_content_tools(&harness()).await;
+}
+
+#[tokio::test]
+async fn shared_suite_cancellation_and_errors() {
+    conformance::cancellation_and_errors(&harness()).await;
+}
+
+/// The recovery half of `open_recovers_dead_locks_and_reports_foreign_ones`, on a working copy
+/// made by `svn-wc` instead of a checkout, with locks planted through the harness.
+#[tokio::test]
+async fn shared_recovery_scenario_with_planted_locks() {
+    let h = harness();
+    let e = h.engine();
+    let (_tmp, root) = make_wc(1);
+    add_base_dir(&root, "src", "trunk/src", 1);
+    let clean = e.open_wc(&root, &ctx()).await.unwrap();
+    assert!(clean.recovery.recovered.is_empty() && clean.recovery.needs_user_action.is_empty());
+
+    h.plant_lock(&root, "src", PlantedOwner::DeadProcess)
+        .unwrap();
+    let opened = e.open_wc(&root, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.recovered, vec!["src".to_owned()]);
+    assert!(opened.recovery.needs_user_action.is_empty());
+    let again = e.open_wc(&root, &ctx()).await.unwrap();
+    assert!(again.recovery.recovered.is_empty(), "recovery happens once");
+
+    h.plant_lock(&root, "src", PlantedOwner::Foreign).unwrap();
+    for _ in 0..2 {
+        let opened = e.open_wc(&root, &ctx()).await.unwrap();
+        assert!(opened.recovery.recovered.is_empty());
+        assert_eq!(opened.recovery.needs_user_action, vec!["src".to_owned()]);
+    }
 }
 
 #[tokio::test]
@@ -365,6 +414,7 @@ async fn custom_layout_expands_projects() {
     };
     let nodes = f.engine.branches_list(URL, &layout, &ctx()).await.unwrap();
     assert!(nodes.iter().any(|n| n.url == format!("{URL}/proj/trunk")));
+    assert!(nodes.iter().all(|n| !n.url.contains("{project}")));
     assert!(
         nodes
             .iter()
@@ -455,8 +505,11 @@ async fn working_copy_locks_are_recorded_in_wc_db_and_cleared_on_unlock() {
             .is_some()
     );
 
+    assert_eq!(count_rows(&root, "wc_lock"), 0, "directory lock released");
+
     f.engine.unlock(&scope, false, &ctx()).await.unwrap();
     assert_eq!(count_rows(&root, "lock"), 0);
+    assert_eq!(count_rows(&root, "wc_lock"), 0, "directory lock released");
     let on_server = f
         .engine
         .repo_list(&format!("{URL}/trunk"), None, &ctx())
@@ -470,6 +523,37 @@ async fn working_copy_locks_are_recorded_in_wc_db_and_cleared_on_unlock() {
             .lock
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn working_copy_locks_wait_for_a_directory_locked_by_another_program() {
+    let f = fixture();
+    let (_tmp, root) = make_wc(1);
+    add_base_file(&root, "README.md", "trunk/README.md", 1);
+    plant_lock_row(&root, "");
+    let scope = LockScope::Wc {
+        wc: wc_ref(&root),
+        paths: vec!["README.md".into()],
+    };
+    let err = f
+        .engine
+        .lock(&scope, None, false, &ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::WcBusy);
+    assert_eq!(count_rows(&root, "lock"), 0);
+    assert_eq!(
+        count_rows(&root, "wc_lock"),
+        1,
+        "the other program's lock stays"
+    );
+    let on_server = f
+        .engine
+        .repo_list(&format!("{URL}/trunk"), None, &ctx())
+        .await
+        .unwrap();
+    let readme = on_server.iter().find(|e| e.name == "README.md").unwrap();
+    assert!(readme.lock.is_none(), "the server was never asked");
 }
 
 #[tokio::test]
@@ -513,4 +597,46 @@ async fn working_copy_log_follows_the_repository_path_of_the_node() {
 #[allow(dead_code)]
 fn assert_engine_is_object_safe(e: &RealEngine) -> &dyn EngineFacade {
     e
+}
+
+#[tokio::test]
+async fn branch_urls_are_percent_encoded_and_unsafe_names_skipped() {
+    let f = fixture();
+    f.repo
+        .seed(
+            "bob",
+            "Odd branch names",
+            &[
+                dir("branches/feature x"),
+                dir("branches/50%off"),
+                dir("branches/a#b?c"),
+                dir("branches/hash#1"),
+                dir("branches/CON"),
+                dir("tags/v1.0"),
+            ],
+        )
+        .unwrap();
+    let nodes = f
+        .engine
+        .branches_list(URL, &Layout::Auto, &ctx())
+        .await
+        .unwrap();
+    let url_of = |name: &str| nodes.iter().find(|n| n.name == name).map(|n| n.url.clone());
+    assert_eq!(url_of("trunk"), Some(format!("{URL}/trunk")));
+    assert_eq!(
+        url_of("feature x"),
+        Some(format!("{URL}/branches/feature%20x"))
+    );
+    assert_eq!(url_of("50%off"), Some(format!("{URL}/branches/50%25off")));
+    assert_eq!(url_of("hash#1"), Some(format!("{URL}/branches/hash%231")));
+    assert_eq!(url_of("v1.0"), Some(format!("{URL}/tags/v1.0")));
+    // `?` is not a valid Windows file name character: a branch named like that cannot be
+    // checked out safely, so it is not offered (same for device names such as CON).
+    assert_eq!(url_of("a#b?c"), None);
+    assert_eq!(url_of("CON"), None);
+    // Every listed URL resolves back to the directory it names.
+    for n in nodes.iter().filter(|n| n.name != "trunk") {
+        let info = f.engine.repo_info(&n.url, &ctx()).await.unwrap();
+        assert_eq!(info.kind, EntryKind::Dir, "{}", n.url);
+    }
 }

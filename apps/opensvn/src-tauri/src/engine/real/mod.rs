@@ -35,11 +35,12 @@ mod blame;
 mod journal;
 mod layout;
 mod locks;
-mod mapping;
 mod recovery;
 mod remote;
 mod remote_edit;
 mod text;
+
+use crate::engine::text::percent_decode;
 mod wc_read;
 
 #[cfg(test)]
@@ -70,6 +71,9 @@ pub struct RealEngineConfig {
     pub connector: Arc<dyn SessionConnector>,
     /// Records which process holds which working copy directory lock.
     pub lock_ownership: Arc<dyn LockOwnershipStore>,
+    /// Boot session id of this process (`lock_ownership::current_boot_id()` in the app); with
+    /// the process id it identifies the locks this process takes.
+    pub boot_id: String,
     /// Per-user state directory; commit journals live below it.
     pub state_dir: PathBuf,
     /// Steps of crash recovery that need the working copy layer.
@@ -80,6 +84,7 @@ pub struct RealEngineConfig {
 pub struct RealEngine {
     connector: Arc<dyn SessionConnector>,
     lock_ownership: Arc<dyn LockOwnershipStore>,
+    boot_id: String,
     journals: JournalStore,
     recovery: Arc<dyn RecoveryHooks>,
 }
@@ -90,6 +95,7 @@ impl RealEngine {
         Self {
             connector: config.connector,
             lock_ownership: config.lock_ownership,
+            boot_id: config.boot_id,
             journals: JournalStore::new(config.state_dir),
             recovery: config.recovery,
         }
@@ -145,7 +151,7 @@ fn path_below_root(session: &dyn RaSession, url: &RepoUrl) -> EngineResult<RelPa
                 format!("{full} is not inside repository {root}"),
             )
         })?;
-    RelPath::new(&text::percent_decode(rest.trim_matches('/')))
+    RelPath::new(&percent_decode(rest.trim_matches('/')))
 }
 
 /// Error of an operation that waits for the working copy layer.
@@ -235,7 +241,9 @@ impl EngineFacade for RealEngine {
         Err(not_wired("props_set"))
     }
 
-    async fn checkout(&self, _plan: &CheckoutPlan, _ctx: &OpContext) -> EngineResult<WcInfo> {
+    async fn checkout(&self, _plan: &CheckoutPlan, ctx: &OpContext) -> EngineResult<WcInfo> {
+        // Cancellation wins over everything else, as for every wired operation.
+        ctx.check()?;
         Err(not_wired("checkout"))
     }
 
