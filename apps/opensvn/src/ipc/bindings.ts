@@ -15,6 +15,26 @@ export const commands = {
 	 */
 	wcOpen: (wcId: WcId) => typedError<WorkingCopy, AppError>(__TAURI_INVOKE("wc_open", { wcId })),
 	wcClose: (wcId: WcId) => typedError<null, AppError>(__TAURI_INVOKE("wc_close", { wcId })),
+	/**  Every registered working copy, including ones whose folder is gone or moved (`missing`). */
+	wcEntries: () => typedError<WcEntry[], AppError>(__TAURI_INVOKE("wc_entries")),
+	/**
+	 *  Points a moved working copy at its new folder, chosen in the native folder dialog. The folder
+	 *  must be a working copy of the same repository. Recovery runs as on open.
+	 */
+	wcLocate: (wcId: WcId, grant: PathGrantId) => typedError<WorkingCopy, AppError>(__TAURI_INVOKE("wc_locate", { wcId, grant })),
+	/**  Repository URLs used recently, newest first. */
+	recentUrls: () => typedError<string[], AppError>(__TAURI_INVOKE("recent_urls")),
+	/**
+	 *  A folder grant for the default checkout folder (`general.checkoutRoot`), created when missing.
+	 *  The setting only changes through `checkout_root_choose`, so the grant always names a folder
+	 *  the user chose (or the built-in `~/svn`).
+	 */
+	checkoutRootGrant: () => typedError<PathGrantInfo, AppError>(__TAURI_INVOKE("checkout_root_grant")),
+	/**
+	 *  Lets the user choose the default checkout folder in the native folder dialog and stores it.
+	 *  Returns the settings unchanged when the dialog is cancelled.
+	 */
+	checkoutRootChoose: () => typedError<Settings, AppError>(__TAURI_INVOKE("checkout_root_choose")),
 	/**
 	 *  Status from the engine, or from the snapshot while a write is running on the working copy
 	 *  (the running operation in `op_list` is the "updating" indicator).
@@ -33,6 +53,12 @@ export const commands = {
 	changelistSet: (wcId: WcId, paths: string[], name: string | null) => typedError<null, AppError>(__TAURI_INVOKE("changelist_set", { wcId, paths, name })),
 	ignoreAdd: (request: IgnoreAddRequest) => typedError<null, AppError>(__TAURI_INVOKE("ignore_add", { request })),
 	markMove: (wcId: WcId, from: string, to: string) => typedError<null, AppError>(__TAURI_INVOKE("mark_move", { wcId, from, to })),
+	/**
+	 *  Checks out into a new folder (`dest_name`) inside the granted parent folder, or into the granted
+	 *  folder itself. The target must not exist or be an empty folder. On success the working copy is
+	 *  registered and its id returned in `OpResult::CheckedOut`; a folder this checkout created is
+	 *  removed again when the checkout fails or is cancelled while it is still empty.
+	 */
 	checkout: (request: CheckoutRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("checkout", { request })),
 	update: (request: UpdateRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("update", { request })),
 	switch: (wcId: WcId, url: string, rev: number | null) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("switch", { wcId, url, rev })),
@@ -114,9 +140,11 @@ export const commands = {
 	certsList: () => typedError<TrustedCert[], AppError>(__TAURI_INVOKE("certs_list")),
 	/**  Stops trusting a certificate; the next connection asks again. */
 	certsRemove: (key: TrustedCertKey) => typedError<null, AppError>(__TAURI_INVOKE("certs_remove", { key })),
-	/**  Lets the user pick the default checkout folder in a native dialog and stores it. */
-	checkoutRootChoose: () => typedError<Settings, AppError>(__TAURI_INVOKE("checkout_root_choose")),
-	/**  Shows an item of a working copy in the file manager. */
+	/**
+	 *  Shows a working copy item in the file manager. `path` is relative to the working copy root;
+	 *  an empty path reveals the root folder itself. Items reached through a symbolic link are
+	 *  refused, so the file manager never opens a folder outside the working copy.
+	 */
 	revealInOs: (wcId: WcId, path: string) => typedError<null, AppError>(__TAURI_INVOKE("reveal_in_os", { wcId, path })),
 	/**  Opens an item of a working copy with the default app, the editor or the terminal. */
 	openExternal: (wcId: WcId, path: string, openWith: OpenWith) => typedError<null, AppError>(__TAURI_INVOKE("open_external", { wcId, path, openWith })),
@@ -274,8 +302,17 @@ export type ChangedPath = {
 
 export type CheckoutRequest = {
 	url: string,
-	/**  Folder chosen with `path_pick`; becomes the working copy root. */
+	/**
+	 *  Folder chosen with `path_pick` (or minted by `checkout_root_grant`). With `dest_name` it is
+	 *  the parent folder and the working copy is created in a new child folder; without it the
+	 *  folder itself becomes the working copy root. An existing, non-empty target is refused.
+	 */
 	dest: PathGrantId,
+	/**
+	 *  Name of the new folder created inside `dest`: one path component, no separators, not `.` or
+	 *  `..`, no reserved Windows name (`CON`, `NUL`, `COM1`, ...), no trailing dot or space.
+	 */
+	destName: string | null,
 	rev: Rev | null,
 	depth: Depth,
 	sparse: SparseEntry[] | null,
@@ -562,6 +599,11 @@ export type OpResult =
 { kind: "done" } | 
 /**  Commit or update produced/reached a revision. */
 { kind: "newRev"; newRev: Rev } | 
+/**
+ *  Checkout finished: the new working copy's registry id (`None` when it could not be
+ *  registered; the files are on disk and can be added with "Add existing working copy").
+ */
+{ kind: "checkedOut"; wcId: WcId | null; newRev: Rev } | 
 /**  Blame result. */
 { kind: "blame"; lines: BlameLine[] };
 
@@ -700,7 +742,6 @@ export type SecretText = string;
 
 /**  All settings with their effective values. */
 export type Settings = {
-	"general.checkoutRoot": string,
 	"general.checkIntervalMin": number,
 	"general.language": Language,
 	"appearance.theme": Theme,
@@ -715,6 +756,11 @@ export type Settings = {
 	"cache.maxSizeGb": number,
 	"integrations.webRevisionUrl": string,
 	"integrations.webFileUrl": string,
+	/**
+	 *  Parent folder offered for new checkouts. `~` stands for the home folder. Changes only
+	 *  through `checkout_root_choose` (native folder dialog).
+	 */
+	"general.checkoutRoot": string,
 	/**  `null` when no external tool is configured. */
 	"diff.externalTool": ExternalDiffTool | null,
 	/**  Same shape as `diff.externalTool`. `null` when not configured. */
@@ -740,7 +786,6 @@ export type SettingsPatch = SettingsPatch_Serialize | SettingsPatch_Deserialize;
  *  fails loudly instead of being ignored.
  */
 export type SettingsPatch_Deserialize = {
-	"general.checkoutRoot"?: string | null,
 	"general.checkIntervalMin"?: number | null,
 	"general.language"?: Language | null,
 	"appearance.theme"?: Theme | null,
@@ -764,7 +809,6 @@ export type SettingsPatch_Deserialize = {
  *  fails loudly instead of being ignored.
  */
 export type SettingsPatch_Serialize = {
-	"general.checkoutRoot"?: string | null,
 	"general.checkIntervalMin"?: number | null,
 	"general.language"?: Language | null,
 	"appearance.theme"?: Theme | null,
@@ -851,6 +895,27 @@ export type UpdateRequest = {
 };
 
 export type WcBanner = Banner;
+
+/**
+ *  One row of the repository manager (`wc_entries`): every registered working copy, including
+ *  ones that can no longer be read (folder moved or deleted), which `wc_list` leaves out.
+ */
+export type WcEntry = {
+	id: WcId,
+	/**  Display name (app database only; renaming never touches the folder). */
+	name: string,
+	rootPath: string,
+	repoRootUrl: string,
+	repoUuid: string,
+	/**  URL the working copy points at; `None` when it cannot be read. */
+	url: string | null,
+	addedAt: string,
+	lastOpenedAt: string | null,
+	/**  The folder is gone, moved or no longer a working copy. The UI offers "Locate…" and "Remove". */
+	missing: boolean,
+	/**  Why the working copy cannot be read (only when `missing`). */
+	problem: string | null,
+};
 
 /**  Working-copy format; only 31 and 32 are valid (validated on deserialize; `number` in TS). */
 export type WcFormat = number;

@@ -160,35 +160,9 @@ pub async fn certs_remove(state: State<'_, AppState>, key: TrustedCertKey) -> Re
     .await
 }
 
-/// Lets the user pick the default checkout folder in a native dialog and stores it.
-#[tauri::command]
-#[specta::specta]
-pub async fn checkout_root_choose(state: State<'_, AppState>) -> Result<Settings, AppError> {
-    guard(async {
-        let Ok(_open) = state.path_dialog_open.try_lock() else {
-            return Err(crate::errors::invalid_argument(
-                "A file picker is already open.",
-            ));
-        };
-        let Some((path, _)) = state
-            .path_picker
-            .pick(&PickRequest::Folder {
-                title: Some("Default checkout folder".to_owned()),
-            })
-            .await
-        else {
-            return Ok(state.settings.get());
-        };
-        let patch = SettingsPatch {
-            general_checkout_root: Some(path.to_string_lossy().into_owned()),
-            ..SettingsPatch::default()
-        };
-        state.settings.apply_patch(&patch)
-    })
-    .await
-}
-
-/// Shows an item of a working copy in the file manager.
+/// Shows a working copy item in the file manager. `path` is relative to the working copy root;
+/// an empty path reveals the root folder itself. Items reached through a symbolic link are
+/// refused, so the file manager never opens a folder outside the working copy.
 #[tauri::command]
 #[specta::specta]
 pub async fn reveal_in_os(
