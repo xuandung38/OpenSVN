@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use opensvn_ipc::{
     BranchKind, CopyLocationRequest, EntryKind, Layout, LockRequest, LockTargets, LogGetRequest,
-    LogTarget, OpResult, RemoteEditRequest, RemoteOp, Rev, UnlockRequest,
+    LogTarget, OpResult, PathGrantId, RemoteEditRequest, RemoteOp, Rev, UnlockRequest,
 };
 
 use super::fixture::Fixture;
@@ -250,7 +250,7 @@ async fn repo_save_streams_to_disk_and_refuses_relative_targets() {
         f.state(),
         url("trunk/README.md"),
         Some(Rev(1)),
-        out.to_string_lossy().into_owned(),
+        f.grant_file(&out),
     )
     .await
     .unwrap();
@@ -259,15 +259,22 @@ async fn repo_save_streams_to_disk_and_refuses_relative_targets() {
         std::fs::read_to_string(&out).unwrap(),
         "# Demo\n\nA small project.\n"
     );
-    let h = commands::repo_save(
+    // a folder grant (or a reused grant) cannot be used as the save target
+    let again = commands::repo_save(
         f.state(),
         url("trunk/README.md"),
         None,
-        "relative.md".into(),
+        PathGrantId("x".into()),
     )
     .await
-    .unwrap();
-    assert!(f.wait_op(&h).await.is_err());
+    .unwrap_err();
+    assert_eq!(again.code, opensvn_ipc::ErrorCode::InvalidArgument);
+    let wrong_kind = f.grant_dir(dir.path());
+    assert!(
+        commands::repo_save(f.state(), url("trunk/README.md"), None, wrong_kind)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

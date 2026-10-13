@@ -28,7 +28,7 @@ async fn settings_round_trip_and_survive_a_restart_of_the_service() {
 }
 
 #[tokio::test]
-async fn settings_set_rejects_keys_that_launch_programs() {
+async fn program_keys_do_not_exist_in_a_settings_patch() {
     let f = Fixture::new(Duration::ZERO).await;
     for key in [
         "diff.externalTool",
@@ -36,13 +36,10 @@ async fn settings_set_rejects_keys_that_launch_programs() {
         "tools.editor",
         "tools.terminal",
     ] {
-        let err = commands::settings_set(
-            f.state(),
-            patch(serde_json::json!({ key: {"path": "/bin/sh", "args": ["-c", "id"]} })),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.code, ErrorCode::PermissionDenied, "{key}");
+        let parsed = serde_json::from_value::<SettingsPatch>(
+            serde_json::json!({ key: {"path": "/bin/sh", "args": ["-c", "id"]} }),
+        );
+        assert!(parsed.is_err(), "{key} must not be patchable");
     }
     let s = commands::settings_get(f.state()).await.unwrap();
     assert!(s.diff_external_tool.is_none() && s.tools_editor.is_none());
@@ -98,7 +95,7 @@ async fn accounts_list_is_empty_and_auth_commands_reject_unknown_requests() {
 
 #[tokio::test]
 async fn checkout_waits_for_sign_in_through_the_prompt_events() {
-    use opensvn_ipc::{AuthResponse, CheckoutRequest, Depth, OpResult, Rev, WcFormat};
+    use opensvn_ipc::{AuthResponse, Depth, OpResult, Rev, WcFormat};
     use std::sync::Arc;
 
     use crate::auth::{AuthBroker, NoSecretStore};
@@ -120,6 +117,7 @@ async fn checkout_waits_for_sign_in_through_the_prompt_events() {
         engine,
         events: f.events.clone(),
         picker: f.picker.clone(),
+        path_picker: f.paths.clone(),
         status_timing: Default::default(),
     })
     .unwrap();
@@ -133,7 +131,7 @@ async fn checkout_waits_for_sign_in_through_the_prompt_events() {
             };
             let info = engine
                 .checkout(
-                    &CheckoutRequest {
+                    &crate::engine::CheckoutPlan {
                         url,
                         path: root.into(),
                         rev: Some(Rev(2)),

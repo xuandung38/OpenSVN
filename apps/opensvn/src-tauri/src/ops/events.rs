@@ -1,14 +1,14 @@
 //! Outbound events (Rust -> UI) behind a trait, so services are testable without a window.
 
 use opensvn_ipc::{
-    AuthPrompt, Banner, Incoming, OpFailed, OpFinished, OperationHandle, Progress, RevisionChanged,
-    StatusChanged,
+    AuthPrompt, Banner, DroppedPaths, Incoming, OpFailed, OpFinished, OperationHandle, Progress,
+    RevisionChanged, StatusChanged,
 };
 use tauri_specta::Event;
 
 use crate::events::{
-    AuthPromptEvent, OpFailedEvent, OpFinishedEvent, OpProgress, OpStarted, WcBanner, WcIncoming,
-    WcRevisionChanged, WcStatusChanged,
+    AuthPromptEvent, FsDropped, OpFailedEvent, OpFinishedEvent, OpProgress, OpStarted, WcBanner,
+    WcIncoming, WcRevisionChanged, WcStatusChanged,
 };
 
 /// Everything the backend pushes to the UI. Implementations must not block.
@@ -31,6 +31,8 @@ pub trait AppEvents: Send + Sync + 'static {
     fn banner(&self, banner: &Banner);
     /// `auth://prompt`
     fn auth_prompt(&self, prompt: &AuthPrompt);
+    /// `fs://dropped`
+    fn dropped(&self, dropped: &DroppedPaths);
 }
 
 /// Emits events to the WebView through Tauri.
@@ -78,6 +80,9 @@ impl<R: tauri::Runtime> AppEvents for TauriEvents<R> {
     fn banner(&self, b: &Banner) {
         emit!(self, WcBanner, b, "wc://banner");
     }
+    fn dropped(&self, d: &DroppedPaths) {
+        emit!(self, FsDropped, d, "fs://dropped");
+    }
     fn auth_prompt(&self, p: &AuthPrompt) {
         emit!(self, AuthPromptEvent, p, "auth://prompt");
     }
@@ -95,6 +100,7 @@ pub enum Recorded {
     Revision(RevisionChanged),
     Incoming(Incoming),
     Banner(Banner),
+    Dropped(DroppedPaths),
     Auth(AuthPrompt),
 }
 
@@ -135,6 +141,7 @@ impl RecordingEvents {
                 Recorded::Revision(c) => format!("revision:{}", c.wc_id.0),
                 Recorded::Incoming(i) => format!("incoming:{}", i.wc_id.0),
                 Recorded::Banner(b) => format!("banner:{}", b.wc_id.0),
+                Recorded::Dropped(d) => format!("dropped:{}", d.grants.len()),
                 Recorded::Auth(p) => format!("auth:{}", p.request_id),
             })
             .collect()
@@ -180,6 +187,9 @@ impl AppEvents for RecordingEvents {
     }
     fn banner(&self, b: &Banner) {
         self.push(Recorded::Banner(b.clone()));
+    }
+    fn dropped(&self, d: &DroppedPaths) {
+        self.push(Recorded::Dropped(d.clone()));
     }
     fn auth_prompt(&self, p: &AuthPrompt) {
         self.push(Recorded::Auth(p.clone()));

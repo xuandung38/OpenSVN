@@ -1,8 +1,8 @@
 //! System commands (3.5): operations, auth, accounts, settings, OS integration.
 
 use opensvn_ipc::{
-    Account, AppError, AuthResponse, OpId, OpenWith, OperationHandle, ProgramKind, Settings,
-    SettingsPatch, WcId,
+    Account, AppError, AuthResponse, OpId, OpenWith, OperationHandle, PathGrantInfo, PickRequest,
+    ProgramKind, Settings, SettingsPatch, WcId,
 };
 use tauri::State;
 
@@ -80,6 +80,29 @@ pub async fn program_clear(
     kind: ProgramKind,
 ) -> Result<Settings, AppError> {
     guard(async { state.programs.clear(kind) }).await
+}
+
+/// Shows a native file or folder dialog and returns an opaque, single-use grant for the choice
+/// (`None` when cancelled). Commands that need a local path outside a working copy take the grant.
+#[tauri::command]
+#[specta::specta]
+pub async fn path_pick(
+    state: State<'_, AppState>,
+    request: PickRequest,
+) -> Result<Option<PathGrantInfo>, AppError> {
+    guard(async {
+        let Ok(_open) = state.path_dialog_open.try_lock() else {
+            return Err(crate::errors::invalid_argument(
+                "A file picker is already open.",
+            ));
+        };
+        Ok(state.path_picker.pick(&request).await.map(|(path, kind)| {
+            state
+                .grants
+                .mint(path, kind, crate::path_grants::MAIN_WINDOW)
+        }))
+    })
+    .await
 }
 
 stub!(reveal_in_os(wc_id: WcId, path: String) -> ());

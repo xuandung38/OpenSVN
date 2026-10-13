@@ -16,10 +16,9 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use opensvn_ipc::{
-    BlameLine, BranchNode, CheckoutRequest, CleanupRequest, CommitRequest, CopyLocationRequest,
-    Depth, FileDiff, FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage,
-    RemoteEditRequest, RepoEntry, RepoInfo, ResolveRequest, Rev, RevertRequest, TextSide,
-    UpdateRequest, WcFormat, WcId,
+    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth, FileDiff,
+    FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage, RepoEntry, RepoInfo,
+    ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest, WcFormat, WcId,
 };
 use svn_types::SvnError;
 
@@ -58,6 +57,57 @@ pub struct WcInfo {
     pub store_pristine: bool,
     /// Path of the root inside the repository, `/`-prefixed.
     pub path_in_repo: String,
+}
+
+/// A checkout with its destination already resolved from a path grant.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckoutPlan {
+    /// Repository URL.
+    pub url: String,
+    /// Destination directory (becomes the working copy root).
+    pub path: PathBuf,
+    /// Revision (`None` = HEAD).
+    pub rev: Option<Rev>,
+    /// Depth.
+    pub depth: Depth,
+    /// Sparse entries.
+    pub sparse: Option<Vec<opensvn_ipc::SparseEntry>>,
+    /// Working copy format.
+    pub format: WcFormat,
+    /// Store pristine copies.
+    pub store_pristine: bool,
+    /// Skip externals.
+    pub ignore_externals: bool,
+}
+
+/// One server-side edit with local paths already resolved from path grants. Fields mirror
+/// `opensvn_ipc::RemoteOp`.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditOp {
+    /// Create a directory.
+    Mkdir { url: String },
+    /// Rename.
+    Rename { from_url: String, to_url: String },
+    /// Delete.
+    Delete { url: String },
+    /// Copy.
+    Copy {
+        from_url: String,
+        from_rev: Option<Rev>,
+        to_url: String,
+    },
+    /// Upload a local file the user picked.
+    Upload { url: String, local_path: PathBuf },
+}
+
+/// A remote edit commit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteEditPlan {
+    /// Operations in order.
+    pub ops: Vec<EditOp>,
+    /// Commit message.
+    pub message: String,
 }
 
 /// What opening a working copy found and repaired.
@@ -206,7 +256,7 @@ pub trait EngineFacade: Send + Sync {
 
     // ---- working copy: long operations
     /// Checks a repository out into `req.path`.
-    async fn checkout(&self, req: &CheckoutRequest, ctx: &OpContext) -> EngineResult<WcInfo>;
+    async fn checkout(&self, plan: &CheckoutPlan, ctx: &OpContext) -> EngineResult<WcInfo>;
     /// Compares the working copy with the repository head.
     async fn status_remote(&self, wc: &WcRef, ctx: &OpContext) -> EngineResult<RemoteScan>;
     /// Updates; returns the revision reached.
@@ -318,7 +368,7 @@ pub trait EngineFacade: Send + Sync {
         ctx: &OpContext,
     ) -> EngineResult<()>;
     /// Applies server-side edits in one commit; returns the new revision.
-    async fn remote_edit(&self, req: &RemoteEditRequest, ctx: &OpContext) -> EngineResult<Rev>;
+    async fn remote_edit(&self, plan: &RemoteEditPlan, ctx: &OpContext) -> EngineResult<Rev>;
     /// Copies in the repository (branch, tag); returns the new revision.
     async fn copy_location(&self, req: &CopyLocationRequest, ctx: &OpContext) -> EngineResult<Rev>;
     /// Branch tree of a repository for `layout`.

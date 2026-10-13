@@ -2,6 +2,7 @@
 
 use super::defaults::language_from_locale;
 use super::*;
+use opensvn_ipc::ErrorCode;
 use opensvn_ipc::{DiffMode, ProxySetting, Theme};
 
 fn service() -> SettingsService {
@@ -61,7 +62,7 @@ fn invalid_patch_changes_nothing() {
             "network.maxConnections": 99,
         })))
         .unwrap_err();
-    assert_eq!(err.code, ErrorCode::Internal);
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
     assert_eq!(
         svc.get(),
         before,
@@ -75,21 +76,18 @@ fn invalid_patch_changes_nothing() {
 }
 
 #[test]
-fn settings_set_rejects_every_program_launching_key() {
-    let svc = service();
+fn a_patch_cannot_carry_program_launching_keys() {
     for key in PROGRAM_KEYS {
         for value in [
             serde_json::json!({"path": "/bin/sh", "args": ["-c", "id"]}),
             serde_json::Value::Null,
         ] {
-            let err = svc
-                .apply_patch(&patch(serde_json::json!({ key: value })))
+            let err = serde_json::from_value::<SettingsPatch>(serde_json::json!({ key: value }))
                 .unwrap_err();
-            assert_eq!(err.code, ErrorCode::PermissionDenied, "{key}");
-            assert_eq!(err.detail.as_deref(), Some(key));
+            assert!(err.to_string().contains("unknown field"), "{key}: {err}");
         }
     }
-    assert_eq!(svc.get().diff_external_tool, None);
+    assert_eq!(service().get().diff_external_tool, None);
 }
 
 #[test]

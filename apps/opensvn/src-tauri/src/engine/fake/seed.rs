@@ -5,13 +5,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bytes::Bytes;
-use opensvn_ipc::{CheckoutRequest, Depth, Rev, WcFormat};
+use opensvn_ipc::{Depth, Rev, WcFormat};
 use svn_ra_api::fake::{FakeChange, FakeRaSession};
 use svn_types::{PropChange, RelPath, SvnError};
 
 use super::FakeEngine;
 use crate::engine::context::OpContext;
-use crate::engine::facade::{EngineFacade, LockScope, WcRef};
+use crate::engine::facade::{CheckoutPlan, EngineFacade, LockScope, WcRef};
 
 /// URL of the demo repository.
 pub const DEMO_REPO_URL: &str = "https://svn.test.local/repos/demo";
@@ -153,9 +153,9 @@ impl FakeEngine {
         let root = demo_wc_root();
         engine
             .checkout(
-                &CheckoutRequest {
+                &CheckoutPlan {
                     url: format!("{DEMO_REPO_URL}/trunk"),
-                    path: root.to_string_lossy().into_owned(),
+                    path: root.clone(),
                     rev: Some(Rev(8)),
                     depth: Depth::Infinity,
                     sparse: None,

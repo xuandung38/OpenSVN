@@ -132,47 +132,20 @@ fn password_is_redacted_in_debug_but_plain_on_the_wire() {
 }
 
 #[test]
-fn nullable_patch_key_distinguishes_unchanged_clear_and_set() {
-    // absent key: unchanged
-    let absent: SettingsPatch = serde_json::from_value(json!({})).unwrap();
-    assert_eq!(absent.diff_external_tool, None);
-    // explicit null: clear
-    let clear: SettingsPatch = serde_json::from_value(json!({"diff.externalTool": null})).unwrap();
-    assert_eq!(clear.diff_external_tool, Some(None));
-    // value: set
-    let set: SettingsPatch = serde_json::from_value(
-        json!({"diff.externalTool": {"path": "/usr/bin/meld", "args": ["%l", "%r"]}}),
-    )
-    .unwrap();
-    assert_eq!(
-        set.diff_external_tool,
-        Some(Some(ExternalDiffTool {
-            path: "/usr/bin/meld".into(),
-            args: vec!["%l".into(), "%r".into()]
-        }))
-    );
-    // serialization keeps the three states apart
-    assert_eq!(serde_json::to_value(&absent).unwrap(), json!({}));
-    assert_eq!(
-        serde_json::to_value(&clear).unwrap(),
-        json!({"diff.externalTool": null})
-    );
-    assert_eq!(
-        serde_json::to_value(&set).unwrap(),
-        json!({"diff.externalTool": {"path": "/usr/bin/meld", "args": ["%l", "%r"]}})
-    );
-}
-
-#[test]
-fn program_settings_are_nullable_patch_keys() {
-    let patch: SettingsPatch = serde_json::from_value(json!({
-        "diff.mergeTool": null,
-        "tools.editor": {"path": "/usr/bin/code", "args": []},
-    }))
-    .unwrap();
-    assert_eq!(patch.diff_merge_tool, Some(None));
-    assert!(matches!(patch.tools_editor, Some(Some(_))));
-    assert_eq!(patch.tools_terminal, None);
+fn program_settings_are_readable_but_not_patchable() {
+    let mut settings = serde_json::to_value(sample_settings()).unwrap();
+    settings["tools.editor"] = json!({"path": "/usr/bin/code", "args": []});
+    let back: Settings = serde_json::from_value(settings).unwrap();
+    assert!(back.tools_editor.is_some() && back.diff_merge_tool.is_none());
+    for key in [
+        "diff.externalTool",
+        "diff.mergeTool",
+        "tools.editor",
+        "tools.terminal",
+    ] {
+        let err = serde_json::from_value::<SettingsPatch>(json!({ key: null })).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{key}: {err}");
+    }
     assert_eq!(
         serde_json::to_value(ProgramKind::MergeTool).unwrap(),
         json!("merge-tool")
@@ -191,4 +164,55 @@ fn operation_kinds_for_local_edits_and_downloads() {
     ] {
         assert_eq!(serde_json::to_value(kind).unwrap(), json!(wire));
     }
+}
+
+fn sample_settings() -> Settings {
+    Settings {
+        general_checkout_root: "~/svn".into(),
+        general_check_interval_min: 10,
+        general_language: Language::En,
+        appearance_theme: Theme::System,
+        diff_mode: DiffMode::Split,
+        diff_ignore_whitespace: false,
+        network_max_connections: 4,
+        network_timeout_sec: 60,
+        network_proxy: ProxySetting::System,
+        wc_default_format: WcFormat::V31,
+        wc_read_subversion_config: true,
+        cache_max_size_gb: 2,
+        integrations_web_revision_url: "https://{server}/r{rev}".into(),
+        integrations_web_file_url: "https://{server}/{path}".into(),
+        diff_external_tool: None,
+        diff_merge_tool: None,
+        tools_editor: None,
+        tools_terminal: None,
+    }
+}
+
+#[test]
+fn path_grants_are_opaque_ids_with_display_names() {
+    let dropped = DroppedPaths {
+        grants: vec![PathGrantInfo {
+            id: PathGrantId("g1".into()),
+            display_name: "project".into(),
+            kind: GrantKind::Dir,
+        }],
+        position: DropPosition { x: 10, y: 20 },
+    };
+    assert_eq!(
+        serde_json::to_value(&dropped).unwrap(),
+        json!({"grants": [{"id": "g1", "displayName": "project", "kind": "dir"}], "position": {"x": 10, "y": 20}})
+    );
+    assert_eq!(
+        serde_json::to_value(PickRequest::SaveFile {
+            suggested_name: "a.txt".into(),
+            title: None
+        })
+        .unwrap(),
+        json!({"kind": "saveFile", "suggestedName": "a.txt", "title": null})
+    );
+    assert_eq!(
+        serde_json::to_value(ErrorCode::InvalidArgument).unwrap(),
+        json!("invalid-argument")
+    );
 }

@@ -2,7 +2,7 @@
 
 use opensvn_ipc::{
     AppError, DiffGetRequest, DiffTarget, FileDiff, FileStatus, IgnoreAddRequest, NodeStatus,
-    OpResult, OperationHandle, OperationKind, StatusGetRequest, WcId, WorkingCopy,
+    OpResult, OperationHandle, OperationKind, PathGrantId, StatusGetRequest, WcId, WorkingCopy,
 };
 use tauri::State;
 
@@ -20,10 +20,11 @@ pub async fn wc_list(state: State<'_, AppState>) -> Result<Vec<WorkingCopy>, App
 #[specta::specta]
 pub async fn wc_add_existing(
     state: State<'_, AppState>,
-    path: String,
+    grant: PathGrantId,
 ) -> Result<WorkingCopy, AppError> {
     guard(async {
-        let wc = state.wcs.add_existing(&path).await?;
+        let path = state.redeem_dir(&grant)?;
+        let wc = state.wcs.add_existing(&path.to_string_lossy()).await?;
         // Run recovery now so a stale lock is handled before the first operation.
         state.open_wc(&wc.id).await
     })
@@ -183,7 +184,7 @@ pub async fn status_remote(
                     })
                     .await?;
                 wcs.set_incoming(&wc_id, scan.incoming);
-                publisher.apply_remote(&wc_id, &scan)?;
+                publisher.apply_remote(&wc_id, &scan).await?;
                 Ok(OpResult::Done)
             },
         ))

@@ -1,0 +1,28 @@
+[package]
+name = "svn-delta-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone workspace: libfuzzer-sys is deliberately kept out of the engine's pinned graph.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+svn-delta = { path = ".." }
+svn-types = { path = "../../svn-types" }
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false

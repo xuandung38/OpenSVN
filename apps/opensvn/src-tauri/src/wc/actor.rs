@@ -10,11 +10,12 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures_util::FutureExt;
 use opensvn_ipc::{AppError, ErrorAction, ErrorCode};
+use svn_types::CancelToken;
 use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::boundary::panic_to_error;
@@ -63,6 +64,13 @@ fn busy() -> AppError {
     e
 }
 
+fn cancelled() -> AppError {
+    AppError::from(&svn_types::SvnError::new(
+        svn_types::ErrorCode::Cancelled,
+        "operation cancelled",
+    ))
+}
+
 fn actor_gone() -> AppError {
     AppError::internal("The working copy worker stopped unexpectedly.")
 }
@@ -94,17 +102,46 @@ impl WcActor {
         T: Send + 'static,
         Fut: Future<Output = Result<T, AppError>> + Send + 'static,
     {
-        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_cancellable(job, &CancelToken::new()).await
+    }
+
+    /// Like [`WcActor::write`], but a queued job is abandoned as soon as `cancel` fires: it never
+    /// starts, and the caller gets `cancelled` immediately instead of waiting for the writes
+    /// ahead of it. Once the job has started, cancellation is up to the job itself (it holds the
+    /// token), so the caller keeps waiting for its real result.
+    pub async fn write_cancellable<T, Fut>(
+        &self,
+        job: Fut,
+        cancel: &CancelToken,
+    ) -> Result<T, AppError>
+    where
+        T: Send + 'static,
+        Fut: Future<Output = Result<T, AppError>> + Send + 'static,
+    {
+        if cancel.is_cancelled() {
+            return Err(cancelled());
+        }
+        let (reply_tx, mut reply_rx) = oneshot::channel();
         let shared = Arc::clone(&self.shared);
+        let started = Arc::new(AtomicBool::new(false));
+        let (job_started, job_cancel) = (Arc::clone(&started), cancel.clone());
         shared.pending_writes.fetch_add(1, Ordering::SeqCst);
         let wrapped: Job = Box::pin(async move {
-            let result = {
-                let _exclusive = shared.gate.write().await;
+            let result = async {
+                if job_cancel.is_cancelled() {
+                    return Err(cancelled());
+                }
+                let _exclusive = tokio::select! {
+                    guard = shared.gate.write() => guard,
+                    () = job_cancel.cancelled() => return Err(cancelled()),
+                };
+                job_started.store(true, Ordering::SeqCst);
                 match AssertUnwindSafe(job).catch_unwind().await {
                     Ok(r) => r,
                     Err(p) => Err(panic_to_error(p.as_ref())),
                 }
-            };
+            }
+            .await;
             shared.pending_writes.fetch_sub(1, Ordering::SeqCst);
             let _ = reply_tx.send(result);
         });
@@ -112,7 +149,17 @@ impl WcActor {
             self.shared.pending_writes.fetch_sub(1, Ordering::SeqCst);
             return Err(actor_gone());
         }
-        reply_rx.await.map_err(|_| actor_gone())?
+        loop {
+            tokio::select! {
+                reply = &mut reply_rx => return reply.map_err(|_| actor_gone())?,
+                () = cancel.cancelled(), if !started.load(Ordering::SeqCst) => {
+                    // Not started: the wrapper drops the job when it reaches it.
+                    if !started.load(Ordering::SeqCst) {
+                        return Err(cancelled());
+                    }
+                }
+            }
+        }
     }
 
     /// Runs a read. `make` builds the job again for every attempt. An attempt is retried when a
