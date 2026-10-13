@@ -1,0 +1,3 @@
+# Workspace-wide cargo settings.
+[term]
+color = "auto"
