@@ -2,11 +2,11 @@
 
 use svn_types::{Depth, ErrorCode, RelPath, Result, SvnError};
 
-use crate::display_path::{RepoDisplayPath, RepoLock};
-
 use crate::caps::{UrlBuilder, advertise_caps};
+use crate::display_path::{RepoDisplayPath, RepoLock};
 use crate::http::{HttpRequest, Method, ResponseParser, parse_chunked};
-use crate::util::{corrupt, parse_timestamp};
+use crate::limits::ParserLimits;
+use crate::util::{corrupt, decode_text_field, parse_timestamp, validate_lock_token};
 use crate::xml::{Ns, XmlEvent, XmlReader, XmlWriter};
 
 /// Builds `REPORT` on the public URL of `path`. `depth` limits how far below `path` locks are
@@ -44,21 +44,40 @@ struct Building {
     expires: Option<String>,
 }
 
+/// Fields whose text is kept; text of every other element is dropped without buffering.
+const FIELDS: [&str; 6] = [
+    "path",
+    "token",
+    "owner",
+    "comment",
+    "creationdate",
+    "expirationdate",
+];
+
 /// Incremental parser emitting one [`RepoLock`] per `S:lock`.
 #[derive(Default)]
 pub struct GetLocksParser {
     xml: XmlReader,
     depth: usize,
     lock: Option<Building>,
-    field: Option<String>,
+    field: Option<(&'static str, Option<String>)>,
     text: String,
+    limits: ParserLimits,
     failed: bool,
 }
 
 impl GetLocksParser {
-    /// Creates a parser.
+    /// Creates a parser with the default limits.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a parser with explicit limits.
+    pub fn with_limits(limits: ParserLimits) -> Self {
+        Self {
+            limits,
+            ..Self::default()
+        }
     }
 
     fn run(&mut self, events: Vec<XmlEvent>) -> Result<Vec<RepoLock>> {
@@ -73,20 +92,31 @@ impl GetLocksParser {
                         }
                         2 if tag.name.is(&Ns::Svn, "lock") => self.lock = Some(Building::default()),
                         3 if self.lock.is_some() && tag.name.ns == Ns::Svn => {
-                            self.field = Some(tag.name.local.clone());
+                            self.field = FIELDS
+                                .iter()
+                                .find(|f| **f == tag.name.local)
+                                .map(|f| (*f, tag.attr("encoding").map(str::to_owned)));
                             self.text.clear();
                         }
                         _ => {}
                     }
                 }
                 XmlEvent::Text(t) => {
-                    if self.depth == 3 && self.field.is_some() {
+                    if self.depth == 3
+                        && let Some((name, _)) = &self.field
+                    {
                         self.text.push_str(&t);
+                        let max = if *name == "comment" {
+                            self.limits.max_text_bytes
+                        } else {
+                            self.limits.max_href_bytes
+                        };
+                        ParserLimits::check(self.text.len(), max, "lock field")?;
                     }
                 }
                 XmlEvent::End(_) => {
                     if self.depth == 3 {
-                        self.store_field();
+                        self.store_field()?;
                     } else if self.depth == 2
                         && let Some(b) = self.lock.take()
                     {
@@ -99,20 +129,20 @@ impl GetLocksParser {
         Ok(out)
     }
 
-    fn store_field(&mut self) {
-        let (Some(field), Some(lock)) = (self.field.take(), self.lock.as_mut()) else {
-            return;
+    fn store_field(&mut self) -> Result<()> {
+        let (Some((field, encoding)), Some(lock)) = (self.field.take(), self.lock.as_mut()) else {
+            return Ok(());
         };
-        let text = std::mem::take(&mut self.text);
-        match field.as_str() {
+        let text = decode_text_field(std::mem::take(&mut self.text), encoding.as_deref())?;
+        match field {
             "path" => lock.path = Some(text.trim().to_owned()),
             "token" => lock.token = Some(text.trim().to_owned()),
             "owner" => lock.owner = Some(text.trim().to_owned()),
             "comment" => lock.comment = Some(text),
             "creationdate" => lock.created = Some(text),
-            "expirationdate" => lock.expires = Some(text),
-            _ => {}
+            _ => lock.expires = Some(text),
         }
+        Ok(())
     }
 }
 
@@ -123,7 +153,7 @@ fn finish_lock(b: Building) -> Result<RepoLock> {
     };
     Ok(RepoLock {
         path: RepoDisplayPath::parse(&need(b.path, "S:path")?)?,
-        token: need(b.token, "S:token")?,
+        token: validate_lock_token(&need(b.token, "S:token")?)?,
         owner: need(b.owner, "S:owner")?,
         comment: b.comment.filter(|c| !c.is_empty()),
         created: parse_timestamp(&need(b.created, "S:creationdate")?)?,

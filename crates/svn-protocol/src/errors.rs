@@ -8,10 +8,9 @@
 use svn_types::{ErrorCode, SvnError};
 
 use crate::http::Headers;
+use crate::limits::ParserLimits;
 use crate::xml::{Ns, XmlEvent, XmlReader};
 
-/// Largest error body inspected; longer bodies are cut and normally fall back to the status.
-const MAX_ERROR_BODY: usize = 1 << 20;
 /// Longest chain of nested errors accepted.
 const MAX_CHAIN: usize = 32;
 
@@ -108,8 +107,11 @@ pub fn map_errcode(code: u32) -> Option<ErrorCode> {
         | AUTHZ_PARTIALLY_READABLE
         | AUTHZ_UNWRITABLE
         | RA_DAV_FORBIDDEN
-        | CLIENT_FORBIDDEN_BY_SERVER
-        | REPOS_HOOK_FAILURE => ErrorCode::Forbidden,
+        | CLIENT_FORBIDDEN_BY_SERVER => ErrorCode::Forbidden,
+        // A hook rejection is a repository policy message, not an authorization failure.
+        // TODO(ErrorCode::HookFailed): map here once the contract adds the variant; `Internal`
+        // keeps the UI from offering a re-login meanwhile, and `svn_code` stays on the error.
+        REPOS_HOOK_FAILURE => ErrorCode::Internal,
         RA_SERF_SSL_CERT_UNTRUSTED => ErrorCode::TlsUntrusted,
         RA_DAV_CONN_TIMEOUT => ErrorCode::Timeout,
         RA_NOT_IMPLEMENTED | UNSUPPORTED_FEATURE | REPOS_DISABLED_FEATURE => {
@@ -127,6 +129,8 @@ pub fn map_http_status(status: u16) -> ErrorCode {
         403 => ErrorCode::Forbidden,
         404 | 410 => ErrorCode::PathNotFound,
         408 | 504 => ErrorCode::Timeout,
+        // Also sent for "parent collection missing" (MKCOL/PUT/COPY); out-of-date is the
+        // actionable reading when the body is not a `D:error`.
         409 => ErrorCode::OutOfDate,
         412 => ErrorCode::LockTokenInvalid,
         423 => ErrorCode::LockedByOther,
@@ -148,7 +152,8 @@ pub struct DavErrorEntry {
 /// Parses a `D:error` document into its chain (outermost first). `None` when the body is not
 /// such a document or carries no message.
 pub fn parse_dav_error(body: &[u8]) -> Option<Vec<DavErrorEntry>> {
-    let body = &body[..body.len().min(MAX_ERROR_BODY)];
+    let limits = ParserLimits::default();
+    let body = &body[..body.len().min(limits.max_error_body_bytes)];
     let mut reader = XmlReader::new();
     let mut events = reader.feed(body).ok()?;
     events.extend(reader.finish().ok()?);
@@ -167,13 +172,16 @@ pub fn parse_dav_error(body: &[u8]) -> Option<Vec<DavErrorEntry>> {
                 });
             }
             XmlEvent::Text(t) => {
-                if let Some(c) = current.as_mut() {
+                // Keep reading but stop growing: the message is cut to the cap afterwards.
+                if let Some(c) = current.as_mut()
+                    && c.message.len() <= limits.max_error_message_bytes
+                {
                     c.message.push_str(&t);
                 }
             }
             XmlEvent::End(n) if n.is(&Ns::Apache, "human-readable") => {
                 if let Some(mut c) = current.take() {
-                    c.message = c.message.trim().to_owned();
+                    c.message = sanitize_message(c.message.trim(), limits.max_error_message_bytes);
                     entries.push(c);
                 }
             }
@@ -181,6 +189,23 @@ pub fn parse_dav_error(body: &[u8]) -> Option<Vec<DavErrorEntry>> {
         }
     }
     (root_ok && !entries.is_empty()).then_some(entries)
+}
+
+/// Makes server text safe to show: control characters other than newline and tab (ESC, NUL,
+/// ...) are dropped and the text is cut to `max` bytes at a character boundary, marked with `…`.
+pub fn sanitize_message(text: &str, max: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max + 3));
+    for c in text.chars() {
+        if c.is_control() && !matches!(c, '\n' | '\t') {
+            continue;
+        }
+        if out.len() + c.len_utf8() > max {
+            out.push('\u{2026}');
+            break;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Builds the error for a failed response. `body` should be the (bounded) response body.

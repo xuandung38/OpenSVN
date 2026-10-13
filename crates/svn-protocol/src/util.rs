@@ -1,5 +1,7 @@
 //! Small helpers shared by the protocol modules.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use svn_types::{ErrorCode, Revnum, SvnError, Timestamp};
 
 /// Error for data that violates the wire protocol.
@@ -55,6 +57,55 @@ pub(crate) fn validate_display_path(path: &str) -> Result<String, SvnError> {
         ));
     }
     Ok(path.to_owned())
+}
+
+/// Decodes a text value that the server may have base64-encoded (`encoding="base64"`, sent when
+/// `S:encode-binary-props` is requested and the value is not XML-safe). The result must be UTF-8.
+pub(crate) fn decode_text_field(text: String, encoding: Option<&str>) -> Result<String, SvnError> {
+    match encoding {
+        None => Ok(text),
+        Some(_) => {
+            let bytes = decode_bytes_field(text, encoding)?;
+            String::from_utf8(bytes).map_err(|_| corrupt("base64 field is not UTF-8"))
+        }
+    }
+}
+
+/// Decodes bytes of a value that may be base64-encoded.
+pub(crate) fn decode_bytes_field(
+    text: String,
+    encoding: Option<&str>,
+) -> Result<Vec<u8>, SvnError> {
+    match encoding {
+        None => Ok(text.into_bytes()),
+        Some("base64") => {
+            let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+            STANDARD
+                .decode(compact.as_bytes())
+                .map_err(|e| corrupt(format!("invalid base64 field: {e}")))
+        }
+        Some(other) => Err(corrupt(format!("unknown value encoding {other:?}"))),
+    }
+}
+
+/// A lock token as the engine accepts it: `opaquelocktoken:` followed by printable characters,
+/// no whitespace, control characters or angle brackets, at most 256 bytes.
+pub(crate) fn validate_lock_token(token: &str) -> Result<String, SvnError> {
+    let t = token.trim();
+    let ok = t.len() <= 256
+        && t.strip_prefix("opaquelocktoken:")
+            .is_some_and(|rest| !rest.is_empty())
+        && !t
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '<' | '>'));
+    if ok {
+        Ok(t.to_owned())
+    } else {
+        Err(SvnError::new(
+            ErrorCode::LockTokenInvalid,
+            "server sent a malformed lock token",
+        ))
+    }
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date.

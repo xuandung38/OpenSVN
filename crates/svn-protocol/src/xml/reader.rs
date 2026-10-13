@@ -57,11 +57,16 @@ pub struct StartTag {
 }
 
 impl StartTag {
-    /// Value of the first attribute whose local name is `local`, whatever its namespace.
+    /// Value of the unprefixed (namespace-less) attribute `local`.
     pub fn attr(&self, local: &str) -> Option<&str> {
+        self.attr_in(&Ns::None, local)
+    }
+
+    /// Value of the attribute `local` in namespace `ns`.
+    pub fn attr_in(&self, ns: &Ns, local: &str) -> Option<&str> {
         self.attrs
             .iter()
-            .find(|a| a.name.local == local)
+            .find(|a| a.name.is(ns, local))
             .map(|a| a.value.as_str())
     }
 }
@@ -107,12 +112,25 @@ pub struct XmlReader {
     saw_root: bool,
     root_closed: bool,
     first_chunk: bool,
+    started: bool,
     failed: bool,
 }
 
 impl Default for XmlReader {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// XML 1.0 `Char`: rejects C0 controls other than tab, LF and CR, surrogates and U+FFFE/F.
+fn check_chars(text: &str) -> Result<()> {
+    let ok = text.chars().all(|c| {
+        matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}')
+    });
+    if ok {
+        Ok(())
+    } else {
+        Err(corrupt("malformed XML: character not allowed in XML 1.0"))
     }
 }
 
@@ -139,6 +157,7 @@ impl XmlReader {
             saw_root: false,
             root_closed: false,
             first_chunk: true,
+            started: false,
             failed: false,
         }
     }
@@ -227,13 +246,11 @@ impl XmlReader {
                     b'<' => return Err(corrupt("malformed XML: '<' inside a tag")),
                     _ => Scan::Tag(0),
                 },
-                Scan::Tag(q) => {
-                    if b == q {
-                        Scan::Tag(0)
-                    } else {
-                        Scan::Tag(q)
-                    }
-                }
+                Scan::Tag(q) => match b {
+                    _ if b == q => Scan::Tag(0),
+                    b'<' => return Err(corrupt("malformed XML: '<' in an attribute value")),
+                    _ => Scan::Tag(q),
+                },
                 Scan::Bang => match b {
                     b'-' => Scan::BangDash,
                     b'[' => Scan::CdataHead(1),
@@ -353,14 +370,26 @@ impl XmlReader {
                     self.flush_text(&mut pending, out)?;
                     self.end_element(e.name().as_ref(), out)?;
                 }
-                Event::Text(t) => pending.push_str(&t.xml10_content()),
-                Event::CData(c) => pending.push_str(&c.xml10_content()),
+                Event::Text(t) => {
+                    let text = t.xml10_content();
+                    check_chars(&text)?;
+                    if !text.trim().is_empty() {
+                        self.started = true;
+                    }
+                    pending.push_str(&text);
+                }
+                Event::CData(c) => {
+                    let text = c.xml10_content();
+                    check_chars(&text)?;
+                    pending.push_str(&text);
+                }
                 Event::GeneralRef(r) => {
                     if r.is_char_ref() {
                         let c = r
                             .resolve_char_ref()
                             .map_err(xml_err)?
                             .ok_or_else(|| corrupt("malformed XML: bad character reference"))?;
+                        check_chars(c.encode_utf8(&mut [0; 4]))?;
                         pending.push(c);
                     } else {
                         pending.push(match &*r.xml10_content() {
@@ -373,7 +402,13 @@ impl XmlReader {
                         });
                     }
                 }
-                Event::Comment(_) | Event::Decl(_) | Event::PI(_) => {}
+                Event::Decl(_) => {
+                    if self.started {
+                        return Err(corrupt("malformed XML: declaration is not first"));
+                    }
+                    self.started = true;
+                }
+                Event::Comment(_) | Event::PI(_) => self.started = true,
                 Event::DocType(_) => return Err(corrupt("DTD is not allowed")),
             }
         }
@@ -460,6 +495,7 @@ impl XmlReader {
                 .normalized_value(XmlVersion::Implicit1_0)
                 .map_err(xml_err)?
                 .into_owned();
+            check_chars(&value)?;
             if key == "xmlns" {
                 decls.push((String::new(), value));
             } else if let Some(prefix) = key.strip_prefix("xmlns:") {
@@ -477,6 +513,7 @@ impl XmlReader {
             });
         }
         self.saw_root = true;
+        self.started = true;
         self.stack.push(Scope { lexical, decls });
         out.push(XmlEvent::Start(StartTag { name, attrs }));
         Ok(())

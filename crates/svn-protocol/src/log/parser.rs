@@ -1,11 +1,13 @@
 //! Streaming `S:log-report` response parser.
 
+use bytes::Bytes;
 use svn_types::{ChangeAction, LogEntry, NodeKind, Result, Revnum};
 
 use crate::display_path::{DisplayChangedPath, RepoDisplayPath};
 
 use crate::http::{ResponseParser, parse_chunked};
-use crate::util::{corrupt, parse_revnum, parse_timestamp};
+use crate::limits::ParserLimits;
+use crate::util::{corrupt, decode_bytes_field, decode_text_field, parse_revnum, parse_timestamp};
 use crate::xml::{Ns, StartTag, XmlEvent, XmlReader};
 
 /// A log entry with its position in the merge hierarchy.
@@ -19,6 +21,9 @@ pub struct LogItem {
     pub entry: LogEntry,
     /// Changed paths (when requested), display-only.
     pub changed_paths: Vec<DisplayChangedPath>,
+    /// Revision properties beyond author, date and message (`LogRevprops::All`/`Only`), with
+    /// decoded values.
+    pub revprops: Vec<(String, Bytes)>,
     /// Nesting level in the merge hierarchy.
     pub merge_depth: u32,
     /// The merge was subtractive (a reverse merge).
@@ -32,6 +37,7 @@ enum Field {
     Date,
     Comment,
     Path,
+    RevProp,
 }
 
 struct Building {
@@ -39,6 +45,7 @@ struct Building {
     end_marker: bool,
     entry: LogEntry,
     paths: Vec<DisplayChangedPath>,
+    revprops: Vec<(String, Bytes)>,
     subtractive: bool,
 }
 
@@ -65,6 +72,9 @@ pub struct LogParser {
     field: Option<Field>,
     text: String,
     path_tag: Option<StartTag>,
+    encoding: Option<String>,
+    revprop_name: Option<String>,
+    limits: ParserLimits,
     failed: bool,
 }
 
@@ -104,7 +114,18 @@ impl LogParser {
             field: None,
             text: String::new(),
             path_tag: None,
+            encoding: None,
+            revprop_name: None,
+            limits: ParserLimits::default(),
             failed: false,
+        }
+    }
+
+    /// Creates a parser with explicit limits.
+    pub fn with_limits(limits: ParserLimits) -> Self {
+        Self {
+            limits,
+            ..Self::new()
         }
     }
 
@@ -120,6 +141,7 @@ impl LogParser {
                     end_marker: false,
                     subtractive: false,
                     paths: Vec::new(),
+                    revprops: Vec::new(),
                     entry: LogEntry {
                         rev: Revnum(0),
                         author: None,
@@ -130,15 +152,17 @@ impl LogParser {
                     },
                 });
             }
-            3 if self.item.is_some() => self.start_field(tag),
+            3 if self.item.is_some() => self.start_field(tag)?,
             _ => {}
         }
         Ok(())
     }
 
-    fn start_field(&mut self, tag: &StartTag) {
+    fn start_field(&mut self, tag: &StartTag) -> Result<()> {
         let n = &tag.name;
         self.text.clear();
+        self.encoding = tag.attr("encoding").map(str::to_owned);
+        self.revprop_name = None;
         self.field = if n.is(&Ns::Dav, "version-name") {
             Some(Field::Rev)
         } else if n.is(&Ns::Dav, "creator-displayname") {
@@ -150,6 +174,14 @@ impl LogParser {
         } else if n.ns == Ns::Svn && action_for(&n.local).is_some() {
             self.path_tag = Some(tag.clone());
             Some(Field::Path)
+        } else if n.is(&Ns::Svn, "revprop") {
+            self.revprop_name = Some(
+                tag.attr("name")
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| corrupt("revprop without a name"))?
+                    .to_owned(),
+            );
+            Some(Field::RevProp)
         } else {
             if let Some(item) = self.item.as_mut() {
                 if n.is(&Ns::Svn, "has-children") {
@@ -160,6 +192,7 @@ impl LogParser {
             }
             None
         };
+        Ok(())
     }
 
     fn finish_field(&mut self) -> Result<()> {
@@ -167,17 +200,33 @@ impl LogParser {
             return Ok(());
         };
         let text = std::mem::take(&mut self.text);
+        let encoding = self.encoding.take();
+        let enc = encoding.as_deref();
         match field {
             Field::Rev => {
+                let text = decode_text_field(text, enc)?;
                 if text.trim() == "-1" {
                     item.end_marker = true;
                 } else {
                     item.rev = Some(parse_revnum(&text)?);
                 }
             }
-            Field::Author => item.entry.author = Some(text),
-            Field::Date => item.entry.date = Some(parse_timestamp(&text)?),
-            Field::Comment => item.entry.message = Some(text),
+            Field::Author => item.entry.author = Some(decode_text_field(text, enc)?),
+            Field::Date => item.entry.date = Some(parse_timestamp(&decode_text_field(text, enc)?)?),
+            Field::Comment => item.entry.message = Some(decode_text_field(text, enc)?),
+            Field::RevProp => {
+                let name = self
+                    .revprop_name
+                    .take()
+                    .ok_or_else(|| corrupt("internal parser state"))?;
+                ParserLimits::check(
+                    item.revprops.len() + 1,
+                    self.limits.max_prop_elements,
+                    "revision properties",
+                )?;
+                item.revprops
+                    .push((name, Bytes::from(decode_bytes_field(text, enc)?)));
+            }
             Field::Path => {
                 let tag = self
                     .path_tag
@@ -189,6 +238,11 @@ impl LogParser {
                     (Some(p), Some(r)) => Some((RepoDisplayPath::parse(p)?, parse_revnum(r)?)),
                     _ => None,
                 };
+                ParserLimits::check(
+                    item.paths.len() + 1,
+                    self.limits.max_changed_paths,
+                    "changed paths",
+                )?;
                 item.paths.push(DisplayChangedPath {
                     path: RepoDisplayPath::parse(text.trim())?,
                     action,
@@ -221,6 +275,7 @@ impl LogParser {
                 out.push(LogItem {
                     entry: item.entry,
                     changed_paths: item.paths,
+                    revprops: item.revprops,
                     merge_depth,
                     subtractive_merge: item.subtractive,
                 });
@@ -236,8 +291,17 @@ impl LogParser {
             match ev {
                 XmlEvent::Start(tag) => self.start(&tag)?,
                 XmlEvent::Text(t) => {
-                    if self.depth == 3 && self.field.is_some() {
+                    if self.depth == 3
+                        && let Some(field) = self.field
+                    {
                         self.text.push_str(&t);
+                        let max = match field {
+                            Field::Comment => self.limits.max_log_message_bytes,
+                            Field::RevProp => self.limits.max_text_bytes,
+                            Field::Rev | Field::Date => self.limits.max_status_bytes,
+                            Field::Author | Field::Path => self.limits.max_href_bytes,
+                        };
+                        ParserLimits::check(self.text.len(), max, "log field")?;
                     }
                 }
                 XmlEvent::End(_) => self.end(&mut out)?,

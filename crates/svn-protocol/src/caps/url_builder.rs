@@ -65,7 +65,33 @@ pub struct UrlBuilder {
     rev_root: String,
     txn: Vec<String>,
     txn_root: Vec<String>,
+    dec: Decoded,
+}
+
+/// The stubs in decoded form: hrefs are classified after one round of percent-decoding, so
+/// `%21svn` cannot slip past a guard written for `!svn`.
+#[derive(Debug, Clone)]
+struct Decoded {
+    root: String,
+    me: String,
+    rev: String,
+    rev_root: String,
+    txn: Vec<String>,
+    txn_root: Vec<String>,
     special_parents: Vec<String>,
+}
+
+/// Percent-decodes every segment of an absolute path once; an encoded `/` is refused.
+fn decode_path(path: &str) -> Result<String> {
+    let mut segs = Vec::new();
+    for seg in path.split('/') {
+        let d = percent_decode(seg)?;
+        if d.contains('/') {
+            return Err(unsafe_href("encoded slash in href"));
+        }
+        segs.push(d);
+    }
+    Ok(segs.join("/"))
 }
 
 /// Parent path of an absolute path (`/a/b/c` -> `/a/b`).
@@ -136,6 +162,21 @@ impl UrlBuilder {
                 special_parents.push(parent);
             }
         }
+        let dec = Decoded {
+            root: decode_path(&root)?,
+            me: decode_path(&me)?,
+            rev: decode_path(&rev)?,
+            rev_root: decode_path(&rev_root)?,
+            txn: txn.iter().map(|p| decode_path(p)).collect::<Result<_>>()?,
+            txn_root: txn_root
+                .iter()
+                .map(|p| decode_path(p))
+                .collect::<Result<_>>()?,
+            special_parents: special_parents
+                .iter()
+                .map(|p| decode_path(p))
+                .collect::<Result<_>>()?,
+        };
         Ok(Self {
             origin,
             root,
@@ -144,7 +185,7 @@ impl UrlBuilder {
             rev_root,
             txn,
             txn_root,
-            special_parents,
+            dec,
         })
     }
 
@@ -258,23 +299,24 @@ impl UrlBuilder {
                 return Err(unsafe_href(format!("dot segment in href {href:?}")));
             }
         }
-        let kind = self.classify(url.path())?;
+        let kind = self.classify(&decode_path(url.path())?)?;
         Ok(AcceptedHref { url, kind })
     }
 
     fn classify(&self, path: &str) -> Result<HrefKind> {
+        let d = &self.dec;
         let path = path.trim_end_matches('/');
-        if path == self.me {
+        if path == d.me {
             return Ok(HrefKind::Me);
         }
-        if let Some(rest) = strip_stub(path, &self.rev_root) {
+        if let Some(rest) = strip_stub(path, &d.rev_root) {
             let (rev, tail) = split_first(rest)?;
             return Ok(HrefKind::RevRoot {
                 rev: parse_rev(rev)?,
-                path: decode_rel(tail)?,
+                path: rel_from_decoded(tail)?,
             });
         }
-        if let Some(rest) = strip_stub(path, &self.rev) {
+        if let Some(rest) = strip_stub(path, &d.rev) {
             let (rev, tail) = split_first(rest)?;
             return if tail.is_empty() {
                 Ok(HrefKind::Rev {
@@ -284,17 +326,17 @@ impl UrlBuilder {
                 Err(unsafe_href("unexpected path below a revision resource"))
             };
         }
-        for stub in &self.txn_root {
+        for stub in &d.txn_root {
             if let Some(rest) = strip_stub(path, stub) {
                 let (name, tail) = split_first(rest)?;
                 Self::txn_name(name)?;
                 return Ok(HrefKind::TxnRoot {
                     name: name.to_owned(),
-                    path: decode_rel(tail)?,
+                    path: rel_from_decoded(tail)?,
                 });
             }
         }
-        for stub in &self.txn {
+        for stub in &d.txn {
             if let Some(rest) = strip_stub(path, stub) {
                 let (name, tail) = split_first(rest)?;
                 Self::txn_name(name)?;
@@ -309,14 +351,14 @@ impl UrlBuilder {
         }
         // Any other resource under the directory that holds the stubs (`bc`, `ver`, `vcc`, ...)
         // is a special resource this client does not use.
-        if self.special_parents.iter().any(|p| under(path, p)) {
+        if d.special_parents.iter().any(|p| under(path, p)) {
             return Err(unsafe_href(format!(
                 "href below an unknown special resource: {path}"
             )));
         }
-        if let Some(rest) = strip_stub(path, &self.root) {
+        if let Some(rest) = strip_stub(path, &d.root) {
             return Ok(HrefKind::Public {
-                path: decode_rel(rest)?,
+                path: rel_from_decoded(rest)?,
             });
         }
         Err(unsafe_href(format!("href outside the repository: {path}")))
@@ -349,18 +391,10 @@ fn parse_rev(s: &str) -> Result<Revnum> {
     }
 }
 
-/// Decodes and validates `a/b/c` with [`RelPath::from_server`]; empty means the root.
-fn decode_rel(encoded: &str) -> Result<RelPath> {
-    if encoded.is_empty() {
+/// Validates decoded `a/b/c` with [`RelPath::from_server`]; empty means the root.
+fn rel_from_decoded(decoded: &str) -> Result<RelPath> {
+    if decoded.is_empty() {
         return Ok(RelPath::root());
     }
-    let mut decoded = Vec::new();
-    for seg in encoded.split('/') {
-        let d = percent_decode(seg)?;
-        if d.contains('/') {
-            return Err(unsafe_href("encoded slash in href"));
-        }
-        decoded.push(d);
-    }
-    RelPath::from_server(&decoded.join("/"))
+    RelPath::from_server(decoded)
 }

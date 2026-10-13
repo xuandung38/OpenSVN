@@ -125,7 +125,7 @@ fn allprop_exposes_versioned_custom_and_dav_properties() {
     assert_eq!(e.get(&Ns::SvnDav, "md5-checksum").unwrap().text().len(), 32);
     assert_eq!(e.get(&Ns::Dav, "getcontentlength").unwrap().text(), "17");
     assert_eq!(
-        e.get(&Ns::Dav, "checked-in").unwrap().descendant("href"),
+        e.get(&Ns::Dav, "checked-in").unwrap().descendant_at("href"),
         Some("/svn/repo/!svn/ver/3/trunk/a.txt")
     );
     assert!(
