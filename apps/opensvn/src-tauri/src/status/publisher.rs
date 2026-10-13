@@ -227,6 +227,8 @@ mod tests {
                 repo_uuid: "u".into(),
                 repo_root_url: "u".into(),
                 sort_order: 0,
+                added_at: String::new(),
+                last_opened_at: None,
             },
         };
         let tasks: Vec<_> = (0..8)

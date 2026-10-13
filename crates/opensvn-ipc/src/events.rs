@@ -20,6 +20,9 @@ pub enum OpResult {
     Done,
     /// Commit or update produced/reached a revision.
     NewRev { new_rev: Rev },
+    /// Checkout finished: the new working copy's registry id (`None` when it could not be
+    /// registered; the files are on disk and can be added with "Add existing working copy").
+    CheckedOut { wc_id: Option<WcId>, new_rev: Rev },
     /// Blame result.
     Blame {
         lines: Vec<crate::models::BlameLine>,

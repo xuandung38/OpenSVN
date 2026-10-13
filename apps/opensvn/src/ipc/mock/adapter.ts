@@ -43,13 +43,13 @@ const err = (message: string): Promise<{ status: "error"; error: AppError }> =>
     error: { code: "internal", message, detail: null, path: null, retryable: false, actions: null },
   });
 
-const errCode = (code: AppError["code"], message: string) =>
+const errCode = (code: AppError["code"], message: string, detail: string | null = null) =>
   Promise.resolve({
     status: "error" as const,
     error: {
       code,
       message,
-      detail: null,
+      detail,
       path: null,
       retryable: false,
       actions: null,
@@ -243,6 +243,11 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
   },
   programClear: (kind: ProgramKind) => {
     Object.assign(mockSettings, { [PROGRAM_KEYS[kind]]: null });
+    return ok({ ...mockSettings });
+  },
+  // The real backend shows the native folder dialog; the mock pretends the user chose a folder.
+  checkoutRootChoose: () => {
+    Object.assign(mockSettings, { "general.checkoutRoot": "/Users/dev/projects" });
     return ok({ ...mockSettings });
   },
   settingsSet: (patch: SettingsPatch_Deserialize) => {

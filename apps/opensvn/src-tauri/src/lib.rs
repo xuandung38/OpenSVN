@@ -145,7 +145,10 @@ pub fn run() {
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
-            menu::install(app, true)?;
+            // A missing menu bar must not stop the app; the shortcuts work without it.
+            if let Err(e) = menu::install(app, true) {
+                tracing::warn!(error = %e, "menu bar could not be installed");
+            }
             let state = build_state(app)?;
             app.manage(state);
             tauri::async_runtime::spawn(finish_startup(app.handle().clone()));

@@ -13,7 +13,14 @@ export type WcDialog =
   | { kind: "update-rev" }
   | { kind: "switch" }
   | { kind: "cleanup" }
-  | { kind: "resolver"; path: string | null };
+  | { kind: "resolver"; path: string | null }
+  | { kind: "repo-rename"; wcId: string; name: string }
+  | { kind: "repo-remove"; wcId: string; name: string };
+
+/** Dialogs that do not belong to the current working copy (they survive switching to another). */
+export function isAppDialog(d: WcDialog | null): boolean {
+  return d?.kind === "checkout" || d?.kind === "repo-rename" || d?.kind === "repo-remove";
+}
 
 export interface WcLinks {
   /** Show the history of a working-copy path (History tab). */
@@ -64,7 +71,7 @@ export function WcSessionProvider({
     setScope(wcId);
     setSelected(null);
     setChecked(new Set());
-    setDialog((d) => (d?.kind === "checkout" ? d : null));
+    setDialog((d) => (isAppDialog(d) ? d : null));
   }
   const value = useMemo<WcSession>(
     () => ({

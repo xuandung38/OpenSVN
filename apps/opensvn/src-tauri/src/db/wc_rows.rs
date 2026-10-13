@@ -19,6 +19,10 @@ pub struct WcRow {
     pub repo_root_url: String,
     /// Position in the sidebar.
     pub sort_order: i64,
+    /// When the working copy was added (set by the database on insert).
+    pub added_at: String,
+    /// When the working copy was last opened.
+    pub last_opened_at: Option<String>,
 }
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WcRow> {
@@ -29,10 +33,13 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WcRow> {
         repo_uuid: r.get(3)?,
         repo_root_url: r.get(4)?,
         sort_order: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+        added_at: r.get(6)?,
+        last_opened_at: r.get(7)?,
     })
 }
 
-const COLS: &str = "id, name, root_path, repo_uuid, repo_root_url, sort_order";
+const COLS: &str =
+    "id, name, root_path, repo_uuid, repo_root_url, sort_order, added_at, last_opened_at";
 
 impl AppDb {
     /// Registered working copies in sidebar order.
@@ -107,6 +114,22 @@ impl AppDb {
         })
     }
 
+    /// Points a working copy at a new root folder (it was moved) and records the repository root
+    /// URL read from it (it may have been relocated as well). Returns whether a row existed.
+    pub fn wc_set_root(
+        &self,
+        id: &str,
+        root_path: &str,
+        repo_root_url: &str,
+    ) -> Result<bool, DbError> {
+        self.db.with(|c| {
+            Ok(c.execute(
+                "UPDATE working_copy SET root_path = ?2, repo_root_url = ?3 WHERE id = ?1",
+                params![id, root_path, repo_root_url],
+            )? > 0)
+        })
+    }
+
     /// Stamps the time a working copy was opened.
     pub fn wc_touch_opened(&self, id: &str) -> Result<(), DbError> {
         self.db.with(|c| {
@@ -132,6 +155,8 @@ mod tests {
             repo_uuid: "u".into(),
             repo_root_url: "https://svn.test.local/r".into(),
             sort_order: 0,
+            added_at: String::new(),
+            last_opened_at: None,
         }
     }
 
@@ -149,6 +174,17 @@ mod tests {
         assert!(db.wc_rename("a", "Alpha").unwrap());
         assert_eq!(db.wc_get("a").unwrap().unwrap().name, "Alpha");
         assert_eq!(db.wc_get_by_root("/wc/b").unwrap().unwrap().id, "b");
+        assert_eq!(db.wc_get("b").unwrap().unwrap().last_opened_at, None);
+        assert!(db.wc_set_root("b", "/wc/b2", "https://new/repo").unwrap());
+        assert!(!db.wc_set_root("zz", "/wc/z", "https://x").unwrap());
+        assert!(
+            db.wc_set_root("b", "/wc/a", "https://x").is_err(),
+            "root stays unique"
+        );
+        db.wc_touch_opened("b").unwrap();
+        let b = db.wc_get_by_root("/wc/b2").unwrap().unwrap();
+        assert_eq!(b.repo_root_url, "https://new/repo");
+        assert!(b.last_opened_at.is_some() && !b.added_at.is_empty());
         assert!(db.wc_remove("a").unwrap());
         assert!(!db.wc_remove("a").unwrap());
         assert_eq!(db.wc_list().unwrap().len(), 1);
