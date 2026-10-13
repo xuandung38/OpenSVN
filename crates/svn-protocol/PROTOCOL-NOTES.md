@@ -218,6 +218,29 @@ and 1.10 servers once the compat images exist; no behaviour was verified against
   `opaquelocktoken:` + printable characters (no whitespace, controls, `<>`, max 256 bytes).
 * `REPOS_HOOK_FAILURE` (165001) maps to `Internal` until the contract adds a hook-failure code.
 
+## Update drive order (parser is the gate)
+
+`UpdateParser` accepts exactly one anonymous root `open-directory`, entries only below
+directories, `txdelta`/`fetch-file` only below a file and at most once, property changes only
+below a node, and nothing after the root closes; end tags must match the open element by
+namespace and name. Every violation is `Corrupt`. `DriveChecker` re-checks a finished event
+stream (usable as a debug assertion in the driver and as the fuzz oracle).
+
+* The first event is `ReportStart { send_all, inline_props }`. In skelta (`send_all` false) a
+  file whose text was not sent gets a synthesized `FetchFile` before its `CloseFile`, so an added
+  file is never silently empty; without `inline_props` added nodes get `FetchProps` the same way.
+* `AddDir`/`AddFile` carry `copy_from` (raw server text; with a copy source the text delta is
+  against the source's content) and `DeleteEntry` carries `rev`.
+* A name that `RelPath::from_server` rejects (`..`, `.svn`, `CON`, `a:b` ...) stops the whole
+  update with `UnsafePath` and a message naming the offending path. Repositories containing such
+  names cannot be checked out in the MVP.
+* `PutOptions`/`put_request` take a `Body`: pass `Body::Stream(ReadBody(spill_file))` for large
+  svndiff data. Transactions are `TxnName` (plain or virtual); `SVN-VTxn-Name` answers use the
+  `vtxn`/`vtxr` stubs. Directory `COPY` sends `Depth: infinity`.
+* svndiff version: serf's preference, 1 unless `low_latency` and svndiff2 is announced.
+* `UpdateMode::select` asks for send-all like serf when a server sends neither
+  `SVN-Allow-Bulk-Updates` nor `inline-props` (skelta would cost a request per node).
+
 ## Contract notes
 
 * Log and lock paths are `RepoDisplayPath` values (private field, no `Deref`, no `AsRef<Path>`,

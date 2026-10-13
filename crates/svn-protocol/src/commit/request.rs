@@ -4,12 +4,12 @@
 //! the transaction itself is created by `POST` on the `me` resource.
 
 use bytes::Bytes;
-use svn_types::{ErrorCode, PropChange, RelPath, Result, Revnum, SvnError};
+use svn_types::{ErrorCode, NodeKind, PropChange, RelPath, Result, Revnum, SvnError};
 
 use super::skel::{create_txn_body, create_txn_with_props_body};
-use crate::caps::{Capabilities, UrlBuilder, advertise_caps};
+use crate::caps::{Capabilities, TxnName, UrlBuilder, advertise_caps};
 use crate::http::{Body, HttpRequest, Method};
-use crate::locks::bracketed_token;
+use crate::util::validate_lock_token;
 use crate::xml::XmlWriter;
 use crate::xml::ns::{CUSTOM_PROPS_URI, DAV_URI, SVN_DAV_URI, SVN_PROPS_URI};
 
@@ -27,7 +27,11 @@ fn with_lock(
         None => Ok(req),
         Some(LockToken(token)) => Ok(req.header(
             "If",
-            format!("<{}> ({})", urls.public(path)?, bracketed_token(token)?),
+            format!(
+                "<{}> (<{}>)",
+                urls.public(path)?,
+                validate_lock_token(token.trim_matches(['<', '>']))?
+            ),
         )),
     }
 }
@@ -121,7 +125,11 @@ pub fn ephemeral_txn_props(
 }
 
 /// Builds `MKCOL` for a new directory.
-pub fn mkcol_request(urls: &UrlBuilder, txn: &str, path: &RelPath) -> Result<HttpRequest> {
+pub fn mkcol_request(
+    urls: &UrlBuilder,
+    txn: impl Into<TxnName>,
+    path: &RelPath,
+) -> Result<HttpRequest> {
     Ok(advertise_caps(HttpRequest::new(
         Method::Mkcol,
         urls.txn_root(txn, path)?,
@@ -152,17 +160,19 @@ impl<'a> PutOptions<'a> {
     }
 }
 
-/// Builds `PUT` of a svndiff body (an empty body creates an empty file).
+/// Builds `PUT` of a svndiff body (an empty body creates an empty file). Pass `Body::Stream`
+/// (for example a [`ReadBody`](crate::http::ReadBody) over a spill file) to keep large svndiff
+/// data out of memory.
 pub fn put_request(
     urls: &UrlBuilder,
-    txn: &str,
+    txn: impl Into<TxnName>,
     path: &RelPath,
-    svndiff: Bytes,
+    svndiff: Body,
     opts: &PutOptions<'_>,
 ) -> Result<HttpRequest> {
     let mut req = HttpRequest::new(Method::Put, urls.txn_root(txn, path)?)
         .header("Content-Type", "application/vnd.svn-svndiff");
-    req.body = Body::Bytes(svndiff);
+    req.body = svndiff;
     req = base_header(req, opts.base_rev);
     for (name, value) in [
         ("X-SVN-Base-Fulltext-MD5", opts.base_md5),
@@ -190,7 +200,7 @@ fn check_md5(md5: &str) -> Result<()> {
 /// Builds `DELETE` of a node inside the transaction.
 pub fn delete_request(
     urls: &UrlBuilder,
-    txn: &str,
+    txn: impl Into<TxnName>,
     path: &RelPath,
     base_rev: Option<Revnum>,
     lock: Option<LockToken<'_>>,
@@ -204,12 +214,17 @@ pub fn copy_request(
     urls: &UrlBuilder,
     src_rev: Revnum,
     src: &RelPath,
-    txn: &str,
+    src_kind: NodeKind,
+    txn: impl Into<TxnName>,
     dst: &RelPath,
 ) -> Result<HttpRequest> {
-    let req = HttpRequest::new(Method::Copy, urls.rev_root(src_rev, src)?)
+    let mut req = HttpRequest::new(Method::Copy, urls.rev_root(src_rev, src)?)
         .header("Destination", urls.txn_root(txn, dst)?.as_str())
         .header("Overwrite", "F");
+    // serf sends `Depth: infinity` for directories only.
+    if src_kind == NodeKind::Dir {
+        req = req.header("Depth", "infinity");
+    }
     Ok(advertise_caps(req))
 }
 
@@ -274,7 +289,7 @@ fn propertyupdate_body(changes: &[PropChange]) -> Result<Bytes> {
 /// Builds `PROPPATCH` for a node inside the transaction.
 pub fn proppatch_request(
     urls: &UrlBuilder,
-    txn: &str,
+    txn: impl Into<TxnName>,
     path: &RelPath,
     changes: &[PropChange],
     base_rev: Option<Revnum>,
@@ -288,7 +303,7 @@ pub fn proppatch_request(
 /// Builds `PROPPATCH` on the transaction resource itself (revision properties such as `svn:log`).
 pub fn txn_proppatch_request(
     urls: &UrlBuilder,
-    txn: &str,
+    txn: impl Into<TxnName>,
     changes: &[PropChange],
 ) -> Result<HttpRequest> {
     let req =
@@ -321,7 +336,7 @@ pub struct MergeOptions<'a> {
 pub fn merge_request(
     urls: &UrlBuilder,
     merge_root: &RelPath,
-    txn: &str,
+    txn: impl Into<TxnName>,
     opts: &MergeOptions<'_>,
 ) -> Result<HttpRequest> {
     let mut w = XmlWriter::new();
@@ -346,7 +361,7 @@ pub fn merge_request(
         for (path, token) in opts.lock_tokens {
             w.start("S:lock", &[])
                 .element("lock-path", &[], path.as_str())
-                .element("lock-token", &[], token)
+                .element("lock-token", &[], &validate_lock_token(token)?)
                 .end();
         }
         w.end();
@@ -366,7 +381,7 @@ pub fn merge_request(
 }
 
 /// Builds the `DELETE` that discards a transaction (after a failure or cancellation).
-pub fn abort_txn_request(urls: &UrlBuilder, txn: &str) -> Result<HttpRequest> {
+pub fn abort_txn_request(urls: &UrlBuilder, txn: impl Into<TxnName>) -> Result<HttpRequest> {
     Ok(advertise_caps(HttpRequest::new(
         Method::Delete,
         urls.txn(txn)?,

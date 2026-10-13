@@ -235,6 +235,7 @@ fn edits_inside_the_transaction() {
         &u,
         Revnum(9),
         &rel("trunk/a.txt"),
+        svn_types::NodeKind::File,
         txn,
         &rel("trunk/copy.txt"),
     )
@@ -273,7 +274,7 @@ fn put_variants() {
         &u,
         txn,
         &rel("trunk/fresh/f.txt"),
-        Bytes::from(f.req_body.clone()),
+        svn_protocol::Body::Bytes(Bytes::from(f.req_body.clone())),
         &PutOptions::default(),
     )
     .unwrap();
@@ -294,7 +295,7 @@ fn put_variants() {
         &u,
         txn,
         &rel("trunk/a.txt"),
-        Bytes::from(f.req_body.clone()),
+        svn_protocol::Body::Bytes(Bytes::from(f.req_body.clone())),
         &opts,
     )
     .unwrap();
@@ -305,7 +306,7 @@ fn put_variants() {
         &u,
         txn,
         &rel("trunk/fresh/empty.txt"),
-        Bytes::from(f.req_body.clone()),
+        svn_protocol::Body::Bytes(Bytes::from(f.req_body.clone())),
         &PutOptions::default(),
     )
     .unwrap();
@@ -338,7 +339,7 @@ fn put_of_a_locked_file_carries_the_if_header() {
         &urls(),
         &txn,
         &rel("trunk/copy.txt"),
-        Bytes::from(f.req_body.clone()),
+        svn_protocol::Body::Bytes(Bytes::from(f.req_body.clone())),
         &opts,
     )
     .unwrap();

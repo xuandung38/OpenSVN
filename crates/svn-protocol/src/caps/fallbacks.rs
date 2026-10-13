@@ -31,14 +31,14 @@ impl Capabilities {
         self.bulk_updates != Some(BulkUpdates::Off)
     }
 
-    /// Highest svndiff version the server accepts in `PUT`: 2 (`svndiff2`), 1 (`svndiff1`) or 0.
-    pub fn svndiff_version(&self) -> u8 {
-        if self.dav.svndiff2 {
-            2
-        } else if self.dav.svndiff1 {
-            1
-        } else {
-            0
+    /// svndiff version for `PUT`, with serf's preference: version 1 (zlib) whenever the server
+    /// has it, because it compresses better over a WAN; version 2 (LZ4) only on a low-latency
+    /// connection, where speed matters more; version 0 when the server announced neither.
+    pub fn svndiff_version(&self, low_latency: bool) -> u8 {
+        match (self.dav.svndiff1, self.dav.svndiff2) {
+            (_, true) if low_latency || !self.dav.svndiff1 => 2,
+            (true, _) => 1,
+            _ => 0,
         }
     }
 

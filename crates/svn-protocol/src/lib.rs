@@ -25,7 +25,7 @@ mod util;
 
 pub use caps::{
     AcceptedHref, BulkPreference, BulkUpdates, Capabilities, DavCaps, HrefKind, ListStrategy,
-    UrlBuilder, options_request,
+    TxnName, UrlBuilder, options_request,
 };
 pub use display_path::{DisplayChangedPath, RepoDisplayPath, RepoLock};
 pub use errors::{error_from_response, map_errcode, map_http_status};
