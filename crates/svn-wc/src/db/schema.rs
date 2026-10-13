@@ -55,7 +55,7 @@ pub fn check_supported_format(format: u32) -> Result<()> {
 pub fn create_schema(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction().map_err(sql_err)?;
     tx.execute_batch(CREATE_SCHEMA_SQL).map_err(sql_err)?;
-    install_statistics(&tx)?;
+    install_statistics(&tx).map_err(sql_err)?;
     tx.execute_batch(&format!("PRAGMA user_version = {FORMAT_WRITE};"))
         .map_err(sql_err)?;
     tx.commit().map_err(sql_err)
@@ -64,15 +64,19 @@ pub fn create_schema(conn: &mut Connection) -> Result<()> {
 /// Installs the `sqlite_stat1` planner hints. `ANALYZE` also creates `sqlite_stat4` when the
 /// linked SQLite is built with STAT4 (the bundled one is); svn's own SQLite usually is not, and
 /// the table is useless for these hints, so it is dropped to keep the schema identical.
-fn install_statistics(conn: &Connection) -> Result<()> {
-    conn.execute_batch(INSTALL_STATISTICS_SQL)
-        .map_err(sql_err)?;
+fn install_statistics(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(INSTALL_STATISTICS_SQL)?;
     conn.execute_batch("DROP TABLE IF EXISTS sqlite_stat4;")
-        .map_err(sql_err)
 }
 
-/// Re-installs `sqlite_stat1` hints when the table is missing (svn does this on open of format 31;
-/// failures are ignored there too because the hints are only an optimisation).
+/// Short busy timeout for the optional statistics step so `open` never waits the full 10 s.
+const STATS_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Re-installs `sqlite_stat1` hints when the table is missing (svn does this on open of format 31).
+///
+/// The install runs in one `BEGIN IMMEDIATE` transaction, so another process never observes a
+/// half-installed table, and with a 100 ms busy timeout: when the database is busy (or the install
+/// fails) the step is skipped, because the hints are only an optimisation. A later open retries.
 pub fn ensure_statistics(conn: &Connection) -> Result<()> {
     let have: Option<i64> = conn
         .query_row(
@@ -82,9 +86,18 @@ pub fn ensure_statistics(conn: &Connection) -> Result<()> {
         )
         .optional()
         .map_err(sql_err)?;
-    if have.is_none() {
-        // Optimisation only: ignore a failure exactly like svn_wc__db_install_schema_statistics.
-        let _ = install_statistics(conn);
+    if have.is_some() {
+        return Ok(());
     }
-    Ok(())
+    conn.busy_timeout(STATS_BUSY_TIMEOUT).map_err(sql_err)?;
+    let outcome = conn
+        .execute_batch("BEGIN IMMEDIATE")
+        .and_then(|()| install_statistics(conn))
+        .and_then(|()| conn.execute_batch("COMMIT"));
+    if let Err(err) = outcome {
+        let _ = conn.execute_batch("ROLLBACK");
+        tracing::debug!(%err, "skipping sqlite_stat1 installation");
+    }
+    conn.busy_timeout(super::connection::BUSY_TIMEOUT)
+        .map_err(sql_err)
 }
