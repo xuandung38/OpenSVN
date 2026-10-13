@@ -46,6 +46,8 @@ default = []
 negotiate-gssapi = ["dep:libgssapi"]
 
 [dev-dependencies]
+# Fixture replay and hostile-server tests parse what the transport delivers.
+svn-protocol.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["tokio"] }
