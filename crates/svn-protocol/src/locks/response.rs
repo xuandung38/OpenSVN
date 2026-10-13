@@ -3,12 +3,19 @@
 use svn_types::{RelPath, Result, Timestamp};
 
 use crate::display_path::{RepoDisplayPath, RepoLock};
-
 use crate::errors::error_from_response;
 use crate::http::{ResponseHead, parse_chunked};
+use crate::limits::ParserLimits;
 use crate::propfind::MultiStatusParser;
-use crate::util::{corrupt, parse_timestamp};
+use crate::util::{corrupt, parse_timestamp, validate_lock_token};
 use crate::xml::{Ns, XmlEvent, XmlReader};
+
+/// Element paths below `D:prop`/`D:lockdiscovery` that carry lock data. Matching the whole path
+/// keeps an `href` inside a DAV-style comment (`<D:owner><D:href>mailto:..`) from being taken
+/// for the lock token.
+const TOKEN_PATH: &str = "activelock/locktoken/href";
+const OWNER_PATH: &str = "activelock/owner";
+const TIMEOUT_PATH: &str = "activelock/timeout";
 
 /// What a `D:activelock` carries.
 struct ActiveLock {
@@ -50,49 +57,47 @@ fn expiry(created: Timestamp, timeout: Option<&str>) -> Option<Timestamp> {
         .map(Timestamp)
 }
 
-fn token_from_href(href: &str) -> Result<String> {
-    let t = href.trim();
-    if t.is_empty() {
-        return Err(corrupt("empty lock token"));
-    }
-    Ok(t.to_owned())
-}
-
 /// Interprets the response to `LOCK` for `path`.
 pub fn parse_lock_response(path: &RelPath, head: &ResponseHead, body: &[u8]) -> Result<RepoLock> {
     if !(200..300).contains(&head.status) {
         return Err(error_from_response(head.status, &head.headers, body));
     }
+    let limits = ParserLimits::default();
     let mut xml = XmlReader::new();
     let mut events = xml.feed(body)?;
     events.extend(xml.finish()?);
-    let (mut in_lock, mut field) = (false, None::<&str>);
-    let (mut token, mut owner, mut timeout) = (String::new(), String::new(), String::new());
+    // Names of the open elements below the root, to match whole paths.
+    let mut stack: Vec<String> = Vec::new();
+    let (mut token, mut owner, mut timeout) = (None, None::<String>, None::<String>);
+    let mut text = String::new();
     for ev in events {
         match ev {
-            XmlEvent::Start(t) if t.name.is(&Ns::Dav, "activelock") => in_lock = true,
-            XmlEvent::Start(t) if in_lock && t.name.is(&Ns::Dav, "href") => field = Some("href"),
-            XmlEvent::Start(t) if in_lock && t.name.is(&Ns::Dav, "owner") => field = Some("owner"),
-            XmlEvent::Start(t) if in_lock && t.name.is(&Ns::Dav, "timeout") => {
-                field = Some("timeout")
+            XmlEvent::Start(t) => {
+                stack.push(t.name.local.clone());
+                text.clear();
             }
-            XmlEvent::Text(t) => match field {
-                Some("href") => token.push_str(&t),
-                Some("owner") => owner.push_str(&t),
-                Some("timeout") => timeout.push_str(&t),
-                _ => {}
-            },
-            XmlEvent::End(_) => field = None,
-            _ => {}
+            XmlEvent::Text(t) => {
+                text.push_str(&t);
+                ParserLimits::check(text.len(), limits.max_href_bytes, "lock field")?;
+            }
+            XmlEvent::End(_) => {
+                // Path below `D:prop/D:lockdiscovery`.
+                let below = stack.get(2..).map(|s| s.join("/")).unwrap_or_default();
+                match below.as_str() {
+                    TOKEN_PATH if token.is_none() => token = Some(validate_lock_token(&text)?),
+                    OWNER_PATH => owner = Some(text.clone()),
+                    TIMEOUT_PATH => timeout = Some(text.clone()),
+                    _ => {}
+                }
+                stack.pop();
+                text.clear();
+            }
         }
     }
-    if !in_lock {
-        return Err(corrupt("LOCK response has no D:activelock"));
-    }
     let active = ActiveLock {
-        token: token_from_href(&token)?,
-        comment: Some(owner),
-        timeout: Some(timeout),
+        token: token.ok_or_else(|| corrupt("LOCK response has no lock token"))?,
+        comment: owner,
+        timeout,
     };
     lock_from_parts(path, head, &active)
 }
@@ -117,16 +122,13 @@ pub fn parse_get_lock_response(
         return Ok(None);
     }
     let token = value
-        .descendants
-        .iter()
-        .find(|(n, t)| n == "href" && !t.trim().is_empty())
-        .map(|(_, t)| token_from_href(t))
-        .transpose()?
-        .ok_or_else(|| corrupt("activelock without a lock token"))?;
+        .descendant_at(TOKEN_PATH)
+        .ok_or_else(|| corrupt("activelock without a lock token"))
+        .and_then(validate_lock_token)?;
     let active = ActiveLock {
         token,
-        comment: value.descendant("owner").map(str::to_owned),
-        timeout: value.descendant("timeout").map(str::to_owned),
+        comment: value.descendant_at(OWNER_PATH).map(str::to_owned),
+        timeout: value.descendant_at(TIMEOUT_PATH).map(str::to_owned),
     };
     lock_from_parts(path, head, &active).map(Some)
 }

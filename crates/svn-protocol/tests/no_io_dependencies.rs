@@ -42,12 +42,14 @@ fn normal_dependency_tree_has_no_runtime_or_http_stack() {
             "svn-protocol depends on {banned}:\n{tree}"
         );
     }
-    // Only these workspace crates may be linked in.
-    for line in tree.lines().filter(|l| l.contains("(/")) {
-        let name = line.split_whitespace().next().unwrap();
-        assert!(
-            matches!(name, "svn-protocol" | "svn-types"),
-            "unexpected workspace dependency {name}"
-        );
+    // Only these workspace crates may be linked in (works for `(/path)` and `(C:\path)` alike).
+    for line in tree.lines() {
+        let name = line.split_whitespace().next().unwrap_or_default();
+        if name.starts_with("svn-") || name == "secure-store" || name == "opensvn" {
+            assert!(
+                matches!(name, "svn-protocol" | "svn-types"),
+                "unexpected workspace dependency {name}"
+            );
+        }
     }
 }

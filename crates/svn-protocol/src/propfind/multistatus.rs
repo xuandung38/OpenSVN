@@ -5,11 +5,9 @@ use base64::engine::general_purpose::STANDARD;
 use svn_types::Result;
 
 use crate::http::ResponseParser;
+use crate::limits::ParserLimits;
 use crate::util::corrupt;
 use crate::xml::{Name, Ns, StartTag, XmlEvent, XmlReader};
-
-/// Longest accepted property value (text), a guard against unbounded memory use.
-const MAX_PROP_BYTES: usize = 8 << 20;
 
 /// Value of one property, kept generic so one parser serves every PROPFIND.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -18,8 +16,8 @@ pub struct PropValue {
     pub text: String,
     /// Local names of child elements (`resourcetype` holds `collection` for directories).
     pub child_names: Vec<String>,
-    /// Text of every descendant element as `(local name, text)` in document order
-    /// (`lockdiscovery` yields `owner`, `timeout`, `href`, ...; `checked-in` yields `href`).
+    /// Text of every descendant element as `(path, text)` in closing order, where `path` is the
+    /// slash-joined local names below the property (`activelock/locktoken/href`, `href`).
     pub descendants: Vec<(String, String)>,
     /// Decoded bytes when the value was transported as base64 (`encoding="base64"`).
     pub decoded: Option<Vec<u8>>,
@@ -36,11 +34,12 @@ impl PropValue {
         self.decoded.as_deref().unwrap_or(self.text.as_bytes())
     }
 
-    /// Text of the first descendant called `local`, trimmed.
-    pub fn descendant(&self, local: &str) -> Option<&str> {
+    /// Text of the descendant at exactly `path` (for example `"activelock/locktoken/href"`),
+    /// trimmed.
+    pub fn descendant_at(&self, path: &str) -> Option<&str> {
         self.descendants
             .iter()
-            .find(|(n, _)| n == local)
+            .find(|(p, _)| p == path)
             .map(|(_, t)| t.trim())
     }
 }
@@ -85,6 +84,7 @@ struct PropBuild {
     /// Open descendants: (local name, accumulated text).
     open: Vec<(String, String)>,
     size: usize,
+    elements: usize,
 }
 
 /// Position inside the multistatus document, tracked as a stack of element names.
@@ -113,13 +113,24 @@ pub struct MultiStatusParser {
     stat_props: Vec<(Name, PropValue)>,
     stat_missing: Vec<Name>,
     prop: Option<PropBuild>,
+    limits: ParserLimits,
+    entry_props: usize,
+    entry_bytes: usize,
     failed: bool,
 }
 
 impl MultiStatusParser {
-    /// Creates a parser.
+    /// Creates a parser with the default limits.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a parser with explicit limits.
+    pub fn with_limits(limits: ParserLimits) -> Self {
+        Self {
+            limits,
+            ..Self::default()
+        }
     }
 
     fn handle(&mut self, ev: XmlEvent, out: &mut Vec<PropfindEntry>) -> Result<()> {
@@ -139,6 +150,12 @@ impl MultiStatusParser {
         }
         if let Some(p) = self.prop.as_mut() {
             // Inside a property value: record structure only.
+            p.elements += 1;
+            ParserLimits::check(
+                p.elements,
+                self.limits.max_prop_elements,
+                "property elements",
+            )?;
             if p.open.is_empty() {
                 p.value.child_names.push(tag.name.local.clone());
             }
@@ -150,6 +167,8 @@ impl MultiStatusParser {
         let (d, r, ps) = (&Ns::Dav, "response", "propstat");
         if self.cursor.is(&[(d, "multistatus"), (d, r)]) {
             self.entry = PropfindEntry::default();
+            self.entry_props = 0;
+            self.entry_bytes = 0;
         } else if self.cursor.is(&[(d, "multistatus"), (d, r), (d, "href")]) {
             self.in_href = true;
         } else if self.cursor.is(&[(d, "multistatus"), (d, r), (d, ps)]) {
@@ -163,8 +182,22 @@ impl MultiStatusParser {
             self.in_status = true;
         } else if self.cursor.path.len() == 5 && self.cursor.is_prop_child(d, r, ps) {
             let name = self.cursor.path[4].clone();
-            let base64 = tag.attr("encoding").is_some_and(|e| e == "base64");
+            let encoding = tag
+                .attr_in(&Ns::SvnDav, "encoding")
+                .or_else(|| tag.attr("encoding"));
+            let base64 = match encoding {
+                None => false,
+                Some("base64") => true,
+                Some(other) => return Err(corrupt(format!("unknown value encoding {other:?}"))),
+            };
+            self.entry_props += 1;
+            ParserLimits::check(
+                self.entry_props,
+                self.limits.max_props_per_entry,
+                "properties per response",
+            )?;
             self.prop = Some(PropBuild {
+                elements: 0,
                 name,
                 value: PropValue::default(),
                 base64,
@@ -178,17 +211,27 @@ impl MultiStatusParser {
     fn text(&mut self, t: &str) -> Result<()> {
         if let Some(p) = self.prop.as_mut() {
             p.size += t.len();
-            if p.size > MAX_PROP_BYTES {
-                return Err(corrupt("property value too large"));
-            }
+            ParserLimits::check(p.size, self.limits.max_text_bytes, "property value")?;
+            self.entry_bytes += t.len();
+            ParserLimits::check(
+                self.entry_bytes,
+                self.limits.max_entry_bytes,
+                "properties of one response",
+            )?;
             match p.open.last_mut() {
                 Some((_, buf)) => buf.push_str(t),
                 None => p.value.text.push_str(t),
             }
         } else if self.in_href {
             self.entry.href.push_str(t);
+            ParserLimits::check(self.entry.href.len(), self.limits.max_href_bytes, "href")?;
         } else if self.in_status {
             self.status_text.push_str(t);
+            ParserLimits::check(
+                self.status_text.len(),
+                self.limits.max_status_bytes,
+                "status",
+            )?;
         }
         Ok(())
     }
@@ -196,8 +239,16 @@ impl MultiStatusParser {
     fn end(&mut self, out: &mut Vec<PropfindEntry>) -> Result<()> {
         let was_len = self.cursor.path.len();
         if let Some(p) = self.prop.as_mut() {
-            if let Some((local, text)) = p.open.pop() {
-                p.value.descendants.push((local, text));
+            if !p.open.is_empty() {
+                let path = p
+                    .open
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                if let Some((_, text)) = p.open.pop() {
+                    p.value.descendants.push((path, text));
+                }
                 self.cursor.path.pop();
                 return Ok(());
             }
