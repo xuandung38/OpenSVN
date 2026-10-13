@@ -1,0 +1,9 @@
+# Lockfiles, workflows and contract crates need maintainer review.
+/pnpm-lock.yaml            @xuandung38
+/Cargo.lock                @xuandung38
+/.github/workflows/        @xuandung38
+/crates/svn-types/         @xuandung38
+/crates/svn-ra-api/        @xuandung38
+/crates/opensvn-ipc/       @xuandung38
+/crates/svn-ra/src/lib.rs  @xuandung38
+/.gitattributes     @xuandung38

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wc-add-existing"
+description = "Enables the wc_add_existing command without any pre-configured scope."
+commands.allow = ["wc_add_existing"]
+
+[[permission]]
+identifier = "deny-wc-add-existing"
+description = "Denies the wc_add_existing command without any pre-configured scope."
+commands.deny = ["wc_add_existing"]

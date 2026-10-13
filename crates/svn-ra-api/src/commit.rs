@@ -37,16 +37,33 @@ pub struct CommitInfo {
     pub post_commit_err: Option<String>,
 }
 
-/// Observes commit progress so the caller can journal it before the MERGE step.
+/// Observes commit progress so the caller can journal it before content is sent.
 pub trait CommitObserver: Send + Sync {
-    /// The server transaction exists; record it so a crash can clean it up.
-    fn on_txn_created(&self, txn: &str);
+    /// The server transaction exists; record it durably so a crash can clean it up.
+    ///
+    /// An error vetoes the commit: the RA layer DELETEs the transaction and fails
+    /// `commit_editor` with that error, before any content is sent.
+    fn on_txn_created(&self, txn: &str) -> Result<()>;
+
     /// The commit was merged into a revision.
-    fn on_merged(&self, info: &CommitInfo);
+    ///
+    /// The commit cannot be undone at this point. If this returns an error, `close_edit`
+    /// returns it with a message that names the merged revision; callers must treat that as
+    /// "merged, bookkeeping failed" and recover the revision from the message or the log.
+    fn on_merged(&self, info: &CommitInfo) -> Result<()>;
 }
 
 /// Commit editor driven by the caller, like `svn_ra_get_commit_editor`.
 /// Paths are relative to the session URL; handle ids come from the editor.
+///
+/// Cancellation: the editor keeps the `CancelToken` given to `RaSession::commit_editor`. Every
+/// method except `abort_edit` returns `Cancelled` once it fires (and `close_edit` then deletes
+/// the transaction instead of merging). `abort_edit` always works, also after cancellation, so
+/// the caller can clean up.
+///
+/// `apply_text` may return before the upload has finished (uploads may run in parallel). A
+/// failed upload surfaces no later than `close_file` for that file or `close_edit`, and the
+/// sources passed to `apply_text` must stay readable until `close_file` for that file returns.
 #[async_trait]
 pub trait CommitEditor: Send {
     /// Opens the root directory at `base_rev`.

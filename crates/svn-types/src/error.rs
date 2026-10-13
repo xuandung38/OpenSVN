@@ -102,6 +102,11 @@ impl SvnError {
             ErrorKind::PermissionDenied => ErrorCode::PermissionDenied,
             ErrorKind::StorageFull | ErrorKind::QuotaExceeded => ErrorCode::DiskFull,
             ErrorKind::TimedOut => ErrorCode::Timeout,
+            ErrorKind::ResourceBusy => ErrorCode::FileInUse,
+            // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION: another process holds the file.
+            _ if cfg!(windows) && matches!(err.raw_os_error(), Some(32 | 33)) => {
+                ErrorCode::FileInUse
+            }
             _ => ErrorCode::Internal,
         };
         Self::new(code, format!("{context}: {err}"))
