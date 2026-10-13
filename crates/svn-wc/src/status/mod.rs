@@ -10,8 +10,10 @@
 //! parallel, and the proven-unchanged ones can have their stat cache repaired
 //! ([`StatusOptions::update_cache`]; the caller must hold the WC write lock, like svn).
 //!
-//! Scope: infinite depth below a target, local state only (no repository columns, no externals
-//! beyond the `file_external` flag, no lock tokens). Symlink handling is POSIX; on Windows a
+//! Scope: infinite depth below a target, local state only (no repository columns, no lock
+//! tokens). Externals are reported like `svn status --ignore-externals`: a directory external
+//! is one `External` entry and is not descended into; file externals are versioned entries
+//! with `file_external` set. Symlink handling is POSIX; on Windows a
 //! `svn:special` file is treated as a regular file.
 
 pub mod ignores;
@@ -63,6 +65,8 @@ pub enum ItemStatus {
     Conflicted,
     /// Update was interrupted for this node.
     Incomplete,
+    /// Unversioned directory that holds an external defined by `svn:externals`.
+    External,
 }
 
 impl ItemStatus {
@@ -81,6 +85,7 @@ impl ItemStatus {
             Self::Ignored => "ignored",
             Self::Conflicted => "conflicted",
             Self::Incomplete => "incomplete",
+            Self::External => "external",
         }
     }
 }
@@ -136,6 +141,19 @@ impl StatusEntry {
             ItemStatus::Conflicted | ItemStatus::Modified => self.text_status,
             other => other,
         }
+    }
+
+    /// The `revision` attribute of `svn status --xml`: printed for versioned, non-copied
+    /// entries, `-1` when there is no BASE revision (plain additions).
+    pub fn xml_revision(&self) -> Option<i64> {
+        if !self.versioned || self.copied {
+            return None;
+        }
+        Some(
+            self.revision
+                .and_then(|r| i64::try_from(r).ok())
+                .unwrap_or(-1),
+        )
     }
 
     /// The `props` attribute of `svn status --xml`.
@@ -297,7 +315,12 @@ pub fn status(
     let fs = scan::scan(db.wcroot(), target, descend, opts.threads)?;
     cancel.check()?;
 
-    let mut ctx = Ctx::new(db, &nodes, &actual, &fs, opts);
+    let externals = db
+        .externals_under(target)?
+        .into_iter()
+        .map(|e| e.local_relpath.as_str().to_string())
+        .collect();
+    let mut ctx = Ctx::new(db, &nodes, &actual, &fs, opts, externals);
 
     // Every path that may produce an entry, in svn's order (names compared bytewise per level).
     let in_scope =
@@ -433,6 +456,8 @@ struct Ctx<'a> {
     own_ignores: HashMap<String, (Vec<String>, Vec<String>)>,
     patterns: HashMap<String, Vec<String>>,
     repos_relpaths: HashMap<String, Option<String>>,
+    /// Paths recorded in the EXTERNALS table below the target.
+    externals: HashSet<String>,
     next_slot: usize,
 }
 
@@ -443,6 +468,7 @@ impl<'a> Ctx<'a> {
         actual: &'a HashMap<String, ActualRec>,
         fs: &'a HashMap<String, FsEntry>,
         opts: &'a StatusOptions,
+        externals: HashSet<String>,
     ) -> Self {
         let defaults = opts.global_ignores.clone().unwrap_or_else(|| {
             ignores::DEFAULT_GLOBAL_IGNORES
@@ -460,6 +486,7 @@ impl<'a> Ctx<'a> {
             own_ignores: HashMap::new(),
             patterns: HashMap::new(),
             repos_relpaths: HashMap::new(),
+            externals,
             next_slot: 0,
         }
     }
@@ -534,6 +561,15 @@ impl<'a> Ctx<'a> {
     }
 
     fn switched(&mut self, path: &str, info: &NodeRec) -> bool {
+        // File externals point anywhere by definition and are reported as such, not switched.
+        if info.file_external {
+            return false;
+        }
+        // Added nodes (copies included) have no repository path of their own in svn's
+        // `read_children_info`; their NODES `repos_path` is the copy source.
+        if info.status == DbStatus::Added {
+            return false;
+        }
         let (Some(own), true) = (&info.repos_relpath, !path.is_empty()) else {
             return false;
         };
@@ -602,14 +638,17 @@ impl<'a> Ctx<'a> {
         if path.is_empty() {
             return Ok(None);
         }
-        // Unversioned (or a tree-conflict victim without a node).
-        let ignored = if dirent.is_some() {
+        // Unversioned (or a tree-conflict victim without a node). An external's directory is
+        // reported as such and never as ignored (`send_unversioned_item`).
+        let external = dirent.is_some() && self.externals.contains(path);
+        let ignored = if dirent.is_some() && !external {
             let patterns = self.patterns_for(parent_of(path))?;
             ignores::is_ignored(basename(path), &patterns)
         } else {
             false
         };
         let node_status = match dirent {
+            Some(_) if external => ItemStatus::External,
             Some(_) if ignored => ItemStatus::Ignored,
             Some(_) => ItemStatus::Unversioned,
             None if tree_c => ItemStatus::Conflicted,
@@ -781,10 +820,16 @@ impl<'a> Ctx<'a> {
             copied,
             switched,
             file_external: info.file_external,
-            revision: if info.status == DbStatus::Added {
-                None
-            } else {
+            // Additions have no revision, except replacements, which report the BASE revision
+            // of the node they replace.
+            revision: if info.status != DbStatus::Added
+                || matches!(
+                    info.base_presence,
+                    Some(Presence::Normal | Presence::Incomplete)
+                ) {
                 info.base_revision
+            } else {
+                None
             },
             changed_rev: info.changed_rev,
             changed_author: info.changed_author.clone(),
@@ -845,6 +890,7 @@ fn sendable(p: &Pending, opts: &StatusOptions) -> bool {
         || (e.node_status == ItemStatus::Deleted && !p.op_root);
     !(boring
         && !e.switched
+        && !e.file_external
         && e.changelist.is_none()
         && !(e.text_conflicted || e.prop_conflicted || e.tree_conflicted)
         && e.moved_to.is_none())
