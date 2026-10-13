@@ -273,24 +273,30 @@ impl HttpTransport {
             () = cancel.cancelled() => return cancel.check(),
             d = self.prompter.confirm_certificate(&info) => d,
         };
+        // The prompter is the UI, not a trust boundary: an invalid decision for this exact
+        // failure (for example AcceptOnce for a changed certificate) counts as a rejection.
+        if !decision.is_valid_for(&info.failure) {
+            tls.reject(fp);
+            return Err(problem.to_error());
+        }
         match decision {
-            CertDecision::Reject => {
-                tls.reject(fp);
-                Err(problem.to_error())
-            }
             CertDecision::AcceptOnce => {
                 tls.accept(fp, PinAction::SessionOnly);
                 Ok(())
             }
-            // Only an explicit "always" replaces the old pin of a changed certificate.
             CertDecision::AcceptAlways => {
-                let action = if problem.changed {
-                    PinAction::Replace
-                } else {
-                    PinAction::Add
-                };
-                tls.accept(fp, action);
+                tls.accept(fp, PinAction::Add);
                 Ok(())
+            }
+            // Valid only for `Changed`: the user confirmed the new fingerprint.
+            CertDecision::ReplacePin => {
+                tls.accept(fp, PinAction::Replace);
+                Ok(())
+            }
+            // `Reject` and any decision added later.
+            _ => {
+                tls.reject(fp);
+                Err(problem.to_error())
             }
         }
     }

@@ -139,7 +139,7 @@ export type BranchRef = {
 	url: string,
 };
 
-export type CertDecision = "reject" | "acceptOnce" | "acceptAlways";
+export type CertDecision = "reject" | "acceptOnce" | "acceptAlways" | "replacePin";
 
 export type CertSummary = {
 	host: string,
