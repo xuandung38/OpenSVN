@@ -17,6 +17,7 @@ import { fileMenuEntries } from "../changes/file-menu";
 import { dialogStrings } from "../dialogs/dialog-strings";
 import { useUiCommand } from "../ui-commands";
 import { useWcActions } from "../use-wc-actions";
+import { displayPath } from "../wc-model";
 import { useWcSession } from "../wc-session";
 import { wcStrings } from "../wc-strings";
 import { ImageSides, PropChanges } from "./diff-parts";
@@ -82,7 +83,7 @@ function FileDiffPane({
     <section aria-label={d("diffPane", { path })} className="flex h-full min-h-0 flex-col">
       <header className="flex items-center gap-2 border-b border-line px-3 py-1.5">
         <SafeText className="min-w-0 flex-1 truncate font-mono text-[12px] font-semibold">
-          {path}
+          {displayPath(path, t("wcRootRow", { name: session.wc?.name ?? "" }))}
         </SafeText>
         <label className="flex items-center gap-1.5 text-[12px]">
           <input
@@ -138,7 +139,14 @@ function FileDiffPane({
   );
 }
 
-function DiffBody({
+/**
+ * Body of the diff pane. Exported for tests.
+ *
+ * `tooLarge` without text sides always shows the large-file banner (Load full / external tool):
+ * the engine may send the changed hunks or nothing at all (doc 03 `FileDiff.hunks`), and either
+ * way a large modified file must never read as "no content change".
+ */
+export function DiffBody({
   diff,
   file,
   mode,
@@ -175,12 +183,16 @@ function DiffBody({
         actions={<Button onClick={onOpenDefault}>{d("openDefault")}</Button>}
       />
     );
-  } else if (diff.tooLarge && diff.hunks) {
+  } else if (diff.tooLarge && !hasText) {
+    const hunks = diff.hunks && diff.hunks.length > 0 ? diff.hunks : null;
     content = (
       <div>
-        <div className="flex items-center gap-2 border-b border-line bg-warn-soft px-3 py-2">
+        <div
+          role="status"
+          className="flex items-center gap-2 border-b border-line bg-warn-soft px-3 py-2"
+        >
           <b className="text-warn-text">{d("tooLarge")}</b>
-          <span className="flex-1">{d("tooLargeHint")}</span>
+          <span className="flex-1">{d(hunks ? "tooLargeHint" : "tooLargeNoHunksHint")}</span>
           <Button small onClick={onOpenExternal}>
             {d("openExternalTool")}
           </Button>
@@ -188,7 +200,7 @@ function DiffBody({
             {d("loadFull")}
           </Button>
         </div>
-        <HunkLines hunks={diff.hunks} />
+        {hunks && <HunkLines hunks={hunks} />}
       </div>
     );
   } else if (diff.tooComplex) {

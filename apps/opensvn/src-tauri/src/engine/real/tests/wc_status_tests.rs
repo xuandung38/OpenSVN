@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use opensvn_ipc::{
-    FileDiff, FileStatus, NodeStatus, PropStatus, Rev, UpdateRequest, WcFormat, WcId,
+    FileDiff, FileKind, FileStatus, IgnoreAddRequest, IgnoreScope, NodeStatus, PropStatus, Rev,
+    UpdateRequest, WcFormat, WcId,
 };
 use svn_ra_api::RaSession;
 use svn_ra_api::fake::{FakeChange, FakeRaSession};
@@ -247,16 +248,6 @@ fn find<'a>(statuses: &'a [FileStatus], path: &str) -> &'a FileStatus {
         .unwrap_or_else(|| panic!("{path} not in {statuses:?}"))
 }
 
-/// The fake engine hands its lock token to the UI; the real one never does. Compare without it.
-fn without_tokens(mut statuses: Vec<FileStatus>) -> Vec<FileStatus> {
-    for s in &mut statuses {
-        if let Some(l) = &mut s.lock {
-            l.token = None;
-        }
-    }
-    statuses
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn edits_show_in_status_and_diff_like_the_fake_engine() {
     let (real, fake) = (Real::new(), Fake::new());
@@ -280,12 +271,23 @@ async fn edits_show_in_status_and_diff_like_the_fake_engine() {
     assert!(!diff.binary && diff.too_large.is_none() && diff.prop_changes.is_empty());
     assert_eq!(diff, fake.diff(&fw, "README.md", None).await);
 
-    let unversioned = real
+    // An unversioned file is a one-sided addition of what is on disk, like the fake engine.
+    let unversioned = real.diff(&rw, "notes.txt", None).await;
+    assert!(unversioned.left.is_none());
+    assert_eq!(unversioned.right.as_ref().unwrap().content, "todo\n");
+    assert_eq!(unversioned, fake.diff(&fw, "notes.txt", None).await);
+    let err = real
         .engine()
-        .diff_wc(&rw, "notes.txt", None, DiffOptions::default(), &ctx())
+        .diff_wc(
+            &rw,
+            "nothing-here.txt",
+            None,
+            DiffOptions::default(),
+            &ctx(),
+        )
         .await
-        .expect_err("not versioned");
-    assert_eq!(unversioned.code, ErrorCode::PathNotFound);
+        .expect_err("nothing on disk");
+    assert_eq!(err.code, ErrorCode::PathNotFound);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -311,14 +313,11 @@ async fn added_deleted_and_missing_files_have_one_sided_diffs() {
     let readme = find(&st, "README.md");
     assert_eq!(readme.text, NodeStatus::Deleted);
     assert_eq!(readme.size, None, "a deleted file has no size");
-    // The fake engine reports size 0 for a deleted file; the rest matches.
-    let mut fake_st = fake.status(&fw).await;
-    for s in &mut fake_st {
-        if s.text == NodeStatus::Deleted {
-            s.size = None;
-        }
-    }
-    assert_eq!(st, fake_st);
+    assert_eq!(
+        st,
+        fake.status(&fw).await,
+        "deleted files have no size in both engines"
+    );
 
     let added = real.diff(&rw, "new.txt", None).await;
     assert!(added.left.is_none());
@@ -388,10 +387,13 @@ async fn locked_and_changelisted_unmodified_files_are_listed() {
         }
         v
     };
+    let fake_st = fake.status(&fw).await;
     assert_eq!(
-        same_dates(st),
-        same_dates(without_tokens(fake.status(&fw).await))
+        find(&fake_st, "README.md").lock.as_ref().unwrap().token,
+        None,
+        "neither engine sends lock tokens over IPC"
     );
+    assert_eq!(same_dates(st), same_dates(fake_st));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -423,15 +425,178 @@ async fn property_changes_are_diffed_for_files_and_directories() {
     assert_eq!(diff.right.as_ref().unwrap().content, "hello\n");
 
     real.propset(&rw, "src", "x:owner", "team");
+    fake.engine
+        .props_set(&fw, "src", "x:owner", Some("team"), &ctx())
+        .await
+        .unwrap();
     let dir = real.diff(&rw, "src", None).await;
     assert!(dir.left.is_none() && dir.right.is_none() && !dir.binary);
     assert_eq!(dir.prop_changes[0].name, "x:owner");
+    assert_eq!(dir, fake.diff(&fw, "src", None).await, "property-only diff");
+    for (engine, wc) in [
+        (real.engine(), &rw),
+        (&fake.engine as &dyn EngineFacade, &fw),
+    ] {
+        let err = engine
+            .diff_wc(wc, "src", Some(Rev(1)), DiffOptions::default(), &ctx())
+            .await
+            .expect_err("directories are not compared with revisions");
+        assert_eq!(err.code, ErrorCode::WcInvalidOperation);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_root_is_listed_with_its_svn_ignore_property_like_the_fake_engine() {
+    let (real, fake) = (Real::new(), Fake::new());
+    let (rw, fw) = (real.checkout("root").await, fake.checkout("root").await);
+    real.propset(&rw, "", "svn:ignore", "*.log\n");
+    fake.engine
+        .ignore_add(
+            &fw,
+            &IgnoreAddRequest {
+                wc_id: fw.id.clone(),
+                pattern: "*.log".into(),
+                dir: String::new(),
+                scope: IgnoreScope::SvnIgnore,
+            },
+            &ctx(),
+        )
+        .await
+        .unwrap();
+    write(&rw, "build.log", b"noise\n");
+    fake.write(&fw, "build.log", b"noise\n");
+
+    let st = real.status(&rw).await;
+    let root = find(&st, "");
+    assert_eq!(
+        (root.kind, root.text, root.props),
+        (FileKind::Dir, NodeStatus::Normal, PropStatus::Modified)
+    );
+    assert!(
+        st.iter().all(|s| s.path != "build.log"),
+        "ignored by svn:ignore"
+    );
+    assert_eq!(st, fake.status(&fw).await);
+
+    let diff = real.diff(&rw, "", None).await;
+    let rows: Vec<_> = diff
+        .prop_changes
+        .iter()
+        .map(|c| (c.name.as_str(), c.before.as_deref(), c.after.as_deref()))
+        .collect();
+    assert_eq!(rows, vec![("svn:ignore", None, Some("*.log\n"))]);
+    assert_eq!(diff, fake.diff(&fw, "", None).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unversioned_files_follow_the_cap_and_binary_rules() {
+    let real = Real::new();
+    let rw = real.checkout("unv").await;
+    write(&rw, "blob.bin", b"\0\x01\x02binary");
+    let bin = real.diff(&rw, "blob.bin", None).await;
+    assert!(bin.binary && bin.left.is_none() && bin.right.is_none());
+
+    let big = "y".repeat(super::super::remote::CAT_LIMIT + 1);
+    write(&rw, "big.txt", big.as_bytes());
+    let large = real.diff(&rw, "big.txt", None).await;
+    assert_eq!(large.too_large, Some(true));
+    assert!(large.left.is_none() && large.right.is_none() && large.hunks.is_none());
+    let forced = real
+        .engine()
+        .diff_wc(
+            &rw,
+            "big.txt",
+            None,
+            DiffOptions {
+                force_large: true,
+                full_text: true,
+                ..DiffOptions::default()
+            },
+            &ctx(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forced.right.unwrap().content.len(), big.len());
+
+    // Exactly at the cap is still shown.
+    let at_cap = "z".repeat(super::super::remote::CAT_LIMIT);
+    write(&rw, "at-cap.txt", at_cap.as_bytes());
+    let shown = real
+        .engine()
+        .diff_wc(
+            &rw,
+            "at-cap.txt",
+            None,
+            DiffOptions {
+                full_text: true,
+                ..DiffOptions::default()
+            },
+            &ctx(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shown.too_large, None);
+    assert_eq!(shown.right.unwrap().content.len(), at_cap.len());
+
     let err = real
         .engine()
-        .diff_wc(&rw, "src", Some(Rev(1)), DiffOptions::default(), &ctx())
+        .diff_wc(
+            &rw,
+            "blob.bin",
+            Some(Rev(1)),
+            DiffOptions::default(),
+            &ctx(),
+        )
         .await
-        .expect_err("directories are not compared with revisions");
-    assert_eq!(err.code, ErrorCode::WcInvalidOperation);
+        .expect_err("an unversioned file has no repository side");
+    assert_eq!(err.code, ErrorCode::PathNotFound);
+
+    // An unversioned folder has nothing to show but is not an error.
+    std::fs::create_dir(rw.root.join("newdir")).unwrap();
+    let dir = real.diff(&rw, "newdir", None).await;
+    assert!(dir.left.is_none() && dir.right.is_none() && dir.prop_changes.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn diff_paths_never_escape_the_working_copy() {
+    let real = Real::new();
+    let rw = real.checkout("escape").await;
+    std::fs::write(real.dir.path().join("secret.txt"), b"outside\n").unwrap();
+    let outside = real.dir.path().join("secret.txt");
+    for path in [
+        "../secret.txt",
+        "src/../../secret.txt",
+        outside.to_str().unwrap(),
+        ".svn/wc.db",
+        "src/.svn/entries",
+    ] {
+        let err = real
+            .engine()
+            .diff_wc(&rw, path, None, DiffOptions::default(), &ctx())
+            .await
+            .expect_err(path);
+        assert_ne!(err.code, ErrorCode::Cancelled, "{path}");
+    }
+
+    #[cfg(unix)]
+    {
+        // A symlinked folder pointing outside is not followed.
+        std::os::unix::fs::symlink(real.dir.path(), rw.root.join("out")).unwrap();
+        let err = real
+            .engine()
+            .diff_wc(&rw, "out/secret.txt", None, DiffOptions::default(), &ctx())
+            .await
+            .expect_err("through a symlinked folder");
+        assert_eq!(err.code, ErrorCode::WcInvalidOperation);
+        // A symlink itself is shown as its target text, not as the file it points at.
+        std::os::unix::fs::symlink(&outside, rw.root.join("link.txt")).unwrap();
+        let link = real.diff(&rw, "link.txt", None).await;
+        let right = link.right.unwrap().content;
+        assert!(
+            right.starts_with("link ") && !right.contains("outside\n"),
+            "{right}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -523,6 +688,23 @@ async fn a_diff_against_a_revision_reads_the_left_side_from_the_repository() {
         (&fake_diff.left, &fake_diff.right)
     );
 
+    // The binary decision uses the properties of the compared revision too.
+    for repo in [&real.f.repo, &fake.repo] {
+        repo.seed(
+            "bob",
+            "r3",
+            &[set_prop(
+                "README.md",
+                "svn:mime-type",
+                "application/octet-stream",
+            )],
+        )
+        .unwrap();
+    }
+    let bin = real.diff(&rw, "README.md", Some(Rev(3))).await;
+    assert!(bin.binary && bin.left.is_none() && bin.right.is_none());
+    assert_eq!(bin.mime.as_deref(), Some("application/octet-stream"));
+
     let same = real.diff(&rw, "README.md", Some(Rev(1))).await;
     assert_eq!(same.left.unwrap().content, same.right.unwrap().content);
 
@@ -531,6 +713,35 @@ async fn a_diff_against_a_revision_reads_the_left_side_from_the_repository() {
     let absent = real.diff(&rw, "later.txt", Some(Rev(2))).await;
     assert!(absent.left.is_none());
     assert_eq!(absent.right.unwrap().content, "later\n");
+
+    // A repository side over the cap is not downloaded past it; its properties are unknown.
+    let big = "r".repeat(super::super::remote::CAT_LIMIT + 1);
+    real.f
+        .repo
+        .seed("bob", "big", &[put("src/main.rs", &big)])
+        .unwrap();
+    let head = Rev(4);
+    let large = real.diff(&rw, "src/main.rs", Some(head)).await;
+    assert_eq!(large.too_large, Some(true));
+    assert!(large.left.is_none() && large.right.is_none() && large.hunks.is_none());
+    assert!(
+        large.prop_changes.is_empty(),
+        "no rows for unknown properties"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_too_large_diff_keeps_its_property_rows() {
+    let real = Real::new();
+    let rw = real.checkout("bigprops").await;
+    real.propset(&rw, "src/main.rs", "x:review", "yes");
+    let big = "x".repeat(super::super::remote::CAT_LIMIT + 10);
+    write(&rw, "src/main.rs", big.as_bytes());
+    let diff = real.diff(&rw, "src/main.rs", None).await;
+    assert_eq!(diff.too_large, Some(true));
+    assert!(diff.left.is_none() && diff.right.is_none() && diff.hunks.is_none());
+    let rows: Vec<_> = diff.prop_changes.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(rows, vec!["x:review"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -663,6 +874,23 @@ async fn an_update_conflict_shows_in_status_and_diff_like_the_fake_engine() {
     assert_eq!(diff.left.unwrap().content, "fn main() { a(); }\n");
     let right = diff.right.unwrap().content;
     assert!(right.contains("<<<<<<<") && right.contains("b();") && right.contains("a();"));
+
+    // The conflict marker files are listed as unversioned and can be previewed as additions.
+    let st = real.status(&rw).await;
+    let markers: Vec<&FileStatus> = st
+        .iter()
+        .filter(|s| s.path.starts_with("src/main.rs.") && s.text == NodeStatus::Unversioned)
+        .collect();
+    assert!(markers.len() >= 2, "{st:?}");
+    for m in markers {
+        let d = real.diff(&rw, &m.path, None).await;
+        assert!(d.left.is_none(), "{}", m.path);
+        let content = d
+            .right
+            .unwrap_or_else(|| panic!("{} has a text side", m.path))
+            .content;
+        assert!(content.contains("main"), "{}: {content}", m.path);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

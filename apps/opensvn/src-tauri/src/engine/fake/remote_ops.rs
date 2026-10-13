@@ -28,6 +28,25 @@ fn internal(msg: impl Into<String>) -> SvnError {
     SvnError::new(ErrorCode::Internal, msg)
 }
 
+/// Property rows of a working copy diff (`before` = pristine, `after` = working), by name.
+fn prop_rows(
+    before: &std::collections::BTreeMap<String, String>,
+    after: &std::collections::BTreeMap<String, String>,
+) -> Vec<opensvn_ipc::PropChange> {
+    let mut names: Vec<&String> = before.keys().chain(after.keys()).collect();
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .filter(|n| before.get(*n) != after.get(*n))
+        .map(|n| opensvn_ipc::PropChange {
+            name: n.clone(),
+            before: before.get(n).cloned(),
+            after: after.get(n).cloned(),
+        })
+        .collect()
+}
+
 impl FakeEngine {
     async fn read_file(
         &self,
@@ -198,8 +217,32 @@ impl FakeEngine {
                 w.repo_path(&rp),
             ))
         })?;
+        // Pending deletions have no working properties (like the real engine).
+        let working_props = if node.sched == Sched::Deleted {
+            Default::default()
+        } else {
+            node.props.clone()
+        };
         if node.kind == opensvn_ipc::FileKind::Dir {
-            return Err(internal(format!("{rp} is a directory")));
+            if against.is_some() {
+                return Err(SvnError::new(
+                    ErrorCode::WcInvalidOperation,
+                    format!("'{rp}' is a directory; only files can be compared with a revision"),
+                ));
+            }
+            // A folder has no text: only its property changes (svn:ignore, ...).
+            return Ok(FileDiff {
+                path: path.to_owned(),
+                binary: false,
+                mime: None,
+                left: None,
+                right: None,
+                hunks: None,
+                prop_changes: prop_rows(&node.base_props, &working_props),
+                image: None,
+                too_large: None,
+                too_complex: None,
+            });
         }
         let left = match against {
             None => node
@@ -223,7 +266,11 @@ impl FakeEngine {
             .work
             .as_ref()
             .map(|b| (b.to_vec(), format!("{rp} (working)")));
-        file_diff(path, left, right, opts, ctx)
+        let mut diff = file_diff(path, left, right, opts, ctx)?;
+        if against.is_none() {
+            diff.prop_changes = prop_rows(&node.base_props, &working_props);
+        }
+        Ok(diff)
     }
 
     pub(super) async fn do_diff_rev(

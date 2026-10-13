@@ -1,7 +1,7 @@
 //! Conversions between the working copy layer (`svn-client`, `svn-wc`) and the IPC model.
 //!
-//! * Statuses: `WcStatus` -> `FileStatus` through the shared IPC mapping, with every lock token
-//!   removed: whether a lock is this working copy's own is reported as `lock.mine`; the token
+//! * Statuses: `WcStatus` -> `FileStatus` through the shared IPC mapping, which never fills a
+//!   lock token: whether a lock is this working copy's own is reported as `lock.mine`; the token
 //!   itself stays in `wc.db` and never crosses the IPC boundary.
 //! * Property lists: two stored property lists -> the `PropChange` rows of a diff.
 //! * Conflict resolution: the IPC choice -> the `svn-client` choice and scope.
@@ -22,12 +22,6 @@ pub(super) fn file_status(s: &WcStatus) -> Option<FileStatus> {
     // local state: it is shown as an unremarkable node with its remote side, not as unversioned.
     if s.text == svn_types::NodeStatus::None && s.remote.is_some() {
         out.text = NodeStatus::Normal;
-    }
-    if let Some(lock) = &mut out.lock {
-        lock.token = None;
-    }
-    if let Some(lock) = out.remote.as_mut().and_then(|r| r.remote_lock.as_mut()) {
-        lock.token = None;
     }
     Some(out)
 }

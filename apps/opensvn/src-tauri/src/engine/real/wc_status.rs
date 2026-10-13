@@ -7,24 +7,31 @@
 //!   source of a copied node) or the file at a revision read from the repository, against the
 //!   working file with keywords and line endings normalized as a commit would send it. Text is
 //!   shown through the shared `engine::text` rules (binary, display budget), sides above
-//!   [`CAT_LIMIT`] are flagged `too_large` unless the caller forces them, and a binary
-//!   `svn:mime-type` wins over content sniffing. Property changes are listed for files and
-//!   directories.
+//!   [`CAT_LIMIT`] are flagged `too_large` unless the caller forces them (at most `limit + 1`
+//!   bytes of any file are ever read, whatever its size on disk), and a binary `svn:mime-type`
+//!   (of the working node or of the compared side) wins over content sniffing. Property changes
+//!   are listed for files and directories; a `too_large` diff carries no text sides and no hunks
+//!   (doc 03 `FileDiff.hunks`), only its property rows.
+//! * An unversioned file (status lists them, conflict marker files included) is diffed as a
+//!   one-sided addition of the bytes on disk, under the same cap and binary rules. The path must
+//!   stay inside the working copy: no `..`, no absolute path, no `.svn` component and no symlinked
+//!   parent folder; a symlink itself is shown as its `link <target>` text, never followed.
 //! * `status_remote` runs `svn_client::status_remote` on a session anchored at the working copy
 //!   URL (with the interactivity of the call) and counts the revisions the working copy lacks,
 //!   capped at [`INCOMING_CAP`].
 
-use std::fs;
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
 use opensvn_ipc::{FileDiff, FileStatus, Rev};
 use svn_client::StatusOptions;
-use svn_client::wc::inspect::{prop_value, working_repo_normal};
+use svn_client::wc::inspect::{prop_value, translate_info};
 use svn_ra_api::{LogRequest, RaSession};
 use svn_types::{CancelToken, Depth, ErrorCode, NodeKind, RelPath, RepoUrl, Revnum, SvnError};
 use svn_wc::db::{Node, Presence, Props, WcDb};
 use svn_wc::pristine::Sha1Digest;
+use svn_wc::translate::{ContentTranslator, special, translate_stream};
 
 use super::remote::CAT_LIMIT;
 use super::text::CappedBuf;
@@ -71,6 +78,8 @@ struct LocalSides {
     repo_root: String,
     /// Where the node lives in the repository (for a diff against a revision).
     repos_path: String,
+    /// Not under version control: a file on disk only (one-sided addition).
+    unversioned: bool,
 }
 
 fn not_versioned(rel: &RelPath) -> SvnError {
@@ -80,10 +89,16 @@ fn not_versioned(rel: &RelPath) -> SvnError {
     )
 }
 
+/// Bytes read from a source for a side of at most `limit` bytes: one more, to tell "exactly at
+/// the limit" from "over it".
+fn read_cap(limit: usize) -> u64 {
+    u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1)
+}
+
 /// Reads at most `limit` bytes from `r`; [`Content::TooLarge`] beyond.
 fn read_limited(r: impl Read, limit: usize, what: &str) -> EngineResult<Content> {
     let mut out = Vec::new();
-    r.take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+    r.take(read_cap(limit))
         .read_to_end(&mut out)
         .map_err(|e| SvnError::from_io(format!("cannot read {what}"), &e))?;
     Ok(if out.len() > limit {
@@ -106,37 +121,129 @@ fn pristine_text(db: &WcDb, node: &Node, limit: usize) -> EngineResult<Content> 
     read_limited(file, limit, "the pristine text")
 }
 
-/// Working file of `rel` converted to repository-normal form.
-fn working_text(db: &WcDb, rel: &RelPath, limit: usize) -> EngineResult<Content> {
-    let abs = svn_client::wc::abs_path(db, rel)?;
-    let md = match fs::symlink_metadata(&abs) {
-        Ok(md) => md,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Content::Absent),
-        Err(e) => return Err(SvnError::from_io(format!("cannot stat '{rel}'"), &e)),
-    };
-    if !md.file_type().is_file() && !md.file_type().is_symlink() {
-        return Ok(Content::Absent); // obstructed by a directory: no file to show
-    }
-    if usize::try_from(md.len()).unwrap_or(usize::MAX) > limit {
-        return Ok(Content::TooLarge);
-    }
-    let data = working_repo_normal(db, rel)?;
-    // Keyword contraction and line ending normalization may change the size a little.
-    Ok(if data.len() > limit {
+/// Caps bytes already in memory (a symlink's `link <target>` text).
+fn capped(data: Vec<u8>, limit: usize) -> Content {
+    if data.len() > limit {
         Content::TooLarge
     } else {
         Content::Bytes(data)
+    }
+}
+
+/// What is on disk at `abs`, without following a symlink: `None` when nothing is there or a
+/// directory obstructs it (no file to show), else whether it is a symlink.
+fn file_on_disk(abs: &Path, rel: &RelPath) -> EngineResult<Option<bool>> {
+    match fs::symlink_metadata(abs) {
+        Ok(md) if md.file_type().is_symlink() => Ok(Some(true)),
+        Ok(md) if md.file_type().is_file() => Ok(Some(false)),
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(SvnError::from_io(format!("cannot stat '{rel}'"), &e)),
+    }
+}
+
+/// Working file of `rel` converted to repository-normal form. The file is streamed through the
+/// translator and at most `limit + 1` bytes are read, so a file that grows after it was listed
+/// (a log being written) cannot push the read past the cap.
+fn working_text(db: &WcDb, rel: &RelPath, limit: usize) -> EngineResult<Content> {
+    let abs = svn_client::wc::abs_path(db, rel)?;
+    let Some(is_link) = file_on_disk(&abs, rel)? else {
+        return Ok(Content::Absent);
+    };
+    let info = translate_info(&db.actual_props(rel)?);
+    if is_link {
+        return Ok(capped(special::read_repo_normal(&abs)?, limit));
+    }
+    let file =
+        File::open(&abs).map_err(|e| SvnError::from_io(format!("cannot open '{rel}'"), &e))?;
+    if info.special {
+        // `svn:special` on a regular file: its raw content, like `special::read_repo_normal`.
+        return read_limited(file, limit, "the working file");
+    }
+    let mut src = file.take(read_cap(limit));
+    let mut out = Vec::new();
+    translate_stream(
+        &mut src,
+        &mut out,
+        ContentTranslator::to_repo_normal(&info, true)?,
+    )?;
+    // The source hit the cap, or keyword/eol normalization grew the text past it.
+    Ok(if src.limit() == 0 || out.len() > limit {
+        Content::TooLarge
+    } else {
+        Content::Bytes(out)
+    })
+}
+
+/// Checks that an unversioned `rel` stays inside the working copy at `wcroot`: never inside the
+/// administrative area, never through a symlinked parent folder (which could lead outside).
+fn unversioned_path(wcroot: &Path, rel: &RelPath) -> EngineResult<std::path::PathBuf> {
+    let parts: Vec<&str> = rel.as_str().split('/').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() || parts.iter().any(|p| p.eq_ignore_ascii_case(".svn")) {
+        return Err(not_versioned(rel));
+    }
+    let mut dir = wcroot.to_path_buf();
+    for part in &parts[..parts.len() - 1] {
+        dir.push(part);
+        match fs::symlink_metadata(&dir) {
+            Ok(md) if md.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(SvnError::new(
+                    ErrorCode::WcInvalidOperation,
+                    format!("'{rel}' is reached through a link or a file, not a folder"),
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_versioned(rel)),
+            Err(e) => return Err(SvnError::from_io(format!("cannot stat '{rel}'"), &e)),
+        }
+    }
+    Ok(dir.join(parts[parts.len() - 1]))
+}
+
+/// One-sided "added" view of an unversioned path: the raw bytes on disk (a symlink as its
+/// `link <target>` text), or an empty directory diff for a folder.
+fn read_unversioned(db: &WcDb, rel: &RelPath, limit: usize) -> EngineResult<LocalSides> {
+    let abs = unversioned_path(db.wcroot(), rel)?;
+    let md = match fs::symlink_metadata(&abs) {
+        Ok(md) => md,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_versioned(rel)),
+        Err(e) => return Err(SvnError::from_io(format!("cannot stat '{rel}'"), &e)),
+    };
+    let (kind, working) = if md.file_type().is_symlink() {
+        (
+            NodeKind::File,
+            capped(special::read_repo_normal(&abs)?, limit),
+        )
+    } else if md.file_type().is_file() {
+        let file =
+            File::open(&abs).map_err(|e| SvnError::from_io(format!("cannot open '{rel}'"), &e))?;
+        (NodeKind::File, read_limited(file, limit, "the file")?)
+    } else if md.file_type().is_dir() {
+        (NodeKind::Dir, Content::Absent)
+    } else {
+        return Err(not_versioned(rel));
+    };
+    Ok(LocalSides {
+        kind,
+        base: Content::Absent,
+        base_props: Vec::new(),
+        working,
+        working_props: Vec::new(),
+        repo_root: String::new(),
+        repos_path: String::new(),
+        unversioned: true,
     })
 }
 
 /// Reads both local sides of `rel` from the working copy at `root`.
 fn read_local(root: &Path, rel: &RelPath, limit: usize) -> EngineResult<LocalSides> {
     let db = wc_read::open_db(root)?;
-    let cur = db.read_node(rel)?.ok_or_else(|| not_versioned(rel))?;
+    // Not in wc.db, or only a not-present/excluded row: whatever is on disk is unversioned.
+    let cur = match db.read_node(rel)? {
+        Some(n) if n.presence == Presence::BaseDeleted || n.presence.is_present() => n,
+        _ => return read_unversioned(&db, rel, limit),
+    };
     let deleted = cur.presence == Presence::BaseDeleted;
-    if !deleted && !cur.presence.is_present() {
-        return Err(not_versioned(rel));
-    }
     let base = db.read_base(rel)?.filter(|b| b.presence.is_present());
     // Like `svn diff`: a copied node is compared with its copy source, anything else with BASE
     // (a plain addition has none).
@@ -178,6 +285,7 @@ fn read_local(root: &Path, rel: &RelPath, limit: usize) -> EngineResult<LocalSid
         },
         repo_root,
         repos_path,
+        unversioned: false,
     })
 }
 
@@ -280,6 +388,8 @@ impl RealEngine {
         ctx: &OpContext,
     ) -> EngineResult<Vec<FileStatus>> {
         ctx.check()?;
+        // TODO(#94): add the working copy's local-scope ignores (`local_util::read_local_ignores`)
+        // to the global ignores of this scan once that PR lands.
         let opts = StatusOptions {
             depth: Depth::Infinity,
             show_unmodified: false,
@@ -314,13 +424,14 @@ impl RealEngine {
         };
         let shown = rel.as_str().to_owned();
         let is_dir = local.kind == NodeKind::Dir;
-        // The working MIME type decides; a file scheduled for deletion keeps its old one.
-        let mime = binary_mime(&local.working_props).or_else(|| binary_mime(&local.base_props));
+        if local.unversioned && against.is_some() {
+            return Err(not_versioned(&rel));
+        }
         let (left, left_label, left_props) = match against {
             None => (
                 local.base,
                 format!("{shown} (base)"),
-                Some(local.base_props),
+                Some(local.base_props.clone()),
             ),
             Some(_) if is_dir => {
                 return Err(SvnError::new(
@@ -335,6 +446,11 @@ impl RealEngine {
                 (content, format!("{shown}@r{}", r.0), props)
             }
         };
+        // Binary when either side's MIME type says so: the working one first (a file scheduled
+        // for deletion has none), then the compared side's (BASE, or the revision read from the
+        // repository; BASE when that revision's properties are unknown).
+        let mime = binary_mime(&local.working_props)
+            .or_else(|| binary_mime(left_props.as_ref().unwrap_or(&local.base_props)));
         // Properties of a side that was too large to download are unknown: no property rows
         // rather than wrong ones.
         let prop_changes = left_props
