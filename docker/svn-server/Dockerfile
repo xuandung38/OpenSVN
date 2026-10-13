@@ -4,7 +4,7 @@
 # (see docker/compose.yml). Layers are ordered so the slow compile stays cached until the
 # version pin changes; config files are copied last.
 
-FROM debian:bookworm-slim AS compile
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS compile
 ARG SVN_VERSION
 ARG SVN_SHA512
 ENV DEBIAN_FRONTEND=noninteractive
@@ -26,7 +26,7 @@ RUN ./configure --prefix=/usr/local --with-apxs=/usr/bin/apxs --with-serf \
 # mod_dav_svn.so / mod_authz_svn.so under /usr/local/libexec.
 RUN make install DESTDIR=/out && ls /out/usr/local/libexec/mod_dav_svn.so
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 RUN apt-get update && apt-get install -y --no-install-recommends \

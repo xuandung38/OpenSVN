@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # svn command-line client compiled from the official source tarball (version + SHA-512 pinned
 # via build args). Trusts the compat test CA; also ships openssl for gen-certs.sh and sqlite3.
-FROM debian:bookworm-slim AS compile
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS compile
 ARG SVN_VERSION
 ARG SVN_SHA512
 ENV DEBIAN_FRONTEND=noninteractive
@@ -18,7 +18,7 @@ RUN ./configure --prefix=/usr/local --with-serf --without-apxs \
       --without-berkeley-db --without-swig --disable-nls \
     && make -j"$(nproc)" && make install DESTDIR=/out
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 RUN apt-get update && apt-get install -y --no-install-recommends \

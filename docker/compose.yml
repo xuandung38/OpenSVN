@@ -14,6 +14,9 @@ x-server: &server
   restart: "no"
   environment:
     SVN_DUMPIO: "${SVN_DUMPIO:-0}"
+    # Log files are handed to the invoking user so purge/clean never needs root on Linux.
+    HOST_UID: "${HOST_UID:-1000}"
+    HOST_GID: "${HOST_GID:-1000}"
   depends_on:
     certs:
       condition: service_completed_successfully
@@ -36,6 +39,9 @@ services:
       context: ./svn-client
       args: *svn15
     image: opensvn-compat/svn-client:1.15.0
+    # Runs as the invoking user so the files in target/compat/certs are not root-owned.
+    # Use `cargo xtask compat up`, which pre-creates that directory as the same user.
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     entrypoint: ["/gen-certs.sh", "/certs"]
     volumes:
       - ./svn-server/gen-certs.sh:/gen-certs.sh:ro
@@ -54,7 +60,9 @@ services:
     volumes:
       - ../target/compat/certs:/certs:ro
       - ../target/compat/logs/svn14:/var/log/svn-httpd
-      - ../fixtures:/fixtures
+      - ../fixtures:/fixtures:ro
+      # Only the pinned dump hashes are writable (`fixtures --update-hash`).
+      - ../fixtures/repos/expected:/fixtures/repos/expected
       - repos14:/var/svn/repos
 
   svn15-server:
@@ -70,7 +78,9 @@ services:
     volumes:
       - ../target/compat/certs:/certs:ro
       - ../target/compat/logs/svn15:/var/log/svn-httpd
-      - ../fixtures:/fixtures
+      - ../fixtures:/fixtures:ro
+      # Only the pinned dump hashes are writable (`fixtures --update-hash`).
+      - ../fixtures/repos/expected:/fixtures/repos/expected
       - repos15:/var/svn/repos
 
   svn14-client:

@@ -3,7 +3,8 @@
 # Usage: make-basic.sh <repo-path>      (needs svn, svnadmin, svnlook, openssl, sha256sum)
 # Covers: LF/CRLF/mixed text, seeded binary, svn:eol-style, svn:keywords, svn:needs-lock,
 # svn:mime-type, svn:executable, svn:ignore, svn:externals, rename and copy history,
-# a branch and a tag.
+# a branch and a tag,
+# and a node with 8 properties.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
@@ -70,6 +71,21 @@ fx_commit . "Change on feature-x"
 svn update -q
 svn cp -q trunk tags/v1.0
 fx_commit . "Tag v1.0"
+
+# r10: one node with 8 properties. svn serialises a property list in per-process hash order,
+# so this node is what proves wc.db dumps are compared independently of that order.
+svn update -q
+printf 'many properties\n' > trunk/many-props.txt
+svn add -q trunk/many-props.txt
+svn propset -q svn:eol-style native trunk/many-props.txt
+svn propset -q svn:keywords "Id Rev Date" trunk/many-props.txt
+svn propset -q svn:mime-type text/plain trunk/many-props.txt
+svn propset -q svn:needs-lock '*' trunk/many-props.txt
+svn propset -q custom:alpha one trunk/many-props.txt
+svn propset -q custom:beta two trunk/many-props.txt
+svn propset -q custom:gamma three trunk/many-props.txt
+svn propset -q custom:delta four trunk/many-props.txt
+fx_commit . "Add node with many properties"
 
 cd /
 fx_pin_revprops "$repo"

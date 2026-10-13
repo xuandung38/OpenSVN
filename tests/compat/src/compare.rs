@@ -11,12 +11,15 @@ use anyhow::{Context, Result};
 pub enum TreeEntry {
     /// Directory.
     Dir,
-    /// Regular file with its bytes and whether any exec bit is set.
+    /// Regular file with its bytes, exec bit and read-only state (`svn:needs-lock` files are
+    /// read-only until locked).
     File {
         /// File content.
         content: Vec<u8>,
         /// True when the owner/group/other exec bit is set (always false on non-Unix hosts).
         executable: bool,
+        /// True when no write bit is set (Windows: the read-only attribute).
+        readonly: bool,
     },
     /// Symlink and its target.
     Symlink(String),
@@ -58,11 +61,13 @@ fn walk(root: &Path, dir: &Path, out: &mut TreeSnapshot) -> Result<()> {
             walk(root, &path, out)?;
         } else {
             let content = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let (executable, readonly) = file_mode_bits(&entry)?;
             out.insert(
                 rel,
                 TreeEntry::File {
                     content,
-                    executable: is_executable(&entry)?,
+                    executable,
+                    readonly,
                 },
             );
         }
@@ -70,15 +75,18 @@ fn walk(root: &Path, dir: &Path, out: &mut TreeSnapshot) -> Result<()> {
     Ok(())
 }
 
+/// `(executable, readonly)` for a directory entry. The write bit is reduced to a boolean
+/// because umask differs between the container and the host.
 #[cfg(unix)]
-fn is_executable(entry: &fs::DirEntry) -> Result<bool> {
+fn file_mode_bits(entry: &fs::DirEntry) -> Result<(bool, bool)> {
     use std::os::unix::fs::PermissionsExt;
-    Ok(entry.metadata()?.permissions().mode() & 0o111 != 0)
+    let mode = entry.metadata()?.permissions().mode();
+    Ok((mode & 0o111 != 0, mode & 0o222 == 0))
 }
 
 #[cfg(not(unix))]
-fn is_executable(_entry: &fs::DirEntry) -> Result<bool> {
-    Ok(false)
+fn file_mode_bits(entry: &fs::DirEntry) -> Result<(bool, bool)> {
+    Ok((false, entry.metadata()?.permissions().readonly()))
 }
 
 /// Human-readable differences between two snapshots (empty when identical).
@@ -105,10 +113,12 @@ fn describe_difference(l: &TreeEntry, r: &TreeEntry) -> String {
             TreeEntry::File {
                 content: lc,
                 executable: le,
+                readonly: lr,
             },
             TreeEntry::File {
                 content: rc,
                 executable: re,
+                readonly: rr,
             },
         ) => {
             let mut parts = Vec::new();
@@ -118,23 +128,20 @@ fn describe_difference(l: &TreeEntry, r: &TreeEntry) -> String {
             if le != re {
                 parts.push(format!("exec bit {le} vs {re}"));
             }
+            if lr != rr {
+                parts.push(format!("read-only {lr} vs {rr}"));
+            }
             parts.join(", ")
         }
         _ => "entry kind or target".to_string(),
     }
 }
 
-/// XML elements whose text is a timestamp or otherwise run-specific.
-const VOLATILE_ELEMENTS: &[&str] = &[
-    "date",
-    "created",
-    "expires",
-    "text-updated",
-    "prop-updated",
-    "token",
-];
+/// XML elements derived from local file mtimes. Server-sourced values (`<date>`, lock
+/// `<created>`/`<expires>`/`<token>`) are identical across working copies and stay compared.
+const VOLATILE_ELEMENTS: &[&str] = &["text-updated", "prop-updated"];
 
-/// Normalise `svn status|info --xml` output for comparison: drop time-valued elements, replace
+/// Normalise `svn status|info --xml` output for comparison: drop mtime-derived elements, replace
 /// the absolute working-copy path with `{WC}`, sort attributes inside each tag (svn emits them
 /// in per-process hash order, which differs run to run), and emit one token per line.
 pub fn normalize_xml(xml: &str, wc_abspath: &str) -> String {
@@ -330,17 +337,29 @@ mod tests {
             let d = diff_trees(&snapshot_tree(&a)?, &snapshot_tree(&b)?);
             assert_eq!(d.len(), 1);
             assert!(d[0].contains("exec bit"), "{d:?}");
+
+            // needs-lock state: same content and mode otherwise, but one copy is read-only.
+            fs::set_permissions(b.join("sub/f.txt"), fs::Permissions::from_mode(0o644))?;
+            assert!(diff_trees(&snapshot_tree(&a)?, &snapshot_tree(&b)?).is_empty());
+            fs::set_permissions(b.join("sub/f.txt"), fs::Permissions::from_mode(0o444))?;
+            let d = diff_trees(&snapshot_tree(&a)?, &snapshot_tree(&b)?);
+            assert_eq!(d.len(), 1, "{d:?}");
+            assert!(d[0].contains("read-only"), "{d:?}");
         }
         Ok(())
     }
 
     #[test]
-    fn normalize_drops_times_and_wc_path() {
-        let xml = "<info>\n  <wcroot-abspath>/work/s/a</wcroot-abspath>\n  <commit revision=\"3\">\n    <date>2024-01-01T00:00:00.000000Z</date>\n  </commit>\n  <lock><created>x</created></lock>\n  <dated>keep</dated>\n</info>";
+    fn normalize_drops_only_mtime_elements_and_wc_path() {
+        let xml = "<info>\n  <wcroot-abspath>/work/s/a</wcroot-abspath>\n  <text-updated>2025-01-01T00:00:00.000000Z</text-updated>\n  <commit revision=\"3\">\n    <date>2024-01-01T00:00:00.000000Z</date>\n  </commit>\n  <lock><created>x</created></lock>\n  <dated>keep</dated>\n</info>";
         let n = normalize_xml(xml, "/work/s/a");
         assert!(n.contains("<wcroot-abspath>\n{WC}\n</wcroot-abspath>"));
-        assert!(!n.contains("2024-01-01"));
-        assert!(!n.contains("created"));
+        assert!(!n.contains("2025-01-01"), "text-updated is mtime-derived");
+        assert!(
+            n.contains("2024-01-01"),
+            "server commit date must stay compared"
+        );
+        assert!(n.contains("created"));
         assert!(n.contains("<dated>\nkeep\n</dated>"));
     }
 

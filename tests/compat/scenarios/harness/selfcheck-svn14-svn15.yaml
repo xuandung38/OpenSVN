@@ -1,5 +1,5 @@
 # Cross-version sanity: svn14 and svn15 clients checking out the same revision must produce
-# identical trees, status and info (wc.db is compared too: both write format 31).
+# identical trees, status, info and normalised wc.db (both write format 31).
 name: selfcheck-svn14-svn15
 description: svn14 vs svn15 checkout of the same repo
 server: svn15
@@ -8,4 +8,4 @@ steps:
   - { on: svn14, wc: a, svn: [checkout, "{url}/trunk", "."] }
   - { on: svn15, wc: b, svn: [checkout, "{url}/trunk", "."] }
 compare:
-  - { left: a, right: b, checks: [tree, status, info] }
+  - { left: a, right: b, checks: [tree, status, info, wcdb] }
