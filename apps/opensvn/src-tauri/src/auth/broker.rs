@@ -277,12 +277,13 @@ impl AuthPrompter for AuthBroker {
         let Some(AuthResponse::Certificate { decision }) = self.ask(prompt, true).await else {
             return CertDecision::Reject;
         };
+        // The UI is not a trust boundary: the decision must fit the actual failure.
+        let changed = matches!(info.failure, CertFailure::Changed { .. });
+        let expires = opensvn_ipc::time_fmt::timestamp_to_iso(info.not_after);
         match decision {
             IpcDecision::Reject => CertDecision::Reject,
             IpcDecision::AcceptOnce => CertDecision::AcceptOnce,
-            IpcDecision::AcceptAlways if !permanent_ok => CertDecision::AcceptOnce,
-            IpcDecision::AcceptAlways => {
-                let expires = opensvn_ipc::time_fmt::timestamp_to_iso(info.not_after);
+            IpcDecision::AcceptAlways if permanent_ok => {
                 if let Err(e) =
                     self.db
                         .cert_trust(&info.host, info.port, &fingerprint, &info.subject, &expires)
@@ -291,6 +292,27 @@ impl AuthPrompter for AuthBroker {
                     return CertDecision::AcceptOnce;
                 }
                 CertDecision::AcceptAlways
+            }
+            IpcDecision::ReplacePin if changed => {
+                if let Err(e) = self.db.cert_replace_pin(
+                    &info.host,
+                    info.port,
+                    &fingerprint,
+                    &info.subject,
+                    &expires,
+                ) {
+                    tracing::warn!(error = %e, "could not replace the pinned certificate");
+                    return CertDecision::Reject;
+                }
+                // The pin now names the presented certificate; this connection proceeds once.
+                CertDecision::AcceptOnce
+            }
+            IpcDecision::AcceptAlways | IpcDecision::ReplacePin => {
+                tracing::warn!(
+                    ?decision,
+                    "certificate decision does not fit the failure; rejected"
+                );
+                CertDecision::Reject
             }
         }
     }

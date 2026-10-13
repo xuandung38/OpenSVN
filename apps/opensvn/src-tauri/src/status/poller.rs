@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 use super::publisher::StatusPublisher;
 use super::remote_check::run_remote_check;
 use crate::engine::{EngineFacade, OpContext};
+use crate::notify::{Notifier, incoming_text};
 use crate::wc::WcRegistry;
 
 /// Period between checks for a given setting.
@@ -25,6 +26,8 @@ pub struct PollerDeps {
     pub publisher: Arc<StatusPublisher>,
     /// Working copy registry (open set and incoming counts).
     pub wcs: Arc<WcRegistry>,
+    /// Desktop notifications for new revisions.
+    pub notifier: Arc<dyn Notifier>,
     /// Settings changes (the interval).
     pub settings: watch::Receiver<Settings>,
     /// Fixed period instead of the setting (tests).
@@ -74,10 +77,19 @@ async fn check_all(deps: &PollerDeps) {
         };
         // Unattended: the engine must not prompt; a missing login just skips this round.
         let ctx = OpContext::background();
-        if let Err(e) =
-            run_remote_check(&deps.engine, &deps.publisher, &deps.wcs, &resolved, &ctx).await
-        {
-            tracing::info!(wc = %id.0, code = ?e.code, "periodic update check skipped");
+        let before = deps.wcs.incoming_of(&id);
+        match run_remote_check(&deps.engine, &deps.publisher, &deps.wcs, &resolved, &ctx).await {
+            Ok(()) => {
+                // Notify only when more revisions arrived since the last check.
+                let after = deps.wcs.incoming_of(&id);
+                if after > before {
+                    let (title, body) = incoming_text(&resolved.row.name, after);
+                    deps.notifier.notify(&title, &body);
+                }
+            }
+            Err(e) => {
+                tracing::info!(wc = %id.0, code = ?e.code, "periodic update check skipped");
+            }
         }
     }
 }

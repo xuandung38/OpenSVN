@@ -296,6 +296,32 @@ impl AppDb {
         })
     }
 
+    /// Replaces every pinned certificate of `host:port` with the given one (the user accepted a
+    /// renewed certificate).
+    pub fn cert_replace_pin(
+        &self,
+        host: &str,
+        port: u16,
+        sha256: &str,
+        subject: &str,
+        expires_at: &str,
+    ) -> Result<(), DbError> {
+        self.db.with(|c| {
+            let tx = c.transaction()?;
+            tx.execute(
+                "DELETE FROM trusted_cert WHERE host = ?1 AND port = ?2",
+                params![host, port],
+            )?;
+            tx.execute(
+                "INSERT INTO trusted_cert (host, port, sha256, subject, expires_at, trusted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![host, port, sha256, subject, expires_at, now_iso()],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     /// Trusts a certificate permanently for one host and port.
     pub fn cert_trust(
         &self,

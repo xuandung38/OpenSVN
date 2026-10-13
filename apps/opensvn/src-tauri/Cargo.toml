@@ -30,6 +30,9 @@ tauri = { workspace = true, features = ["protocol-asset"] }
 # Opens https links in the default browser. Only `opener:allow-open-url` with an https-only scope is
 # granted in capabilities; no path, reveal or other scheme permission.
 tauri-plugin-opener = "=2.7.1"
+# OS notifications are shown from Rust only (new revisions); no notification permission is granted
+# to the WebView.
+tauri-plugin-notification = "=2.6.0"
 tauri-specta = { workspace = true, features = ["derive", "typescript"] }
 specta.workspace = true
 specta-typescript.workspace = true

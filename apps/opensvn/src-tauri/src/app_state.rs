@@ -10,7 +10,10 @@ use svn_types::SvnError;
 use crate::auth::{AuthBroker, NoSecretStore};
 use crate::db::{AppDb, CacheDb};
 use crate::engine::{EngineFacade, OpContext, WcRef};
+use crate::menu::MenuControl;
+use crate::notify::Notifier;
 use crate::ops::{AppEvents, OperationManager};
+use crate::os_integration::OsOpener;
 use crate::path_grants::{PathGrants, PathPicker};
 use crate::programs::{ProgramPicker, ProgramService};
 use crate::settings::{SettingsService, system_locale};
@@ -31,6 +34,12 @@ pub struct AppDeps {
     pub status_timing: StatusTiming,
     /// Native dialogs for files and folders.
     pub path_picker: Arc<dyn PathPicker>,
+    /// Reveal / open launcher.
+    pub opener: Arc<dyn OsOpener>,
+    /// Desktop notifications.
+    pub notifier: Arc<dyn Notifier>,
+    /// Native menu control.
+    pub menu: Arc<dyn MenuControl>,
 }
 
 /// Services shared by all commands. Managed by Tauri and injected as `State<AppState>`.
@@ -59,6 +68,12 @@ pub struct AppState {
     pub grants: Arc<PathGrants>,
     /// Native file and folder dialogs.
     pub path_picker: Arc<dyn PathPicker>,
+    /// Reveal / open launcher.
+    pub opener: Arc<dyn OsOpener>,
+    /// Desktop notifications.
+    pub notifier: Arc<dyn Notifier>,
+    /// Native menu control.
+    pub menu: Arc<dyn MenuControl>,
     /// Serializes native dialogs (a second request cannot stack dialogs).
     pub path_dialog_open: tokio::sync::Mutex<()>,
     /// Program settings (native pick and confirm).
@@ -87,6 +102,9 @@ impl AppState {
             Arc::new(NoSecretStore),
         ));
         Ok(Self {
+            opener: deps.opener,
+            notifier: deps.notifier,
+            menu: deps.menu,
             poller: Mutex::new(None),
             auth,
             watchers,
@@ -201,6 +219,7 @@ impl AppState {
             engine: Arc::clone(&self.engine),
             publisher: Arc::clone(&self.status),
             wcs: Arc::clone(&self.wcs),
+            notifier: Arc::clone(&self.notifier),
             settings: self.settings.subscribe(),
             period_override: period,
         });

@@ -15,7 +15,10 @@ mod errors;
 mod events;
 mod layout;
 pub mod lock_ownership;
+mod menu;
+mod notify;
 mod ops;
+mod os_integration;
 mod path_grants;
 mod preview;
 mod programs;
@@ -73,6 +76,9 @@ fn build_state<R: tauri::Runtime>(
         picker: Arc::new(programs::NativeProgramPicker),
         status_timing: status::StatusTiming::default(),
         path_picker: Arc::new(path_grants::NativePathPicker),
+        opener: Arc::new(os_integration::SystemOpener),
+        menu: Arc::new(menu::TauriMenu::new(app.handle().clone())),
+        notifier: Arc::new(notify::TauriNotifier::new(app.handle().clone())),
     })
     .map_err(|e| startup_error(format!("{} {}", e.message, e.detail.unwrap_or_default())))
 }
@@ -101,6 +107,7 @@ pub fn run() {
     let builder = builder::<tauri::Wry>();
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .on_window_event(|window, event| {
             // Native drag and drop: the WebView only ever sees grants, never the dropped paths.
             if window.label() != path_grants::MAIN_WINDOW {
@@ -117,6 +124,7 @@ pub fn run() {
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
+            menu::install(app, true)?;
             let state = build_state(app)?;
             app.manage(state);
             tauri::async_runtime::spawn(finish_startup(app.handle().clone()));
