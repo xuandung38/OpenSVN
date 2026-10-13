@@ -2,8 +2,9 @@ import { MOCK_ALLOWED } from "../ipc/client";
 
 /**
  * Opens an https URL in the system browser, never inside the app WebView. In Tauri the opener is
- * `@tauri-apps/plugin-opener`'s `openUrl` (registered at startup by `installTauriOpener`; the Rust side
- * scopes it to https). `window.open` is a convenience only for dev/mock browser sessions.
+ * `@tauri-apps/plugin-opener`'s `openUrl` (registered at startup by `installTauriOpener`).
+ * P08 must scope opener to https (`opener:allow-open-url`, `https://*` only).
+ * `window.open` is a convenience only for dev/mock browser sessions.
  */
 type Opener = (url: string) => Promise<void> | void;
 
