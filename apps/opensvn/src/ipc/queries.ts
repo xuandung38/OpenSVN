@@ -20,6 +20,15 @@ export function useWcEntries(enabled = true) {
   });
 }
 
+/** What the running engine supports; fixed for the app's lifetime. */
+export function useEngineCapabilities() {
+  return useQuery({
+    queryKey: queryKeys.engineCapabilities,
+    staleTime: Number.POSITIVE_INFINITY,
+    queryFn: () => unwrap(ipc().commands.engineCapabilities()),
+  });
+}
+
 /** Repository URLs used recently (checkout suggestions). */
 export function useRecentUrls() {
   return useQuery({
