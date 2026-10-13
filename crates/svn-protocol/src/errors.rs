@@ -233,8 +233,9 @@ pub fn error_from_response(status: u16, headers: &Headers, body: &[u8]) -> SvnEr
 fn moved_error(status: u16, headers: &Headers) -> SvnError {
     let location = headers
         .get("Location")
-        .filter(|l| !l.chars().any(char::is_control))
-        .and_then(|l| svn_types::RepoUrl::parse(l.trim()).ok());
+        .map(str::trim)
+        .filter(|l| crate::caps::check_server_url_text("Location", l).is_ok())
+        .and_then(|l| svn_types::RepoUrl::parse(l).ok());
     let message = match location {
         Some(url) => format!("HTTP {status}: repository moved to {url}"),
         None => format!("HTTP {status}: repository moved (no usable Location)"),
