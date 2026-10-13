@@ -249,7 +249,7 @@ fn window_limits_follow_subversion() {
     // 100 KiB is the limit for every view and section; one more is rejected up front.
     assert_corrupt(&raw_window(0, [0, 102_401, 1, 1, 1], &[], &[]));
     assert_corrupt(&raw_window(0, [0, 0, 102_401, 1, 1], &[], &[]));
-    assert_corrupt(&raw_window(0, [0, 0, 1, 102_417, 0], &[], &[]));
+    assert_corrupt(&raw_window(0, [0, 0, 1, 2_150_417, 0], &[], &[]));
     assert_corrupt(&raw_window(0, [0, 0, 1, 1, 102_417], &[], &[]));
 }
 
@@ -406,4 +406,59 @@ fn empty_delta_marker_without_windows_writes_nothing() {
     assert_eq!(outcome.bytes_written, 0);
     // MD5 of empty input.
     assert_eq!(outcome.md5[0], 0xd4);
+}
+
+#[test]
+fn large_instruction_section_up_to_the_upstream_limit_decodes() {
+    // 1 byte of new data, then 102,399 one-byte target copies: 204,799 instruction bytes.
+    let mut ins = vec![0x81u8];
+    for _ in 0..102_399 {
+        ins.extend_from_slice(&[0x41, 0x00]);
+    }
+    assert_eq!(ins.len(), 204_799);
+    let stream = raw_window(0, [0, 0, 102_400, ins.len() as u64, 1], &ins, b"z");
+    let windows = decode_all(&stream);
+    assert_eq!(windows.len(), 1);
+    assert_eq!(apply(b"", &windows), vec![b'z'; 102_400]);
+}
+
+#[test]
+fn source_view_order_is_tracked_across_empty_views() {
+    let mk = |off: u64, len: u64| TxDeltaWindow {
+        sview_offset: off,
+        sview_len: len,
+        tview_len: 1,
+        ops: vec![if len > 0 {
+            TxDeltaOp::CopyFromSource {
+                offset: 0,
+                length: 1,
+            }
+        } else {
+            TxDeltaOp::NewData {
+                offset: 0,
+                length: 1,
+            }
+        }],
+        new_data: if len > 0 {
+            Bytes::new()
+        } else {
+            Bytes::from_static(b"x")
+        },
+    };
+    let encode = |views: &[(u64, u64)]| {
+        let mut enc = SvndiffEncoder::new(SvndiffVersion::V0);
+        let mut out = Vec::new();
+        for &(o, l) in views {
+            enc.write_window(&mk(o, l), &mut out).unwrap();
+        }
+        out
+    };
+    // (10,5) -> (0,0) -> (2,3): the empty view resets the baseline, as upstream does.
+    assert_eq!(decode_all(&encode(&[(10, 5), (0, 0), (2, 3)])).len(), 3);
+    // Without the empty view in between, going backwards is still rejected.
+    let mut dec = SvndiffDecoder::new();
+    assert_eq!(
+        dec.feed(&encode(&[(10, 5), (2, 3)])).unwrap_err().code,
+        ErrorCode::Corrupt
+    );
 }

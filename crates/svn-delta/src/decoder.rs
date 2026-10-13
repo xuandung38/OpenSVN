@@ -35,7 +35,7 @@ struct Core {
     version: Option<SvndiffVersion>,
     /// Header parsed but its body is not fully buffered yet.
     header: Option<WindowHeader>,
-    /// Source view of the last window that had one, for the monotonic-view rule.
+    /// Source view of the previous window, for the monotonic-view rule.
     last_view: Option<(u64, u64)>,
 }
 
@@ -240,9 +240,7 @@ impl Core {
         let ins = decode_section(version, ins_stored, MAX_INSTRUCTIONS_LEN)?;
         let new_data = decode_section(version, new_stored, MAX_VIEW_LEN)?;
         let ops = parse_instructions(&ins, h.sview_len, h.tview_len, new_data.len() as u64)?;
-        if h.sview_len > 0 {
-            self.last_view = Some((h.sview_offset, h.sview_len));
-        }
+        self.last_view = Some((h.sview_offset, h.sview_len));
         Ok(TxDeltaWindow {
             sview_offset: h.sview_offset,
             sview_len: h.sview_len,

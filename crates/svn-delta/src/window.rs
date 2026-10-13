@@ -8,10 +8,11 @@ use svn_types::{ErrorCode, Result, SvnError, TxDeltaOp, TxDeltaWindow};
 use crate::varint::{decode_varint, encode_varint};
 
 /// Subversion's `SVN_DELTA_WINDOW_SIZE`: svndiff.c rejects any window whose source view, output
-/// view, instruction section or new-data section exceeds it (also after decompression).
+/// view or new-data section exceeds it (also after decompression).
 pub(crate) const MAX_WINDOW_SECTION_LEN: usize = 102_400;
-/// Upper bound for the instruction section of one window (after decompression).
-pub(crate) const MAX_INSTRUCTIONS_LEN: usize = MAX_WINDOW_SECTION_LEN;
+/// Upper bound for the instruction section of one window (after decompression): svndiff.c
+/// allows `SVN_DELTA_WINDOW_SIZE * 21` because a window may hold many tiny instructions.
+pub(crate) const MAX_INSTRUCTIONS_LEN: usize = MAX_WINDOW_SECTION_LEN * 21;
 /// Upper bound for source view, output view and new-data lengths of one window.
 pub(crate) const MAX_VIEW_LEN: usize = MAX_WINDOW_SECTION_LEN;
 
