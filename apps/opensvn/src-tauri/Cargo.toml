@@ -17,6 +17,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build.workspace = true
+# Reads tauri*.conf.json to refuse updater `dangerous*` TLS options at build time.
+serde_json.workspace = true
 
 [dependencies]
 opensvn-ipc = { path = "../../../crates/opensvn-ipc" }
@@ -65,6 +67,9 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync
 thiserror.workspace = true
 tracing.workspace = true
 url.workspace = true
+# Same version as tauri-plugin-updater uses: its redirect policy and sensitive header types are
+# passed to the updater's HTTP client.
+reqwest.workspace = true
 # Pinned here rather than in the workspace table until another crate needs them.
 uuid = { version = "=1.28.0", default-features = false, features = ["v7"] }
 # Process liveness and boot time for the working copy lock ownership probe (no unsafe in our code).

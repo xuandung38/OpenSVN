@@ -45,6 +45,8 @@ pub enum ErrorAction {
     TrustCert,
     OpenLockDialog,
     OpenSettings,
+    /// The default app was refused for this item; show it in the file manager instead.
+    RevealInFileManager,
 }
 
 /// Error returned by every command. `message` is user-displayable; never a bare string error.

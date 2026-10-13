@@ -3466,6 +3466,7 @@ dependencies = [
  "notify",
  "opensvn-ipc",
  "proptest",
+ "reqwest",
  "rfd",
  "rusqlite",
  "secrecy",

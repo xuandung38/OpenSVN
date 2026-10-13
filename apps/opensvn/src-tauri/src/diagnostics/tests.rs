@@ -125,6 +125,11 @@ fn old_logs_and_huge_logs_are_trimmed() {
     let big = "line of text\n".repeat(30_000); // ~390 KB
     std::fs::write(dir.path().join("big.log"), &big).unwrap();
     std::fs::write(dir.path().join("notes.txt"), "not a log").unwrap();
+    std::fs::write(
+        dir.path().join("opensvn.log.1"),
+        "rotated Authorization: Bearer ghp_rotatedsecret\n",
+    )
+    .unwrap();
     let svc = DiagnosticsService::default();
     let p = svc.preview(
         &inputs(Some(dir.path().to_path_buf())),
@@ -137,4 +142,14 @@ fn old_logs_and_huge_logs_are_trimmed() {
         "the tail starts at a line boundary"
     );
     assert!(p.entries.iter().all(|e| e.name != "logs/notes.txt"));
+    let rotated = p
+        .entries
+        .iter()
+        .find(|e| e.name == "logs/opensvn.log.1")
+        .expect("the rotated log is included");
+    assert!(rotated.content.starts_with("rotated"));
+    assert!(
+        !rotated.content.contains("ghp_rotatedsecret"),
+        "the rotated log is redacted too"
+    );
 }

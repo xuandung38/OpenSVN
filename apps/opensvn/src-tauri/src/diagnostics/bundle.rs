@@ -41,7 +41,7 @@ fn recent_log_tails(dir: &PathBuf) -> Vec<(String, String)> {
             let meta = e.metadata().ok()?;
             let modified = meta.modified().ok()?;
             (meta.is_file()
-                && name.ends_with(".log")
+                && (name.ends_with(".log") || name.ends_with(".log.1"))
                 && now.duration_since(modified).ok()? <= LOG_MAX_AGE)
                 .then_some((name, modified, e.path()))
         })

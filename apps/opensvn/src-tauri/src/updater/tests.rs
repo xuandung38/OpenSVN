@@ -140,3 +140,67 @@ fn the_app_wires_the_os_store_and_never_a_memory_store() {
     assert!(me[..idx].trim_end().ends_with("#[derive(Default)]"));
     assert!(me[..idx].contains("#[cfg(test)]\n#[derive(Default)]"));
 }
+
+#[test]
+fn dangerous_tls_options_disable_updates() {
+    let good = "https://api.github.com/repos/xuandung38/OpenSVN-releases/releases/latest";
+    for flag in [
+        "dangerousAcceptInvalidCerts",
+        "dangerousAcceptInvalidHostnames",
+        "dangerousInsecureTransportProtocol",
+    ] {
+        let c = serde_json::json!({ "endpoints": [good], flag: true });
+        assert!(
+            configured_endpoints(Some(&c), RELEASES_REPO).is_err(),
+            "{flag}"
+        );
+        let off = serde_json::json!({ "endpoints": [good], flag: false });
+        assert!(
+            configured_endpoints(Some(&off), RELEASES_REPO).is_ok(),
+            "{flag}=false"
+        );
+    }
+}
+
+#[test]
+fn shipped_config_sets_no_dangerous_updater_option() {
+    let text = include_str!("../../tauri.conf.json");
+    let json: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert!(dangerous_flags(json.pointer("/plugins/updater")).is_empty());
+}
+
+#[test]
+fn redirects_stay_on_https_github_hosts() {
+    let ok = |u: &str, hops| redirect_allowed(&Url::parse(u).unwrap(), hops);
+    assert!(ok(
+        "https://objects.githubusercontent.com/github-production-release-asset/1",
+        1
+    ));
+    assert!(ok("https://release-assets.githubusercontent.com/x", 1));
+    for bad in [
+        "http://objects.githubusercontent.com/x",
+        "https://objects.githubusercontent.com:8443/x",
+        "https://u:p@objects.githubusercontent.com/x",
+        "https://evil.example/x",
+        "https://objects.githubusercontent.com.evil.example/x",
+    ] {
+        assert!(!ok(bad, 1), "{bad}");
+    }
+    assert!(
+        !ok("https://api.github.com/x", 5),
+        "redirect chains are bounded"
+    );
+}
+
+#[test]
+fn authorization_header_is_sensitive_and_absent_without_a_token() {
+    let none = request_headers(None).unwrap();
+    assert!(none.is_empty());
+    let t = SecretString::from("ghp_secretvalue".to_owned());
+    let h = request_headers(Some(&t)).unwrap();
+    let auth = h.get(reqwest::header::AUTHORIZATION).unwrap();
+    assert!(auth.is_sensitive());
+    assert!(!format!("{h:?}").contains("ghp_secretvalue"));
+    let bad = SecretString::from("a\nb".to_owned());
+    assert!(request_headers(Some(&bad)).is_err());
+}

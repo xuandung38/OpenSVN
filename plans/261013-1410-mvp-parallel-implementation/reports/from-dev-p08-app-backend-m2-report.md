@@ -30,3 +30,44 @@ Doc 03 §3.5: the certificate decision rules, `path_pick` validation, and the up
 - Windows and macOS code is unverified (no runner). `secure-store` Linux Secret Service has not been run against a real daemon.
 - `cargo deny` and `pnpm tauri build` were not run this round (disk space).
 - The updater has no endpoint configured in `tauri.conf.json` (no release repo or public key yet). Until it has one, update commands return `invalid-argument`.
+
+---
+
+# Round 3: REQUEST_CHANGES on PR #62 (review of 10ff86e)
+
+origin/main merged (#71, #72) with a merge commit. Conflicts: `Cargo.lock` (main's, then re-resolved), the app `Cargo.toml` (both dependency blocks kept), `engine/fake/{mod,remote_ops}.rs` (main moved `fake/text.rs` to `engine/text.rs`; `tick_tests` and the `Sched` import kept).
+
+## Blocking: default-app opener (`os_integration.rs`)
+| Item | Status | Where / tests |
+|---|---|---|
+| Trailing dot or space (Windows) | DONE | `resolve_in_wc` (reveal and open) now parses with `RelPath::from_server` rules: no trailing `.`/space, no reserved device names, no `:`. `default_app_allowed` also trims trailing dots and spaces itself before reading the extension. Test: `trailing_dots_and_spaces_are_refused_before_any_extension_check` |
+| Symlinks | DONE | For `OpenWith::Default`, `symlink_metadata` on every component below the WC root; any link (or a component that cannot be inspected) is refused. Test: `symlinks_are_never_opened_with_the_default_app` (`README.txt -> Evil.app`, `notes.txt -> x.terminal`, a linked folder) |
+| Bundles | DONE | A folder opens only if its name has no `.` (so `Evil.app`, `X.prefPane`, also `v1.2`, are revealed instead). Test: `folders_that_may_be_bundles_are_refused` |
+| Allow-list | DONE | `DEFAULT_APP_EXTENSIONS`: txt md markdown rst log csv tsv json yaml yml toml diff patch, png jpg jpeg gif bmp webp tif tiff, pdf rtf doc docx xls xlsx ppt pptx odt ods odp (case-insensitive). No archives, disk images, html/svg, macro-enabled office files, or unknown/extensionless names. Execute bit still refuses on Unix. Test: `default_app_uses_an_allow_list_not_a_block_list` (all launchers from the review) |
+| FE fallback | DONE | A refusal carries the new `ErrorAction::RevealInFileManager` (`"reveal-in-file-manager"`). `src/lib/open-in-os.ts::openWithDefaultApp` reveals instead and returns the reason (no UI calls `openExternal` yet, so this is the helper the UI will use). Tests: `src/lib/open-in-os.test.ts` |
+
+## Non-blocking
+| Item | Status | Where / tests |
+|---|---|---|
+| Updater `dangerous*` flags | DONE | `build.rs` fails the build when any `tauri*.conf.json` sets `plugins.updater.dangerous*` to anything but `false`; `configured_endpoints` refuses the same at runtime. Tests: `dangerous_tls_options_disable_updates`, `shipped_config_sets_no_dangerous_updater_option` |
+| Redirect policy, sensitive header | DONE | `configure_client`: `https_only(true)` and a custom redirect policy (`redirect_allowed`: https, default port, no userinfo, hosts `api.github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`, at most 5 hops). Headers built by `request_headers` with `set_sensitive(true)`. `reqwest` (workspace pin 0.13.5, the plugin's version) added to the app. Tests: `redirects_stay_on_https_github_hosts`, `authorization_header_is_sensitive_and_absent_without_a_token` |
+| `install()` re-reads token | DONE | `update_install` already read the token from the keychain; `install` now replaces the `Update`'s headers with ones built from that token, so a token cleared after the check is not sent |
+| Tag characters | DONE | `is_deceptive` covers U+E0000..U+E007F and U+1BCA0..U+1BCA3 |
+| Rotated log in diagnostics | DONE | `opensvn.log.1` is included (still through `finish()` redaction). Test: `old_logs_and_huge_logs_are_trimmed` |
+| Lock rows note | DONE | "Upgrade notes" in `docs/deployment-guide.md` and the `lock_ownership` module doc |
+| `pnpm test -- --testTimeout` | DONE | pnpm forwards a literal `--`, and vitest ignores everything after it. `apps/opensvn/scripts/vitest.mjs` drops `--` markers and runs `vitest run`; the `test` script uses it. Verified: `pnpm test -- --testTimeout=30000 src/lib/` runs only `src/lib` |
+| `installFakeClock()` | NOT AVAILABLE | Not on main; it exists only on `feat/12b-fe-wc-m1`. Not ported here, so FE timeouts under load are reported as they are below |
+
+## Gates (local, Linux, load average about 20 on 4 cores)
+- `cargo fmt --all --check`: pass
+- `cargo clippy --workspace --all-targets -- -D warnings`: pass (full workspace this time)
+- `cargo test -p opensvn -p opensvn-ipc`: app lib 215/215, ipc 4 + 5 + 14 + 3, all pass
+- `pnpm gen:ipc`: regenerated for the new `ErrorAction` variant; the committed bindings match
+- `pnpm lint`, `pnpm typecheck`: pass
+- `pnpm test` (default timeouts): 146/147. The failure was `history.test.tsx` "shows revisions, hostile text stays inert..." (2.2 s, a `waitFor` deadline under load). This file is not touched by this PR, and it passes on its own (8/8, twice).
+- `pnpm test -- --testTimeout=30000` (the flag now reaches vitest): 147/147 in 22 files
+
+## Not done / caveats
+- Windows and macOS behaviour is still unverified: trailing-dot handling, `open` on bundles and the explorer launch. The symlink tests run on Unix only.
+- The FE helper is not wired to a button yet, because no UI calls `openExternal` in this PR.
+- `installFakeClock()` is not on main (it is on `feat/12b-fe-wc-m1`). The timing-sensitive FE tests still depend on machine load.

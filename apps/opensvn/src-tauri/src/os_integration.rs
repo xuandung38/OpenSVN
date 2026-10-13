@@ -1,7 +1,8 @@
 //! Reveal in the file manager, open with the default app, editor or terminal.
 //!
 //! Every path is a path *inside a registered working copy*: it is built from a validated relative
-//! path with `safe_join` and must exist. "Default app" never opens programs or scripts, because a
+//! path (server-name rules: no trailing dot or space) with `safe_join` and must exist. "Default
+//! app" only opens allow-listed document types and plain folders, never symlinks, because a
 //! repository can contain files that run when opened. Editor and terminal are the programs the
 //! user picked in a native dialog (`program_choose`).
 
@@ -13,12 +14,14 @@ use svn_types::{RelPath, safe_join};
 
 use crate::errors::invalid_argument;
 
-/// File extensions that run code when opened (or install/mount software). Compared lower-case.
-const RUNNABLE_EXTENSIONS: &[&str] = &[
-    "exe", "com", "bat", "cmd", "msi", "msp", "scr", "pif", "lnk", "url", "reg", "ps1", "psm1",
-    "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "cpl", "jar", "sh", "bash", "zsh", "csh",
-    "command", "app", "pkg", "dmg", "workflow", "desktop", "appimage", "run", "bin", "deb", "rpm",
-    "py", "pl", "rb", "scpt", "action",
+/// File extensions the default application may open: plain documents, images and office files
+/// without macros. Compared case-insensitively. Everything else (programs, scripts, installers,
+/// shortcuts, disk images, archives, web pages, macro-enabled office files, unknown types) is
+/// refused and the UI offers "Reveal in file manager" instead.
+const DEFAULT_APP_EXTENSIONS: &[&str] = &[
+    "txt", "md", "markdown", "rst", "log", "csv", "tsv", "json", "yaml", "yml", "toml", "diff",
+    "patch", "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "pdf", "rtf", "doc",
+    "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp",
 ];
 
 /// The side effects of this module, behind a trait so tests can record them.
@@ -31,28 +34,86 @@ pub trait OsOpener: Send + Sync {
     fn run(&self, program: &str, args: &[String], cwd: &Path) -> Result<(), AppError>;
 }
 
-/// Whether the default application must not be used for `path`: files that run code, and (on
-/// Unix) anything with an execute bit.
-pub fn is_runnable(path: &Path) -> bool {
-    let by_name = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        RUNNABLE_EXTENSIONS
-            .iter()
-            .any(|r| r.eq_ignore_ascii_case(e))
-    });
-    if by_name {
-        return true;
+/// Whether the default application may open the file at `path`: its name has an allow-listed
+/// extension and (on Unix) it has no execute bit. The caller has already refused symlinks.
+pub fn default_app_allowed(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    // Windows strips trailing dots and spaces when it opens a file, so `a.exe.` runs `a.exe`.
+    // Such names are already refused by `resolve_in_wc`; trimming here keeps this check honest
+    // on its own.
+    let name = name.trim_end_matches(['.', ' ']);
+    let ext = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => ext,
+        _ => return false,
+    };
+    if !DEFAULT_APP_EXTENSIONS
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(ext))
+    {
+        return false;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
     }
     #[cfg(unix)]
-    if let Ok(meta) = std::fs::metadata(path) {
+    {
         use std::os::unix::fs::PermissionsExt;
-        return meta.is_file() && meta.permissions().mode() & 0o111 != 0;
+        if meta.permissions().mode() & 0o111 != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether the default application may open the directory at `path`. A directory whose name has
+/// an extension may be a bundle (`.app`, `.pkg`, `.prefPane`, ...) that macOS launches, so only
+/// plain names are opened.
+fn default_app_allows_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| !n.contains('.'))
+}
+
+/// Whether any component of `rel` below `root` is a symbolic link (or cannot be inspected).
+fn has_symlink_component(root: &Path, rel: &RelPath) -> bool {
+    let mut cur = root.to_path_buf();
+    for seg in rel.components() {
+        cur.push(seg);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if !m.file_type().is_symlink() => {}
+            _ => return true,
+        }
     }
     false
 }
 
+/// The error for an item the default app must not open; the UI reveals it instead.
+fn default_app_refused(rel: &RelPath) -> AppError {
+    let mut e = invalid_argument(
+        "This kind of item is not opened automatically because it could run code. It is shown in your file manager instead.",
+    )
+    .with_path(rel.as_str());
+    e.actions = Some(vec![ErrorAction::RevealInFileManager]);
+    e
+}
+
+/// Validates `rel` with the strict rules used for names from a server: no trailing dot or space,
+/// no reserved device names, no stream separators. The empty string is the root.
+fn parse_rel(rel: &str) -> Result<RelPath, AppError> {
+    if rel.is_empty() {
+        return Ok(RelPath::root());
+    }
+    RelPath::from_server(rel).map_err(|e| AppError::from(&e))
+}
+
 /// Resolves a working copy relative path to an existing path below `root`.
 pub fn resolve_in_wc(root: &Path, rel: &str) -> Result<PathBuf, AppError> {
-    let rel = RelPath::new(rel).map_err(|e| AppError::from(&e))?;
+    let rel = parse_rel(rel)?;
     let full = safe_join(root, &rel).map_err(|e| AppError::from(&e))?;
     if !full.exists() {
         let mut e = AppError::internal("This item is not on disk.").with_path(rel.as_str());
@@ -85,11 +146,19 @@ pub fn open_external(
     let path = resolve_in_wc(root, rel)?;
     match with {
         OpenWith::Default => {
-            if is_runnable(&path) {
-                return Err(invalid_argument(
-                    "This kind of file can run code, so it is not opened automatically. Open it from your file manager if you trust it.",
-                )
-                .with_path(rel));
+            let rel = parse_rel(rel)?;
+            // The launcher follows links, so a committed `README.txt -> Evil.app` would run the
+            // target: refuse any link inside the working copy.
+            if has_symlink_component(root, &rel) {
+                return Err(default_app_refused(&rel));
+            }
+            let allowed = if path.is_dir() {
+                default_app_allows_dir(&path)
+            } else {
+                default_app_allowed(&path)
+            };
+            if !allowed {
+                return Err(default_app_refused(&rel));
             }
             opener.open_default(&path)
         }
