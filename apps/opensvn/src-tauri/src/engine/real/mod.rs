@@ -9,8 +9,8 @@
 //! * Local working copy edits (revert, add/delete/move, cleanup, resolve, ignore, properties,
 //!   changelists) run through `svn-client` (`local`, `local_util`); marking an external move and
 //!   changing the format are refused with a user-facing error until `svn-client` supports them.
-//! * The other operations that need the `svn-client` working copy layer (checkout, update,
-//!   switch, commit, depth) are not wired yet and fail with
+//! * Checkout, update, switch and depth changes run through `svn-client` (`sync`).
+//! * The operations not wired yet (commit) fail with
 //!   [`ErrorCode::Internal`] carrying a `not wired` message. Each one delegates to a `do_*` method
 //!   in its own file (`wc_status`, `sync`, `commit`, `local`), so wiring one area later touches
 //!   only that file.
