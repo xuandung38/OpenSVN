@@ -10,7 +10,8 @@ use svn_types::{
 };
 
 use super::super::remote_edit::{Edit, Tree, drive};
-use super::support::{URL, ctx, fixture};
+use super::support::{StaticConnector, URL, ctx, fixture, fixture_on, standard_repo};
+use crate::engine::real::UnwiredRecovery;
 use crate::engine::{EditOp, EngineFacade, RemoteEditPlan};
 
 #[tokio::test]
@@ -153,23 +154,14 @@ async fn plans_are_validated_before_anything_is_sent() {
 
 #[tokio::test]
 async fn copy_reports_what_the_repository_cannot_do() {
-    // The in-memory repository has no server-side copies; the engine passes the copy source to
-    // the commit editor and surfaces the editor's refusal unchanged.
-    let f = fixture();
+    // A repository without server-side copies: the engine passes the copy source to the commit
+    // editor and surfaces the editor's refusal unchanged, leaving no transaction behind.
+    let repo = standard_repo().without_copies();
+    let connector = Arc::new(StaticConnector(vec![repo.clone()]));
+    let f = fixture_on(repo, connector, Arc::new(UnwiredRecovery));
     let err = f
         .engine
-        .copy_location(
-            &CopyLocationRequest {
-                from_url: format!("{URL}/trunk"),
-                from_rev: None,
-                to_url: format!("{URL}/branches/b1"),
-                message: "Branch".into(),
-                switch_wc_id: None,
-                from_wc: None,
-            },
-            None,
-            &ctx(),
-        )
+        .copy_location(&branch_request("branches/b1"), None, &ctx())
         .await
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::ServerUnsupported);
@@ -177,21 +169,40 @@ async fn copy_reports_what_the_repository_cannot_do() {
 
     let exists = f
         .engine
-        .copy_location(
-            &CopyLocationRequest {
-                from_url: format!("{URL}/trunk"),
-                from_rev: None,
-                to_url: format!("{URL}/trunk/src"),
-                message: "Branch".into(),
-                switch_wc_id: None,
-                from_wc: None,
-            },
-            None,
-            &ctx(),
-        )
+        .copy_location(&branch_request("trunk/src"), None, &ctx())
         .await
         .unwrap_err();
     assert!(exists.message.contains("already exists"));
+}
+
+#[tokio::test]
+async fn copy_creates_the_branch_from_its_source_url() {
+    let f = fixture();
+    let before = f.engine.repo_info(URL, &ctx()).await.unwrap().youngest_rev;
+    let rev = f
+        .engine
+        .copy_location(&branch_request("branches/b1"), None, &ctx())
+        .await
+        .unwrap();
+    assert_eq!(rev.0, before.0 + 1);
+    let readme = f
+        .engine
+        .repo_cat(&format!("{URL}/branches/b1/README.md"), None, &ctx())
+        .await
+        .unwrap();
+    assert_eq!(readme.content, "hello\n");
+    assert!(f.repo.open_txns().is_empty());
+}
+
+fn branch_request(to: &str) -> CopyLocationRequest {
+    CopyLocationRequest {
+        from_url: format!("{URL}/trunk"),
+        from_rev: None,
+        to_url: format!("{URL}/{to}"),
+        message: "Branch".into(),
+        switch_wc_id: None,
+        from_wc: None,
+    }
 }
 
 /// Editor that records the calls it receives.
@@ -301,7 +312,7 @@ async fn copies_are_added_with_their_source_and_renames_delete_the_origin() {
     tree.insert(
         &path("branches/b1"),
         Edit::Copy {
-            from: "/trunk".into(),
+            from: format!("{URL}/trunk"),
             rev: Revnum(7),
             kind: NodeKind::Dir,
         },
@@ -310,7 +321,7 @@ async fn copies_are_added_with_their_source_and_renames_delete_the_origin() {
     tree.insert(
         &path("tags/README.md"),
         Edit::Copy {
-            from: "/trunk/README.md".into(),
+            from: format!("{URL}/trunk/README.md"),
             rev: Revnum(7),
             kind: NodeKind::File,
         },
@@ -327,10 +338,10 @@ async fn copies_are_added_with_their_source_and_renames_delete_the_origin() {
         seen.lines(),
         vec![
             "open_dir branches base Some(Revnum(7))",
-            "add_dir branches/b1 from Some((\"/trunk\", Revnum(7)))",
+            &format!("add_dir branches/b1 from Some((\"{URL}/trunk\", Revnum(7)))"),
             "delete old",
             "open_dir tags base Some(Revnum(7))",
-            "add_file tags/README.md from Some((\"/trunk/README.md\", Revnum(7)))",
+            &format!("add_file tags/README.md from Some((\"{URL}/trunk/README.md\", Revnum(7)))"),
         ]
     );
 }
