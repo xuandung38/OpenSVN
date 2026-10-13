@@ -21,6 +21,11 @@ tauri-build.workspace = true
 [dependencies]
 opensvn-ipc = { path = "../../../crates/opensvn-ipc" }
 svn-types.workspace = true
+# OS credential store (Keychain, Credential Manager, Secret Service) for the updater token.
+secure-store.workspace = true
+# `RedactingMakeWriter` wraps every log sink (stderr and the log file) so secrets never reach logs.
+svn-ra.workspace = true
+tracing-subscriber = { workspace = true, features = ["std", "fmt", "registry"] }
 # `fake` ships the in-memory repository that backs FakeEngine (the default engine until the real
 # engine is registered behind the `real-engine` feature).
 svn-ra-api = { workspace = true, features = ["fake"] }
@@ -65,6 +70,8 @@ rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }
 engine-conformance = []
 
 [dev-dependencies]
+# Paused clock for deterministic select-ordering tests.
+tokio = { workspace = true, features = ["test-util"] }
 tauri = { workspace = true, features = ["test"] }
 tempfile.workspace = true
 proptest.workspace = true

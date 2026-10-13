@@ -58,14 +58,17 @@ async fn poll_loop(mut deps: PollerDeps) {
         let period = deps
             .period_override
             .unwrap_or_else(|| period_from(&deps.settings.borrow()));
+        // Biased: a settings change (or shutdown) seen together with the timer is handled first,
+        // so no check starts on a stale interval or while the app is shutting down.
         tokio::select! {
-            () = tokio::time::sleep(period) => check_all(&deps).await,
+            biased;
             // A changed interval restarts the wait with the new period.
             changed = deps.settings.changed(), if deps.period_override.is_none() => {
                 if changed.is_err() {
                     return; // settings service is gone: the app is shutting down
                 }
             }
+            () = tokio::time::sleep(period) => check_all(&deps).await,
         }
     }
 }
