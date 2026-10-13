@@ -9,9 +9,9 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use opensvn_ipc::{
-    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth, FileDiff,
-    FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage, RepoEntry, RepoInfo,
-    ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
+    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
+    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage,
+    RepoEntry, RepoInfo, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
 };
 use svn_types::{CancelToken, ErrorCode, RepoUrl, Revnum, SvnError};
 
@@ -27,6 +27,9 @@ struct ClientCheckout(Fixture);
 
 #[async_trait]
 impl EngineFacade for ClientCheckout {
+    fn capabilities(&self) -> EngineCapabilities {
+        self.0.engine.capabilities()
+    }
     async fn wc_info(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcInfo> {
         self.0.engine.wc_info(root, ctx).await
     }
