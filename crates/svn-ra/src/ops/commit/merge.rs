@@ -18,8 +18,8 @@ pub(super) const CLEANUP_TIMEOUT: Duration = Duration::from_secs(15);
 /// Why a commit ended without a new revision, from the point of view of the transaction.
 #[derive(Debug)]
 pub(super) enum CommitFailure {
-    /// The transaction was not merged: the failure came before the `MERGE` was sent, or the
-    /// server answered the `MERGE` with a definite non-2xx status. Deleting it is safe.
+    /// The failure came before the `MERGE` was sent, or the server refused the `MERGE` (see
+    /// [`refusal_is_definite`]). The transaction is deleted, as libsvn_ra_serf does.
     NotMerged(SvnError),
     /// The `MERGE` was sent but its outcome is unknown; the transaction must be kept. The error
     /// has code [`ErrorCode::CommitOutcomeUnknown`].
@@ -34,8 +34,8 @@ impl From<SvnError> for CommitFailure {
 
 /// Merges the transaction into a new revision.
 ///
-/// Mirrors libsvn_ra_serf: once the request may have reached the server, only a definite
-/// refusal (see [`refusal_is_definite`]) proves the commit did not happen. Cancellation, a
+/// Mirrors libsvn_ra_serf: once the request may have reached the server, only a refusal (see
+/// [`refusal_is_definite`]) is reported as a failed commit. Cancellation, a
 /// transport failure, a gateway timeout or bare 5xx, and an unreadable 2xx answer all yield
 /// [`CommitFailure::OutcomeUnknown`], whose child is the underlying error.
 pub(super) async fn merge(
@@ -88,16 +88,25 @@ pub(super) async fn merge(
     parse_merge_response(&head, &body).map_err(unknown)
 }
 
-/// Whether a non-2xx answer to a `MERGE` proves that the transaction was not merged.
+/// Whether a non-2xx answer to a `MERGE` is treated as the server refusing the commit (the
+/// transaction is then deleted and the error returned as an ordinary failure).
 ///
-/// - `408`, `502` and `504` never do: a reverse proxy answers them on a timeout or a broken
+/// This is how libsvn_ra_serf reads the answer, and it is right for every ordinary failure, but
+/// it is not a proof that nothing was merged: mod_dav_svn can answer a 500 with a `D:error`,
+/// or a 404 (transaction already gone), after the revision was written, when the repository
+/// storage fails during the post-commit steps (for example purging the transaction or
+/// updating `rep-cache`). Callers that journal the `MERGE`
+/// ([`svn_ra_api::CommitObserver::on_merge_sending`]) reconcile with the log before they drop
+/// the journal.
+///
+/// - `408`, `502` and `504` never count: a reverse proxy answers them on a timeout or a broken
 ///   upstream while the backend may still be running the commit (a slow pre-commit hook).
 /// - A 5xx answer counts only with a `D:error` body: that is mod_dav_svn reporting a failed
 ///   commit (for example a hook failure). A bare 5xx may come from a proxy or a crashed
 ///   worker after the commit started.
 /// - A 4xx answer counts with a `D:error` body as well (out of date, lock errors), and also
-///   without one: HTTP 4xx means the request was refused before it was carried out (authz,
-///   authentication, proxy limits), so the server cannot have merged anything.
+///   without one: HTTP 4xx normally means the request was refused before it was carried out
+///   (authz, authentication, proxy limits).
 fn refusal_is_definite(status: u16, has_dav_error: bool) -> bool {
     match status {
         408 | 502 | 504 => false,
@@ -143,6 +152,35 @@ pub(super) async fn cleanup_txn(wire: &RaWire, txn: &TxnName) -> Result<()> {
                 "deleting the commit transaction timed out",
             ))
         }
+    }
+}
+
+/// How the server answered a `DELETE` of a transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DeleteAnswer {
+    /// 2xx: the transaction existed and is deleted.
+    Deleted,
+    /// 404: no transaction of that name.
+    NotFound,
+    /// 400: the name is not a transaction of the requested kind (plain or virtual).
+    WrongKind,
+}
+
+/// Sends a `DELETE` of `txn` and classifies the answer; any other status is an error.
+pub(super) async fn delete_txn_answer(
+    wire: &RaWire,
+    txn: &TxnName,
+    cancel: &CancelToken,
+) -> Result<DeleteAnswer> {
+    let req = abort_txn_request(wire.urls(), txn)?;
+    let resp = wire.send(req, cancel).await?;
+    if resp.status().is_success() {
+        return Ok(DeleteAnswer::Deleted);
+    }
+    match resp.status().as_u16() {
+        404 => Ok(DeleteAnswer::NotFound),
+        400 => Ok(DeleteAnswer::WrongKind),
+        _ => Err(crate::ops::update::error_of(resp, cancel).await),
     }
 }
 
