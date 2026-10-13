@@ -8,8 +8,8 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::compare::{diff_lines_unordered, diff_text, diff_trees, normalize_xml, snapshot_tree};
-use crate::scenario::{Actor, Check, Compare, Scenario, Step, SvnVersion};
-use crate::wcdb_dump::dump_wc_db;
+use crate::scenario::{Actor, Check, Compare, Expect, Scenario, Step, SvnVersion};
+use crate::wcdb_dump::{dump_wc_db, work_queue_rows};
 
 /// Test-only Basic credentials baked into the compat server image.
 pub const TEST_USER: &str = "tester";
@@ -245,7 +245,7 @@ impl<'a> Runner<'a> {
         host_dir: &Path,
         report: &mut Report,
     ) -> Result<()> {
-        let oracle = scn.server;
+        let reader = cmp.reader;
         for check in &cmp.checks {
             let diffs = match check {
                 Check::Tree => diff_trees(
@@ -258,8 +258,8 @@ impl<'a> Runner<'a> {
                     } else {
                         &["info", "--xml", "--recursive"]
                     };
-                    let l = self.wc_xml(scn, oracle, &cmp.left, sub)?;
-                    let r = self.wc_xml(scn, oracle, &cmp.right, sub)?;
+                    let l = self.wc_xml(scn, reader, &cmp.left, sub)?;
+                    let r = self.wc_xml(scn, reader, &cmp.right, sub)?;
                     diff_text(&l, &r)
                 }
                 Check::Wcdb => diff_lines_unordered(
@@ -267,6 +267,26 @@ impl<'a> Runner<'a> {
                     &dump_wc_db(&host_dir.join(&cmp.right))?,
                 ),
             };
+            let mut diffs = diffs;
+            if *check == Check::Wcdb {
+                // A finished operation leaves no queued work: non-empty means the WC needs cleanup.
+                for side in [&cmp.left, &cmp.right] {
+                    let n = work_queue_rows(&host_dir.join(side))?;
+                    if n > 0 {
+                        diffs.push(format!("WORK_QUEUE of {side} has {n} pending row(s)"));
+                    }
+                }
+            }
+            if scn.expect == Expect::Mismatch {
+                // Negative control: the check must notice the planted difference.
+                if diffs.is_empty() {
+                    report.mismatches.push(format!(
+                        "[{}] {:?} {} vs {}: expected a difference but found none (comparator too lax?)",
+                        scn.name, check, cmp.left, cmp.right
+                    ));
+                }
+                continue;
+            }
             for d in diffs {
                 report.mismatches.push(format!(
                     "[{}] {:?} {} vs {}: {d}",
@@ -442,6 +462,28 @@ mod tests {
         let mut report = Report::default();
         runner.compare(&scn, &scn.compare[0], &tmp.path().join("t4"), &mut report)?;
         assert_eq!(report.mismatches.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn expect_mismatch_inverts_and_flags_lax_comparators() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let backend = FakeBackend {
+            calls: RefCell::new(Vec::new()),
+        };
+        let runner = Runner::new(&backend, tmp.path().to_path_buf());
+        let scn = Scenario::from_yaml(
+            "name: t5\nrepo: r\nexpect: mismatch\nsteps:\n  - { on: svn15, wc: a, sh: ls }\n  - { on: svn15, wc: b, sh: ls }\ncompare:\n  - { left: a, right: b, checks: [tree] }\n",
+        )?;
+        // Identical trees: the negative control must complain that nothing was detected.
+        let report = runner.run(&scn)?;
+        assert_eq!(report.mismatches.len(), 1, "{:?}", report.mismatches);
+        assert!(report.mismatches[0].contains("expected a difference"));
+        // A planted difference is detected, so the control passes.
+        fs::write(tmp.path().join("t5/b/stray"), b"x")?;
+        let mut report = Report::default();
+        runner.compare(&scn, &scn.compare[0], &tmp.path().join("t5"), &mut report)?;
+        assert!(report.passed(), "{:?}", report.mismatches);
         Ok(())
     }
 }

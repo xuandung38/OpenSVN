@@ -62,13 +62,22 @@ steps:
   - { on: engine, wc: b, svn: [checkout, "{url}/trunk", "."] }     # needs an EngineDriver
   - { on: tortoise-manual, wc: c, note: "Update in TortoiseSVN, then press Enter" }
 compare:
-  - { left: a, right: b, checks: [tree, status, info, wcdb] }
+  - { left: a, right: b, checks: [tree, status, info, wcdb], reader: svn15 }   # reader defaults to svn15
+expect: match                # `mismatch` = negative control: every listed check must find a difference
 ```
 
 `{url}`, `{repo}`, `{wc}` are substituted. svn steps get `--username/--password/--non-interactive`
-appended. Comparisons: `tree` (paths, bytes, exec bit; `.svn` excluded), `status`/`info`
-(`svn ... --xml` with time elements dropped and the wc path replaced by `{WC}`), `wcdb` (SQLite dump
-with time/date columns dropped, rows sorted, transient tables skipped).
+appended. Comparisons:
+- `tree`: paths, bytes, exec bit and read-only state (`svn:needs-lock`); `.svn` excluded.
+- `status` / `info`: `svn ... --xml` read with `reader` (default svn15), attributes sorted (svn
+  emits them in per-process hash order), `text-updated`/`prop-updated` dropped, wc path replaced
+  by `{WC}`. Server dates, lock data and revisions stay compared.
+- `wcdb`: `user_version`, every index/trigger/view, all rows sorted. Only `NODES.last_mod_time`
+  is masked (SET/NULL) and skel property columns are canonicalised (svn writes them in hash
+  order). A non-empty `WORK_QUEUE` after the steps is a failure.
+
+`selfcheck-must-fail.yaml` is the negative control (`expect: mismatch`): it proves each comparator
+notices a real difference. Run one scenario run at a time (work dir and ports are shared).
 
 Run one: `cargo xtask compat run tests/compat/scenarios/wc/my-scenario.yaml` (files or dirs).
 
@@ -85,6 +94,25 @@ Run one: `cargo xtask compat run tests/compat/scenarios/wc/my-scenario.yaml` (fi
 
 Windows E2E cannot use Docker Linux on hosted runners: use an internal VisualSVN test server or a
 Linux server reachable over the network.
+
+### Native svn oracle for unit tests in other crates
+
+For fast per-crate tests that only need a local `svn`/`svnadmin` (file:// repositories), use
+`opensvn_compat::oracle` (add `opensvn-compat` as a dev-dependency) instead of calling
+`Command::new("svn")`:
+
+```rust
+use opensvn_compat::oracle::{MinVersion, Oracle};
+let Some(oracle) = Oracle::resolve(MinVersion::V1_15)? else { return Ok(()) }; // skipped
+oracle.svnadmin().args(["create", path]).status()?;
+oracle.svn().args(["checkout", url, wc]).status()?;
+```
+
+Environment: `OPENSVN_SVN_BIN` / `OPENSVN_SVNADMIN_BIN` (default `svn` / `svnadmin` on PATH);
+`OPENSVN_REQUIRE_SVN=1` turns a missing or too-old binary into `Err` instead of a skip (CI sets it).
+`MinVersion::V1_15` is the default; ask for `V1_14` only for 1.14-specific behaviour. The same
+crate exports the normalisers: `wcdb_dump::dump_sqlite` / `dump_wc_db`, `compare::snapshot_tree` /
+`diff_trees`, `skel::canonical`.
 
 ### Engine steps
 

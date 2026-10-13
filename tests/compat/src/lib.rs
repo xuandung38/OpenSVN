@@ -8,8 +8,10 @@
 //! `cargo xtask compat up && cargo xtask compat fixtures && cargo test -p opensvn-compat -- --ignored`.
 
 pub mod compare;
+pub mod oracle;
 pub mod runner;
 pub mod scenario;
+pub mod skel;
 pub mod wcdb_dump;
 
 use std::path::{Path, PathBuf};

@@ -105,6 +105,26 @@ pub struct Compare {
     /// Checks to run (default: all).
     #[serde(default = "all_checks")]
     pub checks: Vec<Check>,
+    /// svn version used to read `status`/`info` from both working copies (default svn15, so
+    /// format-32 working copies are never read by 1.14).
+    #[serde(default = "default_reader")]
+    pub reader: SvnVersion,
+}
+
+fn default_reader() -> SvnVersion {
+    SvnVersion::V15
+}
+
+/// Whether the comparisons are expected to agree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Expect {
+    /// Every check must find no difference (default).
+    #[default]
+    Match,
+    /// Negative control: every listed check of every comparison must find a difference.
+    /// Proves the comparators really detect changes (guards against over-normalising).
+    Mismatch,
 }
 
 fn default_server() -> SvnVersion {
@@ -133,6 +153,9 @@ pub struct Scenario {
     /// Comparisons run after all steps.
     #[serde(default)]
     pub compare: Vec<Compare>,
+    /// `match` (default) or `mismatch` for negative controls.
+    #[serde(default)]
+    pub expect: Expect,
 }
 
 /// Scenario loading problems.
@@ -242,6 +265,9 @@ impl Scenario {
                 return Err(bad(format!("step {i}: svn args are empty")));
             }
         }
+        if self.expect == Expect::Mismatch && self.compare.is_empty() {
+            return Err(bad("expect: mismatch needs at least one compare".into()));
+        }
         for c in &self.compare {
             for side in [&c.left, &c.right] {
                 if !self.steps.iter().any(|s| &s.wc == side) {
@@ -272,6 +298,21 @@ compare:
         assert_eq!(s.server, SvnVersion::V15);
         assert!(!s.fresh_repo);
         assert_eq!(s.compare[0].checks, vec![Check::Tree]);
+        Ok(())
+    }
+
+    #[test]
+    fn expect_and_reader_parse_with_defaults() -> anyhow::Result<()> {
+        let s = Scenario::from_yaml(&format!("{OK}expect: mismatch\n"))?;
+        assert_eq!(s.expect, Expect::Mismatch);
+        assert_eq!(s.compare[0].reader, SvnVersion::V15);
+        assert_eq!(Scenario::from_yaml(OK)?.expect, Expect::Match);
+        let no_compare =
+            "name: n\nrepo: r\nexpect: mismatch\nsteps:\n  - { on: svn15, wc: a, sh: ls }\n";
+        assert!(matches!(
+            Scenario::from_yaml(no_compare),
+            Err(ScenarioError::Invalid { .. })
+        ));
         Ok(())
     }
 
