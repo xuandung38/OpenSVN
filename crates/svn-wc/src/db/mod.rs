@@ -41,6 +41,7 @@ pub use connection::{BUSY_TIMEOUT, OpenMode, open_connection, open_existing, sql
 pub use externals::External;
 pub use misc::LockInfo;
 pub use node_api::FileInfo;
+pub(crate) use nodes::decode_props;
 pub use nodes::{Node, Presence, Props};
 pub use ops::{BaseNode, CommitInfo};
 pub use repos_info::ReposInfo;
