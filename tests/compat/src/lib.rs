@@ -34,6 +34,40 @@ pub fn default_work_root() -> PathBuf {
 }
 
 #[cfg(test)]
+mod scenario_files {
+    use super::*;
+    use crate::scenario::Scenario;
+
+    fn yaml_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                yaml_files(&path, out)?;
+            } else if path.extension().is_some_and(|e| e == "yaml") {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    /// Every harness scenario (default and legacy) parses and validates without Docker, so a
+    /// schema mistake is caught by the unit tests rather than by the slow compat job.
+    #[test]
+    fn harness_scenarios_load() -> anyhow::Result<()> {
+        let mut files = Vec::new();
+        yaml_files(
+            &repo_root().join("tests/compat/scenarios/harness"),
+            &mut files,
+        )?;
+        assert!(!files.is_empty());
+        for path in &files {
+            Scenario::load(path)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod docker_tests {
     use super::*;
     use crate::runner::{DockerBackend, Runner};
