@@ -1,10 +1,9 @@
 import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { act } from "react";
 import { beforeAll, expect, test, vi } from "vitest";
 import { mockAuthResponses, mockCalls, mockEmit } from "../../../ipc/mock/adapter";
 import { I18nProvider } from "../../../lib/i18n/i18n";
-import { renderApp, setupMockIpc } from "../../../test-utils";
+import { installFakeClock, renderApp, setupMockIpc } from "../../../test-utils";
 import {
   type CertPromptInfo,
   type CredentialsPromptInfo,
@@ -20,6 +19,12 @@ import { TrustCertDialog } from "./trust-cert-dialog";
 beforeAll(async () => {
   await setupMockIpc("en");
 });
+
+// Fake clock: findBy/waitFor budgets count simulated time, so a loaded machine cannot time them out.
+const { user } = installFakeClock();
+// The per-test timeout is only a hang guard now: under CPU load rendering alone can take many
+// wall-clock seconds, while findBy/waitFor budgets run on the fake clock.
+vi.setConfig({ testTimeout: 120_000 });
 
 const CERT = {
   host: "svn.example.com",
@@ -126,12 +131,12 @@ test("sign-in submits trimmed username and the password, then Cancel answers can
   withLang(<SignInDialog prompt={creds()} onSubmit={onSubmit} onCancel={onCancel} />);
   const signIn = screen.getByRole("button", { name: "Sign in" });
   expect((signIn as HTMLButtonElement).disabled).toBe(true);
-  await userEvent.type(screen.getByLabelText("Username"), "  dev ");
-  await userEvent.type(screen.getByLabelText("Password"), "s3cret");
+  await user().type(screen.getByLabelText("Username"), "  dev ");
+  await user().type(screen.getByLabelText("Password"), "s3cret");
   expect((screen.getByLabelText("Password") as HTMLInputElement).type).toBe("password");
-  await userEvent.click(signIn);
+  await user().click(signIn);
   expect(onSubmit).toHaveBeenCalledWith({ username: "dev", password: "s3cret", save: true });
-  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await user().click(screen.getByRole("button", { name: "Cancel" }));
   expect(onCancel).toHaveBeenCalled();
 });
 
@@ -155,8 +160,8 @@ test("after 3 rejected attempts submitting is blocked", async () => {
       onCancel={() => undefined}
     />,
   );
-  await userEvent.type(screen.getByLabelText("Username"), "a");
-  await userEvent.type(screen.getByLabelText("Password"), "b");
+  await user().type(screen.getByLabelText("Username"), "a");
+  await user().type(screen.getByLabelText("Password"), "b");
   expect((screen.getByRole("button", { name: "Sign in" }) as HTMLButtonElement).disabled).toBe(
     true,
   );
@@ -165,11 +170,11 @@ test("after 3 rejected attempts submitting is blocked", async () => {
 test("self-signed offers reject, trust once and trust permanently", async () => {
   const onDecision = vi.fn();
   withLang(<TrustCertDialog prompt={certPrompt("self-signed")} onDecision={onDecision} />);
-  await userEvent.click(screen.getByRole("button", { name: "Trust permanently" }));
+  await user().click(screen.getByRole("button", { name: "Trust permanently" }));
   expect(onDecision).toHaveBeenCalledWith("acceptAlways");
-  await userEvent.click(screen.getByRole("button", { name: "Trust for this session" }));
+  await user().click(screen.getByRole("button", { name: "Trust for this session" }));
   expect(onDecision).toHaveBeenCalledWith("acceptOnce");
-  await userEvent.click(screen.getByRole("button", { name: "Reject" }));
+  await user().click(screen.getByRole("button", { name: "Reject" }));
   expect(onDecision).toHaveBeenCalledWith("reject");
   expect(screen.getByText("AA:BB")).toBeTruthy();
 });
@@ -181,7 +186,7 @@ test.each(["hostname-mismatch", "expired", "revoked", "not-yet-valid"] as const)
     withLang(<TrustCertDialog prompt={certPrompt(failure)} onDecision={onDecision} />);
     expect(screen.queryByRole("button", { name: /Trust/ })).toBeNull();
     expect(screen.getByText(/connection is blocked/i)).toBeTruthy();
-    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    await user().click(screen.getByRole("button", { name: "Close" }));
     expect(onDecision).toHaveBeenCalledWith("reject");
   },
 );
@@ -204,9 +209,9 @@ test("changed certificate: special warning, never one-click trust; re-pin needs 
     name: "Replace pinned certificate",
   }) as HTMLButtonElement;
   expect(replace.disabled).toBe(true);
-  await userEvent.click(screen.getByLabelText(/I verified the new fingerprint/));
+  await user().click(screen.getByLabelText(/I verified the new fingerprint/));
   expect(replace.disabled).toBe(false);
-  await userEvent.click(replace);
+  await user().click(replace);
   expect(onDecision).toHaveBeenCalledWith("replacePin");
 });
 
@@ -227,7 +232,7 @@ test("host: auth://prompt opens the dialog and Cancel answers cancel, closing th
   await waitFor(() => expect(mockEmit).toBeDefined());
   // Wait for the bus to subscribe (async start) before emitting.
   await act(async () => {
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.advanceTimersByTimeAsync(20);
   });
   const before = mockAuthResponses.length;
   await act(async () => {
@@ -244,7 +249,7 @@ test("host: auth://prompt opens the dialog and Cancel answers cancel, closing th
   });
   expect(await screen.findByRole("dialog", { name: "Sign in", hidden: true })).toBeTruthy();
   expect(screen.getByText("https://h:8443")).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await user().click(screen.getByRole("button", { name: "Cancel" }));
   await waitFor(() => expect(mockAuthResponses.length).toBe(before + 1));
   expect(mockAuthResponses.at(-1)).toEqual({ requestId: "host-1", response: { kind: "cancel" } });
   await waitFor(() => expect(screen.queryByRole("dialog", { hidden: true })).toBeNull());
@@ -253,7 +258,7 @@ test("host: auth://prompt opens the dialog and Cancel answers cancel, closing th
 test("host: certificate decisions map to auth_respond", async () => {
   renderApp(<AuthPromptHost />);
   await act(async () => {
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.advanceTimersByTimeAsync(20);
   });
   await act(async () => {
     mockEmit("auth://prompt", {
@@ -264,7 +269,7 @@ test("host: certificate decisions map to auth_respond", async () => {
       cert: { ...CERT, failure: "self-signed" },
     });
   });
-  await userEvent.click(await screen.findByRole("button", { name: "Trust for this session" }));
+  await user().click(await screen.findByRole("button", { name: "Trust for this session" }));
   await waitFor(() => expect(mockAuthResponses.at(-1)?.requestId).toBe("host-2"));
   expect(mockAuthResponses.at(-1)?.response).toEqual({
     kind: "certificate",

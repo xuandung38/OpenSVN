@@ -1,9 +1,8 @@
 import { screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { beforeAll, expect, test } from "vitest";
+import { beforeAll, expect, test, vi } from "vitest";
 import { mockCalls } from "../../../ipc/mock/adapter";
 import { mockSettings } from "../../../ipc/mock/data";
-import { renderApp, setupMockIpc } from "../../../test-utils";
+import { installFakeClock, renderApp, setupMockIpc } from "../../../test-utils";
 import {
   inRange,
   isHttpsTemplate,
@@ -16,6 +15,12 @@ import { SettingsSheet } from "./settings-sheet";
 beforeAll(async () => {
   await setupMockIpc("en");
 });
+
+// Fake clock: findBy/waitFor budgets count simulated time, so a loaded machine cannot time them out.
+const { user } = installFakeClock();
+// The per-test timeout is only a hang guard now: under CPU load rendering alone can take many
+// wall-clock seconds, while findBy/waitFor budgets run on the fake clock.
+vi.setConfig({ testTimeout: 120_000 });
 
 test("template, proxy and range validation", () => {
   expect(isHttpsTemplate("")).toBe(true);
@@ -58,10 +63,10 @@ test("Save is disabled until something changes and sends only the changed keys",
   );
   expect(save.disabled).toBe(true);
   const interval = within(dialog).getByLabelText(/Check for updates every/);
-  await userEvent.clear(interval);
-  await userEvent.type(interval, "15");
+  await user().clear(interval);
+  await user().type(interval, "15");
   expect(save.disabled).toBe(false);
-  await userEvent.click(save);
+  await user().click(save);
   await waitFor(() => expect(mockCalls.some((c) => c.name === "settingsSet")).toBe(true));
   expect(mockCalls.find((c) => c.name === "settingsSet")?.args[0]).toEqual({
     "general.checkIntervalMin": 15,
@@ -71,10 +76,10 @@ test("Save is disabled until something changes and sends only the changed keys",
 test("an invalid URL template shows an error and blocks Save", async () => {
   renderApp(<SettingsSheet open onClose={() => undefined} />);
   const dialog = await screen.findByRole("dialog", { name: "Settings", hidden: true });
-  await userEvent.click(within(dialog).getByRole("button", { name: "Integrations" }));
+  await user().click(within(dialog).getByRole("button", { name: "Integrations" }));
   const field = await within(dialog).findByLabelText(/Revision URL template/);
-  await userEvent.clear(field);
-  await userEvent.type(field, "http://insecure/{rev}");
+  await user().clear(field);
+  await user().type(field, "http://insecure/{rev}");
   expect(await within(dialog).findByText(/Must start with https/)).toBeTruthy();
   expect((within(dialog).getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(
     true,
@@ -85,8 +90,8 @@ test("accounts page lists accounts as text and signs out", async () => {
   mockCalls.length = 0;
   renderApp(<SettingsSheet open onClose={() => undefined} />);
   const dialog = await screen.findByRole("dialog", { name: "Settings", hidden: true });
-  await userEvent.click(within(dialog).getByRole("button", { name: "Accounts" }));
-  await userEvent.click(await within(dialog).findByRole("button", { name: /Sign out:/ }));
+  await user().click(within(dialog).getByRole("button", { name: "Accounts" }));
+  await user().click(await within(dialog).findByRole("button", { name: /Sign out:/ }));
   await waitFor(() => expect(mockCalls.some((c) => c.name === "accountsSignOut")).toBe(true));
 });
 
@@ -96,10 +101,10 @@ test("paths and commands are display-only: no editable path/command inputs", asy
   const root = await within(dialog).findByDisplayValue(mockSettings["general.checkoutRoot"]);
   expect((root as HTMLInputElement).readOnly).toBe(true);
   // The default checkout folder is chosen in the native dialog by Rust; no path is sent.
-  await userEvent.click(within(dialog).getByRole("button", { name: "Change…" }));
+  await user().click(within(dialog).getByRole("button", { name: "Change…" }));
   expect(await within(dialog).findByDisplayValue("/Users/dev/projects")).toBeTruthy();
   expect(mockCalls.filter((c) => c.name === "checkoutRootChoose").at(-1)?.args).toEqual([]);
-  await userEvent.click(within(dialog).getByRole("button", { name: "Diff & Merge" }));
+  await user().click(within(dialog).getByRole("button", { name: "Diff & Merge" }));
   expect(
     ((await within(dialog).findByDisplayValue("None configured")) as HTMLInputElement).readOnly,
   ).toBe(true);
@@ -108,14 +113,14 @@ test("paths and commands are display-only: no editable path/command inputs", asy
 test("the diff tool is chosen through program_choose (native picker) and can be cleared", async () => {
   renderApp(<SettingsSheet open onClose={() => undefined} />);
   const dialog = await screen.findByRole("dialog", { name: "Settings", hidden: true });
-  await userEvent.click(within(dialog).getByRole("button", { name: "Diff & Merge" }));
-  await userEvent.click(await within(dialog).findByRole("button", { name: "Choose…" }));
+  await user().click(within(dialog).getByRole("button", { name: "Diff & Merge" }));
+  await user().click(await within(dialog).findByRole("button", { name: "Choose…" }));
   // Only the kind and the arguments cross the IPC boundary; the program path comes from Rust.
   const call = mockCalls.filter((c) => c.name === "programChoose").at(-1);
   expect(call?.args).toEqual(["diff-tool", ["{left}", "{right}"]]);
   const shown = await within(dialog).findByDisplayValue("/usr/bin/meld {left} {right}");
   expect((shown as HTMLInputElement).readOnly).toBe(true);
-  await userEvent.click(within(dialog).getByRole("button", { name: "Clear" }));
+  await user().click(within(dialog).getByRole("button", { name: "Clear" }));
   expect(await within(dialog).findByDisplayValue("None configured")).toBeTruthy();
   expect(mockCalls.some((c) => c.name === "programClear" && c.args[0] === "diff-tool")).toBe(true);
 });
@@ -126,11 +131,11 @@ test("changing a value and changing it back removes the key, so Save disables ag
   const interval = await within(dialog).findByLabelText(/Check for updates every/);
   const original = (interval as HTMLInputElement).value;
   const save = within(dialog).getByRole("button", { name: "Save" }) as HTMLButtonElement;
-  await userEvent.clear(interval);
-  await userEvent.type(interval, "99");
+  await user().clear(interval);
+  await user().type(interval, "99");
   expect(save.disabled).toBe(false);
-  await userEvent.clear(interval);
-  await userEvent.type(interval, original);
+  await user().clear(interval);
+  await user().type(interval, original);
   expect(save.disabled).toBe(true);
 });
 
