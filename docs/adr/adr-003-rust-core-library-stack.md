@@ -22,17 +22,17 @@ Lớp giao thức (dựng request, parse response, delta editor) **không làm I
 | Async runtime | `tokio` | Chuẩn de facto; hyper/reqwest chạy trên nó |
 | HTTP client | `reqwest` (hyper 1.x), HTTP/1.1 + pool nhiều kết nối, h2 nếu server ALPN | Method tùy biến qua `Method::from_bytes`, body stream. Dùng thẳng `hyper` nếu cần kiểm soát sâu hơn |
 | TLS | `rustls` + `rustls-platform-verifier` | Dùng trust store OS (Windows CryptoAPI, macOS Keychain, Linux `/etc/ssl`) → CA nội bộ đẩy qua GPO/MDM tự hoạt động; không cần OpenSSL |
-| Auth | Basic (tài khoản AD) + **Negotiate/SPNEGO** qua `cross-krb5` (SSPI trên Windows, GSSAPI trên macOS/Linux) | Windows join domain: SSO không cần nhập mật khẩu. NTLM qua SSPI trên Windows nếu Kerberos thất bại |
+| Auth | Basic (tài khoản AD, chỉ qua HTTPS) + **Negotiate/SPNEGO**: Windows gọi **SSPI package "Negotiate" trực tiếp** (crate `windows`; SSPI tự chọn Kerberos/NTLM, giữ affinity kết nối); macOS/Linux GSSAPI (`cross-krb5`/`libgssapi`, feature `negotiate`) | Windows join domain: SSO. Không tự hạ Negotiate → Basic (phải prompt). Chỉ HTTP/1.1 |
 | XML | `quick-xml` (reader streaming) | Nhanh, không cấp phát cây DOM; tránh serde cho response lớn |
 | Base64 | `base64` | svndiff nhúng trong update-report |
 | Nén | `flate2` (backend `miniz_oxide`), `lz4_flex` | Cả hai pure Rust; svndiff1=zlib, svndiff2=lz4. Content store dùng lz4 (bỏ qua file đã nén) |
 | Checksum | `md-5`, `sha1` (RustCrypto) | SVN dùng MD5 (text-delta base) + SHA-1 (fulltext); key content store = SHA-1 như pristine svn |
-| DB working copy & cache | `rusqlite` (feature `bundled`), WAL | **Bắt buộc**: `.svn/wc.db` là SQLite (ADR-004). Ngoại lệ C duy nhất, build ổn định mọi nền tảng |
+| DB working copy & cache | `rusqlite` (feature `bundled`); **wc.db giữ nguyên journal mode/busy setting như svn** (không bật WAL); WAL chỉ cho `app.sqlite`/`cache.sqlite` | **Bắt buộc**: `.svn/wc.db` là SQLite (ADR-004) |
 | Duyệt cây file | `ignore` (WalkParallel) + `globset` | Quét song song 100k file; tự cài luật `svn:ignore`/`global-ignores` |
 | FS watcher (desktop) | `notify` | FSEvents/inotify |
 | Ghi file an toàn | `tempfile` + rename atomic + fsync | Chống hỏng WC khi crash |
 | Diff | `imara-diff` (histogram/Myers) | Nhanh, dùng bởi gitoxide/helix; diff3 tự viết theo semantics `libsvn_diff` (`diffy` làm tham chiếu) |
-| Secret | `keyring` v4 (Windows Credential Manager, macOS Keychain, Linux Secret Service) | Android sẽ cần plugin Keystore riêng khi làm mobile |
+| Secret | `keyring-core` + store theo OS (Windows Credential Manager, macOS Keychain, Linux Secret Service qua store thuần Rust/zbus); khóa theo origin (scheme, host, port, realm) | keyring 4.x đã tách thành keyring-core + crate store; Android cần store riêng khi làm mobile |
 | Path Windows | tự chuẩn hóa: long path `\\?\`, không phân biệt hoa/thường, tên cấm (CON, NUL...), retry rename khi antivirus giữ file | Hành vi giống libsvn (`svn_io_file_rename2` retry) |
 | Lỗi | `thiserror` (lib), `anyhow` (app) | |
 | Log/trace | `tracing` + `tracing-subscriber` | Ẩn mật khẩu/token trong log |
@@ -47,6 +47,7 @@ Lớp giao thức (dựng request, parse response, delta editor) **không làm I
 ## Consequences
 - Dễ hơn: build 3 desktop OS chỉ cần `cargo`, không cần OpenSSL/APR/serf; mobile sau chỉ thêm target.
 - Khó hơn: tự cài Basic/Negotiate, diff3, svndiff — chấp nhận vì là lõi sản phẩm.
+- **Ngoại lệ thư viện C được phép**: SQLite (`rusqlite` bundled), GSSAPI hệ thống (macOS/Linux, feature `negotiate`), WebKitGTK (runtime Tauri trên Linux). Thêm ngoại lệ mới phải cập nhật ADR này.
 - Xem lại: nếu CA nội bộ không có trong trust store OS (Linux thường thiếu) → cho phép import CA trong app.
 
 ## Action Items
