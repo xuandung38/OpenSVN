@@ -24,7 +24,7 @@ mod unified;
 
 pub use binary::{TextEncoding, detect_binary_for_add, detect_encoding, diff_as_binary_by_mime};
 pub use control::DiffError;
-pub use display::{DisplayOptions, Hunk, HunkLine, LineKind, diff};
+pub use display::{DISPLAY_MAX_COST, DisplayOptions, Hunk, HunkLine, LineKind, diff};
 pub use merge::{ConflictLabels, ConflictRegion, ConflictStyle, MergeOptions, MergeResult, merge3};
 pub use tokens::{DiffOptions, IgnoreSpace, detect_eol, split_lines};
 pub use unified::{

@@ -29,6 +29,7 @@ export function VirtualList({
   scrollRef,
   onActivate,
   onToggle,
+  onActiveChange,
 }: {
   count: number;
   rowHeight: number;
@@ -41,6 +42,8 @@ export function VirtualList({
   onActivate?: (index: number) => void;
   /** Space on the active row (e.g. toggle its checkbox). */
   onToggle?: (index: number) => void;
+  /** Keyboard moved the active row (used to prefetch the next page near the end). */
+  onActiveChange?: (index: number) => void;
 }) {
   const [parent, setParent] = useState<HTMLDivElement | null>(null);
   const [active, setActive] = useState(0);
@@ -57,6 +60,7 @@ export function VirtualList({
   const move = (next: number) => {
     const i = Math.max(0, Math.min(count - 1, next));
     setActive(i);
+    onActiveChange?.(i);
     virt.scrollToIndex(i);
   };
 

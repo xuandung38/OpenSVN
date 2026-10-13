@@ -21,9 +21,9 @@ rusqlite = { workspace = true, features = ["functions"] }
 sha1.workspace = true
 md-5.workspace = true
 tracing.workspace = true
+tempfile.workspace = true
 fail = { workspace = true, optional = true }
 
 [dev-dependencies]
 opensvn-svn-oracle = { path = "../../tests/svn-oracle" }
-tempfile.workspace = true
 proptest.workspace = true
