@@ -25,4 +25,5 @@ tempfile.workspace = true
 fail = { workspace = true, optional = true }
 
 [dev-dependencies]
+opensvn-svn-oracle = { path = "../../tests/svn-oracle" }
 proptest.workspace = true
