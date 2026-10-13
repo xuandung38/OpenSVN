@@ -1,0 +1,4 @@
+svn: E135000: Commit failed (details follow):
+svn: E135000: While preparing '/tmp/opensvn-golden/wc1/eol_native_mixed_after_prop' for commit
+svn: E135000: Inconsistent line ending style
+svn: E200042: Additional errors:

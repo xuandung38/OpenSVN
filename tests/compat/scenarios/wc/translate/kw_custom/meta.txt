@@ -1,0 +1,10 @@
+svn_version=1.15.0
+prop.svn:keywords=Foo=%a-%r-%b Bar=%H Id Baz=%P|%R|%u|%d|%%|%_|%x|%
+rev=20
+author=alice
+date_micros=1791884712202212
+utc_offset_secs=0
+url=file:///tmp/opensvn-golden/repo/kw_custom
+root=file:///tmp/opensvn-golden/repo
+tz=UTC
+path=kw_custom

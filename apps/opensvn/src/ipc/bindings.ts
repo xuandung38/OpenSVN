@@ -194,8 +194,8 @@ export type BranchRef = {
 
 export type CertDecision = "reject" | "acceptOnce" | "acceptAlways";
 
-/**  Why a TLS certificate needs a decision. */
-export type CertFailureInfo = "unknownIssuer" | "selfSigned" | "expired" | "notYetValid" | "hostnameMismatch" | "revoked" | 
+/**  Why a TLS certificate needs a decision (`unknown-issuer`, ..., `{ changed: { oldSha256, newSha256 } }`). */
+export type CertFailureInfo = "unknown-issuer" | "self-signed" | "expired" | "not-yet-valid" | "hostname-mismatch" | "revoked" | 
 /**  A different certificate than the pinned one; "always trust" is not offered. */
 ({ changed: {
 	oldSha256: string,
@@ -302,7 +302,7 @@ export type Eol = "LF" | "CRLF" | "mixed";
 
 export type ErrorAction = "retry" | "update" | "cleanup" | "sign-in" | "trust-cert" | "open-lock-dialog" | "open-settings";
 
-export type ErrorCode = "network" | "timeout" | "auth-required" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | 
+export type ErrorCode = "network" | "timeout" | "auth-required" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "hook-failed" | "repository-moved" | "pristine-not-hydrated" | "wc-invalid-operation" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | 
 /**  The request itself is invalid (bad value, expired path grant, unsupported option). */
 "invalid-argument" | "internal";
 

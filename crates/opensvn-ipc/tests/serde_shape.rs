@@ -242,7 +242,7 @@ fn auth_prompt_carries_reason_offered_methods_and_structured_cert_failure() {
     );
     assert_eq!(
         serde_json::to_value(CertFailureInfo::SelfSigned).unwrap(),
-        json!("selfSigned")
+        json!("self-signed")
     );
     assert_eq!(
         serde_json::to_value(CertFailureInfo::Other("x".into())).unwrap(),

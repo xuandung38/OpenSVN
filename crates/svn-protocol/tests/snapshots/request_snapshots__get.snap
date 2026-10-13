@@ -1,0 +1,5 @@
+---
+source: crates/svn-protocol/tests/request_snapshots.rs
+expression: "render(&get_request(&urls(), Revnum(7), &rel(\"trunk/a b.txt\")).unwrap())"
+---
+GET http://svn.test.local/svn/repo/!svn/rvr/7/trunk/a%20b.txt
