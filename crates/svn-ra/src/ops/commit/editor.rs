@@ -4,7 +4,7 @@
 //! by background tasks (bounded), and property changes are collected and sent as one
 //! `PROPPATCH` when the node is closed, after the file's upload has finished.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -74,6 +74,8 @@ pub struct HttpCommitEditor {
     next_id: u32,
     dirs: HashMap<u32, DirState>,
     files: HashMap<u32, FileState>,
+    /// Session-relative paths deleted so far; mod_dav removes the lock of a deleted node itself.
+    deleted: HashSet<RelPath>,
     slots: Arc<Semaphore>,
 }
 
@@ -97,6 +99,7 @@ impl HttpCommitEditor {
             next_id: 0,
             dirs: HashMap::new(),
             files: HashMap::new(),
+            deleted: HashSet::new(),
             slots,
         }
     }
@@ -116,6 +119,21 @@ impl HttpCommitEditor {
             .iter()
             .find(|(p, _)| p == path)
             .map(|(_, t)| t.as_str())
+    }
+
+    /// `If:` header value naming every lock at or below `path` (session-relative) that has not
+    /// been deleted yet, like libsvn_ra_serf's recursive If header: deleting a directory needs
+    /// the tokens of the locked files inside it.
+    fn recursive_if_header(&self, path: &RelPath) -> Result<Option<String>> {
+        let mut parts = Vec::new();
+        for (p, token) in &self.locks {
+            if !p.starts_with(path) || self.deleted.contains(p) {
+                continue;
+            }
+            let url = self.wire.urls().public(&self.wire.repo_path(p)?)?;
+            parts.push(format!("<{url}> (<{}>)", checked_token(token)?));
+        }
+        Ok((!parts.is_empty()).then(|| parts.join(" ")))
     }
 
     fn dir(&self, id: DirId, what: &str) -> Result<&DirState> {
@@ -405,9 +423,15 @@ impl CommitEditor for HttpCommitEditor {
         self.cancel.check()?;
         self.dir(parent, "delete_entry")?;
         let repo = self.wire.repo_path(path)?;
-        let lock = self.lock_for(path).map(LockToken);
-        let req = delete_request(self.wire.urls(), &self.txn, &repo, rev, lock)?;
+        let mut req = delete_request(self.wire.urls(), &self.txn, &repo, rev, None)?;
+        if let Some(header) = self.recursive_if_header(path)? {
+            req = req.header("If", header);
+            if self.keep_locks {
+                req = req.header("X-SVN-Options", "keep-locks");
+            }
+        }
         self.wire.send_ok(req, &self.cancel).await?;
+        self.deleted.insert(path.clone());
         Ok(())
     }
 
@@ -466,5 +490,25 @@ impl CommitEditor for HttpCommitEditor {
         } = this;
         drop(files);
         delete_txn(&wire, &txn, &CancelToken::new()).await
+    }
+}
+
+/// A lock token as it may appear in an `If:` header (`opaquelocktoken:...`, no brackets,
+/// whitespace or controls).
+fn checked_token(token: &str) -> Result<&str> {
+    let t = token.trim().trim_start_matches('<').trim_end_matches('>');
+    let ok = t.len() <= 256
+        && t.strip_prefix("opaquelocktoken:")
+            .is_some_and(|r| !r.is_empty())
+        && !t
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '<' | '>' | '(' | ')'));
+    if ok {
+        Ok(t)
+    } else {
+        Err(SvnError::new(
+            ErrorCode::LockTokenInvalid,
+            "malformed lock token",
+        ))
     }
 }
