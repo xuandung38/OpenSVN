@@ -137,6 +137,32 @@ pub struct CopyLocationRequest {
     pub switch_wc_id: Option<WcId>,
 }
 
+/// Text that must never reach logs: `Debug` prints a fixed placeholder. On the wire it is a
+/// plain JSON string. Convert to the engine's secret type as soon as it crosses into Rust.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(transparent)]
+#[specta(transparent)]
+pub struct SecretText(String);
+
+impl SecretText {
+    /// Returns the secret; callers must not log it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for SecretText {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl std::fmt::Debug for SecretText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretText(***)")
+    }
+}
+
 /// Response of `auth_respond`'s input (answer to an `auth://prompt`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(
@@ -147,7 +173,7 @@ pub struct CopyLocationRequest {
 pub enum AuthResponse {
     Credentials {
         username: String,
-        password: String,
+        password: SecretText,
         save: bool,
     },
     Certificate {

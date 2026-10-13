@@ -21,3 +21,6 @@ dist/
 
 # Tauri generated
 apps/opensvn/src-tauri/gen/
+
+# Local agent memory
+.claude/agent-memory/

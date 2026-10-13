@@ -29,9 +29,11 @@ pub fn run() {
 mod tests {
     use super::*;
 
-    /// Exports bindings the same way `pnpm gen:ipc` does.
+    /// Exports bindings the same way `pnpm gen:ipc` does, into a directory unique to this call.
     fn export_to_string() -> String {
-        let dir = std::env::temp_dir().join(format!("opensvn-bindings-{}", std::process::id()));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("opensvn-bindings-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let file = dir.join("bindings.ts");
         builder()
@@ -64,8 +66,17 @@ mod tests {
                 "{perm} missing in capability"
             );
         }
-        // No extra app permissions beyond the command list plus core defaults.
-        assert_eq!(perms.len(), COMMAND_NAMES.len() + 1);
+        // Besides the app commands, only the event subscription permissions are granted.
+        let core: Vec<&str> = perms
+            .iter()
+            .copied()
+            .filter(|p| p.starts_with("core:"))
+            .collect();
+        assert_eq!(
+            core,
+            ["core:event:allow-listen", "core:event:allow-unlisten"]
+        );
+        assert_eq!(perms.len(), COMMAND_NAMES.len() + core.len());
     }
 
     #[test]
