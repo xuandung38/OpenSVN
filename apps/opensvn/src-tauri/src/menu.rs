@@ -7,7 +7,11 @@ use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 /// App menu items: id (the event is `menu://<id>`), label and accelerator.
 pub const FILE_ITEMS: [(&str, &str, &str); 3] = [
     ("checkout", "Checkout Repository…", "CmdOrCtrl+Shift+O"),
-    ("add-working-copy", "Add Existing Working Copy…", "CmdOrCtrl+O"),
+    (
+        "add-working-copy",
+        "Add Existing Working Copy…",
+        "CmdOrCtrl+O",
+    ),
     ("switch-repository", "Switch Repository…", "CmdOrCtrl+T"),
 ];
 
@@ -21,7 +25,11 @@ pub fn event_for(id: &str) -> Option<String> {
 pub fn build<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<Menu<R>> {
     let mut file = SubmenuBuilder::new(app, "File");
     for (id, label, accel) in FILE_ITEMS {
-        file = file.item(&MenuItemBuilder::with_id(id, label).accelerator(accel).build(app)?);
+        file = file.item(
+            &MenuItemBuilder::with_id(id, label)
+                .accelerator(accel)
+                .build(app)?,
+        );
     }
     let settings = MenuItemBuilder::with_id("settings", "Settings…")
         .accelerator("CmdOrCtrl+,")

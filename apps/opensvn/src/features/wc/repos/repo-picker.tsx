@@ -246,6 +246,8 @@ export function RepoPicker({
                 <M.Content
                   align="end"
                   sideOffset={2}
+                  // Named by its row; Radix would label it by the (hidden, textless) ⋯ trigger.
+                  aria-labelledby={undefined}
                   aria-label={r("actionsFor", { name: e.name })}
                   className={MENU_CONTENT}
                   onCloseAutoFocus={(ev) => {

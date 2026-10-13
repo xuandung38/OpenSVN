@@ -66,9 +66,7 @@ test("checkout: name follows the URL, parent is the default folder granted by Ru
   expect(mockCalls.some((c) => c.name === "checkoutRootGrant")).toBe(true);
   // The finished checkout is registered, opened and becomes the current repository.
   expect(await screen.findByText("Checked out feature-x")).toBeTruthy();
-  await waitFor(() =>
-    expect(lastCall("wcOpen")?.args[0]).toMatch(/^wc-checkout-/),
-  );
+  await waitFor(() => expect(lastCall("wcOpen")?.args[0]).toMatch(/^wc-checkout-/));
   expect(
     await screen.findByRole("button", { name: /Current repository\s*feature-x/ }),
   ).toBeTruthy();

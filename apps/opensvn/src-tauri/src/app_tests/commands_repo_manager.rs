@@ -73,8 +73,20 @@ async fn bad_folder_names_are_refused_before_the_grant_is_spent() {
     let parent = tempfile::tempdir().unwrap();
     let grant = f.grant_dir(parent.path());
     for bad in [
-        "", ".", "..", "../evil", "a/b", "a\\b", "CON", "nul.txt", "LPT1", "trailing.",
-        "trailing ", "a:b", "q?", "bad\0",
+        "",
+        ".",
+        "..",
+        "../evil",
+        "a/b",
+        "a\\b",
+        "CON",
+        "nul.txt",
+        "LPT1",
+        "trailing.",
+        "trailing ",
+        "a:b",
+        "q?",
+        "bad\0",
     ] {
         let err = commands::checkout(f.state(), request(grant.clone(), Some(bad)))
             .await
@@ -192,7 +204,11 @@ async fn missing_working_copies_are_listed_and_can_be_located() {
     let err = commands::wc_locate(f.state(), id.clone(), f.grant_dir(&demo_wc_root()))
         .await
         .unwrap_err();
-    assert!(err.message.contains("already in the list"), "{}", err.message);
+    assert!(
+        err.message.contains("already in the list"),
+        "{}",
+        err.message
+    );
 
     let wc = commands::wc_locate(f.state(), id.clone(), grant)
         .await
@@ -213,7 +229,10 @@ async fn rename_and_remove_touch_only_the_list() {
         .unwrap();
     let e = commands::wc_entries(f.state()).await.unwrap().remove(0);
     assert_eq!(e.name, "Game client");
-    assert!(parent.path().join("proj").is_dir(), "the folder keeps its name");
+    assert!(
+        parent.path().join("proj").is_dir(),
+        "the folder keeps its name"
+    );
     for bad in ["", "   ", "tab\tname"] {
         assert!(
             commands::wc_rename(f.state(), id.clone(), bad.into())
