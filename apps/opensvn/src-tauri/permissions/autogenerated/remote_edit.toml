@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remote-edit"
+description = "Enables the remote_edit command without any pre-configured scope."
+commands.allow = ["remote_edit"]
+
+[[permission]]
+identifier = "deny-remote-edit"
+description = "Denies the remote_edit command without any pre-configured scope."
+commands.deny = ["remote_edit"]
