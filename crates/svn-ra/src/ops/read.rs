@@ -92,7 +92,7 @@ pub(crate) async fn stat(
         let e = error_of(resp, cancel).await;
         return if is_absent(&e) { Ok(None) } else { Err(e) };
     }
-    let body = RaWire::read_small(resp).await?;
+    let body = RaWire::read_small(resp, cancel).await?;
     let entries = parse_chunked(&mut MultiStatusParser::new(), &body, 0)?;
     let first = entries
         .first()
@@ -233,7 +233,7 @@ pub(crate) async fn get_file(
     // index page, which must never end up in a file.
     let req = propfind::allprop_request(wire.urls(), rev, &repo)?;
     let resp = wire.send_ok(req, cancel).await?;
-    let body = RaWire::read_small(resp).await?;
+    let body = RaWire::read_small(resp, cancel).await?;
     let entries = parse_chunked(&mut MultiStatusParser::new(), &body, 0)?;
     let entry = entries
         .first()
