@@ -188,11 +188,7 @@ fn lock_reports_with_bad_paths_are_rejected() {
 fn options_answers_pointing_elsewhere_are_rejected() {
     let session = session_url();
     for c in cases(&["options"]) {
-        assert!(
-            matches!(c.expect.as_str(), "reject" | "gap-same-origin"),
-            "{}",
-            c.id
-        );
+        assert!(c.expect == "reject", "{}", c.id);
         let text = String::from_utf8(c.body.clone()).unwrap();
         let mut headers = Headers::new();
         for line in text.lines().filter(|l| !l.is_empty()) {
@@ -211,33 +207,7 @@ fn options_answers_pointing_elsewhere_are_rejected() {
                 "{}: unexpected error kind {e:?}",
                 c.id
             ),
-            Ok(b) => {
-                // Accepted only if nothing it builds leaves the session origin.
-                let rel = RelPath::new("trunk").unwrap();
-                let rev = svn_types::Revnum(1);
-                let built = [
-                    b.me(),
-                    b.repository_root(),
-                    b.rev(rev),
-                    b.rev_root(rev, &rel),
-                ];
-                for url in built.into_iter().flatten() {
-                    assert_eq!(
-                        url.host_str(),
-                        session.as_url().host_str(),
-                        "{}: builder produced a foreign URL {url}",
-                        c.id
-                    );
-                }
-                // Known gap (reported): a root that is not an ancestor of the session URL is
-                // accepted. It cannot leave the origin (checked above); flip the expectation to
-                // `reject` in fixtures/evil/generate.py once UrlBuilder validates ancestry.
-                assert_eq!(
-                    c.expect, "gap-same-origin",
-                    "{}: hostile OPTIONS answer was accepted",
-                    c.id
-                );
-            }
+            Ok(_) => panic!("{}: hostile OPTIONS answer was accepted", c.id),
         }
     }
 }
