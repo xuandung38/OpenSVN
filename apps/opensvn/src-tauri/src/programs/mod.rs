@@ -75,13 +75,23 @@ fn validate_program(path: &Path) -> Result<PathBuf, AppError> {
     Ok(canonical)
 }
 
-/// Characters that could hide or reorder text in the confirmation dialog: controls (including
-/// newline, DEL and C1), zero-width and bidirectional formatting characters, the BOM.
-fn is_deceptive(c: char) -> bool {
+/// Characters that could hide or reorder text shown to the user (confirmation dialogs, folder
+/// names): controls (including newline, DEL and C1) and the invisible format characters of
+/// Unicode category Cf: zero-width and bidirectional formatting characters, the BOM, soft hyphen,
+/// interlinear annotation and tag characters.
+pub(crate) fn is_deceptive(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E007F}'
         )
 }
 

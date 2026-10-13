@@ -9,6 +9,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use opensvn_ipc::AppError;
+use svn_types::RelPath;
 
 use crate::errors::invalid_argument;
 
@@ -18,30 +19,18 @@ const MAX_NAME_BYTES: usize = 255;
 /// Characters Windows refuses in file names; refused everywhere so a working copy can be copied.
 const FORBIDDEN: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
 
-/// Device names Windows reserves, with or without an extension (`NUL.txt` is reserved too).
-fn is_reserved_windows_name(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or(name).trim_end();
-    let upper = stem.to_ascii_uppercase();
-    if matches!(
-        upper.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-    ) {
-        return true;
-    }
-    let mut chars = stem.chars();
-    let prefix: String = chars
-        .by_ref()
-        .take(3)
-        .collect::<String>()
-        .to_ascii_uppercase();
-    let rest: Vec<char> = chars.collect();
-    (prefix == "COM" || prefix == "LPT")
-        && rest.len() == 1
-        && matches!(rest[0], '1'..='9' | '¹' | '²' | '³')
-}
-
 /// Checks the name of the folder a checkout creates: exactly one path component that is valid on
-/// every supported platform.
+/// every supported platform, that no Subversion client treats as an administrative directory
+/// (`.svn`, `_svn` and their case, Unicode and trailing-dot aliases), and that contains no
+/// invisible or bidirectional formatting characters (a name that displays as something else).
+///
+/// The friendly checks come first for specific messages; the name then has to pass the same
+/// segment rules as a path from a server ([`RelPath::from_server`]), which is what refuses
+/// reserved device names (`CON`, `NUL.txt`, `COM0`-`COM9`, `LPT¹`, ...).
+///
+/// Every refusal is `invalid_argument` with the refused name as `detail`. `checkout` runs this
+/// before it redeems the grant, and the checkout dialog relies on that pair to keep the user's
+/// parent folder instead of asking for it again.
 pub fn validate_folder_name(name: &str) -> Result<&str, AppError> {
     let bad =
         |why: &str| invalid_argument(format!("Invalid folder name: {why}.")).with_detail(name);
@@ -57,6 +46,11 @@ pub fn validate_folder_name(name: &str) -> Result<&str, AppError> {
     if name == "." || name == ".." {
         return Err(bad("\".\" and \"..\" are not folder names"));
     }
+    if name.chars().any(crate::programs::is_deceptive) {
+        return Err(bad(
+            "the name contains an invisible or text-direction character",
+        ));
+    }
     if name.chars().any(char::is_control) || name.contains(FORBIDDEN) {
         return Err(bad(
             "the name contains a character that is not allowed (< > : \" | ? *)",
@@ -68,7 +62,12 @@ pub fn validate_folder_name(name: &str) -> Result<&str, AppError> {
     if name.starts_with(' ') {
         return Err(bad("the name must not start with a space"));
     }
-    if is_reserved_windows_name(name) {
+    if svn_types::is_any_admin_dir_name(name) {
+        return Err(bad(
+            "the name is reserved for Subversion's administrative folder",
+        ));
+    }
+    if RelPath::from_server(name).is_err() {
         return Err(bad("the name is reserved by Windows"));
     }
     Ok(name)
@@ -229,6 +228,9 @@ mod tests {
             ".hidden",
             "con-tools",
             "COM10",
+            "svn",
+            "my_svn",
+            ".svnignore",
         ] {
             assert_eq!(validate_folder_name(ok).unwrap(), ok, "{ok}");
         }
@@ -262,6 +264,29 @@ mod tests {
             "lpt9",
             "COM¹",
             "CONIN$",
+            "COM0",
+            "lpt0.log",
+            "LPT²",
+            "com³.txt",
+            // administrative folder names and their aliases
+            ".svn",
+            ".SVN",
+            "_svn",
+            "_SVN",
+            "_svn.",
+            "_Svn ",
+            "\u{FF3F}svn",
+            "_s\u{200D}vn",
+            "SVN~1",
+            // invisible and bidirectional format characters (Cf)
+            "a\u{202E}gnp.exe",
+            "a\u{2066}b",
+            "a\u{2069}b",
+            "zero\u{200B}width",
+            "rlm\u{200F}",
+            "bom\u{FEFF}",
+            "soft\u{00AD}hyphen",
+            "tag\u{E0041}",
         ] {
             assert!(
                 validate_folder_name(bad).is_err(),

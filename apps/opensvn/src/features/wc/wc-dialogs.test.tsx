@@ -117,6 +117,45 @@ test("checkout: a picked parent is single use; a refused target asks to choose i
   await waitFor(() => expect(submit.disabled).toBe(false));
 });
 
+test("checkout: a folder name the backend refuses keeps the picked parent", async () => {
+  renderApp(<AppShell />);
+  await option(/renderer\.ts/);
+  await user().keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
+  const dlg = await dialog("Checkout repository");
+  await user().type(
+    within(dlg).getByRole("combobox", { name: "Repository URL" }),
+    "https://svn.example.com/repos/game/trunk",
+  );
+  const name = within(dlg).getByRole("textbox", { name: "Folder name" }) as HTMLInputElement;
+  const submit = within(dlg).getByRole("button", { name: "Checkout" }) as HTMLButtonElement;
+  await user().click(within(dlg).getByRole("button", { name: "Change…" }));
+  expect(await within(dlg).findByText("game-assets")).toBeTruthy();
+
+  // Refused before the grant is redeemed: the parent stays chosen, no re-pick needed.
+  await user().clear(name);
+  await user().type(name, "refused-by-backend");
+  await waitFor(() => expect(submit.disabled).toBe(false));
+  await user().click(submit);
+  expect(await within(dlg).findByText(/Invalid folder name/)).toBeTruthy();
+  expect(within(dlg).queryByText("Choose the parent folder again.")).toBeNull();
+  expect(within(dlg).getByText("game-assets")).toBeTruthy();
+  const picks = mockCalls.filter((c) => c.name === "pathPick").length;
+
+  await user().clear(name);
+  await user().type(name, "game-3");
+  await waitFor(() => expect(submit.disabled).toBe(false));
+  await user().click(submit);
+  await waitFor(() =>
+    expect((lastCall("checkout")?.args[0] as Record<string, unknown> | undefined)?.destName).toBe(
+      "game-3",
+    ),
+  );
+  expect(mockCalls.filter((c) => c.name === "pathPick").length).toBe(picks);
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: "Checkout repository", hidden: true })).toBeNull(),
+  );
+});
+
 test("checkout: progress is shown with Cancel; cancelling returns to the form", async () => {
   setMockOpDuration(60_000);
   renderApp(<AppShell />);

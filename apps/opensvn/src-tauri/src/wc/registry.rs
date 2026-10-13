@@ -185,7 +185,9 @@ impl WcRegistry {
     }
 
     /// Points a registered working copy at the folder it was moved to. The folder must be a working
-    /// copy of the same repository and must not be registered under another entry.
+    /// copy of the same repository (same UUID) and must not be registered under another entry.
+    /// The repository root URL is taken from the located working copy, which may have been
+    /// relocated (`svn relocate`) while it was missing.
     pub async fn locate(&self, id: &WcId, path: &Path) -> Result<WorkingCopy, AppError> {
         let row = self.db.wc_get(&id.0)?.ok_or_else(|| unknown_wc(id))?;
         let shown = path.to_string_lossy().into_owned();
@@ -209,7 +211,8 @@ impl WcRegistry {
             ))
             .with_path(shown));
         }
-        self.db.wc_set_root(&row.id, &info.root_path)?;
+        self.db
+            .wc_set_root(&row.id, &info.root_path, &info.repo_root_url)?;
         let row = self.db.wc_get(&id.0)?.ok_or_else(|| unknown_wc(id))?;
         self.describe(&row).await
     }

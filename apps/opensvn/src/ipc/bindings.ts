@@ -114,7 +114,8 @@ export const commands = {
 } | null, AppError>(__TAURI_INVOKE("path_pick", { request })),
 	/**
 	 *  Shows a working copy item in the file manager. `path` is relative to the working copy root;
-	 *  an empty path reveals the root folder itself.
+	 *  an empty path reveals the root folder itself. Items reached through a symbolic link are
+	 *  refused, so the file manager never opens a folder outside the working copy.
 	 */
 	revealInOs: (wcId: WcId, path: string) => typedError<null, AppError>(__TAURI_INVOKE("reveal_in_os", { wcId, path })),
 	openExternal: (wcId: WcId, path: string, openWith: OpenWith) => typedError<null, AppError>(__TAURI_INVOKE("open_external", { wcId, path, openWith })),

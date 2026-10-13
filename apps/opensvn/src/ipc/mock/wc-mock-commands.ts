@@ -31,7 +31,7 @@ type Reply<T> = Promise<{ status: "ok"; data: T } | { status: "error"; error: Ap
 /** Helpers the adapter shares with this module (kept as parameters to avoid an import cycle). */
 export interface MockDeps {
   ok: <T>(data: T) => Reply<T>;
-  fail: (code: AppError["code"], message: string) => Reply<never>;
+  fail: (code: AppError["code"], message: string, detail?: string | null) => Reply<never>;
   simulateOp: (
     kind: OperationKind,
     title: string,
@@ -95,6 +95,12 @@ function entryOf(w: WorkingCopy): WcEntry {
     problem: null,
   };
 }
+
+/**
+ * Folder names the mock backend refuses although the dialog's own check accepts them (the backend
+ * is the authority; this simulates a rule the front end does not mirror).
+ */
+const BACKEND_REFUSED_NAMES = new Set(["refused-by-backend"]);
 
 /** Folder names the mock treats as existing, non-empty folders in every parent. */
 const OCCUPIED_NAMES = new Set(["game-client", "design-docs"]);
@@ -244,8 +250,16 @@ export function wcMockCommands(deps: MockDeps) {
       ),
     checkout: (req: CheckoutRequest) => {
       const name = req.destName;
-      if (name !== null && (!name || /[\\/]/.test(name) || name === "." || name === "..")) {
-        return fail("invalid-argument", "Invalid folder name.");
+      if (
+        name !== null &&
+        (!name ||
+          /[\\/]/.test(name) ||
+          name === "." ||
+          name === ".." ||
+          BACKEND_REFUSED_NAMES.has(name))
+      ) {
+        // Like the backend: checked before the grant is redeemed; `detail` is the refused name.
+        return fail("invalid-argument", "Invalid folder name: the name is not allowed.", name);
       }
       const parent = consumeGrant(req.dest);
       if (!parent) return fail("invalid-argument", BAD_GRANT);
