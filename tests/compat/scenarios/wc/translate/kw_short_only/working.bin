@@ -1,0 +1,6 @@
+$Id: kw_short_only 17 2026-10-13 08:55:15Z hxd $ $Rev$ $Revision$ $LastChangedRevision$ $Date$ $LastChangedDate$ $Author$ $LastChangedBy$ $HeadURL$ $URL$ $Header$
+stale: $Id: kw_short_only 17 2026-10-13 08:55:15Z hxd $ $Rev: 99 $ $Date: junk $ $Author:$
+fixed: $Rev::            $ $Rev:: 12345678901234567890 $ $Author:: x $ $Date::   $ $Id::  $
+unknown: $Foo$ $foo: bar$ $id$ $REV$ $Rev $ $$ $$$ $Id
+nested: $Id: kw_short_only 17 2026-10-13 08:55:15Z hxd $Rev$ x$ and $Rev: $Date$
+tail $Rev$
