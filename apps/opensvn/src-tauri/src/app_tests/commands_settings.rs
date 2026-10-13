@@ -173,3 +173,53 @@ async fn checkout_waits_for_sign_in_through_the_prompt_events() {
         .unwrap();
     f.wait_op(&handle).await.unwrap();
 }
+
+#[tokio::test]
+async fn trusted_certificates_can_be_listed_and_removed() {
+    let f = Fixture::new(Duration::ZERO).await;
+    assert!(commands::certs_list(f.state()).await.unwrap().is_empty());
+    f.state()
+        .db
+        .cert_trust(
+            "svn.test.local",
+            8443,
+            &"ab".repeat(32),
+            "CN=svn",
+            "2030-01-01T00:00:00Z",
+        )
+        .unwrap();
+    let list = commands::certs_list(f.state()).await.unwrap();
+    assert_eq!(
+        (list[0].host.as_str(), list[0].port),
+        ("svn.test.local", 8443)
+    );
+    let key = opensvn_ipc::TrustedCertKey {
+        host: "svn.test.local".into(),
+        port: 8443,
+        sha256: "ab".repeat(32),
+    };
+    commands::certs_remove(f.state(), key.clone())
+        .await
+        .unwrap();
+    assert!(commands::certs_list(f.state()).await.unwrap().is_empty());
+    assert_eq!(
+        commands::certs_remove(f.state(), key)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidArgument
+    );
+}
+
+#[tokio::test]
+async fn default_checkout_folder_is_chosen_natively() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let before = commands::settings_get(f.state()).await.unwrap();
+    // cancelled dialog: unchanged
+    let s = commands::checkout_root_choose(f.state()).await.unwrap();
+    assert_eq!(s.general_checkout_root, before.general_checkout_root);
+    let dir = tempfile::tempdir().unwrap();
+    *f.paths.choice.lock().unwrap() = Some((dir.path().to_path_buf(), opensvn_ipc::GrantKind::Dir));
+    let s = commands::checkout_root_choose(f.state()).await.unwrap();
+    assert_eq!(s.general_checkout_root, dir.path().to_string_lossy());
+}

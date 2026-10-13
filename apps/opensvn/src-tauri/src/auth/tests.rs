@@ -164,7 +164,7 @@ async fn always_trust_is_remembered_per_host_port_and_fingerprint() {
     let summary = prompt.cert.clone().unwrap();
     assert_eq!(summary.host, "svn.test.local:8443");
     assert_eq!(summary.sha256, "ab".repeat(32));
-    assert_eq!(summary.failure, "unknown-issuer");
+    assert_eq!(summary.failure, opensvn_ipc::CertFailureInfo::UnknownIssuer);
     broker
         .respond(
             &prompt.request_id,
@@ -215,8 +215,11 @@ async fn changed_or_expired_certificates_are_never_trusted_permanently() {
         let prompt = next_prompt_after(&events, asked).await;
         if matches!(failure, CertFailure::Changed { .. }) {
             assert_eq!(
-                prompt.cert.as_ref().unwrap().old_sha256.as_deref(),
-                Some(&*"01".repeat(32))
+                prompt.cert.as_ref().unwrap().failure,
+                opensvn_ipc::CertFailureInfo::Changed {
+                    old_sha256: "01".repeat(32),
+                    new_sha256: "ab".repeat(32),
+                }
             );
         }
         broker
@@ -266,4 +269,43 @@ async fn sign_out_removes_accounts_of_the_realm_and_purges_secrets() {
     broker.sign_out("r").unwrap();
     assert!(db.accounts_list().unwrap().is_empty());
     assert_eq!(*spy.0.lock().unwrap(), vec![("h".to_owned(), 443)]);
+}
+
+#[tokio::test]
+async fn offered_methods_reach_the_prompt_and_sso_needs_negotiate_to_be_offered() {
+    let (broker, events, _) = setup(PROMPT_TIMEOUT);
+    let req = CredentialRequest::new(
+        origin(),
+        0,
+        vec![AuthMethod::Negotiate, AuthMethod::Basic],
+        PromptReason::Initial,
+    );
+    let b = broker.clone();
+    let r = req.clone();
+    let task = tokio::spawn(async move { b.credentials(&r).await });
+    let prompt = next_prompt(&events).await;
+    assert_eq!(
+        prompt.offered,
+        vec![
+            opensvn_ipc::AuthMethodKind::Negotiate,
+            opensvn_ipc::AuthMethodKind::Basic
+        ]
+    );
+    broker
+        .respond(&prompt.request_id, AuthResponse::Negotiate)
+        .unwrap();
+    let creds = task.await.unwrap().unwrap();
+    assert_eq!(creds.method, AuthMethod::Negotiate);
+    assert!(creds.username.is_empty());
+
+    // SSO that was never offered is treated like a cancel
+    let basic_only =
+        CredentialRequest::new(origin(), 0, vec![AuthMethod::Basic], PromptReason::Initial);
+    let b = broker.clone();
+    let task = tokio::spawn(async move { b.credentials(&basic_only).await });
+    let prompt = next_prompt_after(&events, 1).await;
+    broker
+        .respond(&prompt.request_id, AuthResponse::Negotiate)
+        .unwrap();
+    assert!(task.await.unwrap().is_none());
 }

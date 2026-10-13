@@ -141,22 +141,24 @@ type Layout =
 | `repo_list` | `{ url, rev? }` | `RepoEntry[]` |
 | `repo_cat` | `{ url, rev? }` | `TextSide` (giới hạn kích thước; quá lớn → lỗi, dùng `repo_save`) |
 | `repo_save` | `{ url, rev?, grant: PathGrantId }` (file chọn qua `path_pick` kiểu `saveFile`) | `OperationHandle` (ghi thẳng ra đĩa) |
-| `log_get` | `{ target: LogTarget, fromRev?, toRev?, limit, stopOnCopy?, withPaths: true, filter? }` | `{ entries: LogEntry[], nextRev?: Rev }` (cache-first) |
+| `log_get` | `{ target: LogTarget, fromRev?, toRev?, limit, stopOnCopy?, withPaths: true, filter? }` | `{ entries: LogEntry[], nextRev?: Rev }` (cache-first). Phân trang: mới nhất trước; `fromRev` là **cận trên bao gồm** (bỏ trống = HEAD); `entries` có tối đa `limit` phần tử (1–1000); `nextRev` là revision của phần tử đầu tiên của trang kế (bao gồm) nên UI gọi lại với `fromRev = nextRev`; không có `nextRev` nghĩa là hết. `filter` khớp không phân biệt hoa thường trên message và author, và áp dụng trước khi cắt trang |
 | `blame_get` | `{ url, rev? }` | `OperationHandle` → kết quả `{ lines: { rev, author, date, text }[] }` |
 | `lock` / `unlock` | `{ targets: LockTargets, comment?, steal? }` / `{ targets: LockTargets, breakLock? }` | `OperationHandle` |
 | `remote_edit` | `{ ops: RemoteOp[], message }` (mkdir/rename/delete/copy/upload; `upload` dùng `source: PathGrantId`, không nhận đường dẫn thô) | `OperationHandle` |
 | `branches_list` | `{ repoRootUrl }` | `BranchNode[]` (theo layout, cache 60s; rỗng khi `mode: 'none'`) |
 | `layout_get` / `layout_set` | `{ repoUuid }` / `{ repoUuid, layout }` | `Layout` / `void` |
 | `layout_detect` | `{ repoRootUrl, url }` | `{ found: boolean; layout?: Layout; current?: BranchRef }` |
-| `copy_location` | `{ fromUrl, fromRev?, toUrl, message, switchWcId? }` (tạo branch/tag hoặc bản sao bất kỳ) | `OperationHandle` |
+| `copy_location` | `{ fromUrl, fromRev?, toUrl, message, switchWcId?, fromWc? }` (tạo branch/tag hoặc bản sao bất kỳ; có `fromWc` thì nguồn là working copy kèm thay đổi local và `fromUrl`/`fromRev` bị bỏ qua) | `OperationHandle` |
 
 ### 3.5 Hệ thống
 | Command | Mô tả |
 |---|---|
 | `op_cancel { opId }` | Hủy tác vụ |
 | `op_list` | Tác vụ đang chạy + 50 gần nhất |
-| `auth_respond { requestId, response }` | Trả lời prompt đăng nhập / trust cert |
+| `auth_respond { requestId, response }` | Trả lời prompt: `{kind:'credentials',username,password,save}`, `{kind:'negotiate'}` (SSO, chỉ khi `offered` có `negotiate`), `{kind:'certificate',decision}` hoặc `{kind:'cancel'}`. Prompt không trả lời sau 5 phút coi như hủy. Chứng chỉ `changed`, hết hạn hay sai host không bao giờ được `acceptAlways` (hạ thành `acceptOnce`) |
 | `accounts_list`, `accounts_sign_out { realm }` | Quản lý credential |
+| `certs_list`, `certs_remove { key: {host, port, sha256} }` | Chứng chỉ đã tin cậy vĩnh viễn (Settings → Certificates); xóa thì lần kết nối sau hỏi lại |
+| `checkout_root_choose` | Dialog native chọn thư mục checkout mặc định, lưu vào `general.checkoutRoot`, trả `Settings` |
 | `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.checkoutRoot"`, `patch` chỉ chứa khóa cần đổi. `SettingsPatch` **không có** các khóa chạy chương trình (`diff.externalTool`, `diff.mergeTool`, `tools.editor`, `tools.terminal`); khóa lạ bị từ chối khi deserialize |
 | `program_choose { kind, args }`, `program_clear { kind }` | Đặt/xóa chương trình ngoài (`kind`: `diff-tool` \| `merge-tool` \| `editor` \| `terminal`). Rust mở dialog chọn file native rồi dialog xác nhận native (mỗi tham số một dòng, có quote; từ chối ký tự điều khiển/bidi); trả `Settings` mới (không đổi nếu người dùng hủy) |
 | `path_pick { request }` | Dialog native chọn thư mục / file / nơi lưu (`PickRequest`), trả `PathGrantInfo \| null` (xem §3.6) |
@@ -201,7 +203,7 @@ type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'forbidden' | 'tls-un
 | `wc://revision-changed` | `{ wcId, baseRev, revRange? }` | toolbar, History |
 | `wc://incoming` | `{ wcId, count, latestRev }` | badge Update, thông báo OS |
 | `wc://banner` | `{ wcId, kind, data }` (conflicts, mixed-rev, lock-stolen, needs-cleanup) | Banner |
-| `auth://prompt` | `{ requestId, kind: 'credentials' \| 'certificate', realm, url, cert? }` | Dialog Sign in / Trust |
+| `auth://prompt` | `{ requestId, kind: 'credentials' \| 'certificate', realm, url, cert?, reason?, attempt, offered }` — `reason`: `initial` \| `rejected` \| `negotiate-failed` \| `expired` (chỉ với credentials); `offered`: `('basic' \| 'negotiate')[]`; `cert.failure`: `'unknownIssuer' \| 'selfSigned' \| 'expired' \| 'notYetValid' \| 'hostnameMismatch' \| 'revoked' \| { changed: { oldSha256, newSha256 } } \| { other: string }` | Dialog Sign in / Trust |
 | `fs://dropped` | `DroppedPaths` (§3.6) | Thả thư mục/file vào cửa sổ |
 
 Luồng prompt auth: engine gặp 401 → phát `auth://prompt`, **tạm dừng** operation → UI hiện dialog → `auth_respond` → engine tiếp tục hoặc hủy (`cancelled`).

@@ -80,6 +80,11 @@ export const commands = {
 	displayName: string,
 	kind: GrantKind,
 } | null, AppError>(__TAURI_INVOKE("path_pick", { request })),
+	certsList: () => typedError<TrustedCert[], AppError>(__TAURI_INVOKE("certs_list")),
+	/**  Stops trusting a certificate; the next connection asks again. */
+	certsRemove: (key: TrustedCertKey) => typedError<null, AppError>(__TAURI_INVOKE("certs_remove", { key })),
+	/**  Lets the user pick the default checkout folder in a native dialog and stores it. */
+	checkoutRootChoose: () => typedError<Settings, AppError>(__TAURI_INVOKE("checkout_root_choose")),
 	revealInOs: (wcId: WcId, path: string) => typedError<null, AppError>(__TAURI_INVOKE("reveal_in_os", { wcId, path })),
 	openExternal: (wcId: WcId, path: string, openWith: OpenWith) => typedError<null, AppError>(__TAURI_INVOKE("open_external", { wcId, path, openWith })),
 	diagnosticsExport: () => typedError<string, AppError>(__TAURI_INVOKE("diagnostics_export")),
@@ -121,6 +126,11 @@ export type AppError = {
 	actions: ErrorAction[] | null,
 };
 
+/**  Authentication scheme the server offers. */
+export type AuthMethodKind = "basic" | 
+/**  Single sign-on (Windows SSO / Kerberos). */
+"negotiate";
+
 export type AuthPrompt = {
 	requestId: string,
 	kind: AuthPromptKind,
@@ -131,6 +141,8 @@ export type AuthPrompt = {
 	reason: AuthPromptReason | null,
 	/**  Failed tries so far in this prompt sequence, starting at 0. */
 	attempt: number,
+	/**  Schemes the server offers (credentials prompts; empty for certificate prompts). */
+	offered: AuthMethodKind[],
 };
 
 export type AuthPromptEvent = AuthPrompt;
@@ -149,7 +161,9 @@ export type AuthPromptReason =
 "expired";
 
 /**  Response of `auth_respond`'s input (answer to an `auth://prompt`). */
-export type AuthResponse = { kind: "credentials"; username: string; password: SecretText; save: boolean } | { kind: "certificate"; decision: CertDecision } | { kind: "cancel" };
+export type AuthResponse = { kind: "credentials"; username: string; password: SecretText; save: boolean } | { kind: "certificate"; decision: CertDecision } | 
+/**  Use single sign-on (only valid when the prompt offered `negotiate`). */
+{ kind: "negotiate" } | { kind: "cancel" };
 
 export type Banner = {
 	wcId: WcId,
@@ -185,6 +199,14 @@ export type BranchRef = {
 
 export type CertDecision = "reject" | "acceptOnce" | "acceptAlways";
 
+/**  Why a TLS certificate needs a decision. */
+export type CertFailureInfo = "unknownIssuer" | "selfSigned" | "expired" | "notYetValid" | "hostnameMismatch" | "revoked" | 
+/**  A different certificate than the pinned one; "always trust" is not offered. */
+({ changed: {
+	oldSha256: string,
+	newSha256: string,
+} }) & { other?: never } | ({ other: string }) & { changed?: never };
+
 export type CertSummary = {
 	host: string,
 	subject: string,
@@ -192,12 +214,7 @@ export type CertSummary = {
 	notBefore: string,
 	notAfter: string,
 	sha256: string,
-	failure: string,
-	/**
-	 *  Fingerprint of the previously pinned certificate when the server now presents a different
-	 *  one (`failure` is then `changed`); "always trust" is not offered in that case.
-	 */
-	oldSha256: string | null,
+	failure: CertFailureInfo,
 };
 
 export type ChangeAction = "A" | "M" | "D" | "R";
@@ -250,6 +267,11 @@ export type CopyLocationRequest = {
 	toUrl: string,
 	message: string,
 	switchWcId: WcId | null,
+	/**
+	 *  Copy the working copy (including its local changes) instead of `from_url`; `from_url` and
+	 *  `from_rev` are then ignored.
+	 */
+	fromWc: WcId | null,
 };
 
 export type Depth = "empty" | "files" | "immediates" | "infinity";
@@ -706,6 +728,23 @@ export type TextSide = {
 };
 
 export type Theme = "system" | "light" | "dark";
+
+/**  A certificate the user chose to trust permanently (Settings > Certificates). */
+export type TrustedCert = {
+	host: string,
+	port: number,
+	sha256: string,
+	subject: string | null,
+	expiresAt: string | null,
+	trustedAt: string,
+};
+
+/**  Identifies a trusted certificate for removal. */
+export type TrustedCertKey = {
+	host: string,
+	port: number,
+	sha256: string,
+};
 
 export type UnlockRequest = {
 	targets: LockTargets,

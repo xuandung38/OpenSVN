@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use opensvn_ipc::{
-    AppError, AuthPrompt, AuthPromptKind, AuthPromptReason, AuthResponse,
-    CertDecision as IpcDecision, CertSummary, ErrorCode,
+    AppError, AuthMethodKind, AuthPrompt, AuthPromptKind, AuthPromptReason, AuthResponse,
+    CertDecision as IpcDecision, CertFailureInfo, CertSummary, ErrorCode,
 };
 use secrecy::SecretString;
 use svn_ra_api::{
@@ -56,18 +56,31 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn failure_text(f: &CertFailure) -> String {
+fn failure_info(f: &CertFailure) -> CertFailureInfo {
     match f {
-        CertFailure::UnknownIssuer => "unknown-issuer".into(),
-        CertFailure::SelfSigned => "self-signed".into(),
-        CertFailure::Expired => "expired".into(),
-        CertFailure::NotYetValid => "not-yet-valid".into(),
-        CertFailure::HostnameMismatch => "hostname-mismatch".into(),
-        CertFailure::Revoked => "revoked".into(),
-        CertFailure::Changed { .. } => "changed".into(),
-        CertFailure::Other(m) => format!("other: {m}"),
-        // `CertFailure` is non-exhaustive: a new reason is shown as unknown rather than guessed.
-        _ => "unknown".into(),
+        CertFailure::UnknownIssuer => CertFailureInfo::UnknownIssuer,
+        CertFailure::SelfSigned => CertFailureInfo::SelfSigned,
+        CertFailure::Expired => CertFailureInfo::Expired,
+        CertFailure::NotYetValid => CertFailureInfo::NotYetValid,
+        CertFailure::HostnameMismatch => CertFailureInfo::HostnameMismatch,
+        CertFailure::Revoked => CertFailureInfo::Revoked,
+        CertFailure::Changed {
+            old_sha256,
+            new_sha256,
+        } => CertFailureInfo::Changed {
+            old_sha256: hex(old_sha256),
+            new_sha256: hex(new_sha256),
+        },
+        CertFailure::Other(m) => CertFailureInfo::Other(m.clone()),
+        // `CertFailure` is non-exhaustive: a new reason is shown as an unknown one.
+        _ => CertFailureInfo::Other("unknown".to_owned()),
+    }
+}
+
+fn method_kind(m: AuthMethod) -> AuthMethodKind {
+    match m {
+        AuthMethod::Negotiate => AuthMethodKind::Negotiate,
+        _ => AuthMethodKind::Basic,
     }
 }
 
@@ -124,7 +137,7 @@ impl AuthBroker {
         };
         let fits = match &response {
             AuthResponse::Cancel => true,
-            AuthResponse::Credentials { .. } => !entry.wants_certificate,
+            AuthResponse::Credentials { .. } | AuthResponse::Negotiate => !entry.wants_certificate,
             AuthResponse::Certificate { .. } => entry.wants_certificate,
         };
         if !fits {
@@ -185,14 +198,24 @@ impl AuthPrompter for AuthBroker {
             cert: None,
             reason: Some(map_reason(req.reason)),
             attempt: req.attempt,
+            offered: req.offered.iter().copied().map(method_kind).collect(),
         };
-        let AuthResponse::Credentials {
-            username,
-            password,
-            save,
-        } = self.ask(prompt, false).await?
-        else {
-            return None;
+        let (username, password, save) = match self.ask(prompt, false).await? {
+            AuthResponse::Credentials {
+                username,
+                password,
+                save,
+            } => (username, password, save),
+            // Single sign-on carries no secret; only honored when the server offered it.
+            AuthResponse::Negotiate if req.offered.contains(&AuthMethod::Negotiate) => {
+                return Some(Credentials {
+                    username: String::new(),
+                    password: SecretString::from(String::new()),
+                    save: false,
+                    method: AuthMethod::Negotiate,
+                });
+            }
+            _ => return None,
         };
         let method = if req.offered.contains(&AuthMethod::Basic) || req.offered.is_empty() {
             AuthMethod::Basic
@@ -233,10 +256,6 @@ impl AuthPrompter for AuthBroker {
         {
             return CertDecision::AcceptAlways;
         }
-        let old_sha256 = match &info.failure {
-            CertFailure::Changed { old_sha256, .. } => Some(hex(old_sha256)),
-            _ => None,
-        };
         let prompt = AuthPrompt {
             request_id: crate::ops::new_op_id().0,
             kind: AuthPromptKind::Certificate,
@@ -249,11 +268,11 @@ impl AuthPrompter for AuthBroker {
                 not_before: opensvn_ipc::time_fmt::timestamp_to_iso(info.not_before),
                 not_after: opensvn_ipc::time_fmt::timestamp_to_iso(info.not_after),
                 sha256: fingerprint.clone(),
-                failure: failure_text(&info.failure),
-                old_sha256,
+                failure: failure_info(&info.failure),
             }),
             reason: None,
             attempt: 0,
+            offered: Vec::new(),
         };
         let Some(AuthResponse::Certificate { decision }) = self.ask(prompt, true).await else {
             return CertDecision::Reject;

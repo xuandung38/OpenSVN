@@ -363,12 +363,19 @@ pub async fn copy_location(
 ) -> Result<OperationHandle, AppError> {
     guard(async {
         let switch_to = request.switch_wc_id.clone();
+        let source = request
+            .from_wc
+            .as_ref()
+            .map(|id| state.wcs.resolve(id).map(|r| r.wc))
+            .transpose()?;
         let to_url = request.to_url.clone();
         let title = format!("Copy to {}", leaf(&request.to_url));
         match switch_to {
             None => Ok(
                 state.start_op(OperationKind::Copy, title, move |engine, ctx| async move {
-                    let new_rev = engine.copy_location(&request, &ctx).await?;
+                    let new_rev = engine
+                        .copy_location(&request, source.as_ref(), &ctx)
+                        .await?;
                     Ok(OpResult::NewRev { new_rev })
                 }),
             ),
@@ -377,7 +384,9 @@ pub async fn copy_location(
                 &wc_id,
                 title,
                 move |engine, wc, ctx| async move {
-                    let new_rev = engine.copy_location(&request, &ctx).await?;
+                    let new_rev = engine
+                        .copy_location(&request, source.as_ref(), &ctx)
+                        .await?;
                     // Switch the working copy to the location that was just created.
                     engine.switch(&wc, &to_url, Some(new_rev), &ctx).await?;
                     Ok(OpResult::NewRev { new_rev })

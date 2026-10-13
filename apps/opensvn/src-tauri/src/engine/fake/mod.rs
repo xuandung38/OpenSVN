@@ -400,8 +400,13 @@ impl EngineFacade for FakeEngine {
         self.do_remote_edit(plan, ctx).await
     }
 
-    async fn copy_location(&self, req: &CopyLocationRequest, ctx: &OpContext) -> EngineResult<Rev> {
-        self.do_copy_location(req, ctx).await
+    async fn copy_location(
+        &self,
+        req: &CopyLocationRequest,
+        from_wc: Option<&WcRef>,
+        ctx: &OpContext,
+    ) -> EngineResult<Rev> {
+        self.do_copy_location(req, from_wc, ctx).await
     }
 
     async fn branches_list(
