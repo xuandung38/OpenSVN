@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-layout-detect"
+description = "Enables the layout_detect command without any pre-configured scope."
+commands.allow = ["layout_detect"]
+
+[[permission]]
+identifier = "deny-layout-detect"
+description = "Denies the layout_detect command without any pre-configured scope."
+commands.deny = ["layout_detect"]

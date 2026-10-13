@@ -1,0 +1,9 @@
+# Normalise line endings: Windows checkouts must not turn sources into CRLF (biome, rustfmt).
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.woff2 binary

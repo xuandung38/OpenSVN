@@ -81,6 +81,10 @@ type OperationKind = 'checkout' | 'update' | 'switch' | 'commit' | 'revert' | 'c
 interface Progress { opId: OpId; phase: string; current?: number; total?: number;
   bytesDone?: number; bytesTotal?: number; currentPath?: string; }
 
+// Tham số dạng union: tagged enum theo `kind` (camelCase).
+type LogTarget = { kind: 'url'; url: string } | { kind: 'wc'; wcId: WcId; path: string };
+type LockTargets = { kind: 'wc'; wcId: WcId; paths: string[] } | { kind: 'url'; urls: string[] };
+
 // SVN không có branch/tag thật: chỉ là thư mục theo quy ước. Layout có thể không tồn tại.
 type Layout =
   | { mode: 'auto' }                                                     // tự phát hiện trunk/branches/tags
@@ -119,7 +123,7 @@ type Layout =
 | `switch` | `{ wcId, url, rev? }` |
 | `commit` | `{ wcId, paths, message, keepLocks, autoAddRemove: true }` |
 | `revert` | `{ wcId, paths, removeUnversioned? }` |
-| `add` / `delete` / `move` | `{ wcId, paths }` / `{ wcId, paths, keepLocal? }` / `{ wcId, from, to }` |
+| `add_paths` / `delete_paths` / `move_path` | `{ wcId, paths }` / `{ wcId, paths, keepLocal? }` / `{ wcId, from, to }` (tên có hậu tố để tránh từ khóa Rust `move` và tên chung chung) |
 | `cleanup` | `{ wcId, removeUnversioned?, removeIgnored?, vacuumPristines? }` |
 | `set_depth` | `{ wcId, path, depth }` |
 | `upgrade_format` | `{ wcId, to: 32 }` — **sau MVP** |
@@ -134,10 +138,11 @@ type Layout =
 |---|---|---|
 | `repo_info` | `{ url }` | `{ repoRootUrl, repoUuid, youngestRev, kind }` |
 | `repo_list` | `{ url, rev? }` | `RepoEntry[]` |
-| `repo_cat` | `{ url, rev? , saveTo? }` | `TextSide` hoặc `OperationHandle` (khi `saveTo`) |
-| `log_get` | `{ url \| wcTarget, fromRev?, toRev?, limit, stopOnCopy?, withPaths: true, filter? }` | `{ entries: LogEntry[], nextRev?: Rev }` (cache-first) |
+| `repo_cat` | `{ url, rev? }` | `TextSide` (giới hạn kích thước; quá lớn → lỗi, dùng `repo_save`) |
+| `repo_save` | `{ url, rev?, saveTo }` | `OperationHandle` (ghi thẳng ra đĩa) |
+| `log_get` | `{ target: LogTarget, fromRev?, toRev?, limit, stopOnCopy?, withPaths: true, filter? }` | `{ entries: LogEntry[], nextRev?: Rev }` (cache-first) |
 | `blame_get` | `{ url, rev? }` | `OperationHandle` → kết quả `{ lines: { rev, author, date, text }[] }` |
-| `lock` / `unlock` | `{ wcId?, urlsOrPaths, comment?, steal? }` / `{ …, breakLock? }` | `OperationHandle` |
+| `lock` / `unlock` | `{ targets: LockTargets, comment?, steal? }` / `{ targets: LockTargets, breakLock? }` | `OperationHandle` |
 | `remote_edit` | `{ ops: RemoteOp[], message }` (mkdir/rename/delete/copy/upload) | `OperationHandle` |
 | `branches_list` | `{ repoRootUrl }` | `BranchNode[]` (theo layout, cache 60s; rỗng khi `mode: 'none'`) |
 | `layout_get` / `layout_set` | `{ repoUuid }` / `{ repoUuid, layout }` | `Layout` / `void` |
@@ -151,7 +156,7 @@ type Layout =
 | `op_list` | Tác vụ đang chạy + 50 gần nhất |
 | `auth_respond { requestId, response }` | Trả lời prompt đăng nhập / trust cert |
 | `accounts_list`, `accounts_sign_out { realm }` | Quản lý credential |
-| `settings_get`, `settings_set { patch }` | Settings (§5) |
+| `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.checkoutRoot"`, `patch` chỉ chứa khóa cần đổi |
 | `reveal_in_os { wcId, path }`, `open_external { wcId, path, with: 'default' \| 'editor' \| 'terminal' }` | Tích hợp OS |
 | `diagnostics_export` | Tạo gói chẩn đoán zip, trả đường dẫn |
 
