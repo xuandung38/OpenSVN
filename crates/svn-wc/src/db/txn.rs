@@ -282,7 +282,12 @@ impl WcTxn<'_> {
     }
 
     /// Like [`WcTxn::mark_base_deleted`], with the working row at `op_depth`: the nodes below
-    /// an obstructed directory are shadowed by a layer rooted at that directory.
+    /// a shadowed directory (obstructed, or deleted or replaced locally) are covered by the layer
+    /// rooted at that directory.
+    ///
+    /// Like svn's `db_extend_parent_delete`, nothing is written when `path` already has a
+    /// working row at `op_depth` or below it: a user's addition or a deeper layer is never
+    /// overwritten.
     pub fn mark_base_deleted_at(
         &self,
         path: &RelPath,
@@ -291,8 +296,10 @@ impl WcTxn<'_> {
     ) -> Result<()> {
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
-                 presence, kind) VALUES (?1, ?2, ?3, ?4, 'base-deleted', ?5)",
+                "INSERT INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
+                 presence, kind) SELECT ?1, ?2, ?3, ?4, 'base-deleted', ?5 \
+                 WHERE NOT EXISTS (SELECT 1 FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+                 AND op_depth > 0 AND op_depth <= ?3)",
                 params![
                     self.wc_id,
                     path.as_str(),
