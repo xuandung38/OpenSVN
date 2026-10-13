@@ -34,6 +34,11 @@ pub enum ErrorCode {
     /// A repository hook rejected the operation (pre-commit, pre-lock, pre-revprop-change;
     /// Subversion error 165001). The hook's own output is the error message and is shown to the user.
     HookFailed,
+    /// The server redirected a write (301/302/307/308): the repository moved
+    /// (Subversion `SVN_ERR_RA_SESSION_URL_MISMATCH`, "Repository moved permanently"). The new
+    /// location is in the error message; it was validated as an https URL on the same scheme
+    /// (`RepoUrl::parse`) before being reported.
+    RepositoryMoved,
     /// Path does not exist.
     PathNotFound,
     /// Path failed safety validation (traversal, reserved name, symlink).
