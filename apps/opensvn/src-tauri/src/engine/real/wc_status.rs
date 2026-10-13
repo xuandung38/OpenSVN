@@ -1,6 +1,7 @@
 //! Working copy reads through `svn-client`: status, working copy diff and remote status.
 //!
-//! * `status` is `svn_client::status` without unmodified nodes. `svn-client` already lists the
+//! * `status` is `svn_client::status` without unmodified nodes, with the configured global
+//!   ignores extended by the working copy's local ignore list (`IgnoreScope::Local`). `svn-client` already lists the
 //!   unmodified nodes the facade asks for (locked, changelisted, switched), so no second pass is
 //!   needed; statuses are sorted by path like the fake engine's.
 //! * `diff_wc` compares two sides in repository-normal form: the pristine text (or the copy
@@ -35,7 +36,7 @@ use svn_wc::translate::{ContentTranslator, special, translate_stream};
 
 use super::remote::CAT_LIMIT;
 use super::text::CappedBuf;
-use super::{ConnectOptions, RealEngine, wc_map, wc_read};
+use super::{ConnectOptions, RealEngine, local_util, wc_map, wc_read};
 use crate::engine::context::OpContext;
 use crate::engine::facade::{DiffOptions, EngineResult, RemoteScan, StatusQuery, WcRef};
 use crate::engine::text::{DiffSide, file_diff, percent_decode};
@@ -388,16 +389,28 @@ impl RealEngine {
         ctx: &OpContext,
     ) -> EngineResult<Vec<FileStatus>> {
         ctx.check()?;
-        // TODO(#94): add the working copy's local-scope ignores (`local_util::read_local_ignores`)
-        // to the global ignores of this scan once that PR lands.
+        // Global ignores of the scan: the configured ones (or svn's defaults) plus the working
+        // copy's local-scope ignore list, as the local operations use them.
+        let mut client = self.client_ctx(ctx);
+        let (config, root) = (self.svn_config.clone(), wc.root.clone());
+        let globals = wc_read::blocking(move || {
+            let mut globals = config.add_config().global_ignores;
+            for p in local_util::read_local_ignores(&root)? {
+                if !globals.contains(&p) {
+                    globals.push(p);
+                }
+            }
+            Ok(globals)
+        })
+        .await?;
+        client.config.global_ignores = Some(globals);
         let opts = StatusOptions {
             depth: Depth::Infinity,
             show_unmodified: false,
             include_unversioned: query.include_unversioned,
             include_ignored: query.include_ignored,
         };
-        let statuses =
-            svn_client::status(&self.client_ctx(ctx), &wc.root, &opts, &ctx.cancel).await?;
+        let statuses = svn_client::status(&client, &wc.root, &opts, &ctx.cancel).await?;
         let mut out: Vec<FileStatus> = statuses.iter().filter_map(wc_map::file_status).collect();
         out.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(out)

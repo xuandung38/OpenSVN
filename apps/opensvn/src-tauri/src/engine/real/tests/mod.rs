@@ -4,6 +4,7 @@
 
 mod conformance_recovery_tests;
 mod edit_tests;
+mod local_tests;
 mod recovery_tests;
 mod remote_tests;
 mod scaffold_tests;
