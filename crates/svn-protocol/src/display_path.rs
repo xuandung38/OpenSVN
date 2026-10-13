@@ -6,39 +6,11 @@
 //! Code that needs a file system path must say so at the call site:
 //! `RelPath::from_server(display.as_str().trim_start_matches('/'))`.
 
-use std::fmt;
+use svn_types::{ChangeAction, ChangedPath, LockInfo, NodeKind, Revnum, Timestamp};
 
-use svn_types::{
-    ChangeAction, ChangedPath, LockInfo, NodeKind, RelPath, Result, Revnum, Timestamp,
-};
-
-use crate::util::validate_display_path;
-
-/// Repository-absolute path (`/trunk/a.txt`) for display. Not usable for I/O.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RepoDisplayPath(String);
-
-impl RepoDisplayPath {
-    /// Validates structure only: absolute, no `.`/`..`/empty segment, no NUL.
-    pub fn parse(path: &str) -> Result<Self> {
-        validate_display_path(path).map(Self)
-    }
-
-    /// Text for display. Never pass it to a file system API; see the module documentation.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub(crate) fn from_rel(path: &RelPath) -> Self {
-        Self(format!("/{path}"))
-    }
-}
-
-impl fmt::Display for RepoDisplayPath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+/// The display-only path type now lives in `svn-types`; re-exported so existing imports keep
+/// working. Build values with `RepoDisplayPath::parse` (validated) or `RepoDisplayPath::from_rel`.
+pub use svn_types::RepoDisplayPath;
 
 /// One changed path of a log entry, display-only counterpart of `svn_types::ChangedPath`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,14 +30,14 @@ pub struct DisplayChangedPath {
 }
 
 impl DisplayChangedPath {
-    /// Leaves the display-only type for the shared contract (`path` becomes a plain `String`).
+    /// Leaves the display-only type for the shared contract (a plain move, no conversion).
     /// Call this only at the boundary where the contract demands it.
     pub fn into_contract(self) -> ChangedPath {
         ChangedPath {
-            path: self.path.0,
+            path: self.path,
             action: self.action,
             kind: self.kind,
-            copy_from: self.copy_from.map(|(p, r)| (p.0, r)),
+            copy_from: self.copy_from,
             text_mods: self.text_mods,
             prop_mods: self.prop_mods,
         }
@@ -90,10 +62,10 @@ pub struct RepoLock {
 }
 
 impl RepoLock {
-    /// Leaves the display-only type for the shared contract (`path` becomes a plain `String`).
+    /// Leaves the display-only type for the shared contract (a plain move, no conversion).
     pub fn into_lock_info(self) -> LockInfo {
         LockInfo {
-            path: self.path.0,
+            path: self.path,
             token: self.token,
             owner: self.owner,
             comment: self.comment,
