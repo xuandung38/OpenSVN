@@ -15,14 +15,14 @@ use svn_types::{
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use super::commit_editor::FakeCommitEditor;
-use super::repo::{FakeChange, NodeData, RepoState, children};
+use super::repo::{FakeChange, FakeMergeFault, NodeData, RepoState, children};
 use super::update_drive::drive_update;
 use crate::auth::{
     AuthMethod, AuthPrompter, CertDecision, CertInfo, CredentialRequest, PromptReason,
 };
 use crate::commit::{CommitEditor, CommitObserver};
 use crate::session::{
-    FileMeta, FileRev, FileRevHandler, LogRequest, RaSession, ReportFn, UpdateRequest,
+    FileMeta, FileRev, FileRevHandler, LogRequest, RaSession, ReportFn, TxnAbort, UpdateRequest,
 };
 
 /// Credentials the fake server accepts.
@@ -144,6 +144,11 @@ impl FakeRaSession {
     /// Seeds the repository with a revision built from `changes`.
     pub fn seed(&self, author: &str, message: &str, changes: &[FakeChange]) -> Result<Revnum> {
         self.guard().commit_changes(author, message, changes)
+    }
+
+    /// Makes the next commit's `close_edit` lose the `MERGE` answer as `fault` describes.
+    pub fn fail_next_merge(&self, fault: FakeMergeFault) {
+        self.guard().merge_fault = Some(fault);
     }
 
     /// Names of commit transactions that are still open.
@@ -677,5 +682,14 @@ impl RaSession for FakeRaSession {
     async fn abort_txn(&self, txn_name: &str) -> Result<()> {
         self.guard().txns.remove(txn_name);
         Ok(())
+    }
+
+    async fn abort_txn_checked(&self, txn_name: &str, cancel: &CancelToken) -> Result<TxnAbort> {
+        cancel.check()?;
+        Ok(if self.guard().txns.remove(txn_name) {
+            TxnAbort::Deleted
+        } else {
+            TxnAbort::Gone
+        })
     }
 }

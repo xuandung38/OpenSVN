@@ -215,6 +215,15 @@ export function RepoPicker({
                     {r("missing")}
                   </span>
                 )}
+                {!e.missing && e.incomplete && (
+                  <span
+                    title={r("incompleteHint")}
+                    className="flex shrink-0 items-center gap-0.5 rounded bg-warn-soft px-1 text-[11px]"
+                  >
+                    <TriangleAlert size={12} aria-hidden="true" />
+                    {r("incomplete")}
+                  </span>
+                )}
               </span>
               <SafeText className="truncate font-mono text-[11px] text-muted-text">
                 {pathTail(e.rootPath)}

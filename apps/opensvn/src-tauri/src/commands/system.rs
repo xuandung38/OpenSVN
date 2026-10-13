@@ -1,8 +1,9 @@
 //! System commands (3.5): operations, auth, accounts, settings, OS integration.
 
 use opensvn_ipc::{
-    Account, AppError, AuthResponse, OpId, OpenWith, OperationHandle, PathGrantInfo, PickRequest,
-    ProgramKind, Settings, SettingsPatch, TrustedCert, TrustedCertKey, WcId,
+    Account, AppError, AuthResponse, EngineCapabilities, OpId, OpenWith, OperationHandle,
+    PathGrantInfo, PickRequest, ProgramKind, Settings, SettingsPatch, TrustedCert, TrustedCertKey,
+    WcId,
 };
 use tauri::State;
 
@@ -42,6 +43,16 @@ pub async fn accounts_list(state: State<'_, AppState>) -> Result<Vec<Account>, A
 #[specta::specta]
 pub async fn accounts_sign_out(state: State<'_, AppState>, realm: String) -> Result<(), AppError> {
     guard(async { state.auth.sign_out(&realm) }).await
+}
+
+/// What the running engine supports, so the UI can hide or explain options it would ignore
+/// (externals are not fetched by the real engine yet).
+#[tauri::command]
+#[specta::specta]
+pub async fn engine_capabilities(
+    state: State<'_, AppState>,
+) -> Result<EngineCapabilities, AppError> {
+    guard(async { Ok(state.engine.capabilities()) }).await
 }
 
 #[tauri::command]
