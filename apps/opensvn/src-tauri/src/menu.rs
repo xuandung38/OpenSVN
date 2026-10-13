@@ -3,8 +3,11 @@
 //! The menu is described as data ([`menu_spec`]) so its structure can be tested on any host, then
 //! turned into a Tauri menu. Activating an item emits the event `menu://<id>` for the UI, which
 //! owns the behavior and runs the same action as the matching keyboard shortcut (the UI ignores
-//! the echo when one key press reaches it both as a menu event and as a keydown). Accelerators use
-//! `Mod` = Cmd on macOS and Ctrl elsewhere.
+//! the echo when one key press reaches it both as a menu event and as a keydown). The few items
+//! that act on the window or the process (zoom, Exit) are handled here instead ([`native_action`]),
+//! and predefined items (copy, paste, quit, ...) are native roles. A test pins that every item is
+//! one of these: subscribed by the UI (`MENU_EVENTS` in `src/ipc/events.ts`) or native.
+//! Accelerators use `Mod` = Cmd on macOS and Ctrl elsewhere.
 
 use tauri::Emitter;
 use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem, Submenu, SubmenuBuilder};
@@ -279,16 +282,80 @@ fn has_item_id(entries: &[Entry], wanted: &str) -> bool {
     })
 }
 
+/// Items of [`menu_spec`] that Rust handles itself instead of emitting `menu://<id>`: they act on
+/// the window or the process, which the UI has no permission for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeAction {
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    Exit,
+}
+
+/// The native handler of a menu item id, if Rust handles it (see [`NativeAction`]).
+pub fn native_action(id: &str) -> Option<NativeAction> {
+    match id {
+        "view.zoom-in" => Some(NativeAction::ZoomIn),
+        "view.zoom-out" => Some(NativeAction::ZoomOut),
+        "view.zoom-reset" => Some(NativeAction::ZoomReset),
+        "app.exit" => Some(NativeAction::Exit),
+        _ => None,
+    }
+}
+
+/// Zoom levels in percent, as browsers step them.
+pub const ZOOM_STEPS: [u16; 13] = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300];
+
+/// The zoom level after `action` at `current` percent (clamped to [`ZOOM_STEPS`]).
+pub fn next_zoom(current: u16, action: NativeAction) -> u16 {
+    match action {
+        NativeAction::ZoomIn => ZOOM_STEPS
+            .iter()
+            .copied()
+            .find(|z| *z > current)
+            .unwrap_or(ZOOM_STEPS[ZOOM_STEPS.len() - 1]),
+        NativeAction::ZoomOut => ZOOM_STEPS
+            .iter()
+            .rev()
+            .copied()
+            .find(|z| *z < current)
+            .unwrap_or(ZOOM_STEPS[0]),
+        NativeAction::ZoomReset | NativeAction::Exit => 100,
+    }
+}
+
 /// The event to emit for an activated menu item: only items of [`menu_spec`] (on any OS and in
-/// either layout variant) become `menu://<id>` events. Native items (copy, paste, quit, ...) and
-/// unknown ids emit nothing.
+/// either layout variant) that Rust does not handle itself ([`native_action`]) become
+/// `menu://<id>` events. Predefined items (copy, paste, quit, ...) and unknown ids emit nothing.
 pub fn event_for(id: &str) -> Option<String> {
+    if native_action(id).is_some() {
+        return None;
+    }
     let ours = [Os::Darwin, Os::Windows, Os::Linux].into_iter().any(|os| {
         [true, false]
             .into_iter()
             .any(|l| has_item_id(&menu_spec(os, l), id))
     });
     ours.then(|| event_name(id))
+}
+
+/// Current zoom of the app's webviews, in percent.
+static ZOOM_PERCENT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(100);
+
+fn run_native<R: tauri::Runtime>(app: &tauri::AppHandle<R>, action: NativeAction) {
+    use std::sync::atomic::Ordering;
+    use tauri::Manager;
+    if action == NativeAction::Exit {
+        app.exit(0);
+        return;
+    }
+    let zoom = next_zoom(ZOOM_PERCENT.load(Ordering::Relaxed), action);
+    ZOOM_PERCENT.store(zoom, Ordering::Relaxed);
+    for w in app.webview_windows().values() {
+        if let Err(e) = w.set_zoom(f64::from(zoom) / 100.0) {
+            tracing::warn!(error = %e, "failed to set the zoom level");
+        }
+    }
 }
 
 fn predefined<R: tauri::Runtime, M: tauri::Manager<R>>(
@@ -362,6 +429,10 @@ pub fn install<R: tauri::Runtime>(app: &tauri::App<R>, has_layout: bool) -> taur
     let menu = build_menu(app, Os::current(), has_layout)?;
     app.set_menu(menu)?;
     app.on_menu_event(|app, event| {
+        if let Some(action) = native_action(&event.id().0) {
+            run_native(app, action);
+            return;
+        }
         let Some(name) = event_for(&event.id().0) else {
             return;
         };

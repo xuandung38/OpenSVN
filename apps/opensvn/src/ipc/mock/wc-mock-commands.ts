@@ -188,6 +188,8 @@ export function wcMockCommands(deps: MockDeps) {
       state.lastOpened.set(wcId, new Date().toISOString());
       return ok(wc);
     },
+    wcClose: (wcId: string) =>
+      forWc(wcId) ? ok(null) : fail("not-a-working-copy", "Unknown working copy"),
     wcRename: (wcId: string, name: string) => {
       const n = name.trim();
       if (!n || n.length > 200)

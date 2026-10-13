@@ -13,7 +13,8 @@
 
 /// Characters that could hide or reorder displayed text: controls (including newline, tab, DEL
 /// and C1), line and paragraph separators, every format character of Unicode category Cf (soft
-/// hyphen, Arabic number signs U+0600..U+0605 and end of ayah U+06DD / U+08E2, Syriac abbreviation
+/// hyphen, Arabic number signs U+0600..U+0605, end of ayah U+06DD / U+08E2, the pound and piastre
+/// marks above U+0890 / U+0891, Syriac abbreviation
 /// mark, Arabic letter mark, Mongolian vowel separator, zero-width characters, bidirectional
 /// embeddings, overrides and isolates, invisible operators, interlinear annotation, the BOM,
 /// Kaithi number signs, Egyptian hieroglyph format controls, shorthand format controls, musical
@@ -21,7 +22,9 @@
 /// blank-looking combining grapheme joiner, Khmer inherent vowels and Hangul fillers.
 ///
 /// This is the one rule for the whole app: program confirmation, new folder names, picked file
-/// names and notifications all use it.
+/// names and notifications all use it. The UI's copy (`FORMAT_CHARS` in
+/// `src/features/wc/repos/repo-model.ts`) is pinned to it through the generated fixture
+/// `src/features/wc/repos/deceptive-ranges.json` (see the `the_ui_fixture_matches_this_rule` test).
 pub fn is_deceptive(c: char) -> bool {
     c.is_control()
         || matches!(
@@ -32,6 +35,8 @@ pub fn is_deceptive(c: char) -> bool {
                 | '\u{061C}'
                 | '\u{06DD}'
                 | '\u{070F}'
+                | '\u{0890}'
+                | '\u{0891}'
                 | '\u{08E2}'
                 | '\u{115F}'
                 | '\u{1160}'
@@ -115,7 +120,9 @@ mod tests {
             '\u{0605}',
             '\u{06DD}',
             '\u{070F}',
-            '\u{08E2}', // Arabic and Syriac prepended format characters
+            '\u{08E2}',
+            '\u{0890}',
+            '\u{0891}', // Arabic and Syriac prepended format characters
             '\u{1D173}',
             '\u{1D17A}', // musical symbol format controls
             '\u{115F}',
@@ -162,5 +169,46 @@ mod tests {
     fn escaping_truncates_by_characters_not_bytes() {
         assert_eq!(escape_for_display("ééééé", 3), "ééé\u{2026}");
         assert_eq!(escape_for_display("abc", 3), "abc");
+    }
+
+    /// Every non-control [`is_deceptive`] code point as inclusive `[first, last]` ranges, in the
+    /// JSON shape of the UI fixture.
+    fn deceptive_ranges_json() -> String {
+        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        for c in (0..=0x10FFFF_u32).filter_map(char::from_u32) {
+            if c.is_control() || !is_deceptive(c) {
+                continue;
+            }
+            let cp = u32::from(c);
+            match ranges.last_mut() {
+                Some((_, last)) if *last + 1 == cp => *last = cp,
+                _ => ranges.push((cp, cp)),
+            }
+        }
+        let rows: Vec<String> = ranges
+            .iter()
+            .map(|(a, b)| format!("  [{a}, {b}]"))
+            .collect();
+        format!("[\n{}\n]\n", rows.join(",\n"))
+    }
+
+    /// The UI refuses the same characters in folder names (`FORMAT_CHARS`, checked against this
+    /// fixture by `repo-model.test.ts`). Regenerate after changing [`is_deceptive`] with
+    /// `OPENSVN_UPDATE_FIXTURES=1 cargo test -p opensvn display_text`.
+    #[test]
+    fn the_ui_fixture_matches_this_rule() {
+        const FIXTURE: &str = "../src/features/wc/repos/deceptive-ranges.json";
+        let want = deceptive_ranges_json();
+        if std::env::var_os("OPENSVN_UPDATE_FIXTURES").is_some() {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
+            std::fs::write(path, &want).unwrap();
+            return;
+        }
+        let have = include_str!("../../src/features/wc/repos/deceptive-ranges.json");
+        assert_eq!(
+            have.replace("\r\n", "\n"),
+            want,
+            "{FIXTURE} is stale: run OPENSVN_UPDATE_FIXTURES=1 cargo test -p opensvn display_text, then update FORMAT_CHARS until repo-model.test.ts passes"
+        );
     }
 }

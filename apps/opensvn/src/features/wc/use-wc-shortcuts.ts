@@ -1,8 +1,14 @@
 import { useEffect, useRef } from "react";
 import { useEventBus } from "../../app/providers";
-import { matchShortcut, type ShortcutId } from "./shortcuts";
+import { useToast } from "../../components/ui/toast";
+import { useT } from "../../lib/i18n/i18n";
+import type { ThemeChoice } from "../../lib/theme";
+import { matchShortcut, SHORTCUTS, type ShortcutId } from "./shortcuts";
+import { runUiCommand } from "./ui-commands";
 import { useWcActions } from "./use-wc-actions";
+import { changedFiles, isConflicted } from "./wc-model";
 import { useWcSession } from "./wc-session";
+import { wcStrings } from "./wc-strings";
 
 export type MainView = "changes" | "history" | "browse";
 
@@ -14,68 +20,138 @@ export type MainView = "changes" | "history" | "browse";
  */
 export const MENU_ECHO_MS = 400;
 
-/** Native menu item events (ids from `src-tauri/src/menu.rs`) and the shortcut action each runs. */
-export const MENU_ACTIONS: Readonly<Record<string, ShortcutId | undefined>> = {
+/** What a native menu item does in the UI: a keyboard-shortcut action, or a menu-only one. */
+export type MenuAction =
+  | ShortcutId
+  | "settings"
+  | "recent"
+  | "copyUrl"
+  | "updateTo"
+  | "discardAll"
+  | "cleanup"
+  | "unlock"
+  | "changelist"
+  | "ignore"
+  | "resolve"
+  | "rename"
+  | "delete"
+  | "conflicts"
+  | "showOnServer"
+  | "themeSystem"
+  | "themeLight"
+  | "themeDark"
+  /** Planned for a later phase: says so instead of doing nothing. */
+  | "notYet";
+
+/**
+ * Every native menu item event (ids from `src-tauri/src/menu.rs`) and what it runs. Its keys are
+ * exactly `MENU_EVENTS` (tested), and a Rust test checks that every menu item is either listed
+ * there or handled natively (zoom, Exit, predefined roles), so no item does nothing.
+ */
+export const MENU_ACTIONS: Readonly<Record<string, MenuAction>> = {
   "menu://file.checkout": "checkout",
   "menu://file.add-wc": "addExisting",
   "menu://file.switch-repo": "switchRepo",
-  "menu://wc.commit": "commit",
-  "menu://wc.update": "update",
-  "menu://wc.check-updates": "checkUpdates",
-  "menu://sel.lock": "lock",
-  "menu://sel.discard": "discard",
-  "menu://sel.log": "showLog",
-  "menu://sel.blame": "blame",
-  "menu://branch.switch": "switch",
+  "menu://file.recent": "recent",
+  "menu://file.close-wc": "closeWc",
+  "menu://app.settings": "settings",
+  "menu://app.check-app-updates": "notYet",
+  "menu://edit.find": "filter",
+  "menu://edit.copy-path": "copyPath",
+  "menu://edit.copy-url": "copyUrl",
   "menu://view.changes": "viewChanges",
   "menu://view.history": "viewHistory",
   "menu://view.browse": "viewBrowse",
   "menu://view.activity": "activity",
+  "menu://view.sidebar": "toggleSidebar",
+  "menu://view.diff-mode": "toggleDiffMode",
+  "menu://view.hide-whitespace": "toggleWhitespace",
+  "menu://view.show-unversioned": "notYet",
+  "menu://view.show-ignored": "notYet",
+  "menu://view.group-changelist": "notYet",
+  "menu://view.tree": "notYet",
+  "menu://view.theme-system": "themeSystem",
+  "menu://view.theme-light": "themeLight",
+  "menu://view.theme-dark": "themeDark",
+  "menu://wc.check-updates": "checkUpdates",
+  "menu://wc.update": "update",
+  "menu://wc.update-to": "updateTo",
+  "menu://wc.commit": "commit",
+  "menu://wc.discard-all": "discardAll",
+  "menu://wc.sparse": "notYet",
+  "menu://wc.cleanup": "cleanup",
+  "menu://wc.properties": "notYet",
+  "menu://wc.layout": "notYet",
+  "menu://wc.upgrade": "notYet",
+  "menu://wc.reveal": "reveal",
+  "menu://wc.terminal": "terminal",
+  "menu://wc.editor": "editor",
+  "menu://branch.switch": "switch",
+  "menu://branch.new": "newBranch",
+  "menu://branch.new-tag": "newTag",
+  "menu://branch.merge": "notYet",
+  "menu://branch.compare": "notYet",
+  "menu://branch.show-on-server": "showOnServer",
+  "menu://branch.layout": "notYet",
+  "menu://sel.discard": "discard",
+  "menu://sel.lock": "lock",
+  "menu://sel.unlock": "unlock",
+  "menu://sel.changelist": "changelist",
+  "menu://sel.ignore": "ignore",
+  "menu://sel.resolve": "resolve",
+  "menu://sel.log": "showLog",
+  "menu://sel.blame": "blame",
+  "menu://sel.rename": "rename",
+  "menu://sel.delete": "delete",
+  "menu://sel.properties": "notYet",
+  "menu://window.conflicts": "conflicts",
+  "menu://help.docs": "notYet",
+  "menu://help.shortcuts": "showShortcuts",
+  "menu://help.logs": "notYet",
+  "menu://help.report": "notYet",
 };
 
 /**
- * App-level keyboard shortcuts (doc 01 section 8) and the native-menu events that mirror them.
- * Selection-scoped actions (lock, discard, log, blame) apply to the selected file. The latest
- * session/action values are read through a ref so the listeners are registered once.
+ * App-level keyboard shortcuts (doc 01 section 8) and every native-menu event. A key press and
+ * the native accelerator of the same item can both reach the WebView; whichever comes second
+ * within `MENU_ECHO_MS` is dropped, so each action runs once. Selection-scoped actions apply to the
+ * selected file. Component-owned actions (filter, diff toggles) go through `ui-commands`. The
+ * latest session/action values are read through a ref so the listeners are registered once.
  */
-export function useWcShortcuts({
-  onView,
-  onToggleActivity,
-  onAddExisting,
-  onSwitchRepo,
-  onOpenSettings,
-}: {
+export function useWcShortcuts(props: {
   onView: (v: MainView) => void;
   onToggleActivity: () => void;
   onAddExisting: () => void;
   /** Opens the "Current repository" picker (Mod+T). */
   onSwitchRepo?: () => void;
   onOpenSettings?: () => void;
+  onToggleSidebar?: () => void;
+  /** Closes the current working copy (it stays in the repository list). */
+  onCloseWc?: () => void;
+  onCreate?: (kind: "branch" | "tag" | "location") => void;
+  onTheme?: (theme: ThemeChoice) => void;
+  onShowShortcuts?: () => void;
 }): void {
   const session = useWcSession();
   const actions = useWcActions();
   const bus = useEventBus();
-  const props = { onView, onToggleActivity, onAddExisting, onSwitchRepo, onOpenSettings };
-  const latest = useRef({ session, actions, ...props });
-  latest.current = { session, actions, ...props };
+  const toast = useToast();
+  const t = useT(wcStrings);
+  const latest = useRef({ session, actions, toast, t, ...props });
+  latest.current = { session, actions, toast, t, ...props };
 
   useEffect(() => {
     // When each action last ran from the keyboard and from the native menu.
-    const lastKey = new Map<ShortcutId, number>();
-    const lastMenu = new Map<ShortcutId, number>();
-    const isEcho = (from: Map<ShortcutId, number>, id: ShortcutId) =>
+    const lastKey = new Map<MenuAction, number>();
+    const lastMenu = new Map<MenuAction, number>();
+    const isEcho = (from: Map<MenuAction, number>, id: MenuAction) =>
       Date.now() - (from.get(id) ?? Number.NEGATIVE_INFINITY) < MENU_ECHO_MS;
-    const run = (id: ShortcutId): boolean => {
-      const {
-        session: s,
-        actions: a,
-        onView,
-        onToggleActivity,
-        onAddExisting,
-        onSwitchRepo,
-      } = latest.current;
+    const run = (id: MenuAction): boolean => {
+      const { session: s, actions: a, toast, t, ...p } = latest.current;
+      const wc = s.wc;
       const sel = s.files.find((f) => f.path === s.selected);
       const selPaths = sel ? [sel.path] : [];
+      const versioned = sel && sel.text !== "unversioned" && sel.text !== "ignored";
       switch (id) {
         case "commit":
           document.querySelector<HTMLButtonElement>("[data-wc-commit]")?.click();
@@ -86,13 +162,55 @@ export function useWcShortcuts({
         case "checkUpdates":
           void a.checkForUpdates();
           return true;
+        case "updateTo":
+          if (!wc) return false;
+          s.openDialog({ kind: "update-rev" });
+          return true;
+        case "discardAll": {
+          const changed = changedFiles(s.files);
+          if (!wc || changed.length === 0) return false;
+          s.openDialog({ kind: "discard", paths: changed.map((f) => f.path), all: true });
+          return true;
+        }
+        case "cleanup":
+          if (!wc) return false;
+          s.openDialog({ kind: "cleanup" });
+          return true;
+        case "conflicts":
+          if (!wc) return false;
+          s.openDialog({ kind: "resolver", path: null });
+          return true;
         case "lock":
-          if (selPaths.length === 0) return false;
+          if (!versioned) return false;
           s.openDialog({ kind: "lock", mode: "lock", paths: selPaths });
+          return true;
+        case "unlock":
+          if (!sel?.lock) return false;
+          s.openDialog({ kind: "lock", mode: "unlock", paths: selPaths });
           return true;
         case "discard":
           if (!sel || sel.text === "normal" || sel.text === "unversioned") return false;
           s.openDialog({ kind: "discard", paths: selPaths, all: false });
+          return true;
+        case "changelist":
+          if (!versioned) return false;
+          s.openDialog({ kind: "changelist", paths: selPaths });
+          return true;
+        case "ignore":
+          if (sel?.text !== "unversioned") return false;
+          s.openDialog({ kind: "ignore", path: sel.path });
+          return true;
+        case "resolve":
+          if (!sel || !isConflicted(sel)) return false;
+          s.openDialog({ kind: "resolver", path: sel.path });
+          return true;
+        case "rename":
+          if (!versioned) return false;
+          s.openDialog({ kind: "rename", path: sel.path });
+          return true;
+        case "delete":
+          if (!versioned) return false;
+          s.openDialog({ kind: "delete", paths: selPaths });
           return true;
         case "showLog":
           if (!sel || !s.links.showLog) return false;
@@ -102,59 +220,100 @@ export function useWcShortcuts({
           if (!sel || !s.links.blame) return false;
           s.links.blame(sel.path);
           return true;
+        case "copyPath":
+          if (!wc) return false;
+          void a.copyPath(sel?.path ?? "", false);
+          return true;
+        case "copyUrl":
+          if (!wc) return false;
+          void a.copyUrl(sel?.path ?? "");
+          return true;
+        case "reveal":
+          if (!wc) return false;
+          void a.reveal("");
+          return true;
+        case "terminal":
+        case "editor":
+          if (!wc) return false;
+          void a.openWith("", id);
+          return true;
         case "checkout":
           s.openDialog({ kind: "checkout" });
           return true;
         case "addExisting":
-          onAddExisting();
+          p.onAddExisting();
           return true;
         case "switchRepo":
-          if (!onSwitchRepo) return false;
-          onSwitchRepo();
+        case "recent":
+          if (!p.onSwitchRepo) return false;
+          p.onSwitchRepo();
+          return true;
+        case "closeWc":
+          if (!wc || !p.onCloseWc) return false;
+          p.onCloseWc();
+          return true;
+        case "settings":
+          if (!p.onOpenSettings) return false;
+          p.onOpenSettings();
           return true;
         case "switch":
-          if (!s.wc) return false;
+          if (!wc) return false;
           s.openDialog({ kind: "switch" });
           return true;
+        case "newBranch":
+          if (!wc || !p.onCreate) return false;
+          p.onCreate(wc.branch ? "branch" : "location");
+          return true;
+        case "newTag":
+          if (!wc?.branch || !p.onCreate) return false;
+          p.onCreate("tag");
+          return true;
+        case "showOnServer":
+          if (!wc) return false;
+          p.onView("browse");
+          return true;
         case "viewChanges":
-          onView("changes");
+          p.onView("changes");
           return true;
         case "viewHistory":
-          onView("history");
+          p.onView("history");
           return true;
         case "viewBrowse":
-          onView("browse");
+          p.onView("browse");
           return true;
         case "activity":
-          onToggleActivity();
+          p.onToggleActivity();
           return true;
-        default:
-          return false; // filter and diff toggles are handled where their controls live
+        case "toggleSidebar":
+          if (!p.onToggleSidebar) return false;
+          p.onToggleSidebar();
+          return true;
+        case "themeSystem":
+        case "themeLight":
+        case "themeDark":
+          if (!p.onTheme) return false;
+          p.onTheme(id === "themeSystem" ? "system" : id === "themeLight" ? "light" : "dark");
+          return true;
+        case "showShortcuts":
+          if (!p.onShowShortcuts) return false;
+          p.onShowShortcuts();
+          return true;
+        case "filter":
+        case "toggleDiffMode":
+        case "toggleWhitespace":
+          return runUiCommand(id);
+        case "notYet":
+          toast.show(t("menuNotYet"));
+          return true;
       }
     };
 
-    const ids: ShortcutId[] = [
-      "commit",
-      "update",
-      "checkUpdates",
-      "lock",
-      "discard",
-      "showLog",
-      "blame",
-      "checkout",
-      "addExisting",
-      "switchRepo",
-      "switch",
-      "viewChanges",
-      "viewHistory",
-      "viewBrowse",
-      "activity",
-    ];
+    const keyIds = Object.keys(SHORTCUTS) as ShortcutId[];
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
       // Dialogs are modal: shortcuts must not fire behind them.
       if (document.querySelector("dialog[open]")) return;
-      for (const id of ids) {
+      for (const id of keyIds) {
         if (!matchShortcut(e, id)) continue;
         if (isEcho(lastMenu, id)) {
           // The menu already ran it for this key press.
@@ -173,10 +332,6 @@ export function useWcShortcuts({
 
     const off = bus.onMenu((name) => {
       if (document.querySelector("dialog[open]")) return;
-      if (name === "menu://app.settings") {
-        latest.current.onOpenSettings?.();
-        return;
-      }
       const id = MENU_ACTIONS[name];
       if (!id) return;
       if (isEcho(lastKey, id)) {

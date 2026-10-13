@@ -74,9 +74,9 @@ reqwest.workspace = true
 uuid = { version = "=1.28.0", default-features = false, features = ["v7"] }
 # Process liveness and boot time for the working copy lock ownership probe (no unsafe in our code).
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
-# Native file picker and confirmation dialogs for program settings (no JS plugin is registered).
 # Canonical paths without the Windows `\\?\` prefix (reveal in file manager).
 dunce = "=1.0.5"
+# Native file picker and confirmation dialogs for program settings (no JS plugin is registered).
 rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }
 
 [features]

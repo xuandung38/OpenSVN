@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ActivityPanel } from "../components/layout/activity-panel";
 import { AppToolbar } from "../components/layout/app-toolbar";
 import { MainWindow } from "../components/layout/main-window";
@@ -24,6 +24,7 @@ import { RepoPicker } from "../features/wc/repos/repo-picker";
 import { repoStrings } from "../features/wc/repos/repo-strings";
 import { useOpenCheckedOut } from "../features/wc/repos/use-open-checked-out";
 import { isMac } from "../features/wc/shortcuts";
+import { ShortcutsDialog } from "../features/wc/shortcuts-dialog";
 import { useOpNotifications } from "../features/wc/use-op-notifications";
 import { useWcActions } from "../features/wc/use-wc-actions";
 import { useWcShortcuts } from "../features/wc/use-wc-shortcuts";
@@ -37,6 +38,7 @@ import {
   WelcomeScreen,
 } from "../features/wc/welcome/welcome-screen";
 import type { FileStatus, WorkingCopy } from "../ipc/bindings";
+import { ipc, unwrap } from "../ipc/client";
 import { useOperations, useStatus, useWcEntries, useWorkingCopies } from "../ipc/queries";
 import { useT } from "../lib/i18n/i18n";
 import { applyTheme, readTheme, type ThemeChoice } from "../lib/theme";
@@ -53,6 +55,12 @@ export function AppShell() {
   const wcs = useWorkingCopies();
   const entries = useWcEntries();
   const [wcId, setWcId] = useState<string | null>(null);
+  // File > Close working copy: no working copy is current until the user picks one again.
+  const [closed, setClosed] = useState(false);
+  const selectWc = useCallback((id: string) => {
+    setClosed(false);
+    setWcId(id);
+  }, []);
   // Until the user picks one, the most recently opened working copy is current.
   const lastOpened = useMemo(
     () =>
@@ -61,7 +69,9 @@ export function AppShell() {
         .sort((a, b) => (b.lastOpenedAt ?? "").localeCompare(a.lastOpenedAt ?? ""))[0]?.id,
     [entries.data],
   );
-  const current = wcs.data?.find((w) => w.id === (wcId ?? lastOpened)) ?? wcs.data?.[0] ?? null;
+  const current = closed
+    ? null
+    : (wcs.data?.find((w) => w.id === (wcId ?? lastOpened)) ?? wcs.data?.[0] ?? null);
   const status = useStatus(current?.id ?? null);
   const [view, setView] = useState<View>("changes");
   const links = useRemoteLinks(setView);
@@ -93,7 +103,8 @@ export function AppShell() {
       <ShellBody
         workingCopies={wcs.data ?? []}
         loaded={wcs.isSuccess}
-        onSelectWc={setWcId}
+        onSelectWc={selectWc}
+        onCloseWc={() => setClosed(true)}
         view={view}
         onView={setView}
         links={links}
@@ -106,6 +117,7 @@ function ShellBody({
   workingCopies,
   loaded,
   onSelectWc,
+  onCloseWc,
   view,
   onView,
   links,
@@ -113,6 +125,7 @@ function ShellBody({
   workingCopies: WorkingCopy[];
   loaded: boolean;
   onSelectWc: (id: string) => void;
+  onCloseWc: () => void;
   view: View;
   onView: (v: View) => void;
   links: ReturnType<typeof useRemoteLinks>;
@@ -128,7 +141,13 @@ function ShellBody({
   const [createKind, setCreateKind] = useState<"branch" | "tag" | "location" | null>(null);
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(true);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const r = useT(repoStrings);
+  const chooseTheme = (next: ThemeChoice) => {
+    setTheme(next);
+    applyTheme(next);
+  };
 
   useOpNotifications();
   useOpenCheckedOut(onSelectWc);
@@ -138,6 +157,17 @@ function ShellBody({
     onAddExisting: () => void addExisting(),
     onSwitchRepo: () => setPickerOpen(true),
     onOpenSettings: () => setSettingsOpen(true),
+    onToggleSidebar: () => setShowSidebar((v) => !v),
+    onCloseWc: () => {
+      if (!current) return;
+      const id = current.id;
+      onCloseWc();
+      // Stops its watcher; the entry stays in the repository list.
+      void actions.attempt(() => unwrap(ipc().commands.wcClose(id)));
+    },
+    onCreate: setCreateKind,
+    onTheme: chooseTheme,
+    onShowShortcuts: () => setShortcutsOpen(true),
   });
 
   const changed = changedFiles(files).length;
@@ -190,7 +220,7 @@ function ShellBody({
           />
         }
         banner={<WcBanners />}
-        sidebar={<WcSidebar />}
+        sidebar={showSidebar ? <WcSidebar /> : undefined}
         main={
           loaded && workingCopies.length === 0 ? (
             <WelcomeScreen />
@@ -247,10 +277,7 @@ function ShellBody({
             <SegmentedControl<ThemeChoice>
               label="Theme"
               value={theme}
-              onChange={(next) => {
-                setTheme(next);
-                applyTheme(next);
-              }}
+              onChange={chooseTheme}
               options={[
                 { value: "system", label: "System" },
                 { value: "light", label: "Light" },
@@ -261,6 +288,7 @@ function ShellBody({
         }
       />
       <WcDialogHost />
+      <ShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
     </>
   );
 }
