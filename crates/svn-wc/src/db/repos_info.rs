@@ -14,16 +14,22 @@ pub struct ReposInfo {
     pub repos_root_url: String,
     /// Repository UUID.
     pub repos_uuid: String,
-    /// Path of the node inside the repository (`""` is the repository root).
+    /// Path of the node inside the repository (`""` is the repository root); for added and
+    /// copied nodes the path they will have once committed.
     pub repos_relpath: String,
+    /// Where a copied node comes from, `(repository path, revision)`; `None` unless the node's
+    /// own current row is a copy (copy root or node inside a copy).
+    pub copyfrom: Option<(String, u64)>,
 }
 
-/// `(repos_id, repos_relpath)` of `path`.
+/// `(repos_id, repos_relpath)` where `path` lives or would live in the repository.
 ///
-/// * A row that carries a location (BASE node, copy root or any node inside a copy) uses it.
-/// * A deleted node reports the location of the layer it deletes (the highest lower row with one).
-/// * A locally added node takes its parent's location plus its own name (`scan_addition`), which
-///   also covers adds inside copies and adds replacing deleted nodes.
+/// * A BASE node uses its own location.
+/// * A deleted node reports the BASE location it deletes (parent location plus name when the
+///   deletion sits inside a copy and there is no BASE row).
+/// * Added and copied nodes (any working layer) take the location they will have when committed:
+///   their parent's location plus their name, like `scan_addition`. The copy source is reported
+///   separately in [`ReposInfo::copyfrom`].
 fn location(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<(i64, String)> {
     let current: Option<(i64, Option<i64>, Option<String>, String)> = conn
         .query_row(
@@ -34,27 +40,28 @@ fn location(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<(i64, Strin
         )
         .optional()
         .map_err(sql_err)?;
-    let Some((_, repos_id, repos_path, presence)) = current else {
+    let Some((op_depth, repos_id, repos_path, presence)) = current else {
         return Err(SvnError::new(
             ErrorCode::PathNotFound,
             format!("'{path}' is not under version control"),
         ));
     };
-    if let (Some(id), Some(p)) = (repos_id, repos_path) {
+    if op_depth == 0
+        && let (Some(id), Some(p)) = (repos_id, repos_path)
+    {
         return Ok((id, p));
     }
     if presence == "base-deleted" {
-        let below: Option<(i64, String)> = conn
+        let base: Option<(i64, String)> = conn
             .query_row(
                 "SELECT repos_id, repos_path FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
-                 AND repos_id IS NOT NULL AND repos_path IS NOT NULL \
-                 ORDER BY op_depth DESC LIMIT 1",
+                 AND op_depth = 0 AND repos_id IS NOT NULL AND repos_path IS NOT NULL",
                 params![wc_id, path.as_str()],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
             .map_err(sql_err)?;
-        if let Some(found) = below {
+        if let Some(found) = base {
             return Ok(found);
         }
     }
@@ -87,10 +94,21 @@ impl WcDb {
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .map_err(sql_err)?;
+            let copyfrom: Option<(String, i64)> = c
+                .query_row(
+                    "SELECT repos_path, revision FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+                     AND op_depth > 0 AND repos_path IS NOT NULL AND revision IS NOT NULL \
+                     AND op_depth = (SELECT MAX(op_depth) FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2)",
+                    params![self.wc_id, path.as_str()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(sql_err)?;
             Ok(ReposInfo {
                 repos_root_url: root,
                 repos_uuid: uuid,
                 repos_relpath,
+                copyfrom: copyfrom.and_then(|(p, r)| u64::try_from(r).ok().map(|r| (p, r))),
             })
         })
     }
