@@ -155,6 +155,8 @@ impl RaSession for FakeRaSession {
         cancel.check()?;
         if let Some((cert, prompter)) = &self.cert_check {
             let decision = prompter.confirm_certificate(cert).await;
+            // The prompt can take a long time: honor cancellation before acting on the answer.
+            cancel.check()?;
             // The prompter (the UI) is not a trust boundary: validate against the real failure.
             if decision == CertDecision::Reject || !decision.is_valid_for(&cert.failure) {
                 return Err(SvnError::new(
