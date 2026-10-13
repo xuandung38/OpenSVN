@@ -22,6 +22,8 @@
 //! svn survives a read-modify-write cycle. Marker file *creation* (`.mine`, `.rN`, `.prej`) is
 //! separate and lives with the update/merge code that produces them.
 
+pub mod markers;
+
 use svn_types::{ErrorCode, Result, SvnError};
 
 use crate::skel::{PropPair, Skel, parse_proplist, unparse_proplist};

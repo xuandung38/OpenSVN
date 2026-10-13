@@ -19,6 +19,7 @@ export function Tabs({
   panels,
   label,
   className,
+  keepMounted = false,
 }: {
   tabs: TabDef[];
   value: string;
@@ -27,6 +28,8 @@ export function Tabs({
   panels?: Record<string, ReactNode>;
   label: string;
   className?: string;
+  /** Render every panel (inactive ones hidden) so panel state survives tab switches. */
+  keepMounted?: boolean;
 }) {
   return (
     <T.Root
@@ -60,7 +63,7 @@ export function Tabs({
           forceMount
           className="min-h-0 flex-1 flex-col data-[state=active]:flex data-[state=inactive]:hidden"
         >
-          {t.id === value ? panels?.[t.id] : null}
+          {keepMounted || t.id === value ? panels?.[t.id] : null}
         </T.Content>
       ))}
     </T.Root>
