@@ -1,0 +1,13 @@
+Index: f
+===================================================================
+--- f	(revision 1)
++++ f	(working copy)
+@@ -8,7 +8,7 @@
+ line 7
+ line 8
+ line 9
+-line 10
++LINE TEN
+ line 11
+ line 12
+ line 13

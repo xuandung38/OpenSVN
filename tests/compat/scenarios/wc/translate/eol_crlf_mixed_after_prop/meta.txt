@@ -1,0 +1,10 @@
+svn_version=1.15.0
+prop.svn:eol-style=CRLF
+rev=12
+author=alice
+date_micros=1791884702250420
+utc_offset_secs=0
+url=file:///tmp/opensvn-golden/repo/eol_crlf_mixed_after_prop
+root=file:///tmp/opensvn-golden/repo
+tz=UTC
+path=eol_crlf_mixed_after_prop
