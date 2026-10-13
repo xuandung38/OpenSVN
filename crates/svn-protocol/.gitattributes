@@ -1,0 +1,3 @@
+# Recorded wire traffic is compared byte for byte: never normalize line endings.
+tests/data/** -text
+tests/snapshots/** text eol=lf
