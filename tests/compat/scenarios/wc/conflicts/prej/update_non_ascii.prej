@@ -1,0 +1,9 @@
+Trying to change property 'k'
+but the property has already been locally changed to a different value.
+<<<<<<< (local property value)
+cafe mine
+||||||| (incoming 'changed from' value)
+cafe
+=======
+cafu theirs
+>>>>>>> (incoming 'changed to' value)

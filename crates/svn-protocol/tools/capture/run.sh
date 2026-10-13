@@ -93,6 +93,31 @@ WCL="$WORK/wcl"; svn "${A[@]}" checkout -q $U/trunk "$WCL"
 step lock-wc svn "${A[@]}" lock -m 'from wc' "$WCL/a.txt"
 step unlock-wc svn "${A[@]}" unlock "$WCL/a.txt"
 step unlock-force-unlocked svn "${A[@]}" unlock --force $U/trunk/src/deep/c.cfg
+# --- richer commit / update / blame scenarios ---
+step blame svn "${A[@]}" blame --xml $U/trunk/a.txt
+CW="$WORK/cw"; svn "${A[@]}" checkout -q $U/trunk "$CW"
+svn propset -q svn:eol-style native "$CW/a.txt"; svn propset -q custom:note 'x<y' "$CW/src"
+svn rm -q "$CW/src/b.txt"; svn cp -q "$CW/a.txt" "$CW/copy.txt"
+mkdir "$CW/fresh"; printf 'fresh\n' > "$CW/fresh/f.txt"; printf '' > "$CW/fresh/empty.txt"; svn add -q "$CW/fresh"
+printf 'edited\nlines\n' >> "$CW/docs/../a.txt"
+step commit-full svn "${A[@]}" commit -m 'props, delete, copy, add' "$CW"
+svn "${A[@]}" up -q "$CW" >/dev/null
+svn "${A[@]}" lock -q "$CW/copy.txt" >/dev/null
+echo more >> "$CW/copy.txt"
+step commit-with-lock svn "${A[@]}" commit -m 'edit locked file' "$CW"
+step update-rich svn "${A[@]}" update "$WORK/wc2"
+step update-rich-skelta svn "${A[@]}" --config-option servers:global:http-bulk-updates=no update "$WORK/wc3"
+step switch-trunk svn "${A[@]}" switch $U/trunk "$WORK/wc3"
+step status-u-rich svn "${A[@]}" status -u "$WORK/wc2"
+# mixed working copy: switched subtree, locked file, missing directory, sparse depth
+MW="$WORK/mw"; svn "${A[@]}" checkout -q $U/trunk "$MW"
+svn "${A[@]}" switch -q $U/branches/b1 "$MW/src" >/dev/null 2>&1 || true
+svn "${A[@]}" lock -q "$MW/a.txt" >/dev/null || true
+rm -rf "$MW/docs" "$MW/newdir"
+echo bump >> "$CW/a.txt"; svn "${A[@]}" commit -q -m 'bump for mixed update' "$CW" >/dev/null || true
+step update-mixed svn "${A[@]}" update "$MW"
+SW="$WORK/sw"; svn "${A[@]}" checkout -q --depth immediates $U/trunk "$SW"
+step update-sparse svn "${A[@]}" update --set-depth infinity "$SW/fresh"
 # commit message with control characters: the server sends it base64-encoded (encode-binary-props).
 # (svn refuses control characters in lock comments, so locks cannot be recorded that way.)
 printf 'esc \033[1mbold\033[0m message\n' > "$WORK/esc-msg.txt"

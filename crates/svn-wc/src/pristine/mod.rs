@@ -31,11 +31,6 @@ use md5::Md5;
 use sha1::{Digest, Sha1};
 use svn_types::{ErrorCode, SvnError, rename_replacing};
 
-/// `SvnError::svn_code` of a converted [`PristineError::NotHydrated`]. It lies outside the range
-/// svn itself uses and tells the caller to fetch the text through RA. A dedicated `ErrorCode`
-/// would be cleaner (proposed contract addition).
-pub const NOT_HYDRATED_SVN_CODE: u32 = 900_001;
-
 /// File suffix of stored pristines.
 const SUFFIX: &str = ".svn-base";
 
@@ -187,9 +182,8 @@ pub enum PristineError {
     /// No row (or no file) for this checksum.
     #[error("pristine text {0:?} is not in the store")]
     NotInstalled(Sha1Digest),
-    /// Row exists but the text was dehydrated; it must be fetched from the repository. P11 must
-    /// match this variant before converting to `SvnError` (the conversion carries
-    /// [`NOT_HYDRATED_SVN_CODE`] as a fallback signal).
+    /// Row exists but the text was dehydrated; it must be fetched from the repository. Converts
+    /// to [`ErrorCode::PristineNotHydrated`], which callers use to decide to fetch it through RA.
     #[error("pristine text {0:?} is not hydrated (fetch it from the repository)")]
     NotHydrated(Sha1Digest),
     /// The working copy format only allows reading pristines (format 32).
@@ -198,6 +192,10 @@ pub enum PristineError {
     /// The row exists but its text was dehydrated; re-hydration is not supported in the MVP.
     #[error("pristine text {0:?} is dehydrated and cannot be re-hydrated in this version")]
     RehydrateUnsupported(Sha1Digest),
+    /// A shared helper failed (for example `rename_replacing`); the classification of the
+    /// underlying I/O error (disk full, permission denied, file in use) is kept.
+    #[error(transparent)]
+    Svn(#[from] SvnError),
     /// The database side failed.
     #[error("pristine index: {0}")]
     Index(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -214,12 +212,8 @@ impl From<PristineError> for SvnError {
             PristineError::NotInstalled(_) => {
                 SvnError::new(ErrorCode::Corrupt, err.to_string()).with_svn_code(155_017)
             }
-            // No ErrorCode means "fetch the text from the repository", so the converted error
-            // stays distinguishable through an OpenSVN-private svn_code. P11 should still match
-            // `PristineError::NotHydrated` before converting when it can.
             PristineError::NotHydrated(_) => {
-                SvnError::new(ErrorCode::PathNotFound, err.to_string())
-                    .with_svn_code(NOT_HYDRATED_SVN_CODE)
+                SvnError::new(ErrorCode::PristineNotHydrated, err.to_string())
             }
             PristineError::ReadOnlyFormat | PristineError::RehydrateUnsupported(_) => {
                 SvnError::new(ErrorCode::WcFormatUnsupported, err.to_string())
@@ -229,6 +223,7 @@ impl From<PristineError> for SvnError {
                 ref path,
                 ref source,
             } => SvnError::from_io(format!("{op} '{}'", path.display()), source),
+            PristineError::Svn(e) => e,
             PristineError::Index(_) => SvnError::new(ErrorCode::Internal, err.to_string()),
         }
     }
@@ -379,11 +374,7 @@ impl<I: PristineIndex> PristineStore<I> {
         ));
         // Replaces an orphan file (no row) that may be truncated or damaged; on Windows this
         // clears the read-only attribute and retries sharing violations.
-        rename_replacing(&tmp_path, &dest).map_err(|e| PristineError::Io {
-            op: "rename to",
-            path: dest.clone(),
-            source: std::io::Error::other(e.to_string()),
-        })?;
+        rename_replacing(&tmp_path, &dest)?;
         // A pristine is immutable, like svn leaves it.
         let mut perms = fs::metadata(&dest)
             .map_err(PristineError::io("stat", &dest))?

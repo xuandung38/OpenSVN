@@ -90,7 +90,13 @@ pub trait WorkingCopyOps {
     fn actual_props(&self, relpath: &str) -> Result<BTreeMap<String, Vec<u8>>, WorkQueueError>;
     /// Inputs for `sync-file-flags`; `None` when the node is not a normal/added file.
     fn sync_flags_input(&self, relpath: &str) -> Result<Option<SyncInput>, WorkQueueError>;
-    /// Writes the `.prej` property reject file recorded in the node's conflict data.
+    /// Writes the `.prej` property reject file recorded in the node's conflict data; the text
+    /// comes from `conflicts::prej::prej_text`.
+    ///
+    /// `legacy` is the property conflict skel that svn 1.7 and 1.8 stored in the work item. It
+    /// is not supported: an implementation must fail with a clear error telling the user to
+    /// finish the interrupted operation with `svn cleanup` using the client that created the
+    /// working copy, and must not silently write nothing.
     fn write_prop_reject_file(
         &mut self,
         relpath: &str,
@@ -204,10 +210,10 @@ impl<'a> WorkQueueRunner<'a> {
         resolve_operand(&self.config.wc_root, relpath, false)
     }
 
-    /// Like [`operand`](Self::operand) for read-only SOURCES (`file-install` source,
-    /// `file-translate` source), which may also be a stored pristine text
-    /// (`.svn/pristine/<xx>/<sha1>.svn-base`, as svn 1.14 and TortoiseSVN 1.14 queue them).
-    fn source_operand(&self, relpath: &str) -> Result<PathBuf, WorkQueueError> {
+    /// Like [`operand`](Self::operand) for the `file-translate` source, which may also be a
+    /// stored pristine text (`.svn/pristine/<xx>/<sha1>.svn-base`, as svn 1.14 and
+    /// TortoiseSVN 1.14 queue them). No other operand may name a pristine.
+    fn translate_source_operand(&self, relpath: &str) -> Result<PathBuf, WorkQueueError> {
         resolve_operand(&self.config.wc_root, relpath, true)
     }
 
@@ -306,7 +312,7 @@ impl<'a> WorkQueueRunner<'a> {
         relpath: &str,
     ) -> Result<Box<dyn Read>, WorkQueueError> {
         if let Some(src) = source {
-            let path = self.source_operand(src)?;
+            let path = self.operand(src)?;
             return Ok(Box::new(
                 File::open(&path).map_err(WorkQueueError::io("open", &path))?,
             ));
@@ -369,7 +375,7 @@ impl<'a> WorkQueueRunner<'a> {
     }
 
     fn file_translate(&mut self, local: &str, src: &str, dst: &str) -> Result<(), WorkQueueError> {
-        let (src_abs, dst_abs) = (self.source_operand(src)?, self.operand(dst)?);
+        let (src_abs, dst_abs) = (self.translate_source_operand(src)?, self.operand(dst)?);
         // Keyword values come from the node's database row, but the properties that select the
         // translation are the *actual* ones (`svn_wc__get_translate_info` with props = NULL).
         let info = self.ops.install_info(local)?;
@@ -438,7 +444,8 @@ fn write_atomically(
 /// (no Windows CI).** Elsewhere this is a single `remove_file`.
 fn remove_file_if_present(path: &Path) -> Result<(), WorkQueueError> {
     let mut delay = Duration::from_millis(10);
-    let attempts = if cfg!(windows) { 12 } else { 1 };
+    // Same budget as `rename_replacing` (about ten seconds), like svn's WIN32_RETRY_LOOP.
+    let attempts = if cfg!(windows) { 25 } else { 1 };
     for attempt in 1..=attempts {
         #[cfg(windows)]
         let _ = flags::set_read_write(path);
