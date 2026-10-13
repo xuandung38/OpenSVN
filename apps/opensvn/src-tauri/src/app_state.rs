@@ -12,7 +12,7 @@ use crate::engine::{EngineFacade, OpContext, WcRef};
 use crate::ops::{AppEvents, OperationManager};
 use crate::programs::{ProgramPicker, ProgramService};
 use crate::settings::{SettingsService, system_locale};
-use crate::status::StatusPublisher;
+use crate::status::{StatusPublisher, StatusService, StatusTiming};
 use crate::wc::{ResolvedWc, WcRegistry};
 
 /// Everything needed to build the state; tests substitute the engine, events and dialogs.
@@ -25,6 +25,8 @@ pub struct AppDeps {
     pub events: Arc<dyn AppEvents>,
     /// Native dialogs.
     pub picker: Arc<dyn ProgramPicker>,
+    /// Watcher timing.
+    pub status_timing: StatusTiming,
 }
 
 /// Services shared by all commands. Managed by Tauri and injected as `State<AppState>`.
@@ -43,6 +45,8 @@ pub struct AppState {
     pub wcs: Arc<WcRegistry>,
     /// Status deltas and snapshots.
     pub status: Arc<StatusPublisher>,
+    /// File watchers of open working copies.
+    pub watchers: Arc<StatusService>,
     /// Program settings (native pick and confirm).
     pub programs: ProgramService,
 }
@@ -62,7 +66,9 @@ impl AppState {
             cache,
             Arc::clone(&deps.events),
         ));
+        let watchers = Arc::new(StatusService::new(Arc::clone(&status), deps.status_timing));
         Ok(Self {
+            watchers,
             programs: ProgramService::new(Arc::clone(&settings), deps.picker),
             ops: OperationManager::new(Arc::clone(&deps.events)),
             events: deps.events,

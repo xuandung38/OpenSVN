@@ -15,6 +15,7 @@ use crate::engine::FakeEngine;
 use crate::engine::fake::demo_wc_root;
 use crate::ops::events::{Recorded, RecordingEvents};
 use crate::programs::ProgramPicker;
+use crate::status::StatusTiming;
 
 /// Dialog double with scripted answers.
 #[derive(Default)]
@@ -49,6 +50,11 @@ pub struct Fixture {
 impl Fixture {
     /// App state over the demo fake engine with `delay` per simulated item.
     pub async fn new(delay: Duration) -> Self {
+        Self::with_timing(delay, StatusTiming::default()).await
+    }
+
+    /// Like [`Fixture::new`] with custom watcher timing.
+    pub async fn with_timing(delay: Duration, status_timing: StatusTiming) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let engine = Arc::new(FakeEngine::demo(delay).await.unwrap());
         let events = Arc::new(RecordingEvents::default());
@@ -58,6 +64,7 @@ impl Fixture {
             engine: engine.clone(),
             events: events.clone(),
             picker: picker.clone(),
+            status_timing,
         })
         .unwrap();
         let app = tauri::test::mock_app();

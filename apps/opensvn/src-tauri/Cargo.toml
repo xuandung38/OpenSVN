@@ -39,6 +39,7 @@ async-trait.workspace = true
 bytes.workspace = true
 futures-util = { workspace = true, features = ["std"] }
 rusqlite.workspace = true
+notify.workspace = true
 time = { workspace = true, features = ["std", "formatting"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 thiserror.workspace = true
