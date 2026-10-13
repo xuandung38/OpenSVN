@@ -50,6 +50,7 @@ pub struct GetLocksParser {
     lock: Option<Building>,
     field: Option<String>,
     text: String,
+    failed: bool,
 }
 
 impl GetLocksParser {
@@ -136,13 +137,21 @@ impl ResponseParser for GetLocksParser {
     type Item = LockInfo;
 
     fn feed(&mut self, chunk: &[u8]) -> Result<Vec<LockInfo>> {
-        let events = self.xml.feed(chunk)?;
-        self.run(events)
+        if self.failed {
+            return Err(corrupt("parser used after an error"));
+        }
+        let result = self.xml.feed(chunk).and_then(|events| self.run(events));
+        self.failed = result.is_err();
+        result
     }
 
     fn finish(&mut self) -> Result<Vec<LockInfo>> {
-        let events = self.xml.finish()?;
-        self.run(events)
+        if self.failed {
+            return Err(corrupt("parser used after an error"));
+        }
+        let result = self.xml.finish().and_then(|events| self.run(events));
+        self.failed = result.is_err();
+        result
     }
 }
 

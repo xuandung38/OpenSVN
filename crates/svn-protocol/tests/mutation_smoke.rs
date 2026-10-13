@@ -43,8 +43,6 @@ fn run_all(data: &[u8], split: usize) {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
-
     #[test]
     fn flipped_bytes(idx in 0usize..6, flips in proptest::collection::vec((0usize..65536, any::<u8>()), 1..8), split in 0usize..65536) {
         let mut data = load(CORPUS[idx]).resp_body;
@@ -69,4 +67,21 @@ proptest! {
         data.extend_from_slice(&b[from % (b.len() + 1)..]);
         run_all(&data, split);
     }
+}
+
+#[test]
+fn a_parser_that_failed_stays_failed() {
+    let good = load("log/head-verbose").resp_body;
+    let mut p = LogParser::new();
+    assert!(p.feed(b"<html>").is_err());
+    assert!(p.feed(&good).is_err());
+    assert!(p.finish().is_err());
+
+    let mut p = MultiStatusParser::new();
+    assert!(p.feed(b"<x/>").is_err());
+    assert!(p.finish().is_err());
+
+    let mut p = GetLocksParser::new();
+    assert!(p.feed(b"<x/>").is_err());
+    assert!(p.feed(b"<S:get-locks-report xmlns:S='svn:'/>").is_err());
 }
