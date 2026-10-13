@@ -21,6 +21,23 @@ test.each([
   expect(labels(src).join(",")).toContain(needle);
 });
 
+// Comment markers inside literals are code: a sink on a later line must still be found.
+test.each([
+  ['const g = "src/*";\nel.innerHTML = s;', "innerHTML"],
+  ['<input accept="image/*" />\nel.innerHTML = s;', "innerHTML"],
+  ['const p = "a//b";\nel.innerHTML = s;', "innerHTML"],
+  ["const t = `x /* $" + "{y} // z`;\nel.innerHTML = s;", "innerHTML"],
+  ["const t = `a $" + "{b + `c//d`} /*`;\nel.innerHTML = s;", "innerHTML"],
+  ["const r = /a\\/*b/;\nel.innerHTML = s;", "innerHTML"],
+  ["const r = /[/*]/;\nel.innerHTML = s;", "innerHTML"],
+])("literal with comment markers does not hide later code: %s", (src, needle) => {
+  expect(labels(src).join(",")).toContain(needle);
+});
+
+test("real comments are still ignored, including multi-line blocks", () => {
+  expect(labels("/*\n el.innerHTML = s;\n*/\nconst ok = 1; // el.innerHTML")).toEqual([]);
+});
+
 test("does not flag comments or safe code", () => {
   expect(labels("// innerHTML is forbidden here")).toEqual([]);
   expect(labels("/* eval\n * Function(\n */\nconst a = 1;")).toEqual([]);

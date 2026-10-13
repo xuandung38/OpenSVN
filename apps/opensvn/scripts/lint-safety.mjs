@@ -29,23 +29,94 @@ export const RULES = [
   [/createElement\s*\(\s*["'`](iframe|object|embed)["'`]/i, "createElement(iframe/object/embed)"],
 ];
 
-/** Removes comments but keeps code on the same line (so `x(); // note` is still scanned). */
-export function stripComments(line, state) {
+/**
+ * Returns `text` with comments blanked out (newlines kept, so line numbers stay valid). Quote-aware:
+ * `/*` or `//` inside string, template or regex literals is code, not a comment. String contents are
+ * kept on purpose because some rules match string arguments (e.g. createElement("iframe")).
+ */
+export function stripComments(text) {
   let out = "";
   let i = 0;
-  while (i < line.length) {
-    if (state.inBlock) {
-      const end = line.indexOf("*/", i);
-      if (end === -1) return out;
-      state.inBlock = false;
-      i = end + 2;
-    } else if (line.startsWith("/*", i)) {
-      state.inBlock = true;
+  let prev = ""; // last significant (non-space) code character, to tell regex from division
+  const templateDepths = []; // brace depth at which each open `${` expression returns to template
+  let braces = 0;
+  const n = text.length;
+
+  const readQuoted = (quote) => {
+    out += text[i++];
+    while (i < n && text[i] !== quote) {
+      if (text[i] === "\\" && i + 1 < n) out += text[i++];
+      if (quote !== "`" && text[i] === "\n") break; // unterminated: do not swallow the file
+      if (quote === "`" && text[i] === "$" && text[i + 1] === "{") {
+        out += "${";
+        i += 2;
+        templateDepths.push(braces);
+        braces++;
+        return "expr";
+      }
+      out += text[i++];
+    }
+    if (i < n && text[i] === quote) out += text[i++];
+    prev = quote;
+    return "done";
+  };
+  const resumeTemplate = () => {
+    // Called right after the `}` that closes a `${...}`: continue reading the template string.
+    while (i < n && text[i] !== "`") {
+      if (text[i] === "\\" && i + 1 < n) out += text[i++];
+      if (text[i] === "$" && text[i + 1] === "{") {
+        out += "${";
+        i += 2;
+        templateDepths.push(braces);
+        braces++;
+        return;
+      }
+      out += text[i++];
+    }
+    if (i < n) out += text[i++];
+    prev = "`";
+  };
+
+  while (i < n) {
+    const c = text[i];
+    const d = text[i + 1];
+    if (c === "/" && d === "/") {
+      while (i < n && text[i] !== "\n") i++;
+    } else if (c === "/" && d === "*") {
       i += 2;
-    } else if (line.startsWith("//", i) && line[i - 1] !== ":") {
-      return out;
+      while (i < n && !(text[i] === "*" && text[i + 1] === "/")) {
+        if (text[i] === "\n") out += "\n";
+        i++;
+      }
+      i += 2;
+      out += " ";
+    } else if (c === '"' || c === "'" || c === "`") {
+      readQuoted(c);
+    } else if (c === "/" && (prev === "" || "(,=:[!&|?{};+-*%<>~^".includes(prev))) {
+      // Regex literal: copy through the closing slash (slashes inside [...] do not close it).
+      out += text[i++];
+      let inClass = false;
+      while (i < n && text[i] !== "\n" && (inClass || text[i] !== "/")) {
+        if (text[i] === "\\" && i + 1 < n) out += text[i++];
+        else if (text[i] === "[") inClass = true;
+        else if (text[i] === "]") inClass = false;
+        out += text[i++];
+      }
+      if (i < n && text[i] === "/") out += text[i++];
+      prev = "/";
     } else {
-      out += line[i++];
+      if (c === "{") braces++;
+      if (c === "}") {
+        braces--;
+        if (templateDepths.length > 0 && templateDepths[templateDepths.length - 1] === braces) {
+          templateDepths.pop();
+          out += text[i++];
+          resumeTemplate();
+          continue;
+        }
+      }
+      if (!/\s/.test(c)) prev = c;
+      out += text[i++];
     }
   }
   return out;
@@ -53,11 +124,11 @@ export function stripComments(line, state) {
 
 export function scan(text) {
   const hits = [];
-  const state = { inBlock: false };
-  text.split("\n").forEach((raw, i) => {
-    const line = stripComments(raw, state);
-    for (const [re, label] of RULES) if (re.test(line)) hits.push([i + 1, label]);
-  });
+  stripComments(text)
+    .split("\n")
+    .forEach((line, i) => {
+      for (const [re, label] of RULES) if (re.test(line)) hits.push([i + 1, label]);
+    });
   return hits;
 }
 

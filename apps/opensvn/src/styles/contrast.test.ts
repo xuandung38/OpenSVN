@@ -13,6 +13,16 @@ function tokens(theme: "light" | "dark"): Record<string, string> {
   ) as Record<string, string>;
 }
 
+/** Dark values declared inside `@media (prefers-color-scheme: dark)` (system theme). */
+function mediaDarkTokens(): Record<string, string> {
+  const start = css.indexOf("@media (prefers-color-scheme: dark)");
+  const open = css.indexOf("{", css.indexOf("{", start) + 1);
+  const body = css.slice(open + 1, css.indexOf("}", open));
+  return Object.fromEntries(
+    [...body.matchAll(/--([\w-]+):\s*(#[0-9a-fA-F]{6})\s*;/g)].map((m) => [m[1], m[2]]),
+  ) as Record<string, string>;
+}
+
 function lum(hex: string): number {
   const c = [1, 3, 5].map((i) => Number.parseInt(hex.slice(i, i + 2), 16) / 255);
   const [r, g, b] = c.map((x) => (x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4)) as [
@@ -62,3 +72,9 @@ for (const theme of ["light", "dark"] as const) {
     }
   });
 }
+
+test("system-dark (@media) and forced-dark ([data-theme=dark]) blocks declare identical colour tokens", () => {
+  const media = mediaDarkTokens();
+  expect(Object.keys(media).length).toBeGreaterThan(10);
+  expect(media).toEqual(tokens("dark"));
+});

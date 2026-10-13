@@ -195,7 +195,7 @@ Icon UI dùng bộ **lucide** (stroke 1.5–2px, 16px trong list, 18px trong too
 ## 10. Lịch sử thay đổi
 | Ngày | Phiên bản | Thay đổi |
 |---|---|---|
-| 2026-10-13 | v1.1 | PO chọn phương án A về tương phản: giữ nguyên hex v1; thêm `--on-accent/--on-bad/--on-warn` (dark = `--bg`; on-warn light = đen), biến thể chữ `--*-text`, `--overlay`; bảng tỉ lệ WCAG; ghi chú dịch class shadcn |
+| 2026-10-13 | v1.1 | Tương phản: PO duyệt phương án A (giữ nguyên hex v1; thêm `--on-accent/--on-bad/--on-warn`, dark = `#0f141b`). Biến thể chữ `--*-text`, `--overlay`, bảng tỉ lệ WCAG, ghi chú dịch class shadcn. **Chờ PO xác nhận:** `--on-warn` light = `#000` (lead/dev chọn trong khuôn A vì `#fff` chỉ đạt 4.24 trên `--warn`) và các giá trị `--*-text` cụ thể |
 | 2026-10-13 | v1 (tạm chốt) | Token màu 2 theme, chữ IBM Plex, component cửa sổ chính, dialog, sheet Conflict resolver & Settings, glyph trạng thái, quy ước nền tảng; toolbar Branch ▾ / Location ▾ hai chế độ (SVN không có branch/tag thật) |
 
 ## Câu hỏi còn mở
