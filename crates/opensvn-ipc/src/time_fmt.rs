@@ -13,6 +13,11 @@ pub fn micros_to_iso(micros: i64) -> Option<String> {
         .ok()
 }
 
+/// Engine timestamp -> ISO-8601 UTC string; out-of-range values fall back to the Unix epoch.
+pub fn timestamp_to_iso(ts: svn_types::Timestamp) -> String {
+    micros_to_iso(ts.0).unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -23,6 +28,18 @@ mod tests {
         assert_eq!(
             micros_to_iso(1_760_000_000_123_456).as_deref(),
             Some("2025-10-09T08:53:20.123456Z")
+        );
+    }
+
+    #[test]
+    fn timestamp_wrapper_and_fallback() {
+        assert_eq!(
+            timestamp_to_iso(svn_types::Timestamp(1_000_000)),
+            "1970-01-01T00:00:01Z"
+        );
+        assert_eq!(
+            timestamp_to_iso(svn_types::Timestamp(i64::MAX)),
+            "1970-01-01T00:00:00Z"
         );
     }
 

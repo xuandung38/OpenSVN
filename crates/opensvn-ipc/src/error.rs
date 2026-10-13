@@ -3,64 +3,7 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-/// Engine-side error code. Mirrors the engine contract's `ErrorCode` variant list one-to-one so
-/// that swapping this alias for the engine type is a one-line change.
-pub use self::engine_codes::{ALL as ALL_SVN_ERROR_CODES, SvnErrorCode};
-
-mod engine_codes {
-    /// Local copy of the engine error code list, used until the shared types crate is wired in.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum SvnErrorCode {
-        Network,
-        Timeout,
-        AuthRequired,
-        Forbidden,
-        TlsUntrusted,
-        OutOfDate,
-        LockedByOther,
-        LockTokenInvalid,
-        WcBusy,
-        WcNeedsCleanup,
-        WcFormatUnsupported,
-        NotAWorkingCopy,
-        ConflictBlocksCommit,
-        PathNotFound,
-        UnsafePath,
-        DiskFull,
-        PermissionDenied,
-        FileInUse,
-        Cancelled,
-        Corrupt,
-        ServerUnsupported,
-        Internal,
-    }
-
-    /// Every engine code, for exhaustive tests.
-    pub const ALL: &[SvnErrorCode] = &[
-        SvnErrorCode::Network,
-        SvnErrorCode::Timeout,
-        SvnErrorCode::AuthRequired,
-        SvnErrorCode::Forbidden,
-        SvnErrorCode::TlsUntrusted,
-        SvnErrorCode::OutOfDate,
-        SvnErrorCode::LockedByOther,
-        SvnErrorCode::LockTokenInvalid,
-        SvnErrorCode::WcBusy,
-        SvnErrorCode::WcNeedsCleanup,
-        SvnErrorCode::WcFormatUnsupported,
-        SvnErrorCode::NotAWorkingCopy,
-        SvnErrorCode::ConflictBlocksCommit,
-        SvnErrorCode::PathNotFound,
-        SvnErrorCode::UnsafePath,
-        SvnErrorCode::DiskFull,
-        SvnErrorCode::PermissionDenied,
-        SvnErrorCode::FileInUse,
-        SvnErrorCode::Cancelled,
-        SvnErrorCode::Corrupt,
-        SvnErrorCode::ServerUnsupported,
-        SvnErrorCode::Internal,
-    ];
-}
+use svn_types::{ErrorCode as SvnErrorCode, SvnError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "kebab-case")]
@@ -148,6 +91,26 @@ impl AppError {
     pub fn with_path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
         self
+    }
+}
+
+impl From<&SvnError> for AppError {
+    /// Maps an engine error: `detail` carries the svn code (`E160028`) and the cause chain.
+    fn from(err: &SvnError) -> Self {
+        let mut out = AppError::from_code(err.code, err.message.clone());
+        let mut parts = Vec::new();
+        let mut cur = Some(err);
+        while let Some(e) = cur {
+            match e.svn_code {
+                Some(code) => parts.push(format!("E{code:06}: {}", e.message)),
+                None => parts.push(e.message.clone()),
+            }
+            cur = e.child.as_deref();
+        }
+        if parts.iter().any(|p| p.starts_with('E')) || parts.len() > 1 {
+            out.detail = Some(parts.join(" <- "));
+        }
+        out
     }
 }
 

@@ -1,3 +1,5 @@
+#![allow(missing_docs, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use opensvn_ipc::*;
 use serde_json::json;
 

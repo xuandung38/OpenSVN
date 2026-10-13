@@ -4,9 +4,10 @@
 include!("src/command_names.rs");
 
 fn main() {
-    tauri_build::try_build(
-        tauri_build::Attributes::new()
-            .app_manifest(tauri_build::AppManifest::new().commands(COMMAND_NAMES)),
-    )
-    .expect("failed to run tauri-build");
+    let attributes = tauri_build::Attributes::new()
+        .app_manifest(tauri_build::AppManifest::new().commands(COMMAND_NAMES));
+    if let Err(e) = tauri_build::try_build(attributes) {
+        eprintln!("tauri-build failed: {e:#}");
+        std::process::exit(1);
+    }
 }
