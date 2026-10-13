@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-props-set"
+description = "Enables the props_set command without any pre-configured scope."
+commands.allow = ["props_set"]
+
+[[permission]]
+identifier = "deny-props-set"
+description = "Denies the props_set command without any pre-configured scope."
+commands.deny = ["props_set"]

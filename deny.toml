@@ -6,7 +6,12 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+# Unmaintained notices (no known vulnerability), both build-time proc-macros reachable only
+# through the pinned UI stack; remove when specta / the Tauri GTK3 backend drop them.
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste: proc-macro used by specta 2.0.0-rc.25; no exploitable code at runtime" },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: proc-macro used by gtk3-rs macros (Tauri Linux backend); no runtime code" },
+]
 
 [licenses]
 version = 2

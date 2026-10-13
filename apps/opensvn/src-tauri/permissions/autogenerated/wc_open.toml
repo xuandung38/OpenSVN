@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wc-open"
+description = "Enables the wc_open command without any pre-configured scope."
+commands.allow = ["wc_open"]
+
+[[permission]]
+identifier = "deny-wc-open"
+description = "Denies the wc_open command without any pre-configured scope."
+commands.deny = ["wc_open"]
