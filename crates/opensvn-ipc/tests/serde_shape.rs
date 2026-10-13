@@ -111,3 +111,22 @@ fn proxy_setting_shape() {
         json!({"mode":"system"})
     );
 }
+
+#[test]
+fn password_is_redacted_in_debug_but_plain_on_the_wire() {
+    let r: AuthResponse = serde_json::from_value(
+        json!({"kind":"credentials","username":"alice","password":"hunter2","save":true}),
+    )
+    .unwrap();
+    let dbg = format!("{r:?}");
+    assert!(!dbg.contains("hunter2"), "{dbg}");
+    assert!(dbg.contains("alice"));
+    match &r {
+        AuthResponse::Credentials { password, .. } => assert_eq!(password.expose(), "hunter2"),
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_value(&r).unwrap()["password"],
+        json!("hunter2")
+    );
+}

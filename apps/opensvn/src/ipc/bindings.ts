@@ -105,7 +105,7 @@ export type AuthPromptEvent = AuthPrompt;
 export type AuthPromptKind = "credentials" | "certificate";
 
 /**  Response of `auth_respond`'s input (answer to an `auth://prompt`). */
-export type AuthResponse = { kind: "credentials"; username: string; password: string; save: boolean } | { kind: "certificate"; decision: CertDecision } | { kind: "cancel" };
+export type AuthResponse = { kind: "credentials"; username: string; password: SecretText; save: boolean } | { kind: "certificate"; decision: CertDecision } | { kind: "cancel" };
 
 export type Banner = {
 	wcId: WcId,
@@ -479,6 +479,12 @@ export type RevisionChanged = {
 	baseRev: Rev,
 	revRange: [Rev, Rev] | null,
 };
+
+/**
+ *  Text that must never reach logs: `Debug` prints a fixed placeholder. On the wire it is a
+ *  plain JSON string. Convert to the engine's secret type as soon as it crosses into Rust.
+ */
+export type SecretText = string;
 
 /**  All settings with their effective values. */
 export type Settings = {

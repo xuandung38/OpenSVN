@@ -6,3 +6,4 @@
 /crates/svn-ra-api/        @xuandung38
 /crates/opensvn-ipc/       @xuandung38
 /crates/svn-ra/src/lib.rs  @xuandung38
+/.gitattributes     @xuandung38

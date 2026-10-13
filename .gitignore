@@ -21,3 +21,4 @@ dist/
 
 # Tauri generated
 apps/opensvn/src-tauri/gen/
+
