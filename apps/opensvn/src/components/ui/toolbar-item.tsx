@@ -30,11 +30,11 @@ export function ToolbarItem({
       )}
       {...rest}
     >
-      <span className={cn("w-[18px] font-mono text-muted", busy && "spin")} aria-hidden="true">
+      <span className={cn("w-[18px] font-mono text-muted-text", busy && "spin")} aria-hidden="true">
         {icon}
       </span>
       <span className="flex flex-col">
-        <small className="text-[11px] text-muted">{label}</small>
+        <small className="text-[11px] text-muted-text">{label}</small>
         <b className="font-semibold">
           {value}
           {badge && (

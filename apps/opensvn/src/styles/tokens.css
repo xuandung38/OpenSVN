@@ -35,7 +35,14 @@
   /* Text on solid accent/danger/warning fills. Kept as tokens so a contrast fix is a single edit here. */
   --on-accent: #ffffff;
   --on-bad: #ffffff;
-  --on-warn: #ffffff;
+  --on-warn: #000000;
+  /* Text-only variants: same hue as the fill token but >= 4.5:1 on every surface they appear on. */
+  --muted-text: #5a677a;
+  --accent-text: #2362cf;
+  --ok-text: #1a7541;
+  --warn-text: #965900;
+  --bad-text: #ba3930;
+  --info-text: #6a4bc4;
   --overlay: rgba(10, 18, 30, 0.35);
 
   --f-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -64,6 +71,16 @@
     --add-bg: #16301f;
     --del-bg: #3a1b1a;
     --shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+    /* Text on solid fills is the dark page colour (>= 6.3:1); text-only variants as in light. */
+    --on-accent: #0f141b;
+    --on-bad: #0f141b;
+    --on-warn: #0f141b;
+    --muted-text: #93a1b5;
+    --accent-text: #6ea0f5;
+    --ok-text: #4cc27e;
+    --warn-text: #e6a23c;
+    --bad-text: #f17d75;
+    --info-text: #a991f1;
     color-scheme: dark;
   }
 }
@@ -87,5 +104,15 @@
   --add-bg: #16301f;
   --del-bg: #3a1b1a;
   --shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  /* Text on solid fills is the dark page colour (>= 6.3:1); text-only variants as in light. */
+  --on-accent: #0f141b;
+  --on-bad: #0f141b;
+  --on-warn: #0f141b;
+  --muted-text: #93a1b5;
+  --accent-text: #6ea0f5;
+  --ok-text: #4cc27e;
+  --warn-text: #e6a23c;
+  --bad-text: #f17d75;
+  --info-text: #a991f1;
   color-scheme: dark;
 }

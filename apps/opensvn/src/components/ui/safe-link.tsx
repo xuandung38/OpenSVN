@@ -37,7 +37,7 @@ export function SafeLink({
       onAuxClick={(e) => e.preventDefault()}
       draggable={false}
       rel="noopener noreferrer"
-      className={className ?? "text-accent underline"}
+      className={className ?? "text-accent-text underline"}
     >
       {children}
     </a>

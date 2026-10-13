@@ -22,7 +22,7 @@ export function Popover({ trigger, children }: { trigger: ReactNode; children: R
 /** Eyebrow group label inside a popover list. */
 export function PopoverGroup({ children }: { children: ReactNode }) {
   return (
-    <div className="px-1.5 pt-1.5 text-[10px] font-medium tracking-[.07em] text-muted uppercase">
+    <div className="px-1.5 pt-1.5 text-[10px] font-medium tracking-[.07em] text-muted-text uppercase">
       {children}
     </div>
   );

@@ -9,7 +9,7 @@ export function LockBadge({ owner, className }: { owner: "me" | "other"; classNa
       title={label}
       className={cn(
         "inline-flex items-center gap-1 text-[11px]",
-        owner === "me" ? "text-accent" : "text-bad",
+        owner === "me" ? "text-accent-text" : "text-bad-text",
         className,
       )}
     >

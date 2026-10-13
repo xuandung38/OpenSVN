@@ -28,7 +28,9 @@ const CODES: StatusCode[] = ["M", "A", "D", "R", "?", "!", "C"];
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="flex flex-col gap-2 border-b border-line pb-4">
-      <h2 className="m-0 text-[10px] font-medium tracking-[.07em] text-muted uppercase">{title}</h2>
+      <h2 className="m-0 text-[10px] font-medium tracking-[.07em] text-muted-text uppercase">
+        {title}
+      </h2>
       {children}
     </section>
   );
@@ -157,7 +159,7 @@ function AllComponents() {
           <ContextMenu
             entries={[{ label: "Show in file manager" }, "separator", { label: "Copy path" }]}
           >
-            <div className="rounded-md border border-dashed border-line px-3 py-1.5 text-muted">
+            <div className="rounded-md border border-dashed border-line px-3 py-1.5 text-muted-text">
               Right-click here
             </div>
           </ContextMenu>

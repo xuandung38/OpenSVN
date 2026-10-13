@@ -53,7 +53,7 @@ export function AppShell() {
           }`}
         >
           <span>{w.name}</span>
-          <span className="font-mono text-[11px] text-muted">r{w.baseRev}</span>
+          <span className="font-mono text-[11px] text-muted-text">r{w.baseRev}</span>
         </button>
       ))}
     </Popover>

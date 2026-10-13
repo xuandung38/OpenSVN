@@ -2,12 +2,12 @@ import { cn } from "../../lib/cn";
 import { STATUS_LABEL, type StatusCode } from "../../lib/status";
 
 const COLOR: Record<StatusCode, string> = {
-  M: "text-warn",
-  A: "text-ok",
-  D: "text-bad",
-  R: "text-info",
-  "?": "text-muted",
-  "!": "text-bad",
+  M: "text-warn-text",
+  A: "text-ok-text",
+  D: "text-bad-text",
+  R: "text-info-text",
+  "?": "text-muted-text",
+  "!": "text-bad-text",
   C: "bg-warn text-on-warn rounded-[4px]",
 };
 
