@@ -18,10 +18,12 @@
 //! completes the files later.
 
 use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use svn_types::{ErrorCode, RelPath, SvnError, safe_join};
 
+use crate::translate::{ContentTranslator, TranslateInfo, special, translate_stream};
 use crate::workqueue::WorkItem;
 
 /// Name of the property reject file inside a directory (`SVN_WC__THIS_DIR_PREJ`).
@@ -48,35 +50,66 @@ pub fn path_extension(path: &str) -> &str {
     }
 }
 
-/// `svn_cstring_match_glob_list` (fnmatch with `*`, `?`, `[...]` ranges, case sensitive).
+/// Parses the inside of a `[...]` set (after the `[`): returns whether it is negated, the
+/// inclusive byte ranges, and the pattern after the closing `]`. A backslash escapes the next
+/// byte; the first `]` right after the opening (or after `!`/`^`) is a literal.
+fn parse_bracket(rest: &[u8]) -> Option<(bool, Vec<(u8, u8)>, &[u8])> {
+    let (negate, mut i) = match rest.first() {
+        Some(b'!' | b'^') => (true, 1),
+        _ => (false, 0),
+    };
+    let mut items = Vec::new();
+    let mut first = true;
+    while i < rest.len() {
+        let mut c = rest[i];
+        if c == b']' && !first {
+            return Some((negate, items, &rest[i + 1..]));
+        }
+        first = false;
+        if c == b'\\' && i + 1 < rest.len() {
+            i += 1;
+            c = rest[i];
+        }
+        i += 1;
+        if i + 1 < rest.len() && rest[i] == b'-' && rest[i + 1] != b']' {
+            let mut hi = rest[i + 1];
+            i += 2;
+            if hi == b'\\' && i < rest.len() {
+                hi = rest[i];
+                i += 1;
+            }
+            items.push((c, hi));
+        } else {
+            items.push((c, c));
+        }
+    }
+    None
+}
+
+/// `svn_cstring_match_glob_list` (`apr_fnmatch` with flags 0: `*`, `?`, `[...]` with ranges and
+/// negation, backslash escapes, case sensitive).
 fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
     match pattern.split_first() {
         None => text.is_empty(),
         Some((b'*', rest)) => (0..=text.len()).any(|i| glob_match(rest, &text[i..])),
         Some((b'?', rest)) => text.split_first().is_some_and(|(_, t)| glob_match(rest, t)),
+        // `\x` matches the literal `x` (apr_fnmatch without APR_FNM_NOESCAPE). A trailing lone
+        // backslash matches itself.
+        Some((b'\\', rest)) => match rest.split_first() {
+            Some((&escaped, after)) => {
+                text.first() == Some(&escaped) && glob_match(after, &text[1..])
+            }
+            None => text == b"\\",
+        },
         Some((b'[', rest)) => {
-            let Some(close) = rest.iter().skip(1).position(|b| *b == b']').map(|i| i + 1) else {
+            let Some((negate, items, after)) = parse_bracket(rest) else {
+                // No closing ']': '[' is an ordinary character.
                 return text.first() == Some(&b'[') && glob_match(rest, &text[1..]);
             };
-            let (set, after) = (&rest[..close], &rest[close + 1..]);
             let Some((&c, t)) = text.split_first() else {
                 return false;
             };
-            let (negate, set) = match set.split_first() {
-                Some((b'!' | b'^', s)) => (true, s),
-                _ => (false, set),
-            };
-            let mut hit = false;
-            let mut i = 0;
-            while i < set.len() {
-                if i + 2 < set.len() && set[i + 1] == b'-' {
-                    hit |= (set[i]..=set[i + 2]).contains(&c);
-                    i += 3;
-                } else {
-                    hit |= set[i] == c;
-                    i += 1;
-                }
-            }
+            let hit = items.iter().any(|&(lo, hi)| (lo..=hi).contains(&c));
             hit != negate && glob_match(after, t)
         }
         Some((&p, rest)) => text.first() == Some(&p) && glob_match(rest, &text[1..]),
@@ -107,6 +140,10 @@ fn with_ext(label: String, ext: &str) -> String {
 }
 
 /// Suffixes appended to the file name of the three text conflict markers.
+///
+/// Intentional difference from localized svn: `libsvn_client/merge.c` runs the merge labels
+/// through gettext (`ja.po` even drops the preserved extension), so real svn output varies per
+/// machine. OpenSVN always uses the C-locale names below, like the `$Date$` text in `translate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextMarkerLabels {
     /// Common ancestor (`.r<OLD>` / `.merge-left.r<N>`).
@@ -201,13 +238,18 @@ fn abs_dir(wc_root: &Path, relpath: &str) -> Result<PathBuf, SvnError> {
     Ok(dir)
 }
 
-/// A source file for a marker. svn requires work item paths below the working copy root, so
-/// files outside it are staged into `<wc>/.svn/tmp` first and removed by a trailing work item.
+/// A source file (original or incoming text) for a text marker.
+///
+/// svn requires work item paths below the working copy root, so files elsewhere are staged into
+/// `<wc>/.svn/tmp` first and removed by a trailing work item.
 #[derive(Debug, Clone)]
 pub enum MarkerSource {
-    /// A file below the working copy root, as a relpath.
+    /// A path the work queue runner accepts as a read-only source: a working copy relpath,
+    /// `.svn/tmp/<name>`, or (svn 1.14 style) `.svn/pristine/<xx>/<sha1>.svn-base`. It is only
+    /// ever read, never removed.
     InWc(String),
-    /// A file anywhere (for example in the system temp directory).
+    /// A file anywhere (for example in the system temp directory); it is copied into
+    /// `.svn/tmp` and the copy is removed by a queued `file-remove`.
     External(PathBuf),
 }
 
@@ -221,23 +263,99 @@ pub struct TextMarkers {
     pub work_items: Vec<WorkItem>,
 }
 
+fn queue_err(e: &crate::workqueue::WorkQueueError) -> SvnError {
+    SvnError::new(ErrorCode::UnsafePath, e.to_string())
+}
+
+/// Copies `source` (or an external file) into a fresh `.svn/tmp/marker-*` file; returns its relpath.
+fn stage_into_tmp(
+    wc_root: &Path,
+    fill: impl FnOnce(&mut fs::File) -> Result<(), SvnError>,
+) -> Result<String, SvnError> {
+    let tmp_dir = wc_root.join(crate::db::ADM_DIR).join("tmp");
+    fs::create_dir_all(&tmp_dir).map_err(|e| io_err("create directory", &tmp_dir, &e))?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix("marker-")
+        .tempfile_in(&tmp_dir)
+        .map_err(|e| io_err("create temp file in", &tmp_dir, &e))?;
+    fill(tmp.as_file_mut())?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(|e| io_err("sync", tmp.path(), &e))?;
+    let staged = tmp
+        .into_temp_path()
+        .keep()
+        .map_err(|e| io_err("keep", &tmp_dir, &e.error))?;
+    Ok(format!(
+        "{}/tmp/{}",
+        crate::db::ADM_DIR,
+        staged
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ))
+}
+
+/// Writes the working file at `local_relpath` in repository-normal form (`detranslate_wc_file`
+/// with repair) into a fresh `.svn/tmp` file and returns its relpath. A symlink is saved as
+/// `link <target>`.
+fn stage_detranslated_working_file(
+    wc_root: &Path,
+    local_relpath: &str,
+    info: &TranslateInfo,
+) -> Result<String, SvnError> {
+    let working = crate::workqueue::paths::resolve_wc_path(wc_root, local_relpath)
+        .map_err(|e| queue_err(&e))?;
+    let meta = fs::symlink_metadata(&working).map_err(|e| io_err("stat", &working, &e))?;
+    stage_into_tmp(wc_root, |out| {
+        if meta.file_type().is_symlink() {
+            let text = special::read_repo_normal(&working)?;
+            out.write_all(&text)
+                .map_err(|e| io_err("write", &working, &e))
+        } else {
+            let mut input = fs::File::open(&working).map_err(|e| io_err("open", &working, &e))?;
+            let translator = ContentTranslator::to_repo_normal(info, true)?;
+            translate_stream(&mut input, out, translator)?;
+            Ok(())
+        }
+    })
+}
+
 /// Creates the three empty text conflict marker files next to `local_relpath` and returns the
 /// work items that copy (with keyword expansion and local line endings) the original, incoming
-/// and detranslated working versions into them, like `preserve_pre_merge_files`.
+/// and working versions into them, like `preserve_pre_merge_files`.
 ///
-/// `detranslated_target` is the working file in repository-normal form; it is removed by a work
-/// item after the copy. Translation inputs of the markers come from `local_relpath`'s properties
-/// at run time (`file-translate`).
+/// This function does the detranslation staging itself: the working file is converted to
+/// repository-normal form with `working_props` and written to a fresh `.svn/tmp/marker-*` file,
+/// and the queued `file-remove` only ever names that staged temp (and staged copies of
+/// [`MarkerSource::External`] files). It can therefore never queue the removal of the user's
+/// working file or of any other working copy path. `working_props` selects the old/new property
+/// combination to detranslate with (`detranslate_wc_file` cases I-IV are the caller's decision).
+///
+/// # Partial failure
+/// Marker files are created exclusively and empty first, in svn's order. If a later step fails,
+/// the empty markers already created stay behind as orphans, exactly as in svn; nothing
+/// references them and unique naming skips them next time.
+///
+/// # Intentional difference from localized svn
+/// The label suffixes are always the C-locale names (see [`TextMarkerLabels`]).
 pub fn create_text_markers(
     wc_root: &Path,
     local_relpath: &str,
     labels: &TextMarkerLabels,
     original: &MarkerSource,
     their: &MarkerSource,
-    detranslated_target: &MarkerSource,
+    working_props: &TranslateInfo,
 ) -> Result<TextMarkers, SvnError> {
     let (parent, name) = split(local_relpath);
     let dir = abs_dir(wc_root, parent)?;
+    // Validate sources before creating anything.
+    for source in [original, their] {
+        if let MarkerSource::InWc(rel) = source {
+            crate::workqueue::paths::resolve_operand(wc_root, rel, true)
+                .map_err(|e| queue_err(&e))?;
+        }
+    }
     let created = [&labels.original, &labels.their, &labels.mine]
         .map(|label| create_unique_file(&dir, name, label).map(|p| marker_relpath(parent, &p)));
     let [original_marker, their_marker, mine_marker] = created;
@@ -249,25 +367,12 @@ pub fn create_text_markers(
         match source {
             MarkerSource::InWc(rel) => Ok(rel.clone()),
             MarkerSource::External(path) => {
-                let tmp_dir = wc_root.join(crate::db::ADM_DIR).join("tmp");
-                fs::create_dir_all(&tmp_dir)
-                    .map_err(|e| io_err("create directory", &tmp_dir, &e))?;
-                let staged = tempfile::Builder::new()
-                    .prefix("marker-")
-                    .tempfile_in(&tmp_dir)
-                    .map_err(|e| io_err("create temp file in", &tmp_dir, &e))?
-                    .into_temp_path()
-                    .keep()
-                    .map_err(|e| io_err("keep", &tmp_dir, &e.error))?;
-                fs::copy(path, &staged).map_err(|e| io_err("copy", path, &e))?;
-                let rel = format!(
-                    "{}/tmp/{}",
-                    crate::db::ADM_DIR,
-                    staged
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default()
-                );
+                let rel = stage_into_tmp(wc_root, |out| {
+                    let mut input = fs::File::open(path).map_err(|e| io_err("open", path, &e))?;
+                    std::io::copy(&mut input, out)
+                        .map(|_| ())
+                        .map_err(|e| io_err("copy", path, &e))
+                })?;
                 staged_removals.push(WorkItem::FileRemove {
                     relpath: rel.clone(),
                 });
@@ -277,12 +382,7 @@ pub fn create_text_markers(
     };
     let original_src = stage(original)?;
     let their_src = stage(their)?;
-    let target_src = match detranslated_target {
-        MarkerSource::InWc(rel) => rel.clone(),
-        MarkerSource::External(_) => stage(detranslated_target)?,
-    };
-    // The detranslated working copy is a temporary of the caller; svn removes it after copying.
-    let remove_target = matches!(detranslated_target, MarkerSource::InWc(_));
+    let target_src = stage_detranslated_working_file(wc_root, local_relpath, working_props)?;
     let local = local_relpath.to_string();
     let mut work_items = vec![
         WorkItem::FileTranslate {
@@ -300,13 +400,11 @@ pub fn create_text_markers(
             src: target_src.clone(),
             dst: mine_marker.clone(),
         },
-    ];
-    if remove_target {
-        work_items.push(WorkItem::FileRemove {
+        WorkItem::FileRemove {
             relpath: target_src,
-        });
-    }
-    // Staged external copies are removed last (including the target copy staged above).
+        },
+    ];
+    // Staged copies of external files go last, like `last_items` in svn.
     work_items.extend(staged_removals);
     Ok(TextMarkers {
         conflict: super::TextConflict {
