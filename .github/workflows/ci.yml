@@ -57,6 +57,12 @@ jobs:
       - name: Test svn-wc with failpoints
         if: runner.os == 'Linux'
         run: cargo test -p svn-wc --features failpoints --locked
+      # The real engine is behind a feature, so the workspace runs above never compile it.
+      - name: Lint and test the app with the real engine
+        if: runner.os == 'Linux'
+        run: |
+          cargo clippy -p opensvn --features real-engine --all-targets --locked -- -D warnings
+          cargo test -p opensvn --features real-engine --locked
 
   deny:
     name: cargo-deny

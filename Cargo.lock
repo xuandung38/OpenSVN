@@ -3561,6 +3561,7 @@ dependencies = [
  "sha1",
  "specta",
  "specta-typescript",
+ "svn-client",
  "svn-delta",
  "svn-diff",
  "svn-ra",
