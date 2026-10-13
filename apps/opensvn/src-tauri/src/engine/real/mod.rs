@@ -4,9 +4,11 @@
 //!   (`remote`, `blame`, `layout`, `remote_edit`, `locks`).
 //! * Opening a working copy reads `wc.db` through `svn-wc` and runs crash recovery (`wc_read`,
 //!   `recovery`, `journal`).
-//! * Operations that need the `svn-client` working copy layer (checkout, status, diff, update,
-//!   switch, commit, revert, add/delete/move, cleanup, depth, format upgrade, resolve, ignore,
-//!   properties, changelists, remote status) are not wired yet and fail with
+//! * Local working copy edits (revert, add/delete/move, cleanup, resolve, ignore, properties,
+//!   changelists) run through `svn-client` (`local`, `local_util`); marking an external move and
+//!   changing the format are refused with a user-facing error until `svn-client` supports them.
+//! * The other operations that need the `svn-client` working copy layer (checkout, status, diff,
+//!   update, switch, commit, depth, remote status) are not wired yet and fail with
 //!   [`ErrorCode::Internal`] carrying a `not wired` message. Each one delegates to a `do_*` method
 //!   in its own file (`wc_status`, `sync`, `commit`, `local`), so wiring one area later touches
 //!   only that file.
@@ -37,6 +39,7 @@ mod commit;
 mod journal;
 mod layout;
 mod local;
+mod local_util;
 mod locks;
 mod recovery;
 mod remote;
@@ -52,6 +55,7 @@ mod wc_read;
 mod tests;
 
 pub use journal::{CommitJournal, JournalPhase, JournalRecord, JournalStore};
+pub use local_util::{SvnConfigSource, default_subversion_config_dir, read_local_ignores};
 pub use recovery::{RecoveryHooks, UnwiredRecovery};
 
 /// Opens repository sessions for the engine.
@@ -144,6 +148,8 @@ pub struct RealEngine {
     boot_id: String,
     journals: JournalStore,
     recovery: Arc<dyn RecoveryHooks>,
+    /// Where local operations read svn's runtime configuration (ignores, auto-props).
+    svn_config: Arc<SvnConfigSource>,
 }
 
 impl RealEngine {
@@ -155,7 +161,15 @@ impl RealEngine {
             boot_id: config.boot_id,
             journals: JournalStore::new(config.state_dir),
             recovery: config.recovery,
+            svn_config: Arc::new(SvnConfigSource::default()),
         }
+    }
+
+    /// Reads svn's runtime configuration (`global-ignores`, auto-props) from `dir/config` for
+    /// later operations; `None` uses svn's built-in defaults (the initial state). The app passes
+    /// [`default_subversion_config_dir`] while `wc.readSubversionConfig` is on.
+    pub fn set_subversion_config_dir(&self, dir: Option<PathBuf>) {
+        self.svn_config.set_dir(dir);
     }
 
     /// Context for `svn-client` operations: working copy locks are recorded as owned by this

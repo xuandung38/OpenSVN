@@ -93,3 +93,5 @@ tokio = { workspace = true, features = ["test-util"] }
 tauri = { workspace = true, features = ["test"] }
 tempfile.workspace = true
 proptest.workspace = true
+# Native svn 1.15 for the real engine's oracle tests (skipped when it is missing).
+opensvn-svn-oracle = { path = "../../../tests/svn-oracle" }
