@@ -20,7 +20,34 @@ use tokio::task::JoinHandle;
 /// Default bound of the command channel.
 pub const DEFAULT_COMMAND_CAPACITY: usize = 64;
 
-type Reply<T> = oneshot::Sender<Result<T>>;
+/// Answer channel of a command that returns a value.
+///
+/// If the worker panics while executing the command, unwinding drops this value before the
+/// worker loop can record the panic. Dropping it unanswered therefore records the failure
+/// itself, *before* the receiving side is woken, so the caller can never observe the closed
+/// reply channel without also seeing the stored error.
+struct Reply<T> {
+    tx: Option<oneshot::Sender<Result<T>>>,
+    failure: Failure,
+}
+
+impl<T> Reply<T> {
+    fn send(mut self, r: Result<T>) {
+        if let Some(tx) = self.tx.take() {
+            // The driver may have gone away; there is nobody left to tell.
+            let _ = tx.send(r);
+        }
+    }
+}
+
+impl<T> Drop for Reply<T> {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            store(&self.failure, &panic_error());
+            drop(tx);
+        }
+    }
+}
 type CopyFrom = Option<(String, Revnum)>;
 
 enum Command {
@@ -136,8 +163,7 @@ fn panic_error() -> SvnError {
 }
 
 fn answer<T>(reply: Reply<T>, r: Result<T>) {
-    // The driver may have gone away; there is nobody left to tell.
-    let _ = reply.send(r);
+    reply.send(r);
 }
 
 fn run_worker(
@@ -326,7 +352,8 @@ impl WindowSender {
 
 impl EditorHandle {
     async fn call<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T> {
-        let (reply, rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel();
+        let reply = Reply { tx: Some(tx), failure: Arc::clone(&self.failure) };
         send(&self.tx, &self.failure, make(reply)).await?;
         rx.await.map_err(|_| gone(&self.failure))?
     }
