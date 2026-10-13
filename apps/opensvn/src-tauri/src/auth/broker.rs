@@ -74,9 +74,10 @@ struct Pending {
 /// * Saved passwords live in the OS credential store, account metadata (user name, method) in
 ///   `app.sqlite`; [`AuthPrompter::stored_credentials`] combines both without showing UI.
 /// * Permanently trusted certificates are served to the transport by [`AppDbTrustStore`].
-/// * A saved password the server rejected is not offered again in this process until the user
-///   saves new credentials for that origin, so background work cannot lock the account by
-///   retrying it.
+/// * A saved password the server rejected (401, reported through
+///   [`AuthPrompter::stored_credentials_rejected`]) is not offered again in this process until
+///   the user saves new credentials for that origin, so background work and rebuilt transports
+///   cannot lock the account by retrying it.
 pub struct AuthBroker {
     events: Arc<dyn AppEvents>,
     db: AppDb,
@@ -84,8 +85,6 @@ pub struct AuthBroker {
     trust: Arc<AppDbTrustStore>,
     timeout: Duration,
     pending: Mutex<HashMap<String, Pending>>,
-    /// Origins whose saved password was handed to the transport and not replaced by a prompt.
-    stored_in_use: Mutex<HashSet<OriginKey>>,
     /// Origins whose saved password the server rejected.
     stored_rejected: Mutex<HashSet<OriginKey>>,
     /// Bumped whenever cached sessions must be dropped (sign-out, certificate removed).
@@ -161,7 +160,6 @@ impl AuthBroker {
             trust: Arc::new(trust),
             timeout,
             pending: Mutex::new(HashMap::new()),
-            stored_in_use: Mutex::default(),
             stored_rejected: Mutex::default(),
             invalidations: watch::Sender::new(0),
         }
@@ -189,9 +187,9 @@ impl AuthBroker {
     }
 
     /// Records that the server rejected the saved password of `origin`: it is not offered again
-    /// until the user saves new credentials for the origin.
-    pub fn stored_credentials_rejected(&self, origin: &OriginKey) {
-        locked(&self.stored_in_use).remove(origin);
+    /// (by any transport, including ones created later) until the user saves new credentials
+    /// for the origin.
+    fn withhold_stored(&self, origin: &OriginKey) {
         if locked(&self.stored_rejected).insert(origin.clone()) {
             tracing::info!(host = %origin.host, "saved password was rejected; not offering it again");
         }
@@ -251,7 +249,6 @@ impl AuthBroker {
                 port: account.port,
                 realm: realm.to_owned(),
             };
-            locked(&self.stored_in_use).remove(&origin);
             locked(&self.stored_rejected).remove(&origin);
             if let Some(user) = account.username {
                 self.secrets
@@ -334,14 +331,6 @@ fn origin_url(o: &OriginKey) -> String {
 #[async_trait]
 impl AuthPrompter for AuthBroker {
     async fn credentials(&self, req: &CredentialRequest) -> Option<Credentials> {
-        // The transport offers saved credentials only before the first prompt of an origin; a
-        // `Rejected` prompt right after that means the server refused the saved password.
-        // TODO(fix/wp0-followups): replace this inference with the `AuthPrompter` hook that
-        // reports a rejected stored credential explicitly (also in unattended mode).
-        let saved_was_in_use = locked(&self.stored_in_use).remove(&req.origin);
-        if saved_was_in_use && req.reason == PromptReason::Rejected {
-            self.stored_credentials_rejected(&req.origin);
-        }
         let prompt = AuthPrompt {
             request_id: crate::ops::new_op_id().0,
             kind: AuthPromptKind::Credentials,
@@ -436,13 +425,17 @@ impl AuthPrompter for AuthBroker {
                 return None;
             }
         };
-        locked(&self.stored_in_use).insert(origin.clone());
         Some(Credentials {
             username,
             password,
             save: true,
             method: AuthMethod::Basic,
         })
+    }
+
+    async fn stored_credentials_rejected(&self, req: &CredentialRequest) {
+        // In-memory only: the transport does not race this call against cancellation.
+        self.withhold_stored(&req.origin);
     }
 
     async fn confirm_certificate(&self, info: &CertInfo) -> CertDecision {

@@ -12,7 +12,7 @@ use svn_ra::transport::{ProxyConfig, RetryPolicy, sha256_fingerprint};
 use svn_types::{CancelToken, Depth, ErrorCode, RepoUrl, Revnum};
 use tokio::sync::watch;
 
-use super::https_svn::{PASSWORD, ROOT, Script, SvnServer, USER};
+use super::https_svn::{PASSWORD, REALM, ROOT, Script, SvnServer, USER};
 use super::support::{fixture_on, standard_repo};
 use crate::auth::AuthBroker;
 use crate::db::AppDb;
@@ -40,22 +40,30 @@ fn start(db: &AppDb, store: &Arc<MemoryStore>) -> App {
         Duration::from_secs(20),
     ));
     let (settings, rx) = watch::channel(crate::settings::defaults(None));
-    let connector = Arc::new(HttpConnector::with_config_tweak(
-        broker.clone(),
-        broker.trust_store(),
-        rx,
-        broker.invalidations(),
-        |c| {
-            c.proxy = ProxyConfig::Disabled;
-            c.retry = RetryPolicy::none();
-        },
-    ));
+    let connector = connector_for(&broker, rx);
     App {
         events,
         broker,
         connector,
         settings,
     }
+}
+
+/// A connector (and so a fresh transport) over `broker`, without proxy or retry delays.
+fn connector_for(
+    broker: &Arc<AuthBroker>,
+    settings: watch::Receiver<Settings>,
+) -> Arc<HttpConnector> {
+    Arc::new(HttpConnector::with_config_tweak(
+        broker.clone(),
+        broker.trust_store(),
+        settings,
+        broker.invalidations(),
+        |c| {
+            c.proxy = ProxyConfig::Disabled;
+            c.retry = RetryPolicy::none();
+        },
+    ))
 }
 
 impl App {
@@ -438,4 +446,92 @@ async fn trunk_only_authorization_allows_checkout_and_update_of_trunk() {
         srv.options_paths()
     );
     assert!(app.prompts().is_empty());
+}
+
+#[tokio::test]
+async fn a_rejected_saved_password_is_not_submitted_again_by_a_new_transport() {
+    use secure_store::CredentialStore;
+    let srv = SvnServer::start(Script {
+        require_auth: true,
+        ..Script::default()
+    })
+    .await;
+    let (db, store) = (AppDb::open_in_memory().unwrap(), store());
+    trust(&db, &srv);
+    // A password saved earlier that the server no longer accepts.
+    db.account_upsert(&crate::db::AccountRecord {
+        scheme: "https",
+        host: "127.0.0.1",
+        port: srv.port,
+        realm: REALM,
+        username: USER,
+        negotiate: false,
+    })
+    .unwrap();
+    let origin = svn_types::OriginKey {
+        scheme: "https".into(),
+        host: "127.0.0.1".into(),
+        port: srv.port,
+        realm: REALM.into(),
+    };
+    store
+        .set(
+            &origin,
+            USER,
+            &secrecy::SecretString::from("old".to_owned()),
+        )
+        .unwrap();
+    let submissions = |s: &SvnServer| {
+        s.requests()
+            .iter()
+            .filter(|r| r.method.as_str() == "UNAUTHORIZED" && r.authorization.is_some())
+            .count()
+    };
+    let app = start(&db, &store);
+    let err = app
+        .connect(&srv.url("/trunk"), Anchor::Url, false)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert_eq!(submissions(&srv), 1, "the saved password was tried once");
+
+    // A rebuilt transport (new connector, same broker) does not submit it again.
+    let (_tx, rx) = watch::channel(crate::settings::defaults(None));
+    let rebuilt = connector_for(&app.broker, rx);
+    let err = rebuilt
+        .connect_with(
+            &RepoUrl::parse(&srv.url("/trunk")).unwrap(),
+            &ConnectOptions {
+                anchor: Anchor::Url,
+                interactive: false,
+            },
+            &CancelToken::new(),
+        )
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert_eq!(submissions(&srv), 1);
+    assert!(app.prompts().is_empty());
+
+    // Once the user saves the right password it is used silently again.
+    let answering = app.answer_prompts(true, IpcDecision::Reject);
+    app.connect(&srv.url("/trunk"), Anchor::Url, true)
+        .await
+        .unwrap();
+    answering.abort();
+    let (_tx, rx) = watch::channel(crate::settings::defaults(None));
+    let after = connector_for(&app.broker, rx);
+    after
+        .connect_with(
+            &RepoUrl::parse(&srv.url("/trunk")).unwrap(),
+            &ConnectOptions {
+                anchor: Anchor::Url,
+                interactive: false,
+            },
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap();
 }
