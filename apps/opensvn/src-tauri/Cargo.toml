@@ -86,6 +86,9 @@ rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }
 real-engine = ["dep:svn-wc", "dep:svn-client", "dep:svn-delta", "dep:md-5", "dep:sha1"]
 # Exposes `engine::conformance`, the engine-independent test suite every `EngineFacade` must pass.
 engine-conformance = []
+# Crash-injection points of the working copy layer, for the real engine's crash recovery tests
+# (`cargo test -p opensvn --features failpoints`). Never enabled in a release build.
+failpoints = ["real-engine", "svn-client/failpoints"]
 
 [dev-dependencies]
 # Paused clock for deterministic select-ordering tests.
@@ -95,3 +98,5 @@ tempfile.workspace = true
 proptest.workspace = true
 # Native svn 1.15 for the real engine's oracle tests (skipped when it is missing).
 opensvn-svn-oracle = { path = "../../../tests/svn-oracle" }
+# Configures the failpoints of the `failpoints` feature in tests (inert without it).
+fail.workspace = true

@@ -61,10 +61,26 @@ fn decode(seg: &str) -> Result<String> {
             i += 1;
         }
     }
-    String::from_utf8(out).map_err(|_| SvnError::new(ErrorCode::UnsafePath, "URL is not UTF-8"))
+    let out = String::from_utf8(out)
+        .map_err(|_| SvnError::new(ErrorCode::UnsafePath, "URL is not UTF-8"))?;
+    // Like the real `UrlBuilder::locate`: an encoded slash would split one segment in two.
+    if out.contains('/') {
+        return Err(SvnError::new(ErrorCode::UnsafePath, "encoded slash in URL"));
+    }
+    Ok(out)
+}
+
+/// Decoded, non-empty segments of an URL path.
+fn decoded_segments(path: &str) -> Result<Vec<String>> {
+    path.split('/')
+        .filter(|s| !s.is_empty())
+        .map(decode)
+        .collect()
 }
 
 /// Repository-relative path of `url`, which must be on the origin of `root` and at or below it.
+/// Segments are compared decoded, as the real `UrlBuilder::locate` does, so `%7E` and `~`
+/// name the same directory and `a%2Fb` is refused rather than read as `a/b`.
 pub(super) fn rel_of(root: &RepoUrl, url: &RepoUrl) -> Result<RelPath> {
     let (r, u) = (root.as_url(), url.as_url());
     let outside = || {
@@ -73,19 +89,15 @@ pub(super) fn rel_of(root: &RepoUrl, url: &RepoUrl) -> Result<RelPath> {
             format!("{url} is outside the repository {root}"),
         )
     };
-    if r.origin() != u.origin() {
+    if r.origin() != u.origin() || u.query().is_some() || u.fragment().is_some() {
         return Err(outside());
     }
-    let rs: Vec<&str> = r.path().split('/').filter(|s| !s.is_empty()).collect();
-    let us: Vec<&str> = u.path().split('/').filter(|s| !s.is_empty()).collect();
+    let rs = decoded_segments(r.path())?;
+    let us = decoded_segments(u.path())?;
     if us.len() < rs.len() || us[..rs.len()] != rs[..] {
         return Err(outside());
     }
-    let rest = us[rs.len()..]
-        .iter()
-        .map(|s| decode(s))
-        .collect::<Result<Vec<_>>>()?;
-    RelPath::new(&rest.join("/"))
+    RelPath::new(&us[rs.len()..].join("/"))
 }
 
 /// Commit editor of a session below the repository root: `open_root` opens the session

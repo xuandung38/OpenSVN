@@ -22,7 +22,7 @@ use super::support::{
     Fixture, OLD_BOOT, StaticConnector, URL, UUID, ctx, fixture_on, plant_lock_row, put,
 };
 use crate::engine::facade::{EngineFacade, StatusQuery, WcRef};
-use crate::engine::real::{UnwiredRecovery, read_local_ignores};
+use crate::engine::real::{ClientRecovery, read_local_ignores};
 
 /// Repository with `README.md` and `src/main.rs` at its root (revision 1).
 fn repo() -> FakeRaSession {
@@ -48,7 +48,7 @@ fn env() -> Env {
     let repo = repo();
     let connector = Arc::new(StaticConnector(vec![repo.clone()]));
     Env {
-        f: fixture_on(repo, connector, Arc::new(UnwiredRecovery)),
+        f: fixture_on(repo, connector, Arc::new(ClientRecovery)),
         tmp: tempfile::tempdir().unwrap(),
     }
 }
@@ -1035,7 +1035,7 @@ mod oracle {
     fn engine() -> Fixture {
         let repo = super::repo();
         let connector = Arc::new(StaticConnector(vec![repo.clone()]));
-        fixture_on(repo, connector, Arc::new(UnwiredRecovery))
+        fixture_on(repo, connector, Arc::new(ClientRecovery))
     }
 
     #[tokio::test(flavor = "multi_thread")]

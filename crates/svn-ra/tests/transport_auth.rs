@@ -504,6 +504,47 @@ async fn rejected_stored_credentials_lead_to_a_rejected_prompt() {
         prompter.reasons.lock().unwrap().clone(),
         vec![svn_ra_api::PromptReason::Rejected]
     );
+    // The app hears about the rejection before the prompt, once.
+    let rejected = prompter.stored_rejected.lock().unwrap().clone();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].reason, svn_ra_api::PromptReason::Rejected);
+    assert_eq!(rejected[0].origin, calls[0].0);
+    // Typed credentials that work are not stored ones: nothing more is reported.
+    t.send(get(srv.url("/b")), &CancelToken::new())
+        .await
+        .expect("cached typed credentials");
+    assert_eq!(prompter.stored_rejections(), 1);
+}
+
+/// A cancel that lands while the rejection hook runs must not lose the report (the transport
+/// has already cleared its "came from the store" flag, so it would never repeat it).
+#[tokio::test]
+async fn cancel_during_the_rejection_hook_keeps_the_report() {
+    for unattended in [false, true] {
+        let (ca, srv) = server(basic_auth_handler("r", "alice", "new")).await;
+        let prompter = ScriptedPrompter::with_stored("alice", "stale");
+        *prompter.default_credentials.lock().unwrap() = Some(("alice".into(), "new".into()));
+        let cancel = CancelToken::new();
+        *prompter.cancel_in_rejected_hook.lock().unwrap() = Some(cancel.clone());
+        let t = transport_trusting(&ca, prompter.clone(), |_| {});
+        let r = if unattended {
+            t.send_unattended(get(srv.url("/a")), &cancel).await
+        } else {
+            t.send(get(srv.url("/a")), &cancel).await
+        };
+        let err = r.expect_err("cancelled");
+        assert_eq!(err.code, ErrorCode::Cancelled, "unattended={unattended}");
+        assert_eq!(
+            prompter.stored_rejections(),
+            1,
+            "unattended={unattended}: the report survived the cancel"
+        );
+        assert_eq!(
+            prompter.credential_prompts(),
+            0,
+            "no prompt after the cancel"
+        );
+    }
 }
 
 #[tokio::test]
@@ -517,6 +558,11 @@ async fn unattended_send_uses_stored_credentials_but_never_prompts() {
         .expect("stored credentials");
     assert_eq!(r.status().as_u16(), 200);
     assert_eq!(prompter.credential_prompts(), 0);
+    assert_eq!(
+        prompter.stored_rejections(),
+        0,
+        "accepted stored credentials"
+    );
 
     // Wrong stored credentials: AuthRequired, still without a prompt.
     let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
@@ -530,4 +576,88 @@ async fn unattended_send_uses_stored_credentials_but_never_prompts() {
     assert_eq!(err.code, ErrorCode::AuthRequired);
     assert_eq!(prompter.credential_prompts(), 0);
     assert_eq!(srv.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn stale_stored_credentials_are_sent_once_per_transport_when_unattended() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "new")).await;
+    let prompter = ScriptedPrompter::with_stored("alice", "stale");
+    *prompter.default_credentials.lock().unwrap() = Some(("alice".into(), "new".into()));
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    for i in 0..5 {
+        let err = t
+            .send_unattended(get(srv.url(&format!("/poll/{i}"))), &CancelToken::new())
+            .await
+            .expect_err("stale stored credentials");
+        assert_eq!(err.code, ErrorCode::AuthRequired);
+    }
+    let credentialed = srv
+        .requests()
+        .iter()
+        .filter(|r| r.header("authorization").is_some())
+        .count();
+    assert_eq!(credentialed, 1, "the stale password is submitted once");
+    assert_eq!(prompter.stored_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(prompter.credential_prompts(), 0);
+    // The hook fired once, so the app can stop offering it to the next transport.
+    let rejected = prompter.stored_rejected.lock().unwrap().clone();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].reason, svn_ra_api::PromptReason::Rejected);
+    assert_eq!(rejected[0].origin.realm, "r");
+
+    // A second transport (what a poll that does not reuse the transport would do) offers the
+    // stored password again; that is why background work must reuse one transport, and why
+    // the app must act on the hook.
+    let t2 = transport_trusting(&ca, prompter.clone(), |_| {});
+    t2.send_unattended(get(srv.url("/poll/again")), &CancelToken::new())
+        .await
+        .expect_err("still stale");
+    assert_eq!(prompter.stored_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(prompter.stored_rejections(), 2);
+}
+
+#[tokio::test]
+async fn stored_attempt_counts_towards_the_three_attempt_cap() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "right")).await;
+    let prompter = ScriptedPrompter::with_stored("alice", "stale");
+    prompter.push_credentials(Some(("alice", "wrong1")));
+    prompter.push_credentials(Some(("alice", "wrong2")));
+    prompter.push_credentials(Some(("alice", "wrong3")));
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let err = t
+        .send(get(srv.url("/a")), &CancelToken::new())
+        .await
+        .expect_err("gives up");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    let sent: Vec<_> = srv
+        .requests()
+        .iter()
+        .filter_map(|r| r.header("authorization"))
+        .collect();
+    assert_eq!(
+        sent,
+        vec![
+            basic("alice", "stale"),
+            basic("alice", "wrong1"),
+            basic("alice", "wrong2"),
+        ],
+        "stored + two prompts = three credentialed requests"
+    );
+    assert_eq!(prompter.credential_prompts(), 2);
+    assert_eq!(
+        prompter.stored_rejections(),
+        1,
+        "only the stored attempt is reported"
+    );
+    // A later unattended request adds nothing.
+    t.send_unattended(get(srv.url("/b")), &CancelToken::new())
+        .await
+        .expect_err("still refused");
+    let credentialed = srv
+        .requests()
+        .iter()
+        .filter(|r| r.header("authorization").is_some())
+        .count();
+    assert_eq!(credentialed, 3);
+    assert_eq!(prompter.stored_calls.load(Ordering::SeqCst), 1);
 }
