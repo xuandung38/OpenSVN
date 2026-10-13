@@ -1,9 +1,10 @@
 svn_version=1.15.0
 prop.svn:keywords=  Id	RevDate 
 rev=19
-author=hxd
-date_micros=1791881717475195
+author=alice
+date_micros=1791884711233960
 utc_offset_secs=0
-url=file:///var/folders/0n/5d8bqg7d2s381g6g71yx_5lr0000gn/T/svn-translate-golden-vemn4wiw/repo/kw_whitespace_prop
-root=file:///var/folders/0n/5d8bqg7d2s381g6g71yx_5lr0000gn/T/svn-translate-golden-vemn4wiw/repo
+url=file:///tmp/opensvn-golden/repo/kw_whitespace_prop
+root=file:///tmp/opensvn-golden/repo
 tz=UTC
+path=kw_whitespace_prop

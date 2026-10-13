@@ -34,11 +34,23 @@ Consequence: one implementation serves both; golden tests recorded with svn 1.15
   - Text matching in the file is **case-sensitive** against these canonical key spellings (`$id$`, `$REV$` untouched).
 - `keyword_printf` codes: `%a` author, `%b` basename of URL (**percent-decoded**, empty for root URL), `%d` UTC `YYYY-MM-DD HH:MM:SSZ`, `%D` `svn_time_to_human_cstring` (**local time zone**, `YYYY-MM-DD HH:MM:SS +hhmm (Www, DD Mon YYYY)`, hours = `gmtoff/3600` truncating with forced sign so -00:30 prints `+00`, English names in C locale), `%P` repos-relative path (percent-decoded; needs root and url), `%R` root, `%r` revision, `%u` URL as given, `%_` space, `%%` `%`, `%H` = `%P %r %d %a`, `%I` = `%b %r %d %a`; unknown `%x` printed literally; trailing lone `%` printed. Date 0/NULL -> empty.
 - Scanner (`translate_chunk`): candidate = `$` ... next `$`, max `SVN_KEYWORD_MAX_LEN`=255 bytes, aborted by CR/LF. Name = bytes up to first `:` (or end). Match requires name in table. Forms handled by `translate_keyword_subst`: unexpanded `$K$`, expanded `$K: v $` / `$K:$`, **fixed-length** `$K:: v   $` (needs `6+len(K) < len`; pad with spaces, truncate with `#` before closing `$`; contract = blank fill). Expanded value is truncated to `255-5-len(K)`. A matched-but-malformed candidate keeps buffering and rolls back to the *last* `$` seen on newline/overflow (`next_sign_off`).
+- The fixed-length fill (`while (*p != '$')`) stops at the FIRST `$` after the value, which can be an interior `$` when the scanner kept buffering past a failed candidate (`$Rev:: a$b $` expands to `$Rev:: 1$b $`). Ported and golden-tested.
 - Known svn quirk, reproduced and golden-tested: `$Rev:: $ $Rev::      $` — the short first candidate is not a valid fixed-length keyword, so the scan extends across the second `$` and the pair is treated as one fixed-length candidate. Expand+contract is therefore **not** always an identity; fixture `kw_fixed_too_short_lossy` compares only forward.
 - EOL scanner: CR, LF, CRLF recognised; lone CR is an EOL. First EOL seen defines the source format; later different EOL -> error unless repair. Output always the configured eol. Nothing special at EOF (pending CR flushed as CR; open keyword buffer flushed raw, **without** rollback).
 
-### 1.3 Time zone dependency (risk)
-`$Date$` expands in the *process-local* zone (verified: fixtures for UTC, Asia/Ho_Chi_Minh +0700, America/St_Johns -0230 (DST), America/Los_Angeles -0700 all match). The crate takes `KeywordContext::utc_offset_secs`; the caller (07A/11U) must resolve the local offset at the commit instant. Needs a time-zone source (`time` crate with `local-offset`, or OS call) that is not in the pinned dependency set — **contract question for planner** (see Q1).
+### 1.3 `$Date$`: time zone and locale (decisions)
+- `%D` uses the offset in effect **at the commit timestamp** (DST included). `Keywords::build` takes a resolver `&dyn Fn(i64 /*unix secs*/) -> i32 /*utc offset secs*/` supplied by svn-client; svn-wc has no tz dependency. Fixtures cover UTC, +0700, -0230 (DST), -0700.
+- **Intentional difference from svn:** the suffix `(Www, DD Mon YYYY)` is always rendered in the English C locale. svn gettext-translates it and uses locale names (`LC_ALL=de_DE.UTF-8` gives `(Di., 13. Okt. 2026)`), so real svn output varies per machine. The text is cosmetic: contraction discards the value, so status, commit content and checksums never depend on it.
+- Pre-1970 dates: APR truncates toward zero, this port floors. Not ported (low impact).
+
+### 1.4 Chunking (byte parity, pinned to svn 1.15.0)
+svn's `next_sign_off` rollback marker is local to each `translate_chunk` call, so malformed candidates straddling a chunk boundary behave differently. Measured with svn 1.15.0:
+- normalise (commit, status comparison): **16384-byte** chunks (`SVN__STREAM_CHUNK_SIZE`). `"x"*16377 + "$Rev:a$Id: x $\n"` commits unchanged.
+- expand (checkout/install): **102400-byte** chunks (`SVN_STREAM_CHUNK_SIZE`); boundary straddling cases at 16384/32768/65536 expand normally, at 102400 they do not.
+`ContentTranslator` exposes `chunk_size()`; the slice helpers and `translate_stream` use these sizes. svn 1.14.5 was not run (only 1.15.0 is installed); its source is identical for this logic, so the sizes are assumed equal.
+
+### 1.5 `svn:special`
+svn branches on `special` before any eol/keyword handling. `to_working`/`to_repo_normal` return special content unchanged; use `special::*`. svn also treats a path that is a symlink on disk as special without the property (`svn_io_check_special_path`); the status/work-queue callers must do the same.
 
 ## 2. Work queue (M6) — exact builders (identical in 1.14.5/1.15.0)
 Skel = `(op arg...)`; strings are atoms, ints are decimal atoms; all paths are **wc-root-relative relpaths** (resolved against the wc root of `wri_abspath`). The queue holds a list of items; `wq_merge` flattens. Dispatch table (runner must know all, else `SVN_ERR_WC_BAD_ADM_LOG` "Unrecognized work item" and stop):
@@ -81,6 +93,7 @@ Order is positional (new conflicts are prepended to CONFLICTS; kinds looked up b
 - `svn_skel__parse_int` / `unparse` byte grammar (explicit vs implicit-length atoms): 07A skel.rs; B2 relies on it.
 - Tree conflict `reason_map`/`action_map` token lists (above).
 
-## 5. Unresolved questions
-1. Local time-zone offset source for `$Date$` (no tz dep in pinned set). Proposal: `time` crate (features `local-offset`) or resolve in the app layer; B1 API already takes the offset explicitly.
-2. Windows/Linux golden fixtures: only macOS-recorded (native EOL = LF). `native` + CRLF working copies are tested through `to_working_with_native`; real Windows byte comparison needs CI on Windows.
+## 5. Follow-ups
+1. Time-zone resolver implementation lives in svn-client (P11).
+2. Golden fixtures were recorded on macOS (native EOL = LF). `native` with CRLF is tested through `to_working_with_native`; a real Windows byte comparison is covered by P06/P13 on the Windows CI runner.
+3. The EPERM `reown_file` retry of `io_set_perms` is not ported.

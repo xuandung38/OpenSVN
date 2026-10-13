@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use svn_wc::translate::special::{self, SpecialContent};
 use svn_wc::translate::{
-    EolStyle, KeywordContext, TranslateError, TranslateInfo, to_repo_normal, to_working_with_native,
+    EolStyle, KeywordContext, TranslateError, TranslateInfo, check_eol_consistency, to_repo_normal,
+    to_working_with_native,
 };
 
 fn fixture_root() -> PathBuf {
@@ -63,24 +64,37 @@ fn matches_real_svn_output() {
             .to_string();
 
         if dir.join("expect_error.txt").exists() {
-            // svn refused to commit: our normalisation must refuse too where svn did so at commit.
-            let working = fs::read(dir.join("working.bin")).unwrap();
+            // svn refused the file. Every style rejects mixed endings at `propset` time; native
+            // files that got past it fail at commit; an unknown style fails everywhere.
+            let content = fs::read(dir.join("working.bin")).unwrap();
             match info.eol_style {
-                EolStyle::Native => assert!(
-                    matches!(
-                        to_repo_normal(&info, &working, false),
-                        Err(TranslateError::InconsistentEol)
-                    ),
-                    "{label}: expected inconsistent eol"
-                ),
                 EolStyle::Unknown => assert!(
                     matches!(
-                        to_repo_normal(&info, &working, false),
+                        to_repo_normal(&info, &content, false),
                         Err(TranslateError::UnknownEol)
                     ),
                     "{label}: expected unknown eol"
                 ),
-                _ => {}
+                style => {
+                    if !label.ends_with("after_prop") {
+                        assert!(
+                            matches!(
+                                check_eol_consistency(&content),
+                                Err(TranslateError::InconsistentEol)
+                            ),
+                            "{label}: expected the propset consistency check to fail"
+                        );
+                    }
+                    if style == EolStyle::Native {
+                        assert!(
+                            matches!(
+                                to_repo_normal(&info, &content, false),
+                                Err(TranslateError::InconsistentEol)
+                            ),
+                            "{label}: expected inconsistent eol at commit"
+                        );
+                    }
+                }
             }
             checked += 1;
             continue;
@@ -109,9 +123,9 @@ fn matches_real_svn_output() {
             repos_root_url: Some(meta["root"].clone()),
             date_micros: Some(meta["date_micros"].parse().unwrap()),
             author: Some(meta["author"].clone()),
-            utc_offset_secs: meta["utc_offset_secs"].parse().unwrap(),
         };
-        let got = to_working_with_native(&info, &pristine, &ctx, b"\n").unwrap();
+        let offset: i32 = meta["utc_offset_secs"].parse().unwrap();
+        let got = to_working_with_native(&info, &pristine, &ctx, &|_| offset, b"\n").unwrap();
         assert_eq!(
             String::from_utf8_lossy(&got),
             String::from_utf8_lossy(&working),
@@ -125,6 +139,13 @@ fn matches_real_svn_output() {
             checked += 1;
             continue;
         }
+        // What svn read when it committed the file must normalise to the stored pristine.
+        let commit = fs::read(dir.join("commit.bin")).unwrap();
+        let normalised = to_repo_normal(&info, &commit, false).unwrap();
+        assert_eq!(
+            normalised, pristine,
+            "{label}: to_repo_normal(commit input)"
+        );
         let back = to_repo_normal(&info, &working, false).unwrap();
         assert_eq!(back, pristine, "{label}: to_repo_normal");
         checked += 1;

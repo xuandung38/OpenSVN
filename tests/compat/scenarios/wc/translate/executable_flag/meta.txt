@@ -1,9 +1,10 @@
 svn_version=1.15.0
 prop.svn:executable=*
-rev=27
-author=hxd
-date_micros=1791881725915644
+rev=31
+author=alice
+date_micros=1791884723208011
 utc_offset_secs=0
-url=file:///var/folders/0n/5d8bqg7d2s381g6g71yx_5lr0000gn/T/svn-translate-golden-vemn4wiw/repo/executable_flag
-root=file:///var/folders/0n/5d8bqg7d2s381g6g71yx_5lr0000gn/T/svn-translate-golden-vemn4wiw/repo
+url=file:///tmp/opensvn-golden/repo/executable_flag
+root=file:///tmp/opensvn-golden/repo
 tz=UTC
+path=executable_flag

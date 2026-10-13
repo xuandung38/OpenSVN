@@ -1,6 +1,6 @@
-$Id: kw_all 14 2026-10-13 08:55:12Z hxd $ $Rev: 14 $ $Revision: 14 $ $LastChangedRevision: 14 $ $Date: 2026-10-13 15:55:12 +0700 (Tue, 13 Oct 2026) $ $LastChangedDate: 2026-10-13 15:55:12 +0700 (Tue, 13 Oct 2026) $ $Author: hxd $ $LastChangedBy: hxd $ $HeadURL: file:///var/folders/0n/5d8bqg7d2s381g6g71yx_5lr0000gn/T/svn-translate-golden-vemn4wiw/repo/kw_all $ $URL: file:///var/folders/0n/5d8bqg7d2s381g6g71yx_5lr0000gn/T/svn-translate-golden-vemn4wiw/repo/kw_all $ $Header: file:///var/folders/0n/5d8bqg7d2s381g6g71yx_5lr0000gn/T/svn-translate-golden-vemn4wiw/repo/kw_all 14 2026-10-13 08:55:12Z hxd $
-stale: $Id: kw_all 14 2026-10-13 08:55:12Z hxd $ $Rev: 14 $ $Date: 2026-10-13 15:55:12 +0700 (Tue, 13 Oct 2026) $ $Author: hxd $
-fixed: $Rev:: 14         $ $Rev:: 14                   $ $Author:: h#$ $Date:: 2#$ $Id::  $
+$Id: kw_all 14 2026-10-13 09:45:06Z alice $ $Rev: 14 $ $Revision: 14 $ $LastChangedRevision: 14 $ $Date: 2026-10-13 16:45:06 +0700 (Tue, 13 Oct 2026) $ $LastChangedDate: 2026-10-13 16:45:06 +0700 (Tue, 13 Oct 2026) $ $Author: alice $ $LastChangedBy: alice $ $HeadURL: file:///tmp/opensvn-golden/repo/kw_all $ $URL: file:///tmp/opensvn-golden/repo/kw_all $ $Header: file:///tmp/opensvn-golden/repo/kw_all 14 2026-10-13 09:45:06Z alice $
+stale: $Id: kw_all 14 2026-10-13 09:45:06Z alice $ $Rev: 14 $ $Date: 2026-10-13 16:45:06 +0700 (Tue, 13 Oct 2026) $ $Author: alice $
+fixed: $Rev:: 14         $ $Rev:: 14                   $ $Author:: a#$ $Date:: 2#$ $Id::  $
 unknown: $Foo$ $foo: bar$ $id$ $REV$ $Rev $ $$ $$$ $Id
-nested: $Id: kw_all 14 2026-10-13 08:55:12Z hxd $Rev$ x$ and $Rev: 14 $Date$
+nested: $Id: kw_all 14 2026-10-13 09:45:06Z alice $Rev$ x$ and $Rev: 14 $Date$
 tail $Rev: 14 $
