@@ -25,11 +25,24 @@ pub enum OpenMode {
     Create,
 }
 
+/// `SQLITE_IOERR_DELETE` (`SQLITE_IOERR | 10 << 8`).
+const SQLITE_IOERR_DELETE: std::ffi::c_int = 2570;
+/// `SQLITE_IOERR_LOCK` (`SQLITE_IOERR | 15 << 8`).
+const SQLITE_IOERR_LOCK: std::ffi::c_int = 3850;
+
 /// Maps a rusqlite error onto the engine error model. Lock contention that survives the busy
 /// timeout becomes [`ErrorCode::WcBusy`].
 pub fn sql_err(err: rusqlite::Error) -> SvnError {
     use rusqlite::ErrorCode as Sqlite;
+    // A sharing violation while another process holds the journal or lock file (typically a
+    // Windows peer that does not use svn's TRUNCATE journal mode) is contention, not a failure.
+    let sharing_violation = matches!(
+        &err,
+        rusqlite::Error::SqliteFailure(e, _)
+            if e.extended_code == SQLITE_IOERR_DELETE || e.extended_code == SQLITE_IOERR_LOCK
+    );
     let code = match err.sqlite_error_code() {
+        _ if sharing_violation => ErrorCode::WcBusy,
         Some(Sqlite::DatabaseBusy | Sqlite::DatabaseLocked) => ErrorCode::WcBusy,
         Some(Sqlite::DatabaseCorrupt | Sqlite::NotADatabase) => ErrorCode::Corrupt,
         Some(Sqlite::DiskFull) => ErrorCode::DiskFull,

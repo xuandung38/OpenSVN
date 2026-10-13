@@ -178,9 +178,11 @@ fn format_32_without_a_settings_row_is_corrupt() {
 fn user_version_change_after_open_blocks_writes() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db = new_wc(tmp.path());
+    // The upgrader uses svn's journal mode: a DELETE-mode helper would try to delete the journal
+    // file our TRUNCATE-mode connection keeps open, which Windows refuses (SQLITE_IOERR_DELETE).
     Connection::open(tmp.path().join(".svn/wc.db"))
         .expect("other")
-        .execute_batch("PRAGMA user_version = 32;")
+        .execute_batch("PRAGMA journal_mode = TRUNCATE; PRAGMA user_version = 32;")
         .expect("upgrade behind our back");
     let err = db.with_write(|_| Ok(())).expect_err("format changed");
     assert_eq!(err.code, ErrorCode::WcFormatUnsupported);
