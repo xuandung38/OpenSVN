@@ -323,3 +323,39 @@ fn errors_convert_to_svn_errors() {
     let e: SvnError = PristineError::index("boom").into();
     assert_eq!(e.code, ErrorCode::Internal);
 }
+
+#[cfg(unix)]
+#[test]
+fn rename_failure_keeps_its_classification() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, mut st) = store();
+    let sha = Sha1Digest::from_hex("f572d396fae9206628714fb2ce00f72e94f2258f").unwrap();
+    // The fan-out directory exists but is not writable, so the rename fails with EACCES.
+    let dir = st.path_of(&sha).parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = dir.join("probe");
+    let running_as_root = std::fs::write(&probe, b"x").is_ok();
+    let result = st.install(&mut Cursor::new(b"hello\n"), None, None);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if running_as_root {
+        return; // permissions are not enforced for root
+    }
+    let err = result.unwrap_err();
+    assert!(matches!(err, PristineError::Svn(_)), "{err:?}");
+    assert!(
+        st.index().rows.is_empty(),
+        "no row for a text that was not stored"
+    );
+    assert_eq!(
+        std::fs::read_dir(st.adm_dir.join("tmp")).unwrap().count(),
+        0,
+        "temp file cleaned up"
+    );
+    let svn: SvnError = err.into();
+    assert_eq!(
+        svn.code,
+        ErrorCode::PermissionDenied,
+        "the I/O classification must survive: {svn:?}"
+    );
+}
