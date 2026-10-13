@@ -34,6 +34,19 @@ python3 crates/svn-protocol/tools/capture/extract.py /tmp/raw crates/svn-protoco
 * Quirk: server answers listings in hash order, not sorted.
 * P06 will provide the official harness and a 1.15 server; this tooling is deliberately minimal.
 
+### Fuzzing
+
+Targets live in `fuzz/fuzz_targets/` (standalone crate, needs a nightly toolchain):
+
+```
+cd crates/svn-protocol/fuzz
+cargo +nightly fuzz build                 # compile all targets
+cargo +nightly fuzz run multistatus -- -max_total_time=3600
+```
+
+The 1h-per-target run belongs to the nightly CI job; the stable test suite covers the same
+entry points with `tests/mutation_smoke.rs`.
+
 ## Verified facts
 
 ### OPTIONS / session
