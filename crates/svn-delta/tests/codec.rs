@@ -217,10 +217,134 @@ fn decoder_stays_failed_after_error() {
 }
 
 #[test]
-fn empty_stream_is_an_empty_delta() {
+fn stream_without_header_is_rejected_but_header_alone_is_an_empty_delta() {
     let mut dec = SvndiffDecoder::new();
     assert!(dec.feed(b"").unwrap().is_empty());
+    assert_eq!(dec.finish().unwrap_err().code, ErrorCode::Corrupt);
+
+    let mut dec = SvndiffDecoder::new();
+    assert!(dec.feed(b"SVN\0").unwrap().is_empty());
     dec.finish().unwrap();
+}
+
+/// Builds `SVN<version>` + one window with the given raw header integers and sections.
+fn raw_window(version: u8, ints: [u64; 5], ins: &[u8], new: &[u8]) -> Vec<u8> {
+    let mut out = vec![b'S', b'V', b'N', version];
+    for i in ints {
+        svn_delta::encode_varint(i, &mut out);
+    }
+    out.extend_from_slice(ins);
+    out.extend_from_slice(new);
+    out
+}
+
+fn assert_corrupt(stream: &[u8]) {
+    let mut dec = SvndiffDecoder::new();
+    let res = dec.feed(stream).and_then(|_| dec.finish());
+    assert_eq!(res.unwrap_err().code, ErrorCode::Corrupt);
+}
+
+#[test]
+fn window_limits_follow_subversion() {
+    // 100 KiB is the limit for every view and section; one more is rejected up front.
+    assert_corrupt(&raw_window(0, [0, 102_401, 1, 1, 1], &[], &[]));
+    assert_corrupt(&raw_window(0, [0, 0, 102_401, 1, 1], &[], &[]));
+    assert_corrupt(&raw_window(0, [0, 0, 1, 102_417, 0], &[], &[]));
+    assert_corrupt(&raw_window(0, [0, 0, 1, 1, 102_417], &[], &[]));
+}
+
+#[test]
+fn tiny_section_declaring_huge_output_is_rejected_without_allocating() {
+    for version in [1u8, 2] {
+        // 20 stored bytes whose length prefix claims 64 MiB.
+        let mut section = Vec::new();
+        svn_delta::encode_varint(64 * 1024 * 1024, &mut section);
+        section.extend_from_slice(&[0x78, 0x9c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(section.len(), 20);
+        let ins = [0x81u8, 0x01]; // v1/v2 prefix + 1 byte, irrelevant: new-data check fails first
+        let stream = raw_window(
+            version,
+            [0, 0, 1, ins.len() as u64, section.len() as u64],
+            &ins,
+            &section,
+        );
+        assert_corrupt(&stream);
+    }
+}
+
+#[test]
+fn zlib_bomb_is_bounded_by_declared_length() {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+    // Compresses 16 MiB of zeros into a few dozen KiB; the section lies about its size.
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
+    enc.write_all(&vec![0u8; 16 * 1024 * 1024]).unwrap();
+    let bomb = enc.finish().unwrap();
+    assert!(bomb.len() < 102_400, "bomb is {} bytes", bomb.len());
+    for declared in [600u64, 102_400] {
+        let mut section = Vec::new();
+        svn_delta::encode_varint(declared, &mut section);
+        section.extend_from_slice(&bomb);
+        let stream = raw_window(
+            1,
+            [0, 0, 1, 2, section.len() as u64],
+            &[0x81, 0x01],
+            &section,
+        );
+        assert_corrupt(&stream);
+    }
+}
+
+#[test]
+fn compressed_section_larger_than_limit_after_decompression_is_rejected() {
+    let mut section = Vec::new();
+    svn_delta::encode_varint(102_401, &mut section);
+    section.extend_from_slice(&[0u8; 8]);
+    assert_corrupt(&raw_window(
+        1,
+        [0, 0, 1, 2, section.len() as u64],
+        &[0x81, 0x01],
+        &section,
+    ));
+}
+
+#[test]
+fn zero_length_ops_and_unused_new_data_are_rejected() {
+    // new-data op with explicit zero length, then a real one
+    assert_corrupt(&raw_window(0, [0, 0, 1, 3, 1], &[0x80, 0x00, 0x81], b"a"));
+    // 2 bytes of new data supplied, only 1 used
+    assert_corrupt(&raw_window(0, [0, 0, 1, 1, 2], &[0x81], b"ab"));
+}
+
+#[test]
+fn applier_stays_failed_and_publishes_nothing_after_an_error() {
+    let good = TxDeltaWindow::full_text(Bytes::from_static(b"abc"));
+    let bad = TxDeltaWindow {
+        sview_offset: 0,
+        sview_len: 50,
+        tview_len: 1,
+        ops: vec![TxDeltaOp::CopyFromSource {
+            offset: 0,
+            length: 1,
+        }],
+        new_data: Bytes::new(),
+    };
+    let mut app = WindowApplier::new(Cursor::new(b"short".to_vec()), Vec::new());
+    let handle = app.handle();
+    app.apply_window(&good).unwrap();
+    assert!(app.apply_window(&bad).is_err());
+    assert!(app.apply_window(&good).is_err(), "later windows refused");
+    assert!(app.finish().is_err(), "finish refused");
+    assert!(handle.outcome().is_none(), "no digest after failure");
+
+    // Checksum mismatch also leaves no outcome behind.
+    let mut app = WindowApplier::new(Cursor::new(Vec::new()), Vec::new()).expect_md5([1; 16]);
+    let handle = app.handle();
+    app.apply_window(&good).unwrap();
+    assert!(app.finish().is_err());
+    assert!(handle.outcome().is_none());
+    assert!(app.finish().is_err());
 }
 
 #[test]

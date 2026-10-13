@@ -7,10 +7,13 @@ use svn_types::{ErrorCode, Result, SvnError, TxDeltaOp, TxDeltaWindow};
 
 use crate::varint::{decode_varint, encode_varint};
 
+/// Subversion's `SVN_DELTA_WINDOW_SIZE`: svndiff.c rejects any window whose source view, output
+/// view, instruction section or new-data section exceeds it (also after decompression).
+pub(crate) const MAX_WINDOW_SECTION_LEN: usize = 102_400;
 /// Upper bound for the instruction section of one window (after decompression).
-pub(crate) const MAX_INSTRUCTIONS_LEN: usize = 4 * 1024 * 1024;
-/// Upper bound for source view, target view and new-data lengths of one window.
-pub(crate) const MAX_VIEW_LEN: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_INSTRUCTIONS_LEN: usize = MAX_WINDOW_SECTION_LEN;
+/// Upper bound for source view, output view and new-data lengths of one window.
+pub(crate) const MAX_VIEW_LEN: usize = MAX_WINDOW_SECTION_LEN;
 
 fn corrupt(msg: impl Into<String>) -> SvnError {
     SvnError::new(ErrorCode::Corrupt, msg)
@@ -64,7 +67,7 @@ pub fn parse_instructions(
     Ok(ops)
 }
 
-/// Encodes ops into an instruction section. Zero-length ops are dropped.
+/// Encodes ops into an instruction section. Zero-length ops (never valid) are skipped.
 pub fn serialize_instructions(ops: &[TxDeltaOp], out: &mut Vec<u8>) {
     for op in ops {
         let (code, length, offset) = match *op {
@@ -92,6 +95,12 @@ fn validate_ops(ops: &[TxDeltaOp], sview_len: u64, tview_len: u64, new_len: u64)
     let mut tpos: u64 = 0;
     let mut npos: u64 = 0;
     for op in ops {
+        let (TxDeltaOp::CopyFromSource { length, .. }
+        | TxDeltaOp::CopyFromTarget { length, .. }
+        | TxDeltaOp::NewData { length, .. }) = *op;
+        if length == 0 {
+            return Err(corrupt("svndiff instruction has zero length"));
+        }
         let length = match *op {
             TxDeltaOp::CopyFromSource { offset, length } => {
                 let end = offset
@@ -125,6 +134,9 @@ fn validate_ops(ops: &[TxDeltaOp], sview_len: u64, tview_len: u64, new_len: u64)
             .checked_add(length)
             .filter(|end| *end <= tview_len)
             .ok_or_else(|| corrupt("svndiff instructions exceed the target view"))?;
+    }
+    if npos != new_len {
+        return Err(corrupt("svndiff window has unused new data"));
     }
     if tpos != tview_len {
         return Err(corrupt("svndiff instructions do not fill the target view"));
@@ -194,5 +206,9 @@ mod tests {
         assert!(parse_instructions(&[0x80], 0, 5, 5).is_err());
         // truncated offset
         assert!(parse_instructions(&[0x01], 1, 1, 0).is_err());
+        // zero-length op (explicit varint length 0)
+        assert!(parse_instructions(&[0x80, 0x00, 0x81], 0, 1, 1).is_err());
+        // new data supplied but never used
+        assert!(parse_instructions(&[0x82], 0, 2, 3).is_err());
     }
 }
