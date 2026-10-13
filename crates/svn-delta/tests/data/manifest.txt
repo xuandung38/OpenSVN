@@ -1,0 +1,10 @@
+# svndiff-file base-file expected-file md5 length
+none-r1.svndiff - text-r1.txt 45fee15c6aceb6e17d27d3d24053e3ae 122516
+none-r2.svndiff text-r1.txt text-r2.txt 581a7f290f3600ae8361ab17663b5914 122503
+none-r3.svndiff text-r2.txt text-r3.txt b1573b4d62119684dc3e071e94457c97 122521
+zlib-r1.svndiff - text-r1.txt 45fee15c6aceb6e17d27d3d24053e3ae 122516
+zlib-r2.svndiff text-r1.txt text-r2.txt 581a7f290f3600ae8361ab17663b5914 122503
+zlib-r3.svndiff text-r2.txt text-r3.txt b1573b4d62119684dc3e071e94457c97 122521
+lz4-r1.svndiff - text-r1.txt 45fee15c6aceb6e17d27d3d24053e3ae 122516
+lz4-r2.svndiff text-r1.txt text-r2.txt 581a7f290f3600ae8361ab17663b5914 122503
+lz4-r3.svndiff text-r2.txt text-r3.txt b1573b4d62119684dc3e071e94457c97 122521
