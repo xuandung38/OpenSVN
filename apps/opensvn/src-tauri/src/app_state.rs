@@ -1,0 +1,168 @@
+//! Shared application state handed to every command.
+
+use std::future::Future;
+use std::path::Path;
+use std::sync::Arc;
+
+use opensvn_ipc::{AppError, OpResult, OperationHandle, OperationKind, WcId};
+use svn_types::SvnError;
+
+use crate::db::{AppDb, CacheDb};
+use crate::engine::{EngineFacade, OpContext, WcRef};
+use crate::ops::{AppEvents, OperationManager};
+use crate::programs::{ProgramPicker, ProgramService};
+use crate::settings::{SettingsService, system_locale};
+use crate::status::StatusPublisher;
+use crate::wc::{ResolvedWc, WcRegistry};
+
+/// Everything needed to build the state; tests substitute the engine, events and dialogs.
+pub struct AppDeps {
+    /// Directory holding `app.sqlite` and `cache.sqlite`.
+    pub data_dir: std::path::PathBuf,
+    /// Engine implementation.
+    pub engine: Arc<dyn EngineFacade>,
+    /// Outbound events.
+    pub events: Arc<dyn AppEvents>,
+    /// Native dialogs.
+    pub picker: Arc<dyn ProgramPicker>,
+}
+
+/// Services shared by all commands. Managed by Tauri and injected as `State<AppState>`.
+pub struct AppState {
+    /// Durable app database.
+    pub db: AppDb,
+    /// Settings with change notification.
+    pub settings: Arc<SettingsService>,
+    /// Operation lifecycle.
+    pub ops: OperationManager,
+    /// Engine behind every repository and working copy command.
+    pub engine: Arc<dyn EngineFacade>,
+    /// Working copy list and actors.
+    pub wcs: Arc<WcRegistry>,
+    /// Status deltas and snapshots.
+    pub status: Arc<StatusPublisher>,
+    /// Program settings (native pick and confirm).
+    pub programs: ProgramService,
+}
+
+impl AppState {
+    /// Opens the databases and wires the services.
+    pub fn build(deps: AppDeps) -> Result<Self, AppError> {
+        let db = AppDb::open(&deps.data_dir)?;
+        let cache = CacheDb::open(&deps.data_dir)?;
+        let settings = Arc::new(SettingsService::load(
+            db.clone(),
+            system_locale().as_deref(),
+        )?);
+        let wcs = Arc::new(WcRegistry::new(db.clone(), Arc::clone(&deps.engine)));
+        let status = Arc::new(StatusPublisher::new(
+            Arc::clone(&deps.engine),
+            cache,
+            Arc::clone(&deps.events),
+        ));
+        Ok(Self {
+            programs: ProgramService::new(Arc::clone(&settings), deps.picker),
+            ops: OperationManager::new(deps.events),
+            engine: deps.engine,
+            db,
+            settings,
+            wcs,
+            status,
+        })
+    }
+
+    /// Runs a read on a working copy through its actor (busy-retry applies).
+    pub async fn wc_read<T, F, Fut>(&self, id: &WcId, f: F) -> Result<T, AppError>
+    where
+        F: Fn(Arc<dyn EngineFacade>, WcRef) -> Fut,
+        Fut: Future<Output = Result<T, SvnError>>,
+    {
+        let r = self.wcs.resolve(id)?;
+        let engine = Arc::clone(&self.engine);
+        r.actor
+            .read(|| {
+                let fut = f(Arc::clone(&engine), r.wc.clone());
+                async move { fut.await.map_err(|e| AppError::from(&e)) }
+            })
+            .await
+    }
+
+    /// Runs a short write on a working copy through its actor and refreshes status afterwards.
+    pub async fn wc_write<T, F, Fut>(&self, id: &WcId, f: F) -> Result<T, AppError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<dyn EngineFacade>, WcRef) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, SvnError>> + Send + 'static,
+    {
+        let r = self.wcs.resolve(id)?;
+        let (engine, wc) = (Arc::clone(&self.engine), r.wc.clone());
+        let out = r
+            .actor
+            .write(async move { f(engine, wc).await.map_err(|e| AppError::from(&e)) })
+            .await;
+        self.publish_quietly(&r).await;
+        out
+    }
+
+    /// Starts a long write operation on a working copy. The work runs inside the working copy's
+    /// actor; status is republished when it ends, also after a failure or cancel, because the
+    /// operation may have changed part of the tree.
+    pub fn start_wc_op<F, Fut>(
+        &self,
+        kind: OperationKind,
+        id: &WcId,
+        title: impl Into<String>,
+        f: F,
+    ) -> Result<OperationHandle, AppError>
+    where
+        F: FnOnce(Arc<dyn EngineFacade>, WcRef, OpContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<OpResult, SvnError>> + Send + 'static,
+    {
+        let r = self.wcs.resolve(id)?;
+        let (engine, publisher) = (Arc::clone(&self.engine), Arc::clone(&self.status));
+        let wc = r.wc.clone();
+        Ok(self
+            .ops
+            .spawn(kind, Some(id.clone()), title, move |ctx| async move {
+                let result = r
+                    .actor
+                    .write(async move { f(engine, wc, ctx).await.map_err(|e| AppError::from(&e)) })
+                    .await;
+                if let Err(e) = publisher.publish(&r).await {
+                    tracing::warn!(code = ?e.code, "status refresh after operation failed");
+                }
+                result
+            }))
+    }
+
+    /// Starts an operation that needs no working copy (remote edits, downloads, ...).
+    pub fn start_op<F, Fut>(
+        &self,
+        kind: OperationKind,
+        title: impl Into<String>,
+        f: F,
+    ) -> OperationHandle
+    where
+        F: FnOnce(Arc<dyn EngineFacade>, OpContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<OpResult, SvnError>> + Send + 'static,
+    {
+        let engine = Arc::clone(&self.engine);
+        self.ops.spawn(kind, None, title, move |ctx| async move {
+            f(engine, ctx).await.map_err(|e| AppError::from(&e))
+        })
+    }
+
+    /// Republishes status; a failure is logged, never surfaced (the caller's result matters more).
+    pub async fn publish_quietly(&self, r: &ResolvedWc) {
+        if let Err(e) = self.status.publish(r).await {
+            tracing::warn!(code = ?e.code, "status refresh failed");
+        }
+    }
+}
+
+/// Last path component for operation titles.
+pub fn leaf(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned())
+}

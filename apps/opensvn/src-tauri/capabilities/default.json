@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window only. core:event:allow-listen / allow-unlisten: the UI subscribes to op://, wc:// and auth:// events emitted by Rust. No emit (UI talks to Rust through commands), no window/webview/menu/path/resources/app permissions: nothing in the UI needs them yet; add per-feature when a screen requires one. App commands are allowed one by one.",
+  "description": "Main window only. core:event:allow-listen / allow-unlisten: the UI subscribes to op://, wc:// and auth:// events emitted by Rust. No emit (UI talks to Rust through commands), no window/webview/menu/path/resources/app permissions: nothing in the UI needs them yet; add per-feature when a screen requires one. App commands are allowed one by one; program-choose / program-clear only open a native file dialog or clear a value (the program to run is picked and confirmed natively, never passed by the UI).",
   "windows": ["main"],
   "permissions": [
     "core:event:allow-listen",
@@ -27,6 +27,8 @@
     "allow-accounts-sign-out",
     "allow-settings-get",
     "allow-settings-set",
+    "allow-program-choose",
+    "allow-program-clear",
     "allow-reveal-in-os",
     "allow-open-external",
     "allow-diagnostics-export",
