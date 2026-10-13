@@ -25,6 +25,11 @@ const COMPAT_VERSION: &str = "1.15.0";
 ///
 /// `lock_tokens` are `(path relative to the session URL, token)` pairs. If the observer
 /// rejects the transaction it is deleted and the observer's error is returned.
+///
+/// The returned editor must end with `close_edit` or `abort_edit`. Dropping it without either
+/// leaves the transaction on the server unless the best-effort background delete described on
+/// [`HttpCommitEditor`] gets through; the journaled name and [`abort_txn`] are the reliable way
+/// to clean up.
 pub async fn start_commit(
     wire: &RaWire,
     message: &str,
@@ -64,7 +69,7 @@ pub async fn start_commit(
 
     let resp = wire.send(plan.request, cancel).await?;
     let head = svn_protocol::ResponseHead::new(resp.status().as_u16(), headers_of(&resp));
-    let body = RaWire::read_small(resp).await?;
+    let body = RaWire::read_small(resp, cancel).await?;
     let txn = parse_create_txn_response(&head, &body)?;
 
     if let Err(e) = begin(wire, &txn, &plan.deferred_revprops, &*observer, cancel).await {
@@ -94,7 +99,7 @@ async fn begin(
     if !deferred.is_empty() {
         let req = txn_proppatch_request(wire.urls(), txn, deferred)?;
         let resp = wire.send_ok(req, cancel).await?;
-        merge::check_proppatch(&RaWire::read_small(resp).await?)?;
+        merge::check_proppatch(&RaWire::read_small(resp, cancel).await?)?;
     }
     Ok(())
 }

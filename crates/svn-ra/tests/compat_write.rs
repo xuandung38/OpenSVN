@@ -4,6 +4,14 @@
 //! Needs Docker and the `svn` CLI: `cargo xtask compat up --no-build`, then
 //! `cargo test -p svn-ra --test compat_write -- --ignored`. Each run creates a scratch
 //! repository on the server and removes it again, so the fixture repositories stay untouched.
+//!
+//! Without Docker, point the tests at a local Apache + mod_dav_svn instead (HTTPS, Basic auth
+//! `tester`/`tester-pass`, `SVNParentPath` writable by the test):
+//!
+//! - `OPENSVN_COMPAT_LOCAL_URL`: the parent-path URL, e.g. `https://localhost:18276/svn`;
+//! - `OPENSVN_COMPAT_LOCAL_REPOS`: the `SVNParentPath` directory (scratch repositories are
+//!   created there with the local `svnadmin`);
+//! - `OPENSVN_COMPAT_CA`: the CA certificate of the server (PEM).
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::collections::BTreeMap;
@@ -33,12 +41,44 @@ const SERVERS: [(&str, u16, &str); 2] = [
     ("1.15.0", 8444, "opensvn-compat-svn15-server-1"),
 ];
 
+/// Where the scratch repositories of a server live.
+#[derive(Clone)]
+enum Host {
+    /// In a compat container (`docker exec`), served on this port of localhost.
+    Docker { container: &'static str, port: u16 },
+    /// In a local `SVNParentPath` directory, served below this parent-path URL.
+    Local { repos: PathBuf, base: String },
+}
+
+/// The servers to test against: the local one from the environment, or the compat containers.
+fn servers() -> Vec<(String, Host)> {
+    if let (Ok(base), Ok(repos)) = (
+        std::env::var("OPENSVN_COMPAT_LOCAL_URL"),
+        std::env::var("OPENSVN_COMPAT_LOCAL_REPOS"),
+    ) {
+        return vec![(
+            "local".to_owned(),
+            Host::Local {
+                repos: PathBuf::from(repos),
+                base: base.trim_end_matches('/').to_owned(),
+            },
+        )];
+    }
+    SERVERS
+        .iter()
+        .map(|&(version, port, container)| (version.to_owned(), Host::Docker { container, port }))
+        .collect()
+}
+
 fn p(s: &str) -> RelPath {
     RelPath::new(s).expect("path")
 }
 
 fn ca_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/compat/certs/ca.crt")
+    match std::env::var_os("OPENSVN_COMPAT_CA") {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/compat/certs/ca.crt"),
+    }
 }
 
 struct TesterPrompter;
@@ -78,50 +118,62 @@ fn transport() -> Arc<HttpTransport> {
 
 /// A scratch repository that is deleted when dropped.
 struct Scratch {
-    container: &'static str,
+    host: Host,
     name: String,
-    port: u16,
 }
 
 impl Scratch {
-    fn new(container: &'static str, port: u16) -> Self {
+    fn new(host: &Host) -> Self {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let name = format!(
             "ra10b-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         );
-        // The server runs Apache as uid 33; the repository must belong to that user.
-        let out = Command::new("docker")
-            .args(["exec", "-u", "33:33", container, "svnadmin", "create"])
-            .arg(format!("/var/svn/repos/{name}"))
-            .output()
-            .expect("docker");
+        let out = match host {
+            // The server runs Apache as uid 33; the repository must belong to that user.
+            Host::Docker { container, .. } => Command::new("docker")
+                .args(["exec", "-u", "33:33", container, "svnadmin", "create"])
+                .arg(format!("/var/svn/repos/{name}"))
+                .output()
+                .expect("docker"),
+            Host::Local { repos, .. } => Command::new("svnadmin")
+                .arg("create")
+                .arg(repos.join(&name))
+                .output()
+                .expect("svnadmin"),
+        };
         assert!(
             out.status.success(),
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
         Self {
-            container,
+            host: host.clone(),
             name,
-            port,
         }
     }
 
     fn url(&self) -> String {
-        format!("https://localhost:{}/svn/{}", self.port, self.name)
+        match &self.host {
+            Host::Docker { port, .. } => format!("https://localhost:{port}/svn/{}", self.name),
+            Host::Local { base, .. } => format!("{base}/{}", self.name),
+        }
     }
 
     /// URL for the CLI: Docker publishes the port on IPv4 only, and `svn` tries `::1` first.
     fn cli_url(&self) -> String {
-        format!("https://127.0.0.1:{}/svn/{}", self.port, self.name)
+        match &self.host {
+            Host::Docker { port, .. } => format!("https://127.0.0.1:{port}/svn/{}", self.name),
+            Host::Local { .. } => self.url(),
+        }
     }
 
     fn cli(&self) -> Command {
         let mut c = Command::new("svn");
         c.args([
             "--non-interactive",
+            "--no-auth-cache",
             "--username",
             "tester",
             "--password",
@@ -160,15 +212,22 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = Command::new("docker")
-            .args([
-                "exec",
-                self.container,
-                "rm",
-                "-rf",
-                &format!("/var/svn/repos/{}", self.name),
-            ])
-            .output();
+        match &self.host {
+            Host::Docker { container, .. } => {
+                let _ = Command::new("docker")
+                    .args([
+                        "exec",
+                        container,
+                        "rm",
+                        "-rf",
+                        &format!("/var/svn/repos/{}", self.name),
+                    ])
+                    .output();
+            }
+            Host::Local { repos, .. } => {
+                let _ = std::fs::remove_dir_all(repos.join(&self.name));
+            }
+        }
     }
 }
 
@@ -296,10 +355,10 @@ fn big_bytes() -> Vec<u8> {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and svn: cargo xtask compat up --no-build"]
+#[ignore = "requires svn and a server: cargo xtask compat up --no-build, or OPENSVN_COMPAT_LOCAL_*"]
 async fn commit_update_roundtrip_matches_svn() {
-    for (version, port, container) in SERVERS {
-        let scratch = Scratch::new(container, port);
+    for (version, host) in servers() {
+        let scratch = Scratch::new(&host);
         let wire = open(&scratch).await;
         let journal = Arc::new(Journal::default());
         let big = big_bytes();
@@ -402,10 +461,10 @@ async fn commit_update_roundtrip_matches_svn() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and svn: cargo xtask compat up --no-build"]
+#[ignore = "requires svn and a server: cargo xtask compat up --no-build, or OPENSVN_COMPAT_LOCAL_*"]
 async fn failures_clean_up_and_map_to_error_codes() {
-    for (version, port, container) in SERVERS {
-        let scratch = Scratch::new(container, port);
+    for (version, host) in servers() {
+        let scratch = Scratch::new(&host);
         let wire = open(&scratch).await;
         let journal = Arc::new(Journal::default());
         first_commit(&wire, &journal, b"small").await;
@@ -535,5 +594,124 @@ async fn failures_clean_up_and_map_to_error_codes() {
         let err = ed.close_file(f).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::LockedByOther, "{version}: {err}");
         ed.abort_edit().await.unwrap();
+    }
+}
+
+/// Lock token of `path` as `svn info` reports it, if the node is locked.
+fn lock_token(scratch: &Scratch, path: &str) -> Option<String> {
+    let url = format!("{}/{path}", scratch.cli_url());
+    scratch
+        .svn(&["info", &url])
+        .lines()
+        .find_map(|l| l.strip_prefix("Lock Token: "))
+        .map(str::to_owned)
+}
+
+/// Replacing directories whose old children are locked (`svn rm d; mkdir d; ...; svn ci`, and
+/// the same with a copy): mod_dav still sees the old locks below the new directory, so `MKCOL`
+/// and the directory `COPY` must present them (ra_serf's recursive `If:` header). The svn CLI
+/// makes the same commit with DELETE, MKCOL, PUT and MERGE.
+#[tokio::test]
+#[ignore = "requires svn and a server: cargo xtask compat up --no-build, or OPENSVN_COMPAT_LOCAL_*"]
+async fn replacing_directories_with_locked_children() {
+    for (version, host) in servers() {
+        for keep_locks in [false, true] {
+            let scratch = Scratch::new(&host);
+            let wire = open(&scratch).await;
+            let journal = Arc::new(Journal::default());
+
+            // r1: rd/f.txt and cd/g.txt.
+            let mut ed = start_commit(
+                &wire,
+                "seed",
+                &[],
+                &[],
+                false,
+                journal.clone(),
+                &CancelToken::new(),
+            )
+            .await
+            .unwrap();
+            let root = ed.open_root(Some(Revnum(0))).await.unwrap();
+            for (dir, name) in [("rd", "f.txt"), ("cd", "g.txt")] {
+                let d = ed.add_directory(&p(dir), root, None).await.unwrap();
+                let (_k, src, md5) = file(b"old\n");
+                let f = ed
+                    .add_file(&p(&format!("{dir}/{name}")), d, None)
+                    .await
+                    .unwrap();
+                ed.apply_text(f, None, src, None, md5).await.unwrap();
+                ed.close_file(f).await.unwrap();
+                ed.close_directory(d).await.unwrap();
+            }
+            ed.close_directory(root).await.unwrap();
+            let r1 = ed.close_edit().await.unwrap().revision;
+
+            let urls: Vec<String> = ["rd/f.txt", "cd/g.txt"]
+                .iter()
+                .map(|f| format!("{}/{f}", scratch.cli_url()))
+                .collect();
+            scratch.svn(&["lock", "-m", "held", &urls[0], &urls[1]]);
+            let locks = vec![
+                (
+                    "rd/f.txt".to_owned(),
+                    lock_token(&scratch, "rd/f.txt").unwrap(),
+                ),
+                (
+                    "cd/g.txt".to_owned(),
+                    lock_token(&scratch, "cd/g.txt").unwrap(),
+                ),
+            ];
+
+            // r2: replace rd by a new directory with a new f.txt, and cd by a copy of rd@r1
+            // (URL form in one run, repository-path form in the other).
+            let copy_src = if keep_locks {
+                "/rd".to_owned()
+            } else {
+                format!("{}/rd", scratch.url())
+            };
+            let mut ed = start_commit(
+                &wire,
+                "replace",
+                &[],
+                &locks,
+                keep_locks,
+                journal.clone(),
+                &CancelToken::new(),
+            )
+            .await
+            .unwrap();
+            let root = ed.open_root(Some(r1)).await.unwrap();
+            ed.delete_entry(&p("rd"), Some(r1), root).await.unwrap();
+            let rd = ed.add_directory(&p("rd"), root, None).await.unwrap();
+            let (_k, src, md5) = file(b"new\n");
+            let f = ed.add_file(&p("rd/f.txt"), rd, None).await.unwrap();
+            ed.apply_text(f, None, src, None, md5).await.unwrap();
+            ed.close_file(f).await.unwrap();
+            ed.close_directory(rd).await.unwrap();
+            ed.delete_entry(&p("cd"), Some(r1), root).await.unwrap();
+            let cd = ed
+                .add_directory(&p("cd"), root, Some((&copy_src, r1)))
+                .await
+                .unwrap_or_else(|e| panic!("{version} keep={keep_locks}: copy: {e}"));
+            ed.close_directory(cd).await.unwrap();
+            ed.close_directory(root).await.unwrap();
+            let info = ed
+                .close_edit()
+                .await
+                .unwrap_or_else(|e| panic!("{version} keep={keep_locks}: {e}"));
+            assert_eq!(info.revision, Revnum(r1.0 + 1), "{version}");
+
+            assert_eq!(scratch.cat("rd/f.txt"), b"new\n", "{version}");
+            assert_eq!(scratch.cat("cd/f.txt"), b"old\n", "{version}");
+            let listing = scratch.svn(&["ls", &format!("{}/cd", scratch.cli_url())]);
+            assert_eq!(listing.trim(), "f.txt", "{version}");
+            // The MERGE keeps or releases the lock the commit used.
+            assert_eq!(
+                lock_token(&scratch, "rd/f.txt").is_some(),
+                keep_locks,
+                "{version} keep={keep_locks}"
+            );
+        }
     }
 }

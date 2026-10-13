@@ -404,6 +404,168 @@ async fn deleting_a_directory_presents_the_locks_below_it() {
     assert!(del("/trunk/plain").headers.get("If").is_none());
 }
 
+/// Replacing a directory whose old child is locked: mod_dav still sees the lock below the new
+/// directory, so `MKCOL` and a directory `COPY` carry the recursive `If:` header (ra_serf's
+/// `setup_add_dir_common_headers` / `setup_copy_dir_headers`). Only `DELETE` gets the
+/// keep-locks option; whether the locks survive is decided by the `MERGE`.
+#[tokio::test]
+async fn replacing_a_directory_presents_the_locks_below_it() {
+    for keep_locks in [false, true] {
+        let srv = server(Bulk::Prefer).await;
+        mount_txn(&srv).await;
+        for m in ["DELETE", "MKCOL", "PUT"] {
+            Mock::given(method(m))
+                .and(path_prefix_txr())
+                .respond_with(ResponseTemplate::new(201))
+                .mount(&srv)
+                .await;
+        }
+        Mock::given(method("COPY"))
+            .and(wiremock::matchers::path_regex(r"^/svn/repo/!svn/rvr/.*"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&srv)
+            .await;
+        mount_merge(&srv, fixture("commit/full-merge.resp")).await;
+        let locks = [
+            ("rd/f.txt".to_owned(), "opaquelocktoken:ffff".to_owned()),
+            ("cd/sub/g.txt".to_owned(), "opaquelocktoken:gggg".to_owned()),
+            ("other.txt".to_owned(), "opaquelocktoken:cccc".to_owned()),
+        ];
+        let w = wire(&srv, 4).await;
+        let rec = Arc::new(Recorder::default());
+        let mut ed = start_commit(
+            &w,
+            "replace",
+            &[],
+            &locks,
+            keep_locks,
+            rec.clone(),
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap();
+        let root = ed.open_root(Some(Revnum(5))).await.unwrap();
+        // Replace `rd` by a new directory with a new `f.txt`.
+        ed.delete_entry(&p("rd"), None, root).await.unwrap();
+        let rd = ed.add_directory(&p("rd"), root, None).await.unwrap();
+        let (_keep, src, md5) = source("y");
+        let f = ed.add_file(&p("rd/f.txt"), rd, None).await.unwrap();
+        ed.apply_text(f, None, src, None, md5).await.unwrap();
+        ed.close_file(f).await.unwrap();
+        ed.close_directory(rd).await.unwrap();
+        // Replace `cd` by a copy (given as a repository path).
+        ed.delete_entry(&p("cd"), None, root).await.unwrap();
+        let cd = ed
+            .add_directory(&p("cd"), root, Some(("/trunk/src", Revnum(2))))
+            .await
+            .unwrap();
+        ed.close_directory(cd).await.unwrap();
+        // A plain new directory with no locks below it.
+        let n = ed.add_directory(&p("new"), root, None).await.unwrap();
+        ed.close_directory(n).await.unwrap();
+        ed.close_directory(root).await.unwrap();
+        ed.close_edit().await.unwrap();
+
+        let all = srv.received_requests().await.unwrap();
+        let req = |m: &str, suffix: &str| {
+            all.iter()
+                .find(|r| r.method.as_str() == m && r.url.path().ends_with(suffix))
+                .unwrap_or_else(|| panic!("no {m} {suffix}"))
+        };
+        let hdr = |r: &wiremock::Request, n: &str| {
+            r.headers.get(n).map(|v| v.to_str().unwrap().to_owned())
+        };
+        let mkcol = req("MKCOL", "/trunk/rd");
+        assert_eq!(
+            hdr(mkcol, "If").as_deref(),
+            Some(
+                format!(
+                    "<{}/svn/repo/trunk/rd/f.txt> (<opaquelocktoken:ffff>)",
+                    srv.uri()
+                )
+                .as_str()
+            ),
+            "keep_locks={keep_locks}"
+        );
+        assert!(hdr(mkcol, "X-SVN-Options").is_none());
+        let copy = req("COPY", "/svn/repo/!svn/rvr/2/trunk/src");
+        assert!(
+            hdr(copy, "Destination")
+                .unwrap()
+                .ends_with("/svn/repo/!svn/txr/7-a/trunk/cd")
+        );
+        assert_eq!(
+            hdr(copy, "If").as_deref(),
+            Some(
+                format!(
+                    "<{}/svn/repo/trunk/cd/sub/g.txt> (<opaquelocktoken:gggg>)",
+                    srv.uri()
+                )
+                .as_str()
+            )
+        );
+        assert!(hdr(copy, "X-SVN-Options").is_none());
+        assert!(hdr(req("MKCOL", "/trunk/new"), "If").is_none());
+        // The delete of `rd` names the lock too and carries keep-locks when asked.
+        let del = req("DELETE", "/trunk/rd");
+        assert!(hdr(del, "If").unwrap().contains("opaquelocktoken:ffff"));
+        assert_eq!(
+            hdr(del, "X-SVN-Options").is_some(),
+            keep_locks,
+            "keep_locks={keep_locks}"
+        );
+        // The new file is written with the token, and the MERGE lists it.
+        let put = req("PUT", "/trunk/rd/f.txt");
+        assert!(hdr(put, "If").unwrap().contains("opaquelocktoken:ffff"));
+        let merge = all.iter().find(|r| r.method.as_str() == "MERGE").unwrap();
+        let body = String::from_utf8_lossy(&merge.body);
+        assert!(body.contains("<lock-path>rd/f.txt</lock-path>"), "{body}");
+        assert_eq!(
+            hdr(merge, "X-SVN-Options")
+                .unwrap_or_default()
+                .contains("keep-locks"),
+            keep_locks,
+            "{:?}",
+            hdr(merge, "X-SVN-Options")
+        );
+    }
+}
+
+#[tokio::test]
+async fn repository_path_copy_sources_must_be_clean() {
+    let srv = server(Bulk::Prefer).await;
+    mount_txn(&srv).await;
+    let rec = Arc::new(Recorder::default());
+    let mut ed = begin(&srv, &rec, &[], &CancelToken::new()).await.unwrap();
+    let root = ed.open_root(None).await.unwrap();
+    for bad in ["/trunk/../etc", "//evil.test.local/x", "/a//b"] {
+        let err = ed
+            .add_file(&p("x"), root, Some((bad, Revnum(1))))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnsafePath, "{bad}");
+    }
+    assert!(requests(&srv).await.iter().all(|(m, _)| m != "COPY"));
+}
+
+/// Dropping an editor without `close_edit`/`abort_edit` deletes the transaction in the
+/// background (best effort; the journal and `abort_txn` remain the reliable cleanup).
+#[tokio::test]
+async fn dropped_editor_deletes_the_transaction_in_the_background() {
+    let srv = server(Bulk::Prefer).await;
+    mount_txn(&srv).await;
+    let rec = Arc::new(Recorder::default());
+    let mut ed = begin(&srv, &rec, &[], &CancelToken::new()).await.unwrap();
+    ed.open_root(None).await.unwrap();
+    drop(ed);
+    let abort = ("DELETE".to_owned(), format!("{ROOT}/!svn/txn/{TXN}"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !requests(&srv).await.contains(&abort) {
+        assert!(Instant::now() < deadline, "transaction was not deleted");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
 async fn observer_veto_deletes_the_transaction() {
     let srv = server(Bulk::Prefer).await;
