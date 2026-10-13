@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use common::{Handler, Reply, ScriptedPrompter, TestCa, TlsServer, transport_trusting};
 use reqwest::Method;
-use svn_ra::ops::commit::{abort_txn, start_commit};
+use svn_ra::ops::commit::{abort_txn, abort_txn_checked, start_commit};
 use svn_ra::ops::update::RaWire;
-use svn_ra_api::{CommitEditor, CommitInfo, CommitObserver};
+use svn_ra_api::{CommitEditor, CommitInfo, CommitObserver, TxnAbort};
 use svn_types::{CancelToken, ErrorCode, RepoUrl, Result};
 
 const TXN: &str = "7-a";
@@ -217,4 +217,139 @@ async fn cleanup_gives_up_after_its_timeout() {
         "used the real clock"
     );
     assert_eq!(prompter.credential_prompts(), 0);
+}
+
+/// Like [`server`], with the request path passed to `rest`.
+async fn server_by_path(
+    rest: impl Fn(&Method, &str) -> Reply + Send + Sync + 'static,
+) -> (TestCa, TlsServer) {
+    let handler: Arc<Handler> = Arc::new(move |seen| match seen.method.as_str() {
+        "OPTIONS" => options(),
+        "POST" => Reply::status(201).header("svn-txn-name", TXN),
+        _ => rest(&seen.method, &seen.path),
+    });
+    let ca = TestCa::new();
+    let srv = TlsServer::start(&ca.leaf(&["localhost"], false), handler).await;
+    (ca, srv)
+}
+
+const VTXN_PATH: &str = "/svn/repo/!svn/vtxn/7-a";
+
+/// `abort_txn_checked` tells "deleted now" from "already gone", trying the plain and the virtual
+/// name, and refuses to guess from an answer that says neither.
+#[tokio::test]
+async fn checked_abort_tells_deleted_from_gone() {
+    for (plain, virt, expected) in [
+        (204, 404, Some(TxnAbort::Deleted)),
+        (404, 204, Some(TxnAbort::Deleted)),
+        (400, 204, Some(TxnAbort::Deleted)),
+        (404, 404, Some(TxnAbort::Gone)),
+        (400, 404, Some(TxnAbort::Gone)),
+        (400, 400, None),
+        (500, 404, None),
+    ] {
+        let (ca, srv) = server_by_path(move |m, path| match (m.as_str(), path) {
+            ("DELETE", TXN_PATH) => Reply::status(plain),
+            ("DELETE", VTXN_PATH) => Reply::status(virt),
+            _ => Reply::status(500),
+        })
+        .await;
+        let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+        let transport = transport_trusting(&ca, prompter, |_| {});
+        let url = RepoUrl::parse(srv.url("/svn/repo/trunk").as_str()).unwrap();
+        let wire = RaWire::open(transport, url, &CancelToken::new())
+            .await
+            .unwrap();
+        let got = abort_txn_checked(&wire, TXN, &CancelToken::new()).await;
+        match expected {
+            Some(want) => assert_eq!(got.unwrap(), want, "{plain}/{virt}"),
+            None => {
+                got.unwrap_err();
+            }
+        }
+    }
+}
+
+/// Records the observer calls; `on_merge_sending` can be told to fail.
+#[derive(Default)]
+struct MergeRecorder {
+    calls: std::sync::Mutex<Vec<String>>,
+    fail_sending: bool,
+}
+
+impl CommitObserver for MergeRecorder {
+    fn on_txn_created(&self, txn: &str) -> Result<()> {
+        self.calls.lock().unwrap().push(format!("txn:{txn}"));
+        Ok(())
+    }
+    fn on_merge_sending(&self, txn: &str) -> Result<()> {
+        self.calls.lock().unwrap().push(format!("sending:{txn}"));
+        if self.fail_sending {
+            return Err(svn_types::SvnError::new(
+                ErrorCode::DiskFull,
+                "journal full",
+            ));
+        }
+        Ok(())
+    }
+    fn on_merged(&self, _info: &CommitInfo) -> Result<()> {
+        self.calls.lock().unwrap().push("merged".into());
+        Ok(())
+    }
+}
+
+async fn begin_with(
+    ca: &TestCa,
+    srv: &TlsServer,
+    observer: Arc<MergeRecorder>,
+) -> Box<dyn CommitEditor> {
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    let transport = transport_trusting(ca, prompter, |_| {});
+    let url = RepoUrl::parse(srv.url("/svn/repo/trunk").as_str()).unwrap();
+    let wire = RaWire::open(transport, url, &CancelToken::new())
+        .await
+        .unwrap();
+    start_commit(&wire, "msg", &[], &[], false, observer, &CancelToken::new())
+        .await
+        .unwrap()
+}
+
+fn merges(srv: &TlsServer) -> usize {
+    srv.requests()
+        .iter()
+        .filter(|s| s.method.as_str() == "MERGE")
+        .count()
+}
+
+/// The observer hears about the MERGE right before it is sent; if it cannot record that, no
+/// MERGE is sent and the transaction is deleted.
+#[tokio::test]
+async fn merge_is_announced_and_can_be_vetoed() {
+    let (ca, srv) = server(deletes_need_login).await;
+    let rec = Arc::new(MergeRecorder::default());
+    let mut ed = begin_with(&ca, &srv, rec.clone()).await;
+    let root = ed.open_root(None).await.unwrap();
+    ed.close_directory(root).await.unwrap();
+    // The MERGE is answered 409 (out of date): a refusal, after the announcement.
+    assert_eq!(
+        ed.close_edit().await.unwrap_err().code,
+        ErrorCode::OutOfDate
+    );
+    assert_eq!(
+        *rec.calls.lock().unwrap(),
+        vec![format!("txn:{TXN}"), format!("sending:{TXN}")]
+    );
+    assert_eq!(merges(&srv), 1);
+
+    let (ca, srv) = server(|_| Reply::status(204)).await;
+    let rec = Arc::new(MergeRecorder {
+        fail_sending: true,
+        ..MergeRecorder::default()
+    });
+    let mut ed = begin_with(&ca, &srv, rec.clone()).await;
+    let root = ed.open_root(None).await.unwrap();
+    ed.close_directory(root).await.unwrap();
+    assert_eq!(ed.close_edit().await.unwrap_err().code, ErrorCode::DiskFull);
+    assert_eq!(merges(&srv), 0, "no MERGE without the record");
+    assert_eq!(deletes(&srv), 1, "transaction deleted");
 }

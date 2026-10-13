@@ -45,6 +45,19 @@ pub trait CommitObserver: Send + Sync {
     /// `commit_editor` with that error, before any content is sent.
     fn on_txn_created(&self, txn: &str) -> Result<()>;
 
+    /// The final `MERGE` of transaction `txn` is about to be sent. From the moment it is sent
+    /// the commit may become a revision even if no answer ever arrives, so a journal must
+    /// record that the outcome can be unknown before this returns.
+    ///
+    /// Called once per `close_edit`, after every content request finished and right before
+    /// the `MERGE`. An error vetoes the `MERGE`: the transaction is deleted and `close_edit`
+    /// fails with that error, so a commit is never merged without the record. The default
+    /// does nothing.
+    fn on_merge_sending(&self, txn: &str) -> Result<()> {
+        let _ = txn;
+        Ok(())
+    }
+
     /// The commit was merged into a revision.
     ///
     /// The commit cannot be undone at this point. If this returns an error, `close_edit`
@@ -123,6 +136,16 @@ pub trait CommitEditor: Send {
     /// Closes a directory.
     async fn close_directory(&mut self, dir: DirId) -> Result<()>;
     /// Finishes the commit (MERGE) and returns the new revision.
+    ///
+    /// Calls [`CommitObserver::on_merge_sending`] right before the `MERGE`. Fails with
+    /// [`svn_types::ErrorCode::CommitOutcomeUnknown`] when the `MERGE` was sent but its result
+    /// is unknown; the transaction is then kept for the caller to reconcile (see
+    /// [`crate::RaSession::abort_txn_checked`]). Any other error is the server saying it did
+    /// not merge. That answer holds for the ordinary refusals (out of date, locks, hooks,
+    /// authz), but it is not a proof: mod_dav_svn can also answer an error (for example a 500,
+    /// or a 404 for a transaction that is already gone) after the revision was written, when
+    /// the repository storage fails during the post-commit steps. A caller that journaled the
+    /// `MERGE` therefore reconciles with the repository before it forgets the commit.
     async fn close_edit(self: Box<Self>) -> Result<CommitInfo>;
     /// Abandons the commit and deletes the server transaction.
     async fn abort_edit(self: Box<Self>) -> Result<()>;

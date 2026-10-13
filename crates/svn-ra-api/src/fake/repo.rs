@@ -67,6 +67,19 @@ pub struct RepoState {
     pub txns: HashSet<String>,
     /// Counter for transaction names.
     pub next_txn: u64,
+    /// Fault injected into the next commit's `MERGE` (see `FakeRaSession::fail_next_merge`).
+    pub merge_fault: Option<FakeMergeFault>,
+}
+
+/// A `MERGE` whose answer is lost, injected with `FakeRaSession::fail_next_merge`. Either way
+/// `close_edit` fails with `CommitOutcomeUnknown` after `on_merge_sending`, without calling
+/// `on_merged`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FakeMergeFault {
+    /// The server never applied the `MERGE`: the transaction is still there.
+    LostBeforeMerge,
+    /// The server created the revision, the answer was lost: the transaction is gone.
+    LostAfterMerge,
 }
 
 fn root_node(rev: Revnum) -> Node {
@@ -107,6 +120,7 @@ impl RepoState {
             locks: HashMap::new(),
             txns: HashSet::new(),
             next_txn: 1,
+            merge_fault: None,
         }
     }
 
