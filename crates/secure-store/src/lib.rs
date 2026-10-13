@@ -176,6 +176,7 @@ fn map_error(err: keyring_core::Error) -> StoreError {
     }
 }
 
+/// macOS Keychain store (round trip verified locally with the ignored `os_store_roundtrip`).
 #[cfg(target_os = "macos")]
 fn native_store() -> Result<Arc<keyring_core::CredentialStore>> {
     let store = apple_native_keyring_store::keychain::Store::new()
@@ -183,6 +184,9 @@ fn native_store() -> Result<Arc<keyring_core::CredentialStore>> {
     Ok(store)
 }
 
+/// Windows Credential Manager store.
+///
+/// Unverified: compiled and exercised only by CI/manual runs on Windows (follow-up for P13).
 #[cfg(target_os = "windows")]
 fn native_store() -> Result<Arc<keyring_core::CredentialStore>> {
     let store = windows_native_keyring_store::Store::new()
@@ -190,6 +194,10 @@ fn native_store() -> Result<Arc<keyring_core::CredentialStore>> {
     Ok(store)
 }
 
+/// Secret Service (zbus) store; fails with a clear error when no keyring daemon is running and
+/// never falls back to plaintext.
+///
+/// Unverified: not run on Linux yet; needs a headless gnome-keyring session (follow-up for P13).
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn native_store() -> Result<Arc<keyring_core::CredentialStore>> {
     let store = zbus_secret_service_keyring_store::Store::new().map_err(|e| {
