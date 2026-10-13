@@ -428,3 +428,31 @@ async fn working_copy_edits_and_depth_through_commands() {
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::WcFormatUnsupported);
 }
+
+#[tokio::test]
+async fn layout_detect_finds_the_demo_layout_and_the_current_branch() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let d = commands::layout_detect(
+        f.state(),
+        DEMO_REPO_URL.into(),
+        url("branches/feature-x/src"),
+    )
+    .await
+    .unwrap();
+    assert!(d.found);
+    assert_eq!(d.layout, Some(Layout::Auto));
+    assert_eq!(d.current.unwrap().name, "feature-x");
+    let d = commands::layout_detect(f.state(), DEMO_REPO_URL.into(), url("trunk"))
+        .await
+        .unwrap();
+    assert_eq!(d.current.unwrap().kind, BranchKind::Trunk);
+    assert!(
+        commands::layout_detect(
+            f.state(),
+            "https://nowhere.test.local/x".into(),
+            "https://nowhere.test.local/x".into()
+        )
+        .await
+        .is_err()
+    );
+}

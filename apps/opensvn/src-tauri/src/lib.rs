@@ -13,6 +13,7 @@ mod db;
 pub mod engine;
 mod errors;
 mod events;
+mod layout;
 pub mod lock_ownership;
 mod ops;
 mod path_grants;
