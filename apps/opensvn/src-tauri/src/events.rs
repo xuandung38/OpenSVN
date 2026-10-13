@@ -2,8 +2,8 @@
 //! the event names from docs/system-design/03 section 5.
 
 use opensvn_ipc::{
-    AuthPrompt, Banner, Incoming, OpFailed, OpFinished, OperationHandle, Progress, RevisionChanged,
-    StatusChanged,
+    AuthPrompt, Banner, DroppedPaths, Incoming, OpFailed, OpFinished, OperationHandle, Progress,
+    RevisionChanged, StatusChanged,
 };
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -27,3 +27,4 @@ event!(WcRevisionChanged, RevisionChanged, "wc://revision-changed");
 event!(WcIncoming, Incoming, "wc://incoming");
 event!(WcBanner, Banner, "wc://banner");
 event!(AuthPromptEvent, AuthPrompt, "auth://prompt");
+event!(FsDropped, DroppedPaths, "fs://dropped");

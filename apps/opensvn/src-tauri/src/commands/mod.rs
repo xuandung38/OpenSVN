@@ -1,5 +1,9 @@
-//! Command stubs for every command in docs/system-design/03 section 3.
-//! Each returns `AppError { code: internal, message: "not implemented" }` until the backend lands.
+//! Command handlers for every command in docs/system-design/03 section 3.
+//!
+//! Handlers are thin: they resolve state, call a service and return `AppError` on failure. Every
+//! body runs inside [`crate::boundary::guard`] so a panic never takes the app down. Commands that
+//! belong to a later service (auth prompts, layout detection, OS integration, diagnostics) are
+//! still `not implemented` stubs.
 
 mod remote;
 mod system;
