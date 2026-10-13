@@ -3,13 +3,13 @@
 <logentry
    revision="8">
 <author>alice</author>
-<date>2026-10-13T09:05:31.602450Z</date>
+<date>2026-10-13T09:45:21.561818Z</date>
 <paths>
 <path
-   action="M"
-   prop-mods="true"
    text-mods="false"
-   kind="dir">/trunk/src</path>
+   kind="dir"
+   action="M"
+   prop-mods="true">/trunk/src</path>
 <path
    action="M"
    prop-mods="false"
@@ -18,32 +18,32 @@
 </paths>
 <msg>merge b1 into trunk</msg>
 <logentry
-   revision="7"
-   reverse-merge="false">
+   reverse-merge="false"
+   revision="7">
 <author>alice</author>
-<date>2026-10-13T09:05:25.286127Z</date>
+<date>2026-10-13T09:45:19.408533Z</date>
 <paths>
 <path
+   action="M"
    prop-mods="false"
    text-mods="true"
-   kind="file"
-   action="M">/branches/b1/b.txt</path>
+   kind="file">/branches/b1/b.txt</path>
 </paths>
 <msg>edit on branch</msg>
 </logentry>
 <logentry
-   revision="5"
-   reverse-merge="false">
+   reverse-merge="false"
+   revision="5">
 <author>alice</author>
-<date>2026-10-13T09:04:38.541421Z</date>
+<date>2026-10-13T09:45:08.662021Z</date>
 <paths>
 <path
-   prop-mods="false"
-   text-mods="false"
-   kind="dir"
    copyfrom-path="/trunk/src"
    copyfrom-rev="4"
-   action="A">/branches/b1</path>
+   action="A"
+   prop-mods="false"
+   text-mods="false"
+   kind="dir">/branches/b1</path>
 </paths>
 <msg>branch b1 copy</msg>
 </logentry>
@@ -51,36 +51,36 @@
 <logentry
    revision="6">
 <author>alice</author>
-<date>2026-10-13T09:05:12.806268Z</date>
+<date>2026-10-13T09:45:15.764184Z</date>
 <paths>
 <path
-   text-mods="true"
    kind="file"
    action="M"
-   prop-mods="false">/trunk/a.txt</path>
+   prop-mods="false"
+   text-mods="true">/trunk/a.txt</path>
 <path
-   text-mods="false"
    kind="dir"
    action="A"
-   prop-mods="false">/trunk/newdir</path>
+   prop-mods="false"
+   text-mods="false">/trunk/newdir</path>
 <path
-   text-mods="true"
    kind="file"
    action="A"
-   prop-mods="false">/trunk/newdir/n.txt</path>
+   prop-mods="false"
+   text-mods="true">/trunk/newdir/n.txt</path>
 </paths>
 <msg>second commit: add dir &amp; edit</msg>
 </logentry>
 <logentry
    revision="4">
 <author>alice</author>
-<date>2026-10-13T09:04:36.423797Z</date>
+<date>2026-10-13T09:45:08.321957Z</date>
 <paths>
 <path
-   prop-mods="false"
    text-mods="false"
    kind="file"
-   action="D">/trunk/docs/readme.md</path>
+   action="D"
+   prop-mods="false">/trunk/docs/readme.md</path>
 </paths>
 <msg>delete readme</msg>
 </logentry>

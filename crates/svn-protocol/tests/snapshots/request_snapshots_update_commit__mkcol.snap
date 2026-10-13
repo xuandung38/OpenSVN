@@ -1,0 +1,8 @@
+---
+source: crates/svn-protocol/tests/request_snapshots_update_commit.rs
+expression: "render(&mkcol_request(&u, t, &rel(\"trunk/new dir\")).unwrap())"
+---
+MKCOL http://svn.test.local/svn/repo/!svn/txr/12-ab/trunk/new%20dir
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops

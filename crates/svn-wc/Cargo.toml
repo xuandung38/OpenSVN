@@ -17,6 +17,8 @@ failpoints = ["dep:fail", "fail/failpoints"]
 [dependencies]
 svn-types.workspace = true
 ignore.workspace = true
+svn-diff.workspace = true
+unicode-normalization.workspace = true
 thiserror.workspace = true
 rusqlite = { workspace = true, features = ["functions"] }
 sha1.workspace = true
@@ -26,4 +28,5 @@ tempfile.workspace = true
 fail = { workspace = true, optional = true }
 
 [dev-dependencies]
+opensvn-svn-oracle = { path = "../../tests/svn-oracle" }
 proptest.workspace = true

@@ -2,8 +2,8 @@
 <S:get-locks-report xmlns:S="svn:" xmlns:D="DAV:">
 <S:lock>
 <S:path>/trunk/a.txt</S:path>
-<S:token>opaquelocktoken:94a18d87-277e-411f-b4a5-dbd5f5a88368</S:token>
-<S:creationdate>2026-10-13T09:04:56.949003Z</S:creationdate>
+<S:token>opaquelocktoken:a51c8c59-0dda-4d35-bb7f-b4ab1f3d2ee9</S:token>
+<S:creationdate>2026-10-13T09:45:12.389643Z</S:creationdate>
 <S:owner >alice</S:owner>
 <S:comment >locking &lt;it&gt;</S:comment>
 </S:lock>

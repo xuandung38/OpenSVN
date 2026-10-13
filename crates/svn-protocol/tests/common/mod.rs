@@ -175,3 +175,27 @@ pub fn svn_log_xml(xml: &str) -> Vec<SvnXmlLogRow> {
     }
     rows
 }
+
+/// Canonical form of an XML document for comparing what two clients send: attribute order and
+/// whitespace between elements do not matter.
+pub fn canonical_xml(doc: &[u8]) -> Vec<String> {
+    use svn_protocol::xml::{XmlEvent, read_all};
+    let mut out = Vec::new();
+    for ev in read_all(doc).unwrap() {
+        match ev {
+            XmlEvent::Start(t) => {
+                let mut attrs: Vec<String> = t
+                    .attrs
+                    .iter()
+                    .map(|a| format!("{}={}", a.name.local, a.value))
+                    .collect();
+                attrs.sort();
+                out.push(format!("<{:?} {}>", t.name.local, attrs.join(" ")));
+            }
+            XmlEvent::Text(t) if !t.trim().is_empty() => out.push(format!("text:{}", t.trim())),
+            XmlEvent::Text(_) => {}
+            XmlEvent::End(n) => out.push(format!("</{}>", n.local)),
+        }
+    }
+    out
+}

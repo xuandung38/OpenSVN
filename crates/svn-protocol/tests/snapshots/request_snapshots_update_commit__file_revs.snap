@@ -1,0 +1,11 @@
+---
+source: crates/svn-protocol/tests/request_snapshots_update_commit.rs
+expression: render(&req)
+---
+REPORT http://svn.test.local/svn/repo/!svn/rvr/9/trunk/a.txt
+Content-Type: text/xml
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+
+<S:file-revs-report xmlns:S="svn:"><S:start-revision>1</S:start-revision><S:end-revision>9</S:end-revision><S:include-merged-revisions/><S:path></S:path></S:file-revs-report>

@@ -123,6 +123,29 @@ pub enum Body {
     Stream(Box<dyn BodyStream>),
 }
 
+/// [`BodyStream`] over any reader (a spill file, a pipe fed by a `WindowSink`), delivered in
+/// 64 KiB pieces so the payload is never held in memory whole.
+#[derive(Debug)]
+pub struct ReadBody<R: std::io::Read + Send + std::fmt::Debug>(pub R);
+
+impl<R: std::io::Read + Send + std::fmt::Debug> BodyStream for ReadBody<R> {
+    fn next_chunk(&mut self) -> Result<Option<Bytes>> {
+        let mut buf = vec![0_u8; 64 * 1024];
+        let n = loop {
+            match self.0.read(&mut buf) {
+                Ok(n) => break n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(svn_types::SvnError::from_io("reading request body", &e)),
+            }
+        };
+        if n == 0 {
+            return Ok(None);
+        }
+        buf.truncate(n);
+        Ok(Some(Bytes::from(buf)))
+    }
+}
+
 /// A request ready to be executed by a transport.
 #[derive(Debug)]
 pub struct HttpRequest {
