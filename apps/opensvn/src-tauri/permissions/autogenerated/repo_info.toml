@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-repo-info"
+description = "Enables the repo_info command without any pre-configured scope."
+commands.allow = ["repo_info"]
+
+[[permission]]
+identifier = "deny-repo-info"
+description = "Denies the repo_info command without any pre-configured scope."
+commands.deny = ["repo_info"]
