@@ -133,9 +133,57 @@ fn not_configured(what: &str) -> AppError {
     e
 }
 
-/// Reveals `rel` of the working copy at `root`.
+fn not_on_disk(rel: &RelPath) -> AppError {
+    let mut e = if rel.as_str().is_empty() {
+        AppError::internal(
+            "The working copy folder is not on disk. Locate the working copy or remove it from the list.",
+        )
+    } else {
+        AppError::internal("This item is not on disk.").with_path(rel.as_str())
+    };
+    e.code = ErrorCode::PathNotFound;
+    e
+}
+
+/// Resolves `rel` (relative to the working copy `root`; empty = the root itself) to the path the
+/// file manager may show.
+///
+/// The file manager resolves symbolic links before it selects an item, and a repository can
+/// ship versioned symlinks (`svn:special`) that point anywhere (`docs -> ~/.ssh`). So every
+/// component below the root must be a real file or folder, never a symlink (also when it points
+/// inside the working copy or nowhere), and the canonical target must stay inside the canonical
+/// root. The canonical path is returned so the file manager has nothing left to resolve.
+pub fn reveal_target(root: &Path, rel: &str) -> Result<PathBuf, AppError> {
+    let rel = parse_rel(rel)?;
+    let mut cur = root.to_path_buf();
+    for seg in rel.components() {
+        cur.push(seg);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(invalid_argument(
+                    "This item is a symbolic link. Only real files and folders inside the working copy are shown.",
+                )
+                .with_path(rel.as_str()));
+            }
+            Ok(_) => {}
+            Err(_) => return Err(not_on_disk(&rel)),
+        }
+    }
+    let target = safe_join(root, &rel).map_err(|e| AppError::from(&e))?;
+    let canon_root = dunce::canonicalize(root).map_err(|_| not_on_disk(&RelPath::root()))?;
+    let canon = dunce::canonicalize(&target).map_err(|_| not_on_disk(&rel))?;
+    if !canon.starts_with(&canon_root) {
+        return Err(
+            invalid_argument("This item is outside the working copy.").with_path(rel.as_str())
+        );
+    }
+    Ok(canon)
+}
+
+/// Reveals `rel` of the working copy at `root` (see [`reveal_target`]: no symlinks, canonical
+/// containment).
 pub fn reveal_in_os(opener: &dyn OsOpener, root: &Path, rel: &str) -> Result<(), AppError> {
-    opener.reveal(&resolve_in_wc(root, rel)?)
+    opener.reveal(&reveal_target(root, rel)?)
 }
 
 /// Opens `rel` with the default app, the configured editor or the configured terminal.
@@ -195,26 +243,12 @@ fn launch(mut cmd: Command) -> Result<(), AppError> {
 
 impl OsOpener for SystemOpener {
     fn reveal(&self, path: &Path) -> Result<(), AppError> {
-        if cfg!(target_os = "macos") {
-            let mut c = Command::new("open");
-            c.arg("-R").arg(path);
-            launch(c)
-        } else if cfg!(windows) {
-            // Unverified on Windows: no runner available. Same comma-splitting caveat as
-            // `open_default`: `explorer` splits `/select,<path>` on commas.
-            let mut c = Command::new("explorer");
-            c.arg(format!("/select,{}", path.display()));
-            launch(c)
-        } else {
-            let target = if path.is_dir() {
-                path
-            } else {
-                path.parent().unwrap_or(path)
-            };
-            let mut c = Command::new("xdg-open");
-            c.arg(target);
-            launch(c)
-        }
+        // The opener plugin selects the item natively (Finder, Explorer's
+        // SHOpenFolderAndSelectItems, the freedesktop FileManager1 interface with an `xdg-open`
+        // fallback), so no command line has to quote the path.
+        tauri_plugin_opener::reveal_item_in_dir(path).map_err(|e| {
+            AppError::internal("The file manager could not be opened.").with_detail(e.to_string())
+        })
     }
 
     fn open_default(&self, path: &Path) -> Result<(), AppError> {

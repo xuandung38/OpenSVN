@@ -36,8 +36,8 @@ test("event bus folds op://* events into the ops cache and invalidates on wc://*
 
   const menu = vi.fn();
   bus.onMenu(menu);
-  mockEmit("menu://commit");
-  expect(menu).toHaveBeenCalledWith("menu://commit");
+  mockEmit("menu://wc.commit");
+  expect(menu).toHaveBeenCalledWith("menu://wc.commit");
 
   bus.stop();
   mockEmit("wc://incoming", { wcId: "wc-main", count: 1, latestRev: 2 });

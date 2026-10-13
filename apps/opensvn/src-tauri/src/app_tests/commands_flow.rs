@@ -362,6 +362,7 @@ async fn cancelling_a_checkout_ends_the_operation_quickly_and_registers_nothing(
         CheckoutRequest {
             url: format!("{DEMO_REPO_URL}/trunk"),
             dest: f.grant_dir(std::path::Path::new(target)),
+            dest_name: None,
             rev: None,
             depth: Depth::Infinity,
             sparse: None,
@@ -399,6 +400,7 @@ async fn checkout_registers_the_new_working_copy_and_rejects_format_32() {
     let mut req = CheckoutRequest {
         url: format!("{DEMO_REPO_URL}/trunk"),
         dest: f.grant_dir(std::path::Path::new(target)),
+        dest_name: None,
         rev: Some(Rev(5)),
         depth: Depth::Infinity,
         sparse: None,
@@ -412,13 +414,17 @@ async fn checkout_registers_the_new_working_copy_and_rejects_format_32() {
     assert_eq!(err.code, ErrorCode::WcFormatUnsupported);
     req.format = WcFormat::V31;
     let h = commands::checkout(f.state(), req).await.unwrap();
-    assert_eq!(
-        f.wait_op(&h).await.unwrap(),
-        OpResult::NewRev { new_rev: Rev(5) }
-    );
+    let result = f.wait_op(&h).await.unwrap();
     let list = commands::wc_list(f.state()).await.unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].name, "fresh");
+    assert_eq!(
+        result,
+        OpResult::CheckedOut {
+            wc_id: Some(list[0].id.clone()),
+            new_rev: Rev(5)
+        }
+    );
 }
 
 #[tokio::test]

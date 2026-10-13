@@ -41,7 +41,7 @@ export const EVENT_NAMES: EventName[] = [
   "auth://prompt",
 ];
 
-/** Native menu events (`menu://commit`, `menu://update`, ...) are free-form and carry no payload. */
+/** Native menu events (`menu://wc.update`, `menu://file.checkout`, ...) carry no payload. */
 export type MenuEventName = `menu://${string}`;
 
 /** Live view of one operation for the Activity panel. */
@@ -68,14 +68,73 @@ export interface EventBus {
   stop(): void;
 }
 
-/** Menu entries the native menu (P08) may emit; listed so the bus can subscribe without wildcards. */
+/**
+ * Every native menu item the UI handles, as emitted by the one native menu (`src-tauri/src/menu.rs`,
+ * `menu://<item id>`); listed so the bus can subscribe without wildcards. Rust tests check both
+ * directions: each id is an item of the menu, and each item is listed here unless Rust handles it
+ * itself (zoom, Exit). `MENU_ACTIONS` (`use-wc-shortcuts.ts`) has exactly these keys.
+ */
 export const MENU_EVENTS: readonly MenuEventName[] = [
-  "menu://commit",
-  "menu://update",
-  "menu://refresh",
-  "menu://add-working-copy",
-  "menu://settings",
-  "menu://about",
+  "menu://file.checkout",
+  "menu://file.add-wc",
+  "menu://file.switch-repo",
+  "menu://file.recent",
+  "menu://file.close-wc",
+  "menu://app.settings",
+  "menu://app.check-app-updates",
+  "menu://edit.find",
+  "menu://edit.copy-path",
+  "menu://edit.copy-url",
+  "menu://view.changes",
+  "menu://view.history",
+  "menu://view.browse",
+  "menu://view.activity",
+  "menu://view.sidebar",
+  "menu://view.diff-mode",
+  "menu://view.hide-whitespace",
+  "menu://view.show-unversioned",
+  "menu://view.show-ignored",
+  "menu://view.group-changelist",
+  "menu://view.tree",
+  "menu://view.theme-system",
+  "menu://view.theme-light",
+  "menu://view.theme-dark",
+  "menu://wc.check-updates",
+  "menu://wc.update",
+  "menu://wc.update-to",
+  "menu://wc.commit",
+  "menu://wc.discard-all",
+  "menu://wc.sparse",
+  "menu://wc.cleanup",
+  "menu://wc.properties",
+  "menu://wc.layout",
+  "menu://wc.upgrade",
+  "menu://wc.reveal",
+  "menu://wc.terminal",
+  "menu://wc.editor",
+  "menu://branch.switch",
+  "menu://branch.new",
+  "menu://branch.new-tag",
+  "menu://branch.merge",
+  "menu://branch.compare",
+  "menu://branch.show-on-server",
+  "menu://branch.layout",
+  "menu://sel.discard",
+  "menu://sel.lock",
+  "menu://sel.unlock",
+  "menu://sel.changelist",
+  "menu://sel.ignore",
+  "menu://sel.resolve",
+  "menu://sel.log",
+  "menu://sel.blame",
+  "menu://sel.rename",
+  "menu://sel.delete",
+  "menu://sel.properties",
+  "menu://window.conflicts",
+  "menu://help.docs",
+  "menu://help.shortcuts",
+  "menu://help.logs",
+  "menu://help.report",
 ];
 
 export function createEventBus(adapter: IpcAdapter, qc: QueryClient): EventBus {

@@ -4,6 +4,10 @@ import { ToolbarItem } from "../ui/toolbar-item";
 
 export interface AppToolbarProps {
   workingCopyName: string;
+  /** Label above the working copy name (default "Current repository"). */
+  workingCopyLabel?: string;
+  /** Shortcut that opens the picker, for `aria-keyshortcuts` (e.g. "Control+T"). */
+  workingCopyShortcut?: string;
   /** Branch name, or the in-repo location when the repo has no trunk/branches/tags layout. */
   locationLabel: "Branch" | "Location";
   locationValue: string;
@@ -18,7 +22,7 @@ export interface AppToolbarProps {
   wrapLocation?: (item: ReactNode) => ReactNode;
 }
 
-/** Toolbar: Working copy v / Branch|Location v / Update / (spacer) / Activity. */
+/** Toolbar: Current repository v / Branch|Location v / Update / (spacer) / Activity. */
 export function AppToolbar(p: AppToolbarProps) {
   const wrap = (fn: ((i: ReactNode) => ReactNode) | undefined, item: ReactNode) =>
     fn ? fn(item) : item;
@@ -28,8 +32,10 @@ export function AppToolbar(p: AppToolbarProps) {
         p.wrapWorkingCopy,
         <ToolbarItem
           icon={<Boxes size={18} />}
-          label="Working copy"
+          label={p.workingCopyLabel ?? "Current repository"}
           value={`${p.workingCopyName} ▾`}
+          aria-haspopup="dialog"
+          aria-keyshortcuts={p.workingCopyShortcut}
         />,
       )}
       {wrap(
