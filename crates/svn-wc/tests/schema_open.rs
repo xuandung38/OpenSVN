@@ -119,7 +119,7 @@ fn opens_svn_format_31_read_write_and_leaves_svn_happy() {
 
 #[test]
 fn opens_format_32_read_only_and_refuses_writes() {
-    if skip_without_svn() {
+    if skip_without_svn_1_15() {
         return;
     }
     let (_tmp, wc, _) = svn_wc_fixture(&["--compatible-version=1.15"]);
@@ -257,4 +257,70 @@ fn create_refuses_existing_database_and_cleans_up_on_failure() {
     };
     assert!(WcDb::create(t2.path(), &bad).is_err());
     assert!(!t2.path().join(".svn/wc.db").exists());
+}
+
+#[test]
+fn create_rejects_pre_1_7_and_foreign_admin_areas_without_touching_them() {
+    let new = NewWc {
+        repos_root_url: "file:///r".into(),
+        repos_uuid: "u".into(),
+        repos_relpath: String::new(),
+        revision: 0,
+        depth: Depth::Empty,
+    };
+    // Legacy entries file must survive byte for byte.
+    let legacy = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(legacy.path().join(".svn")).expect("mkdir");
+    std::fs::write(legacy.path().join(".svn/entries"), b"10\nold").expect("entries");
+    let err = WcDb::create(legacy.path(), &new).expect_err("legacy");
+    assert_eq!(err.code, ErrorCode::WcFormatUnsupported);
+    assert_eq!(
+        std::fs::read(legacy.path().join(".svn/entries")).expect("read"),
+        b"10\nold"
+    );
+    assert!(!legacy.path().join(".svn/wc.db").exists());
+    // An empty .svn directory is rejected the same way and left in place.
+    let empty = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(empty.path().join(".svn")).expect("mkdir");
+    let err = WcDb::create(empty.path(), &new).expect_err("empty adm");
+    assert_eq!(err.code, ErrorCode::WcFormatUnsupported);
+    assert!(empty.path().join(".svn").is_dir());
+}
+
+#[test]
+fn concurrent_creators_have_one_winner_and_the_losers_never_damage_it() {
+    let new = NewWc {
+        repos_root_url: "file:///r".into(),
+        repos_uuid: "u".into(),
+        repos_relpath: "trunk".into(),
+        revision: 0,
+        depth: Depth::Infinity,
+    };
+    for _ in 0..20 {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| s.spawn(|| WcDb::create(tmp.path(), &new).map(|db| db.wc_id())))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("thread"))
+                .collect()
+        });
+        assert_eq!(
+            results.iter().filter(|r| r.is_ok()).count(),
+            1,
+            "{results:?}"
+        );
+        // The winner's database is intact and openable.
+        let db = WcDb::open(tmp.path()).expect("open winner");
+        assert_eq!(db.format(), 31);
+        let rows: i64 = db
+            .with_read(|c| {
+                c.query_row("SELECT count(*) FROM nodes", [], |r| r.get(0))
+                    .map_err(svn_wc::db::sql_err)
+            })
+            .expect("count");
+        assert_eq!(rows, 1);
+    }
 }

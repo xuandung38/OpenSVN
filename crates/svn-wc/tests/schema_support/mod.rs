@@ -19,6 +19,27 @@ pub fn svn_version() -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// True when the installed svn is 1.15 or newer (needed for `--compatible-version=1.15`).
+pub fn svn_is_1_15_or_newer() -> bool {
+    svn_version().is_some_and(|v| {
+        let mut parts = v.split('.').filter_map(|p| p.parse::<u32>().ok());
+        let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+        (major, minor) >= (1, 15)
+    })
+}
+
+/// Skips (returns `true`) when svn is older than 1.15, with a visible note.
+pub fn skip_without_svn_1_15() -> bool {
+    if skip_without_svn() {
+        return true;
+    }
+    if !svn_is_1_15_or_newer() {
+        eprintln!("svn older than 1.15: skipping format 32 test");
+        return true;
+    }
+    false
+}
+
 /// Skips (returns `true`) when svn/svnadmin are unavailable so the suite still passes on
 /// machines without Subversion; CI images that carry svn run the real comparison.
 pub fn skip_without_svn() -> bool {
@@ -132,6 +153,11 @@ pub fn structure(conn: &Connection) -> BTreeMap<String, String> {
         .collect::<Result<Vec<_>, _>>()
         .expect("rows");
     for (kind, name, tbl, sql) in rows {
+        // Optional planner table created by ANALYZE only when SQLite is built with STAT4; its
+        // presence depends on the SQLite build, not on the svn schema.
+        if name == "sqlite_stat4" {
+            continue;
+        }
         match kind.as_str() {
             "table" => {
                 let mut cols = Vec::new();
