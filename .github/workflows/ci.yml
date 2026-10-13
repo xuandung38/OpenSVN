@@ -20,11 +20,21 @@ jobs:
   rust:
     name: rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # The first run on a fresh cache compiles Subversion from source on Linux (about 6 minutes).
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-2025, macos-15]
+    env:
+      # Tests that compare against the real svn binary fail instead of skipping when it is missing.
+      OPENSVN_REQUIRE_SVN: "1"
+      # Same release and checksum as the compat Docker images (docker/svn-client).
+      SVN_VERSION: "1.15.0"
+      SVN_SHA512: 6bb79686baab7176e9b6c519b23141f66694298c0759d1e12332fef329eaa632e4f2e65c75ae0cd05e48e16c23d7eda7c59b322bdf03707e1a46025673282ec2
+      # Windows has no Subversion 1.15 binaries; SlikSVN 1.14.5 is the newest build (pinned by SHA-256).
+      SLIKSVN_VERSION: "1.14.5"
+      SLIKSVN_SHA256: 21aa09ec9db9868cd56a378c44d276643171bcf5fcd8aa4877dee60c2b756200
     steps:
       - name: Keep LF line endings on Windows
         run: git config --global core.autocrlf false
@@ -36,6 +46,59 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
             librsvg2-dev libxdo-dev patchelf
+      - name: Install Subversion build and runtime libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bzip2 libapr1-dev libaprutil1-dev libserf-dev libsqlite3-dev \
+            libexpat1-dev zlib1g-dev
+      - name: Cache Subversion (Linux, built from the Apache source release)
+        id: svn-cache
+        if: runner.os == 'Linux'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/svn-${{ env.SVN_VERSION }}
+          key: svn-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-${{ env.SVN_VERSION }}-${{ env.SVN_SHA512 }}-v1
+      - name: Build Subversion from the verified source tarball (Linux)
+        if: runner.os == 'Linux' && steps.svn-cache.outputs.cache-hit != 'true'
+        run: .github/scripts/build-svn-from-source.sh "$SVN_VERSION" "$SVN_SHA512" "$HOME/svn-$SVN_VERSION"
+      - name: Put Subversion on PATH (Linux)
+        if: runner.os == 'Linux'
+        run: echo "$HOME/svn-$SVN_VERSION/bin" >> "$GITHUB_PATH"
+      - name: Install Subversion (macOS)
+        if: runner.os == 'macOS'
+        run: brew install subversion
+      - name: Cache SlikSVN installer (Windows)
+        if: runner.os == 'Windows'
+        id: slik-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\slik-svn.msi
+          key: sliksvn-${{ env.SLIKSVN_VERSION }}-${{ env.SLIKSVN_SHA256 }}
+      - name: Install SlikSVN (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $msi = Join-Path $env:RUNNER_TEMP 'slik-svn.msi'
+          if (-not (Test-Path $msi)) {
+            Invoke-WebRequest -Uri "https://sliksvn.com/pub/Slik-Subversion-$env:SLIKSVN_VERSION-x64.msi" -OutFile $msi
+          }
+          $actual = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLowerInvariant()
+          if ($actual -ne $env:SLIKSVN_SHA256) { throw "SlikSVN installer checksum mismatch: $actual" }
+          $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "msiexec failed with exit code $($p.ExitCode)" }
+          Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\SlikSvn\bin'
+      - name: Check the Subversion tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$(svn --version --quiet)"
+          echo "svn $v at $(command -v svn)"
+          svnadmin --version --quiet
+          if [ "$RUNNER_OS" != "Windows" ]; then
+            # Subversion 1.15 is required where it can be installed.
+            [ "$(printf '%s\n' "$v" 1.15.0 | sort -V | head -n1)" = "1.15.0" ] || { echo "need svn >= 1.15.0, found $v" >&2; exit 1; }
+          fi
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
