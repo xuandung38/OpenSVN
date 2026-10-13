@@ -116,7 +116,26 @@ scenarios with a clear error.
 2. Take request/response bodies from `target/compat/logs/svn1x/error.log`.
 3. Anonymise before committing: drop `Authorization`/`Cookie` headers, rewrite hosts to
    `svn.test.local`; `fixtures/check-no-real-hosts.sh` must pass.
-4. Protocol capture set and WC state fixtures are produced in the next milestone.
+4. Whole-session transcripts: `fixtures/protocol/capture.sh` (see below) does all of this.
+
+## Committed fixture sets (M2)
+
+| Set | Generator | Content | Checked by |
+|---|---|---|---|
+| `fixtures/wc/f31/` | `SVN=svn fixtures/wc/make-wc-fixtures.sh 31` | 28 WC states, format 31 (clean, modified text/binary/props, added, deleted, missing, unversioned+ignored, replaced, copied, moved file/dir, text/prop/tree conflict, obstructed add, kind changed, locked, sparse empty/files/immediates, excluded, externals, mixed-rev, switched, changelist, uncommitted merge, Unicode paths) | `cargo test -p opensvn-compat --test wc_fixtures` |
+| `fixtures/wc/f32/` | `SVN=/path/to/svn-1.15 fixtures/wc/make-wc-fixtures.sh 32` | 11 states, format 32 (`--compatible-version 1.15`, one with `--store-pristine no`) | same |
+| `fixtures/protocol/<session>/` | `fixtures/protocol/capture.sh` | HTTPv2 transcripts `NNN-{request,response}.http` for `checkout`, `checkout-skelta`, `update`, `log`, `commit` against Apache + mod_dav_svn | `cargo test -p svn-ra --test fixture_replay` (replayed through the transport against a fake HTTPS server, parsed by svn-protocol) |
+| `fixtures/evil/` | `python3 fixtures/evil/generate.py` | 70 hostile-server cases, see its README | `svn-protocol --test evil_server`, `svn-delta --test evil_svndiff`, `svn-ra --test evil_transport` |
+
+Each WC state is `<state>.tar.zst` (a `wc/` directory) + `<state>.status.txt` (`svn status -v`
+and an `svn info` subset) + a `manifest.json` row. The repository is `fixtures/repos/make-basic.sh`
+plus r11..r14 (incoming changes for the conflict states) at the fixed URL
+`file:///tmp/opensvn-wc-fixtures/repos/basic`. Status files are byte-identical across runs; the
+tarballs are not (wc.db stores local mtimes and lock times), so compare semantically.
+
+Transcripts are reproducible in content, not byte order: svn emits properties and some request
+attributes in per-process hash order, and serf may issue independent requests in either order.
+The replay server therefore matches by method and path, not by sequence alone.
 
 ## Environment verification (to be filled by the lead)
 

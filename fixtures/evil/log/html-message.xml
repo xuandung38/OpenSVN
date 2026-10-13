@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:log-report xmlns:S="svn:" xmlns:D="DAV:">
+<S:log-item>
+
+<D:version-name>3</D:version-name>
+<S:date>2024-01-01T03:00:00.000000Z</S:date>
+<D:comment>&lt;script&gt;alert(1)&lt;/script&gt;&lt;img src=x onerror=alert(1)&gt;</D:comment>
+<D:creator-displayname>fixture</D:creator-displayname>
+</S:log-item>
+</S:log-report>
