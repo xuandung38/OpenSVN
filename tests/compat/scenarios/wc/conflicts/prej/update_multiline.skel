@@ -1,4 +1,4 @@
-((update ((subversion file:///tmp/opensvn-golden-prej/repo 36 55e9f9bf-6ad9-47d3-88cc-14685842cf0a multiline 1 2 file) (subversion file:///tmp/opensvn-golden-prej/repo 36 55e9f9bf-6ad9-47d3-88cc-14685842cf0a multiline 1 3 file))) ((prop (multiline.prej) (k) (k 18 line1
+((update ((subversion file:///tmp/opensvn-golden-prej/repo a193ad26-9323-4e7b-9e43-d3cbf0eabb5a multiline 1 2 file) (subversion file:///tmp/opensvn-golden-prej/repo a193ad26-9323-4e7b-9e43-d3cbf0eabb5a multiline 1 3 file))) ((prop (multiline.prej) (k) (k 18 line1
 line2
 line3
 ) (k 17 line1

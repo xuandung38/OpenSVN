@@ -41,6 +41,15 @@ CASES = {
     "binary": (b"\x00\x01", b"\x00\x03", b"\x00\x02"),
     "non_ascii": ("café\n".encode(), "cafü theirs\n".encode(), "café mine\n".encode()),
     "single_line": (b"base", b"theirs", b"mine"),
+    # Values that differ only in characters that render to the same ASCII still conflict.
+    "fuzzy_equal_sides": (b"x\n", b"cafe\n", "café\n".encode()),
+    # Controls are kept (NEL becomes {U+0085}); U+2019 and U+2013 and NBSP are lumped to ASCII;
+    # double quotes are not.
+    "controls_and_lump": (
+        b"x\n",
+        "t\u2019s \u2013 x\u00a0y \u201cq\u201d\n".encode(),
+        b"m\tb\x0cc\x0bd\xc2\x85e\n",
+    ),
 }
 
 
