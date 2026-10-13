@@ -7,7 +7,7 @@ signing variable set, every script produces a working **unsigned** installer.
 
 | Path | Purpose |
 |---|---|
-| `apps/opensvn/src-tauri/tauri.bundle.conf.json` | Bundle config merged over `tauri.conf.json` with `--config`: identifier `vn.opensvn.app`, metadata, license resources, per-OS bundle settings |
+| `apps/opensvn/src-tauri/tauri.bundle.conf.json` | Bundle config merged over `tauri.conf.json` with `--config`: identifier `com.opensvn.desktop`, metadata, license resources, per-OS bundle settings |
 | `apps/opensvn/src-tauri/icons/` | Application icons (temporary set) |
 | `packaging/macos/entitlements.plist` | Hardened-runtime entitlements (intentionally empty) |
 | `packaging/licenses/about.toml` | cargo-about policy for the third-party report |
