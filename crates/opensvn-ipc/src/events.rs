@@ -104,6 +104,33 @@ pub enum AuthPromptReason {
     Expired,
 }
 
+/// Authentication scheme the server offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMethodKind {
+    Basic,
+    /// Single sign-on (Windows SSO / Kerberos).
+    Negotiate,
+}
+
+/// Why a TLS certificate needs a decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum CertFailureInfo {
+    UnknownIssuer,
+    SelfSigned,
+    Expired,
+    NotYetValid,
+    HostnameMismatch,
+    Revoked,
+    /// A different certificate than the pinned one; "always trust" is not offered.
+    Changed {
+        old_sha256: String,
+        new_sha256: String,
+    },
+    Other(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CertSummary {
@@ -113,10 +140,7 @@ pub struct CertSummary {
     pub not_before: String,
     pub not_after: String,
     pub sha256: String,
-    pub failure: String,
-    /// Fingerprint of the previously pinned certificate when the server now presents a different
-    /// one (`failure` is then `changed`); "always trust" is not offered in that case.
-    pub old_sha256: Option<String>,
+    pub failure: CertFailureInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -131,4 +155,6 @@ pub struct AuthPrompt {
     pub reason: Option<AuthPromptReason>,
     /// Failed tries so far in this prompt sequence, starting at 0.
     pub attempt: u32,
+    /// Schemes the server offers (credentials prompts; empty for certificate prompts).
+    pub offered: Vec<AuthMethodKind>,
 }
