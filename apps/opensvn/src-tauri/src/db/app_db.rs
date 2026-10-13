@@ -199,6 +199,91 @@ impl AppDb {
     }
 }
 
+/// Origin and account fields stored for a saved credential.
+pub struct AccountRecord<'a> {
+    pub scheme: &'a str,
+    pub host: &'a str,
+    pub port: u16,
+    pub realm: &'a str,
+    pub username: &'a str,
+    pub negotiate: bool,
+}
+
+impl AppDb {
+    /// Records (or refreshes) the metadata of a saved credential. Never stores a password.
+    pub fn account_upsert(&self, a: &AccountRecord<'_>) -> Result<(), DbError> {
+        self.db.with(|c| {
+            c.execute(
+                "INSERT INTO account (scheme, host, port, realm, username, method, last_used_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(scheme, host, port, realm) DO UPDATE SET
+                   username = excluded.username, method = excluded.method,
+                   last_used_at = excluded.last_used_at",
+                params![
+                    a.scheme,
+                    a.host,
+                    a.port,
+                    a.realm,
+                    a.username,
+                    if a.negotiate { "negotiate" } else { "basic" },
+                    now_iso()
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Removes the accounts of a realm; returns `(scheme, host, port)` of each removed origin so
+    /// the matching secrets can be purged.
+    pub fn account_delete_realm(&self, realm: &str) -> Result<Vec<(String, String, u16)>, DbError> {
+        self.db.with(|c| {
+            let tx = c.transaction()?;
+            let origins = {
+                let mut stmt =
+                    tx.prepare("SELECT scheme, host, port FROM account WHERE realm = ?1")?;
+                stmt.query_map(params![realm], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            tx.execute("DELETE FROM account WHERE realm = ?1", params![realm])?;
+            tx.commit()?;
+            Ok(origins)
+        })
+    }
+
+    /// Whether this exact certificate was trusted permanently for this host and port.
+    pub fn cert_is_trusted(&self, host: &str, port: u16, sha256: &str) -> Result<bool, DbError> {
+        self.db.with(|c| {
+            Ok(c.query_row(
+                "SELECT 1 FROM trusted_cert WHERE host = ?1 AND port = ?2 AND sha256 = ?3",
+                params![host, port, sha256],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+        })
+    }
+
+    /// Trusts a certificate permanently for one host and port.
+    pub fn cert_trust(
+        &self,
+        host: &str,
+        port: u16,
+        sha256: &str,
+        subject: &str,
+        expires_at: &str,
+    ) -> Result<(), DbError> {
+        self.db.with(|c| {
+            c.execute(
+                "INSERT INTO trusted_cert (host, port, sha256, subject, expires_at, trusted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(host, port, sha256) DO UPDATE SET trusted_at = excluded.trusted_at",
+                params![host, port, sha256, subject, expires_at, now_iso()],
+            )?;
+            Ok(())
+        })
+    }
+}
+
 fn json_list(items: &[String]) -> Result<String, DbError> {
     serde_json::to_string(items).map_err(|e| DbError::Corrupt(e.to_string()))
 }

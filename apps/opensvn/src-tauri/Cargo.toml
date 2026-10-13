@@ -34,6 +34,7 @@ tauri-specta = { workspace = true, features = ["derive", "typescript"] }
 specta.workspace = true
 specta-typescript.workspace = true
 serde.workspace = true
+secrecy.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 bytes.workspace = true

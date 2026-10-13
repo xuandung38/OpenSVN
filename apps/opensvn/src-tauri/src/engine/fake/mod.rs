@@ -37,7 +37,7 @@ use super::facade::{
     StatusQuery, WcInfo, WcOpened, WcRef,
 };
 
-pub use seed::{DEMO_REPO_URL, demo_wc_root};
+pub use seed::{DEMO_REPO_URL, demo_repo, demo_wc_root};
 
 /// Fake engine; cheap to share behind an `Arc`.
 pub struct FakeEngine {
@@ -144,6 +144,13 @@ fn not_a_wc(root: &Path) -> SvnError {
 impl EngineFacade for FakeEngine {
     async fn wc_info(&self, root: &Path, _ctx: &OpContext) -> EngineResult<WcInfo> {
         self.with_wc(root, |wc| Ok(wc.info()))
+    }
+
+    async fn ensure_authenticated(&self, wc: &WcRef, ctx: &OpContext) -> EngineResult<()> {
+        let root = self.with_wc(&wc.root, |w| Ok(w.repo_root_url.clone()))?;
+        self.repo_by_root(&root)?
+            .ensure_authenticated(&ctx.cancel)
+            .await
     }
 
     async fn open_wc(&self, root: &Path, _ctx: &OpContext) -> EngineResult<WcOpened> {

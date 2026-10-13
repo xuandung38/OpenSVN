@@ -2693,6 +2693,7 @@ dependencies = [
  "opensvn-ipc",
  "rfd",
  "rusqlite",
+ "secrecy",
  "serde",
  "serde_json",
  "specta",

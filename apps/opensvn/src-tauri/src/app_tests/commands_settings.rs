@@ -84,11 +84,94 @@ async fn program_choose_stores_only_after_native_confirmation() {
 }
 
 #[tokio::test]
-async fn accounts_list_is_empty_and_later_service_commands_are_stubs() {
+async fn accounts_list_is_empty_and_auth_commands_reject_unknown_requests() {
     let f = Fixture::new(Duration::ZERO).await;
     assert!(commands::accounts_list(f.state()).await.unwrap().is_empty());
-    let err = commands::accounts_sign_out("realm".into())
+    commands::accounts_sign_out(f.state(), "realm".into())
+        .await
+        .unwrap();
+    let err = commands::auth_respond(f.state(), "nope".into(), opensvn_ipc::AuthResponse::Cancel)
         .await
         .unwrap_err();
-    assert_eq!(err.message, "not implemented");
+    assert_eq!(err.code, ErrorCode::Internal);
+}
+
+#[tokio::test]
+async fn checkout_waits_for_sign_in_through_the_prompt_events() {
+    use opensvn_ipc::{AuthResponse, CheckoutRequest, Depth, OpResult, Rev, WcFormat};
+    use std::sync::Arc;
+
+    use crate::auth::{AuthBroker, NoSecretStore};
+    use crate::ops::events::Recorded;
+
+    let f = Fixture::new(Duration::ZERO).await;
+    // A repository that wants alice/pw; its prompter is a broker that publishes through the
+    // fixture's event recorder and answers are delivered with `auth_respond`.
+    let broker = Arc::new(AuthBroker::new(
+        f.events.clone(),
+        crate::db::AppDb::open_in_memory().unwrap(),
+        Arc::new(NoSecretStore),
+    ));
+    let repo = crate::engine::fake::demo_repo().unwrap();
+    let repo = repo.with_required_auth("alice", "pw", Some(broker.clone()));
+    let engine = Arc::new(crate::engine::FakeEngine::empty().with_repo(repo));
+    let state = crate::app_state::AppState::build(crate::app_state::AppDeps {
+        data_dir: tempfile::tempdir().unwrap().keep(),
+        engine,
+        events: f.events.clone(),
+        picker: f.picker.clone(),
+        status_timing: Default::default(),
+    })
+    .unwrap();
+    let handle = state.start_op(opensvn_ipc::OperationKind::Checkout, "Checkout", {
+        let url = format!("{}/trunk", crate::engine::fake::DEMO_REPO_URL);
+        move |engine, ctx| async move {
+            let root = if cfg!(windows) {
+                r"C:\opensvn-fake\auth"
+            } else {
+                "/opensvn-fake/auth"
+            };
+            let info = engine
+                .checkout(
+                    &CheckoutRequest {
+                        url,
+                        path: root.into(),
+                        rev: Some(Rev(2)),
+                        depth: Depth::Infinity,
+                        sparse: None,
+                        format: WcFormat::V31,
+                        store_pristine: true,
+                        ignore_externals: false,
+                    },
+                    &ctx,
+                )
+                .await?;
+            Ok(OpResult::NewRev {
+                new_rev: info.base_rev,
+            })
+        }
+    });
+    let prompt = loop {
+        if let Some(Recorded::Auth(p)) = f
+            .events
+            .all()
+            .into_iter()
+            .find(|r| matches!(r, Recorded::Auth(_)))
+        {
+            break p;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert_eq!(prompt.url, "https://svn.test.local:443");
+    broker
+        .respond(
+            &prompt.request_id,
+            AuthResponse::Credentials {
+                username: "alice".into(),
+                password: "pw".to_owned().into(),
+                save: false,
+            },
+        )
+        .unwrap();
+    f.wait_op(&handle).await.unwrap();
 }

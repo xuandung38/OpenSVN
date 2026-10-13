@@ -7,6 +7,7 @@ use std::sync::Arc;
 use opensvn_ipc::{AppError, OpResult, OperationHandle, OperationKind, WcId};
 use svn_types::SvnError;
 
+use crate::auth::{AuthBroker, NoSecretStore};
 use crate::db::{AppDb, CacheDb};
 use crate::engine::{EngineFacade, OpContext, WcRef};
 use crate::ops::{AppEvents, OperationManager};
@@ -45,6 +46,8 @@ pub struct AppState {
     pub wcs: Arc<WcRegistry>,
     /// Status deltas and snapshots.
     pub status: Arc<StatusPublisher>,
+    /// Credential and certificate prompts.
+    pub auth: Arc<AuthBroker>,
     /// File watchers of open working copies.
     pub watchers: Arc<StatusService>,
     /// Program settings (native pick and confirm).
@@ -67,7 +70,13 @@ impl AppState {
             Arc::clone(&deps.events),
         ));
         let watchers = Arc::new(StatusService::new(Arc::clone(&status), deps.status_timing));
+        let auth = Arc::new(AuthBroker::new(
+            Arc::clone(&deps.events),
+            db.clone(),
+            Arc::new(NoSecretStore),
+        ));
         Ok(Self {
+            auth,
             watchers,
             programs: ProgramService::new(Arc::clone(&settings), deps.picker),
             ops: OperationManager::new(Arc::clone(&deps.events)),
@@ -133,6 +142,11 @@ impl AppState {
         Ok(self
             .ops
             .spawn(kind, Some(id.clone()), title, move |ctx| async move {
+                // Authenticate first: a prompt must never wait while the working copy is locked.
+                engine
+                    .ensure_authenticated(&wc, &ctx)
+                    .await
+                    .map_err(|e| AppError::from(&e))?;
                 let result = r
                     .actor
                     .write(async move { f(engine, wc, ctx).await.map_err(|e| AppError::from(&e)) })

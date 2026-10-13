@@ -22,7 +22,15 @@ pub async fn op_list(state: State<'_, AppState>) -> Result<Vec<OperationHandle>,
     guard(async { Ok(state.ops.list()) }).await
 }
 
-stub!(auth_respond(request_id: String, response: AuthResponse) -> ());
+#[tauri::command]
+#[specta::specta]
+pub async fn auth_respond(
+    state: State<'_, AppState>,
+    request_id: String,
+    response: AuthResponse,
+) -> Result<(), AppError> {
+    guard(async { state.auth.respond(&request_id, response) }).await
+}
 
 #[tauri::command]
 #[specta::specta]
@@ -30,7 +38,11 @@ pub async fn accounts_list(state: State<'_, AppState>) -> Result<Vec<Account>, A
     guard(async { Ok(state.db.accounts_list()?) }).await
 }
 
-stub!(accounts_sign_out(realm: String) -> ());
+#[tauri::command]
+#[specta::specta]
+pub async fn accounts_sign_out(state: State<'_, AppState>, realm: String) -> Result<(), AppError> {
+    guard(async { state.auth.sign_out(&realm) }).await
+}
 
 #[tauri::command]
 #[specta::specta]

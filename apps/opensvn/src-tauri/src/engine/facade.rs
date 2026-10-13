@@ -142,6 +142,10 @@ pub trait EngineFacade: Send + Sync {
     // ---- working copy: reads
     /// Describes the working copy containing `root`; `NotAWorkingCopy` if there is none.
     async fn wc_info(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcInfo>;
+    /// Makes sure the server session of this working copy is authenticated, prompting the user
+    /// through the auth prompter if needed. The app calls it BEFORE taking the working copy write
+    /// path, so no prompt ever happens while a working copy lock is held.
+    async fn ensure_authenticated(&self, wc: &WcRef, ctx: &OpContext) -> EngineResult<()>;
     /// Opens the working copy and runs crash/lock recovery (dead-owner locks and unfinished work
     /// queue items). Called when a working copy is added and at app start; it may write, so the app
     /// calls it through the working copy's write path. Locks of foreign or unknown owners are only

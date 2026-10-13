@@ -1,14 +1,14 @@
 //! Outbound events (Rust -> UI) behind a trait, so services are testable without a window.
 
 use opensvn_ipc::{
-    Banner, Incoming, OpFailed, OpFinished, OperationHandle, Progress, RevisionChanged,
+    AuthPrompt, Banner, Incoming, OpFailed, OpFinished, OperationHandle, Progress, RevisionChanged,
     StatusChanged,
 };
 use tauri_specta::Event;
 
 use crate::events::{
-    OpFailedEvent, OpFinishedEvent, OpProgress, OpStarted, WcBanner, WcIncoming, WcRevisionChanged,
-    WcStatusChanged,
+    AuthPromptEvent, OpFailedEvent, OpFinishedEvent, OpProgress, OpStarted, WcBanner, WcIncoming,
+    WcRevisionChanged, WcStatusChanged,
 };
 
 /// Everything the backend pushes to the UI. Implementations must not block.
@@ -29,6 +29,8 @@ pub trait AppEvents: Send + Sync + 'static {
     fn incoming(&self, incoming: &Incoming);
     /// `wc://banner`
     fn banner(&self, banner: &Banner);
+    /// `auth://prompt`
+    fn auth_prompt(&self, prompt: &AuthPrompt);
 }
 
 /// Emits events to the WebView through Tauri.
@@ -76,6 +78,9 @@ impl<R: tauri::Runtime> AppEvents for TauriEvents<R> {
     fn banner(&self, b: &Banner) {
         emit!(self, WcBanner, b, "wc://banner");
     }
+    fn auth_prompt(&self, p: &AuthPrompt) {
+        emit!(self, AuthPromptEvent, p, "auth://prompt");
+    }
 }
 
 /// One recorded event.
@@ -90,6 +95,7 @@ pub enum Recorded {
     Revision(RevisionChanged),
     Incoming(Incoming),
     Banner(Banner),
+    Auth(AuthPrompt),
 }
 
 /// Collects events for assertions in tests.
@@ -129,6 +135,7 @@ impl RecordingEvents {
                 Recorded::Revision(c) => format!("revision:{}", c.wc_id.0),
                 Recorded::Incoming(i) => format!("incoming:{}", i.wc_id.0),
                 Recorded::Banner(b) => format!("banner:{}", b.wc_id.0),
+                Recorded::Auth(p) => format!("auth:{}", p.request_id),
             })
             .collect()
     }
@@ -173,5 +180,8 @@ impl AppEvents for RecordingEvents {
     }
     fn banner(&self, b: &Banner) {
         self.push(Recorded::Banner(b.clone()));
+    }
+    fn auth_prompt(&self, p: &AuthPrompt) {
+        self.push(Recorded::Auth(p.clone()));
     }
 }
