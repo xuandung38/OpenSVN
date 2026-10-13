@@ -152,7 +152,7 @@ pub enum ScenarioError {
         /// File path.
         path: String,
         /// Underlying error.
-        source: serde_yaml_ng::Error,
+        source: Box<serde_saphyr::Error>,
     },
     /// Schema-valid but semantically wrong.
     #[error("invalid scenario {name}: {reason}")]
@@ -176,9 +176,9 @@ impl Scenario {
     /// Parse and validate a scenario from YAML text.
     pub fn from_yaml(text: &str) -> Result<Self, ScenarioError> {
         let scenario: Self =
-            serde_yaml_ng::from_str(text).map_err(|source| ScenarioError::Parse {
+            serde_saphyr::from_str(text).map_err(|source| ScenarioError::Parse {
                 path: "<inline>".into(),
-                source,
+                source: Box::new(source),
             })?;
         scenario.validate()?;
         Ok(scenario)
@@ -192,9 +192,9 @@ impl Scenario {
             source,
         })?;
         let scenario: Self =
-            serde_yaml_ng::from_str(&text).map_err(|source| ScenarioError::Parse {
+            serde_saphyr::from_str(&text).map_err(|source| ScenarioError::Parse {
                 path: display,
-                source,
+                source: Box::new(source),
             })?;
         scenario.validate()?;
         Ok(scenario)
