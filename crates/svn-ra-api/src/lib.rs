@@ -14,7 +14,10 @@ mod session;
 #[cfg(feature = "fake")]
 pub mod fake;
 
-pub use auth::{AuthMethod, AuthPrompter, CertDecision, CertFailure, CertInfo, Credentials};
+pub use auth::{
+    AuthMethod, AuthPrompter, CertDecision, CertFailure, CertInfo, CredentialRequest, Credentials,
+    PromptReason,
+};
 pub use commit::{CommitEditor, CommitInfo, CommitObserver, ReplayableSource};
 pub use editor_worker::{DEFAULT_COMMAND_CAPACITY, EditorHandle, EditorWorker, WindowSender};
 pub use session::{
