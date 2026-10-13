@@ -241,6 +241,8 @@ write("options", "root-not-prefix", options(**{"SVN-Repository-Root": "/elsewher
       "reject", "repository root that is not a prefix of the session URL")
 write("options", "root-dotdot", options(**{"SVN-Repository-Root": "/svn/repo/.."}), O,
       "reject", "repository root with a .. segment")
+write("options", "root-backslash-dotdot", options(**{"SVN-Repository-Root": "/svn/repo\\.."}), O,
+      "reject", "repository root with a backslash .. segment (the URL parser reads \\ as /)")
 write("options", "me-other-host", options(**{"SVN-Me-Resource": "http://evil.test.local/!svn/me"}),
       O, "reject", "me resource on another host (commits would go there)")
 write("options", "stub-other-host", options(**{"SVN-Rev-Root-Stub": "//evil.test.local/svn/repo/!svn/rvr"}),

@@ -44,6 +44,8 @@ pub struct ScriptedPrompter {
     /// Answer of `stored_credentials` (nothing stored by default).
     pub stored: Mutex<Option<(String, String)>>,
     pub stored_calls: AtomicUsize,
+    /// Every `stored_credentials_rejected` call.
+    pub stored_rejected: Mutex<Vec<svn_ra_api::CredentialRequest>>,
 }
 
 impl ScriptedPrompter {
@@ -71,6 +73,10 @@ impl ScriptedPrompter {
         let p = Self::default();
         *p.stored.lock().unwrap() = Some((user.into(), pass.into()));
         Arc::new(p)
+    }
+
+    pub fn stored_rejections(&self) -> usize {
+        self.stored_rejected.lock().unwrap().len()
     }
 
     pub fn credential_prompts(&self) -> usize {
@@ -126,6 +132,10 @@ impl AuthPrompter for ScriptedPrompter {
                 save: true,
                 method: AuthMethod::Basic,
             })
+    }
+
+    async fn stored_credentials_rejected(&self, req: &svn_ra_api::CredentialRequest) {
+        self.stored_rejected.lock().unwrap().push(req.clone());
     }
 
     async fn confirm_certificate(&self, info: &CertInfo) -> CertDecision {

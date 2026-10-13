@@ -1,0 +1,55 @@
+# WP0 follow-ups (review of #91) — dev report
+
+Branch `fix/wp0-followups`, from `origin/main` 793c6f6. It covers the five non-blocking items
+from the #91 review.
+
+## Changes
+
+1. **Backslash dot segments** (`svn-protocol/src/caps/options.rs`). `stub_path` now splits the
+   raw header on both `/` and `\` before it refuses `.`/`..` segments. For http(s), the URL
+   parser reads `\` as `/`, so `/svn/repo\..` was collapsing to `/svn`. Added the evil fixture
+   `options/root-backslash-dotdot` (expect `reject`) through `generate.py`. Regenerating is
+   byte-stable: two runs give no diff. The fixture fails on the old code ("hostile OPTIONS
+   answer was accepted").
+2. **ASCII-only case fold** (`svn-protocol/src/caps/url_builder.rs`). `below_root` now uses
+   `eq_ignore_ascii_case`, so KELVIN SIGN (U+212A) no longer matches `k`. New test
+   `repository_root_case_fold_is_ascii_only` checks three cases:
+   - `k` versus `K` is still accepted;
+   - `k` versus U+212A is refused, in both directions;
+   - `é` versus `É` is refused.
+3. **`AuthPrompter::stored_credentials_rejected(&CredentialRequest)`** (`svn-ra-api`). It is
+   async and a no-op by default.
+   - `AuthManager` records that the cached credentials came from the store (`from_stored`). When
+     the server answers 401 to them, in either mode, it calls the hook once per offer, before it
+     prompts (interactive) or fails with `AuthRequired` (unattended). The request carries
+     `PromptReason::Rejected`.
+   - The `stored_credentials` doc now states the contract: stored credentials are offered once
+     per origin per transport, so background work must reuse one long-lived transport.
+   - **403 is deliberately not reported.** mod_dav_svn answers 403 to valid credentials that
+     lack path access, and a 403 is not a failed logon for the directory server. Reporting it
+     would make the app drop a good password for no lockout benefit. This is documented on the
+     hook.
+   - WP2 (`feat/wp2-real-connector-auth`) implements the hook in `AuthBroker`. The app here
+     still uses the default.
+4. **New tests:**
+   - `transport_http.rs::stored_credentials_are_never_offered_over_plain_http`: interactive and
+     unattended, `stored_calls == 0`, no `Authorization` header sent, no hook call.
+   - `transport_auth.rs::stale_stored_credentials_are_sent_once_per_transport_when_unattended`:
+     - 5 unattended sends produce exactly 1 credentialed request, 1 store lookup, 0 prompts and
+       1 hook call.
+     - A second transport offers the password again. This documents why the transport must be
+       reused and why the app must act on the hook.
+   - `transport_auth.rs::stored_attempt_counts_towards_the_three_attempt_cap`:
+     - stored, then two wrong prompts, gives exactly 3 credentialed requests, then
+       `AuthRequired`;
+     - the hook fires once (only for the stored attempt);
+     - a later unattended send adds 0 requests.
+   - Existing stored-credentials tests now also assert the hook: it fires once before the
+     `Rejected` prompt, and not at all for accepted credentials.
+5. **`fake/prefixed.rs::rel_of`** now compares decoded segments, refuses `%2F` (`decode`
+   refuses a decoded `/`), and refuses a query or fragment, like `UrlBuilder::locate`. New test
+   `session_urls_are_compared_decoded_and_encoded_slashes_are_refused`.
+
+## Gates
+
+See the PR description for the final counts.

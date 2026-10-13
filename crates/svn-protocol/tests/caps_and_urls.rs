@@ -309,7 +309,16 @@ fn repository_root_with_other_case_is_accepted_for_visualsvn() {
 #[test]
 fn repository_root_with_dot_segments_is_refused() {
     let f = load("caps/options-200");
-    for root in ["/svn/repo/..", "/svn/repo/./", "/svn/repo/%2e%2e"] {
+    for root in [
+        "/svn/repo/..",
+        "/svn/repo/./",
+        "/svn/repo/%2e%2e",
+        // The URL parser reads `\` as `/` for http(s), so these collapse just the same.
+        "/svn/repo\\..",
+        "/svn/repo\\.\\",
+        "/svn/repo\\%2E%2E",
+        "http://svn.test.local/svn/repo\\..",
+    ] {
         let mut head = f.head();
         let mut headers = svn_protocol::Headers::new();
         for (k, v) in head.headers.iter() {
@@ -323,5 +332,31 @@ fn repository_root_with_dot_segments_is_refused() {
         let err =
             Capabilities::from_options_response(&session_url(), &head, &f.resp_body).unwrap_err();
         assert_eq!(err.code, ErrorCode::UnsafePath, "{root}");
+    }
+}
+
+#[test]
+fn repository_root_case_fold_is_ascii_only() {
+    let at = |u: &str| svn_types::RepoUrl::parse(u).unwrap();
+    // ASCII case differences still fold (VisualSVN).
+    let b = UrlBuilder::new(
+        &at("http://svn.test.local/svn/k/trunk"),
+        &caps_with_root("/svn/K"),
+    )
+    .unwrap();
+    assert!(
+        b.locate(at("http://svn.test.local/svn/k/trunk").as_url())
+            .unwrap()
+            .1
+    );
+    // Full Unicode lowercasing maps KELVIN SIGN (U+212A) to `k`, and other non-ASCII letters
+    // to their lower case; none of these name the same repository, so all are refused.
+    for (s, root) in [
+        ("http://svn.test.local/svn/k/trunk", "/svn/%E2%84%AA"),
+        ("http://svn.test.local/svn/%E2%84%AA/trunk", "/svn/k"),
+        ("http://svn.test.local/svn/%C3%A9/trunk", "/svn/%C3%89"),
+    ] {
+        let err = UrlBuilder::new(&at(s), &caps_with_root(root)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnsafePath, "{s} vs {root}");
     }
 }

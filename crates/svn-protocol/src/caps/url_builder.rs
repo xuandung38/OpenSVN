@@ -165,7 +165,9 @@ fn under(path: &str, prefix: &str) -> bool {
 /// Segments of the decoded absolute `path` below the decoded repository `root`, and whether the
 /// match needed case folding. The exact comparison wins; the case-insensitive fallback exists
 /// for VisualSVN on Windows, where repository names are case-insensitive and the server may
-/// announce `/svn/Repo` for a session opened at `/svn/repo/trunk`.
+/// announce `/svn/Repo` for a session opened at `/svn/repo/trunk`. Folding is ASCII-only on
+/// purpose: full Unicode lowercasing would match distinct paths such as `/svn/k` and
+/// `/svn/\u{212A}` (KELVIN SIGN), and VisualSVN repository names are what matters here.
 fn below_root(root: &str, path: &str) -> Option<(Vec<String>, bool)> {
     let root: Vec<&str> = root.split('/').filter(|s| !s.is_empty()).collect();
     let path: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
@@ -180,7 +182,7 @@ fn below_root(root: &str, path: &str) -> Option<(Vec<String>, bool)> {
     let folded = head
         .iter()
         .zip(&root)
-        .all(|(a, b)| a == b || a.to_lowercase() == b.to_lowercase());
+        .all(|(a, b)| a.eq_ignore_ascii_case(b));
     folded.then_some((rest, true))
 }
 
