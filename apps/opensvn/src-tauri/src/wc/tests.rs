@@ -175,3 +175,71 @@ async fn panic_in_a_job_does_not_kill_the_actor() {
     assert_eq!(actor.write(async { Ok(1) }).await.unwrap(), 1);
     assert_eq!(actor.read(|| async { Ok(2) }).await.unwrap(), 2);
 }
+
+#[tokio::test]
+async fn cancelling_a_queued_write_returns_at_once_and_the_job_never_runs() {
+    use svn_types::CancelToken;
+    let actor = Arc::new(WcActor::spawn(quick()));
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let a = actor.clone();
+    let long = tokio::spawn(async move {
+        a.write(async {
+            let _ = release_rx.await;
+            Ok(())
+        })
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let ran = Arc::new(AtomicU32::new(0));
+    let cancel = CancelToken::new();
+    let (a, r, c) = (actor.clone(), ran.clone(), cancel.clone());
+    let queued = tokio::spawn(async move {
+        a.write_cancellable(
+            async move {
+                r.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            &c,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let t = std::time::Instant::now();
+    cancel.cancel();
+    let err = queued.await.unwrap().unwrap_err();
+    assert_eq!(err.code, ErrorCode::Cancelled);
+    assert!(t.elapsed() < Duration::from_millis(500));
+
+    let _ = release_tx.send(());
+    long.await.unwrap().unwrap();
+    // let the actor reach the abandoned job
+    actor.write(async { Ok(()) }).await.unwrap();
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        0,
+        "the cancelled job was skipped"
+    );
+    assert!(!actor.is_writing());
+}
+
+#[tokio::test]
+async fn a_started_write_keeps_the_caller_waiting_for_its_real_result() {
+    use svn_types::CancelToken;
+    let actor = WcActor::spawn(quick());
+    let cancel = CancelToken::new();
+    let c = cancel.clone();
+    let canceller = async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        c.cancel();
+    };
+    let write = actor.write_cancellable(
+        async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok("finished")
+        },
+        &cancel,
+    );
+    let (out, ()) = tokio::join!(write, canceller);
+    assert_eq!(out.unwrap(), "finished");
+}

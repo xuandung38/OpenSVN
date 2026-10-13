@@ -10,6 +10,7 @@ use svn_types::SvnError;
 use crate::db::{AppDb, CacheDb};
 use crate::engine::{EngineFacade, OpContext, WcRef};
 use crate::ops::{AppEvents, OperationManager};
+use crate::path_grants::{PathGrants, PathPicker};
 use crate::programs::{ProgramPicker, ProgramService};
 use crate::settings::{SettingsService, system_locale};
 use crate::status::StatusPublisher;
@@ -23,8 +24,10 @@ pub struct AppDeps {
     pub engine: Arc<dyn EngineFacade>,
     /// Outbound events.
     pub events: Arc<dyn AppEvents>,
-    /// Native dialogs.
+    /// Native dialogs for programs.
     pub picker: Arc<dyn ProgramPicker>,
+    /// Native dialogs for files and folders.
+    pub path_picker: Arc<dyn PathPicker>,
 }
 
 /// Services shared by all commands. Managed by Tauri and injected as `State<AppState>`.
@@ -43,6 +46,12 @@ pub struct AppState {
     pub wcs: Arc<WcRegistry>,
     /// Status deltas and snapshots.
     pub status: Arc<StatusPublisher>,
+    /// Path grants minted by native dialogs and drops.
+    pub grants: Arc<PathGrants>,
+    /// Native file and folder dialogs.
+    pub path_picker: Arc<dyn PathPicker>,
+    /// Serializes native dialogs (a second request cannot stack dialogs).
+    pub path_dialog_open: tokio::sync::Mutex<()>,
     /// Program settings (native pick and confirm).
     pub programs: ProgramService,
 }
@@ -63,6 +72,9 @@ impl AppState {
             Arc::clone(&deps.events),
         ));
         Ok(Self {
+            grants: Arc::new(PathGrants::new()),
+            path_picker: deps.path_picker,
+            path_dialog_open: tokio::sync::Mutex::new(()),
             programs: ProgramService::new(Arc::clone(&settings), deps.picker),
             ops: OperationManager::new(Arc::clone(&deps.events)),
             events: deps.events,
@@ -127,9 +139,13 @@ impl AppState {
         Ok(self
             .ops
             .spawn(kind, Some(id.clone()), title, move |ctx| async move {
+                let cancel = ctx.cancel.clone();
                 let result = r
                     .actor
-                    .write(async move { f(engine, wc, ctx).await.map_err(|e| AppError::from(&e)) })
+                    .write_cancellable(
+                        async move { f(engine, wc, ctx).await.map_err(|e| AppError::from(&e)) },
+                        &cancel,
+                    )
                     .await;
                 if let Err(e) = publisher.publish(&r).await {
                     tracing::warn!(code = ?e.code, "status refresh after operation failed");
@@ -181,6 +197,58 @@ impl AppState {
                 tracing::warn!(wc = %id.0, code = ?e.code, "working copy recovery failed");
             }
         }
+    }
+
+    /// Turns a native drop into grants and announces them as `fs://dropped`. The raw paths never
+    /// reach the WebView; only opaque ids and display names do.
+    pub fn handle_drop(&self, paths: &[std::path::PathBuf], x: f64, y: f64) {
+        if paths.is_empty() {
+            return;
+        }
+        let grants = paths
+            .iter()
+            .map(|p| {
+                let kind = if p.is_dir() {
+                    opensvn_ipc::GrantKind::Dir
+                } else {
+                    opensvn_ipc::GrantKind::File
+                };
+                self.grants
+                    .mint(p.clone(), kind, crate::path_grants::MAIN_WINDOW)
+            })
+            .collect();
+        // Rounded logical coordinates; the cast saturates for out-of-range values.
+        #[allow(clippy::cast_possible_truncation)]
+        let position = opensvn_ipc::DropPosition {
+            x: x.round() as i32,
+            y: y.round() as i32,
+        };
+        self.events
+            .dropped(&opensvn_ipc::DroppedPaths { grants, position });
+    }
+
+    /// Redeems a folder grant from the `main` window.
+    pub fn redeem_dir(
+        &self,
+        id: &opensvn_ipc::PathGrantId,
+    ) -> Result<std::path::PathBuf, AppError> {
+        self.grants.redeem(
+            id,
+            crate::path_grants::MAIN_WINDOW,
+            opensvn_ipc::GrantKind::Dir,
+        )
+    }
+
+    /// Redeems a file grant from the `main` window.
+    pub fn redeem_file(
+        &self,
+        id: &opensvn_ipc::PathGrantId,
+    ) -> Result<std::path::PathBuf, AppError> {
+        self.grants.redeem(
+            id,
+            crate::path_grants::MAIN_WINDOW,
+            opensvn_ipc::GrantKind::File,
+        )
     }
 
     /// Republishes status; a failure is logged, never surfaced (the caller's result matters more).

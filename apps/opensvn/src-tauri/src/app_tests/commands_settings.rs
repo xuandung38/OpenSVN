@@ -3,7 +3,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use opensvn_ipc::{ErrorCode, ProgramKind, SettingsPatch, Theme};
+use opensvn_ipc::{ProgramKind, SettingsPatch, Theme};
 
 use super::fixture::Fixture;
 use crate::commands;
@@ -28,7 +28,7 @@ async fn settings_round_trip_and_survive_a_restart_of_the_service() {
 }
 
 #[tokio::test]
-async fn settings_set_rejects_keys_that_launch_programs() {
+async fn program_keys_do_not_exist_in_a_settings_patch() {
     let f = Fixture::new(Duration::ZERO).await;
     for key in [
         "diff.externalTool",
@@ -36,13 +36,10 @@ async fn settings_set_rejects_keys_that_launch_programs() {
         "tools.editor",
         "tools.terminal",
     ] {
-        let err = commands::settings_set(
-            f.state(),
-            patch(serde_json::json!({ key: {"path": "/bin/sh", "args": ["-c", "id"]} })),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.code, ErrorCode::PermissionDenied, "{key}");
+        let parsed = serde_json::from_value::<SettingsPatch>(
+            serde_json::json!({ key: {"path": "/bin/sh", "args": ["-c", "id"]} }),
+        );
+        assert!(parsed.is_err(), "{key} must not be patchable");
     }
     let s = commands::settings_get(f.state()).await.unwrap();
     assert!(s.diff_external_tool.is_none() && s.tools_editor.is_none());

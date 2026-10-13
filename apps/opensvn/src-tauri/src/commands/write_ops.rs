@@ -13,7 +13,7 @@ use crate::boundary::guard;
 use crate::engine::OpContext;
 
 fn mvp_limit(msg: &str) -> AppError {
-    let mut e = AppError::internal(msg);
+    let mut e = crate::errors::invalid_argument(msg);
     e.code = ErrorCode::WcFormatUnsupported;
     e
 }
@@ -31,13 +31,23 @@ pub async fn checkout(
         if let Err(e) = state.db.recent_url_touch(&request.url) {
             tracing::warn!(error = %e, "could not record recent URL");
         }
+        let plan = crate::engine::CheckoutPlan {
+            url: request.url.clone(),
+            path: state.redeem_dir(&request.dest)?,
+            rev: request.rev,
+            depth: request.depth,
+            sparse: request.sparse.clone(),
+            format: request.format,
+            store_pristine: request.store_pristine,
+            ignore_externals: request.ignore_externals,
+        };
         let title = format!("Checkout {}", leaf(&request.url));
         let wcs = std::sync::Arc::clone(&state.wcs);
         Ok(state.start_op(
             OperationKind::Checkout,
             title,
             move |engine, ctx| async move {
-                let info = engine.checkout(&request, &ctx).await?;
+                let info = engine.checkout(&plan, &ctx).await?;
                 // Register the new working copy so the UI can open it right after `op://finished`.
                 if let Err(e) = wcs.add_existing(&info.root_path).await {
                     tracing::warn!(code = ?e.code, "checked out working copy was not registered");

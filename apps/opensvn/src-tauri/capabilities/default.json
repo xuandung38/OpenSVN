@@ -37,6 +37,7 @@
     "allow-settings-set",
     "allow-program-choose",
     "allow-program-clear",
+    "allow-path-pick",
     "allow-reveal-in-os",
     "allow-open-external",
     "allow-diagnostics-export",

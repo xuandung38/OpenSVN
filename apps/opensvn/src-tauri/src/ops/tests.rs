@@ -125,7 +125,7 @@ async fn progress_is_throttled_to_ten_per_second() {
     wait_for(&events, "finished", &h.op_id).await;
     let n = events.progress().len();
     assert!(
-        (1..=5).contains(&n),
+        (1..=6).contains(&n),
         "expected about 4 progress events in 350 ms, got {n}"
     );
     assert!(events.progress().iter().all(|p| p.op_id == h.op_id));
@@ -176,4 +176,38 @@ fn error_code_is_cancelled_for_engine_cancel() {
         "x",
     ));
     assert_eq!(e.code, ErrorCode::Cancelled);
+}
+
+#[tokio::test]
+async fn the_last_sample_is_not_lost_to_the_throttle() {
+    let (m, events) = manager();
+    let h = m.spawn(OperationKind::Update, None, "Update", |ctx| async move {
+        for i in 1..=50u64 {
+            ctx.progress.report(ProgressUpdate {
+                phase: "work-queue".into(),
+                current: Some(i),
+                total: Some(50),
+                ..ProgressUpdate::default()
+            });
+        }
+        Ok(OpResult::Done)
+    });
+    wait_for(&events, "finished", &h.op_id).await;
+    let last = events.progress().last().cloned().unwrap();
+    assert_eq!(
+        last.current.map(|s| s.0),
+        Some(50),
+        "UI ends at the final state"
+    );
+    // and it arrives before the terminal event
+    let names = events.names();
+    let last_progress = names
+        .iter()
+        .rposition(|n| n.starts_with("progress:"))
+        .unwrap();
+    let finished = names
+        .iter()
+        .position(|n| n.starts_with("finished:"))
+        .unwrap();
+    assert!(last_progress < finished);
 }
