@@ -93,6 +93,8 @@ M += [("checkout", dict(method="REPORT", status=200, path="!svn/me"), "update/ch
       ("commit", dict(method="PUT", status=201, nth=0), "commit/put-new"),
       ("commit", dict(method="MERGE", status=200), "commit/merge")]
 
+M += [("log-control-chars", dict(method="REPORT", status=200, path="rvr"), "log/control-chars")]
+
 if os.path.isdir(DEST): shutil.rmtree(DEST)
 for step, sel, dest in M:
     try:

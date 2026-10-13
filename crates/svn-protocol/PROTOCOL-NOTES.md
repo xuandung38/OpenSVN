@@ -139,6 +139,24 @@ not.** The builders follow this (test `wire_parity`).
   `no-merge-response` the answer only carries the new revision under `!svn/vcc/default`.
 * A stale PUT is answered 409 and the client then `DELETE`s the transaction.
 
+## Hard limits and encodings
+
+* `ParserLimits` holds every cap in one place (defaults): href and status 8 KiB, one text node
+  16 MiB, log message 16 MiB (raise it per parser), 10k elements per property value, 1024
+  properties and 64 MiB of property text per `D:response`, 1M changed paths per log item, error
+  message 4 KiB (control characters stripped, `…` marks the cut), error body 64 KiB. Exceeding a
+  cap is `ErrorCode::Corrupt`. Text inside elements a parser does not know is never buffered.
+* We always send `S:encode-binary-props`, so log fields (author, date, message, custom revprops)
+  and get-locks fields can arrive with `encoding="base64"`. They are decoded (UTF-8 required for
+  text fields); any other encoding value is `Corrupt`. Verified for a commit message containing
+  ESC (`log/control-chars`). svn refuses control characters in lock comments, so lock fields are
+  covered by synthetic tests only.
+* The XML reader rejects what expat rejects: characters outside XML 1.0 `Char` (also as
+  `&#1;`), `<` inside attribute values, a declaration that is not first.
+* Lock tokens are read only from `activelock/locktoken/href` and must be
+  `opaquelocktoken:` + printable characters (no whitespace, controls, `<>`, max 256 bytes).
+* `REPOS_HOOK_FAILURE` (165001) maps to `Internal` until the contract adds a hook-failure code.
+
 ## Contract notes
 
 * Log and lock paths are `RepoDisplayPath` values (private field, no `Deref`, no `AsRef<Path>`,

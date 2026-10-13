@@ -155,12 +155,12 @@ fn get_locks_rejects_hostile_paths_and_missing_fields() {
             r#"<S:get-locks-report xmlns:S="svn:"><S:lock>{inner}</S:lock></S:get-locks-report>"#
         )
     };
-    let ok = "<S:path>/a</S:path><S:token>t</S:token><S:owner>o</S:owner><S:creationdate>2026-10-13T08:44:30.014940Z</S:creationdate>";
+    let ok = "<S:path>/a</S:path><S:token>opaquelocktoken:t</S:token><S:owner>o</S:owner><S:creationdate>2026-10-13T08:44:30.014940Z</S:creationdate>";
     assert_eq!(parse_get_locks(wrap(ok).as_bytes()).unwrap().len(), 1);
     for bad in [
         ok.replace("/a", "/a/../../b"),
         ok.replace("/a", "a"),
-        ok.replace("<S:token>t</S:token>", ""),
+        ok.replace("<S:token>opaquelocktoken:t</S:token>", ""),
         ok.replace("<S:owner>o</S:owner>", ""),
         ok.replace("2026-10-13T08:44:30.014940Z", "yesterday"),
     ] {
