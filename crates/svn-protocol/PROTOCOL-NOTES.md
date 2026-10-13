@@ -141,10 +141,14 @@ not.** The builders follow this (test `wire_parity`).
 
 ## Contract notes
 
-* `ChangedPath.path` and `LockInfo.path` are display text. They are validated structurally
-  (`RelPath::new`: absolute, no `.`/`..`/empty segment, no NUL) and not with `from_server`, so a
-  repository containing `aux.c` can still be logged. Node names that may become working-copy
-  paths (`DirEntry.name`, anything from `accept_href`) always go through `RelPath::from_server`.
+* Log and lock paths are `RepoDisplayPath` values (private field, no `Deref`, no `AsRef<Path>`,
+  no conversion to `RelPath`): structurally validated only, so a repo containing `aux.c` can still
+  be logged. `LogItem::changed_paths` and `RepoLock` carry them; `LogItem::entry.changed_paths` is
+  left empty on purpose. `into_log_entry()` / `into_lock_info()` produce the shared contract types,
+  whose `path` fields are plain `String`s: call them only at that boundary. A file system path
+  requires an explicit `RelPath::from_server(display.as_str().trim_start_matches('/'))`.
+  Node names that may become working-copy paths (`DirEntry.name`, `accept_href`) always go
+  through `RelPath::from_server`.
 * A listing never drops entries silently: names that fail validation come back as
   `RejectedEntry` next to the accepted ones; the caller decides whether that is fatal.
 * `UrlBuilder::accept_href` accepts only: same scheme/host/port as the session and a path equal to

@@ -1,6 +1,8 @@
 //! `LOCK` response and get-lock `PROPFIND` response parsing.
 
-use svn_types::{LockInfo, RelPath, Result, Timestamp};
+use svn_types::{RelPath, Result, Timestamp};
+
+use crate::display_path::{RepoDisplayPath, RepoLock};
 
 use crate::errors::error_from_response;
 use crate::http::{ResponseHead, parse_chunked};
@@ -16,7 +18,7 @@ struct ActiveLock {
 }
 
 /// Fields of a lock the server reports in headers rather than in the body.
-fn lock_from_parts(path: &RelPath, head: &ResponseHead, lock: &ActiveLock) -> Result<LockInfo> {
+fn lock_from_parts(path: &RelPath, head: &ResponseHead, lock: &ActiveLock) -> Result<RepoLock> {
     let owner = head
         .headers
         .get("X-SVN-Lock-Owner")
@@ -29,8 +31,8 @@ fn lock_from_parts(path: &RelPath, head: &ResponseHead, lock: &ActiveLock) -> Re
         .get("X-SVN-Creation-Date")
         .ok_or_else(|| corrupt("lock response without X-SVN-Creation-Date"))
         .and_then(parse_timestamp)?;
-    Ok(LockInfo {
-        path: format!("/{path}"),
+    Ok(RepoLock {
+        path: RepoDisplayPath::from_rel(path),
         token: lock.token.clone(),
         owner,
         comment: lock.comment.clone().filter(|c| !c.is_empty()),
@@ -57,7 +59,7 @@ fn token_from_href(href: &str) -> Result<String> {
 }
 
 /// Interprets the response to `LOCK` for `path`.
-pub fn parse_lock_response(path: &RelPath, head: &ResponseHead, body: &[u8]) -> Result<LockInfo> {
+pub fn parse_lock_response(path: &RelPath, head: &ResponseHead, body: &[u8]) -> Result<RepoLock> {
     if !(200..300).contains(&head.status) {
         return Err(error_from_response(head.status, &head.headers, body));
     }
@@ -100,7 +102,7 @@ pub fn parse_get_lock_response(
     path: &RelPath,
     head: &ResponseHead,
     body: &[u8],
-) -> Result<Option<LockInfo>> {
+) -> Result<Option<RepoLock>> {
     if !(200..300).contains(&head.status) {
         return Err(error_from_response(head.status, &head.headers, body));
     }

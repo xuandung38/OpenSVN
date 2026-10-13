@@ -7,6 +7,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod caps;
+pub mod display_path;
 pub mod errors;
 pub mod get;
 pub mod http;
@@ -20,6 +21,7 @@ mod util;
 pub use caps::{
     AcceptedHref, BulkUpdates, Capabilities, DavCaps, HrefKind, UrlBuilder, options_request,
 };
+pub use display_path::{DisplayChangedPath, RepoDisplayPath, RepoLock};
 pub use errors::{error_from_response, map_errcode, map_http_status};
 pub use http::{
     Body, BodyStream, Headers, HttpRequest, Method, ResponseHead, ResponseParser, parse_chunked,

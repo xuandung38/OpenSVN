@@ -1,9 +1,11 @@
 //! Streaming `S:log-report` response parser.
 
-use svn_types::{ChangeAction, ChangedPath, LogEntry, NodeKind, Result, Revnum};
+use svn_types::{ChangeAction, LogEntry, NodeKind, Result, Revnum};
+
+use crate::display_path::{DisplayChangedPath, RepoDisplayPath};
 
 use crate::http::{ResponseParser, parse_chunked};
-use crate::util::{corrupt, parse_revnum, parse_timestamp, validate_display_path};
+use crate::util::{corrupt, parse_revnum, parse_timestamp};
 use crate::xml::{Ns, StartTag, XmlEvent, XmlReader};
 
 /// A log entry with its position in the merge hierarchy.
@@ -12,8 +14,11 @@ use crate::xml::{Ns, StartTag, XmlEvent, XmlReader};
 /// entry that has `has_children`, then an end marker. `merge_depth` is 0 for top-level entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogItem {
-    /// The entry.
+    /// The entry. Its `changed_paths` is always empty: paths are in [`LogItem::changed_paths`]
+    /// as display-only values; use [`LogItem::into_log_entry`] to build the contract form.
     pub entry: LogEntry,
+    /// Changed paths (when requested), display-only.
+    pub changed_paths: Vec<DisplayChangedPath>,
     /// Nesting level in the merge hierarchy.
     pub merge_depth: u32,
     /// The merge was subtractive (a reverse merge).
@@ -33,7 +38,22 @@ struct Building {
     rev: Option<Revnum>,
     end_marker: bool,
     entry: LogEntry,
+    paths: Vec<DisplayChangedPath>,
     subtractive: bool,
+}
+
+impl LogItem {
+    /// Builds the contract `LogEntry` with `changed_paths` filled in. Paths become plain
+    /// strings here, so call it only where the contract requires that.
+    pub fn into_log_entry(self) -> LogEntry {
+        let mut entry = self.entry;
+        entry.changed_paths = self
+            .changed_paths
+            .into_iter()
+            .map(DisplayChangedPath::into_contract)
+            .collect();
+        entry
+    }
 }
 
 /// Incremental parser emitting one [`LogItem`] per `S:log-item`.
@@ -99,6 +119,7 @@ impl LogParser {
                     rev: None,
                     end_marker: false,
                     subtractive: false,
+                    paths: Vec::new(),
                     entry: LogEntry {
                         rev: Revnum(0),
                         author: None,
@@ -165,11 +186,11 @@ impl LogParser {
                 let action =
                     action_for(&tag.name.local).ok_or_else(|| corrupt("internal parser state"))?;
                 let copy_from = match (tag.attr("copyfrom-path"), tag.attr("copyfrom-rev")) {
-                    (Some(p), Some(r)) => Some((validate_display_path(p)?, parse_revnum(r)?)),
+                    (Some(p), Some(r)) => Some((RepoDisplayPath::parse(p)?, parse_revnum(r)?)),
                     _ => None,
                 };
-                item.entry.changed_paths.push(ChangedPath {
-                    path: validate_display_path(text.trim())?,
+                item.paths.push(DisplayChangedPath {
+                    path: RepoDisplayPath::parse(text.trim())?,
                     action,
                     kind: kind_for(tag.attr("node-kind")),
                     copy_from,
@@ -199,6 +220,7 @@ impl LogParser {
                 }
                 out.push(LogItem {
                     entry: item.entry,
+                    changed_paths: item.paths,
                     merge_depth,
                     subtractive_merge: item.subtractive,
                 });
