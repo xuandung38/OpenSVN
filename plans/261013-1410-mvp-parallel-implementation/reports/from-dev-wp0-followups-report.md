@@ -50,6 +50,19 @@ from the #91 review.
    refuses a decoded `/`), and refuses a query or fragment, like `UrlBuilder::locate`. New test
    `session_urls_are_compared_decoded_and_encoded_slashes_are_refused`.
 
-## Gates
+## Gates (own target dir, `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0`)
 
-See the PR description for the final counts.
+- `cargo fmt --all --check`: pass
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: pass
+- `cargo clippy -p opensvn --features real-engine --all-targets --locked -- -D warnings`: pass
+- `cargo test --workspace --locked`: 1233 passed, 0 failed, 21 ignored (5 more than at #91)
+- `cargo test -p opensvn --features opensvn/real-engine --locked`: 317 passed, 0 failed
+- Regression checks: with the `svn-protocol/src` changes reverted, the new `caps_and_urls`
+  tests and the `evil_server` options case fail.
+- `fixtures/evil/generate.py` regenerates byte-identically (no diff after a second run).
+
+## Not covered / remaining
+
+- The app's `AuthBroker` still uses the default no-op hook. WP2 implements it.
+- `compat_read` against a real mod_dav_svn was not re-run. This change does not touch the wire
+  paths it exercises, apart from the stricter root checks.
