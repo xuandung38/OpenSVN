@@ -36,6 +36,9 @@ pub struct RaWire {
     connections: usize,
     bulk: BulkPreference,
     list_limits: ListLimits,
+    /// Every request goes through [`HttpTransport::send_unattended`]: no credential or
+    /// certificate prompt, only what is cached, accepted or stored.
+    unattended: bool,
 }
 
 impl RaWire {
@@ -46,15 +49,7 @@ impl RaWire {
         caps: Capabilities,
     ) -> Result<Self> {
         let urls = UrlBuilder::new(&session_url, &caps)?;
-        let session_rel = match urls.accept_href(session_url.as_url().as_str())?.kind {
-            HrefKind::Public { path } => path,
-            _ => {
-                return Err(SvnError::new(
-                    ErrorCode::UnsafePath,
-                    "session URL points into a special Subversion resource",
-                ));
-            }
-        };
+        let (session_url, session_rel) = locate_session(&urls, session_url)?;
         Ok(Self {
             transport,
             session_url,
@@ -64,6 +59,7 @@ impl RaWire {
             connections: DEFAULT_CONNECTIONS,
             bulk: BulkPreference::Auto,
             list_limits: ListLimits::default(),
+            unattended: false,
         })
     }
 
@@ -73,13 +69,64 @@ impl RaWire {
         session_url: RepoUrl,
         cancel: &CancelToken,
     ) -> Result<Self> {
+        Self::open_mode(transport, session_url, false, cancel).await
+    }
+
+    /// Like [`Self::open`], but the `OPTIONS` (and every later request of the wiring) never
+    /// prompts: see [`Self::unattended`].
+    pub async fn open_unattended(
+        transport: Arc<HttpTransport>,
+        session_url: RepoUrl,
+        cancel: &CancelToken,
+    ) -> Result<Self> {
+        Self::open_mode(transport, session_url, true, cancel).await
+    }
+
+    async fn open_mode(
+        transport: Arc<HttpTransport>,
+        session_url: RepoUrl,
+        unattended: bool,
+        cancel: &CancelToken,
+    ) -> Result<Self> {
         let req = options_request(&session_url)?;
         let body = buffered_body(&req)?;
-        let resp = send_with(&transport, req, body, cancel).await?;
+        let resp = send_with(&transport, req, body, unattended, cancel).await?;
         let head = svn_protocol::ResponseHead::new(resp.status().as_u16(), headers_of(&resp));
         let body = read_limited(resp, ParserLimits::default().max_error_body_bytes, cancel).await?;
         let caps = Capabilities::from_options_response(&session_url, &head, &body)?;
-        Self::new(transport, session_url, caps)
+        let mut wire = Self::new(transport, session_url, caps)?;
+        wire.unattended = unattended;
+        Ok(wire)
+    }
+
+    /// The same wiring rooted at `url`, without a request: transport, capabilities and URL
+    /// builder are shared. `url` must be on the session's origin and at or below the
+    /// repository root (a case-only difference in the root part is accepted and replaced by
+    /// the server's spelling, see [`UrlBuilder::locate`]); anything else is
+    /// [`ErrorCode::UnsafePath`].
+    pub fn reparent(&self, url: &RepoUrl) -> Result<Self> {
+        let (session_url, session_rel) = locate_session(&self.urls, url.clone())?;
+        Ok(Self {
+            session_url,
+            session_rel,
+            ..self.clone()
+        })
+    }
+
+    /// The same wiring with every request sent through [`HttpTransport::send_unattended`]:
+    /// nothing ever prompts; only credentials already cached for the origin or returned by
+    /// [`AuthPrompter::stored_credentials`](svn_ra_api::AuthPrompter::stored_credentials) and
+    /// certificates already accepted are used. A request that would need a prompt fails with
+    /// `AuthRequired` (or its TLS error).
+    #[must_use]
+    pub fn unattended(mut self) -> Self {
+        self.unattended = true;
+        self
+    }
+
+    /// Whether requests never prompt (see [`Self::unattended`]).
+    pub fn is_unattended(&self) -> bool {
+        self.unattended
     }
 
     /// Sets the number of connections the transport pool offers (clamped to 1..=8). The update
@@ -168,7 +215,7 @@ impl RaWire {
         cancel: &CancelToken,
     ) -> Result<HttpResponse> {
         let body = buffered_body(&req)?;
-        send_with(&self.transport, req, body, cancel).await
+        send_with(&self.transport, req, body, self.unattended, cancel).await
     }
 
     /// Sends a protocol request, replacing its body with `body` (replayable uploads).
@@ -178,7 +225,7 @@ impl RaWire {
         body: RequestBody,
         cancel: &CancelToken,
     ) -> Result<HttpResponse> {
-        send_with(&self.transport, req, body, cancel).await
+        send_with(&self.transport, req, body, self.unattended, cancel).await
     }
 
     /// Sends a protocol request without ever prompting (see
@@ -233,6 +280,25 @@ fn buffered_body(req: &svn_protocol::HttpRequest) -> Result<RequestBody> {
         Body::Stream(_) => Err(SvnError::new(
             ErrorCode::Internal,
             "streamed protocol bodies must be sent with send_with_body",
+        )),
+    }
+}
+
+/// Where `url` lies below the repository root: the session URL to use (the server's spelling
+/// of the root when only its case differed) and its repository-relative path. Fails with
+/// `UnsafePath` for another origin, a URL outside the root or one inside a special resource.
+fn locate_session(urls: &UrlBuilder, url: RepoUrl) -> Result<(RepoUrl, RelPath)> {
+    let (rel, folded) = urls.locate(url.as_url())?;
+    let url = if folded {
+        RepoUrl::parse(urls.public(&rel)?.as_str())?
+    } else {
+        url
+    };
+    match urls.accept_href(url.as_url().as_str())?.kind {
+        HrefKind::Public { path } => Ok((url, path)),
+        _ => Err(SvnError::new(
+            ErrorCode::UnsafePath,
+            "session URL points into a special Subversion resource",
         )),
     }
 }
@@ -316,8 +382,14 @@ async fn send_with(
     transport: &HttpTransport,
     req: svn_protocol::HttpRequest,
     body: RequestBody,
+    unattended: bool,
     cancel: &CancelToken,
 ) -> Result<HttpResponse> {
     cancel.check()?;
-    transport.send(convert(req, body)?, cancel).await
+    let req = convert(req, body)?;
+    if unattended {
+        transport.send_unattended(req, cancel).await
+    } else {
+        transport.send(req, cancel).await
+    }
 }

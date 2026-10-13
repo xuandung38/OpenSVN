@@ -1,0 +1,268 @@
+//! Session plumbing for the engine: reparenting without a request, unattended sessions that
+//! never prompt, and the repository-root ancestor check at open (issue #78).
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
+mod common;
+mod ra_write_support;
+
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use common::{Reply, ScriptedPrompter, TestCa, TlsServer, basic, transport_trusting};
+use ra_write_support::{Bulk, FixedPrompter, ROOT, fixture, server, session_url, transport};
+use svn_ra::ops::HttpRaSession;
+use svn_ra_api::RaSession;
+use svn_types::{CancelToken, ErrorCode, NodeKind, RelPath, RepoUrl, Revnum};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+fn p(s: &str) -> RelPath {
+    RelPath::new(s).unwrap()
+}
+
+async fn open(srv: &MockServer) -> HttpRaSession {
+    HttpRaSession::open(
+        transport(Arc::new(FixedPrompter::default())),
+        session_url(srv),
+        &CancelToken::new(),
+    )
+    .await
+    .expect("open session")
+}
+
+async fn request_count(srv: &MockServer) -> usize {
+    srv.received_requests().await.unwrap_or_default().len()
+}
+
+#[tokio::test]
+async fn reparent_moves_the_session_without_a_request() {
+    let srv = server(Bulk::Prefer).await;
+    Mock::given(method("PROPFIND"))
+        .and(path("/svn/repo/!svn/rvr/5/trunk/a.txt"))
+        .respond_with(
+            ResponseTemplate::new(207)
+                .insert_header("Content-Type", "text/xml; charset=\"utf-8\"")
+                .set_body_bytes(fixture("propfind/stat-file.resp")),
+        )
+        .mount(&srv)
+        .await;
+    let s = open(&srv).await;
+    let before = request_count(&srv).await;
+    let root_url = RepoUrl::parse(&format!("{}{ROOT}", srv.uri())).unwrap();
+    let r = s.reparent(&root_url).expect("reparent to the root");
+    assert_eq!(request_count(&srv).await, before, "reparent sends nothing");
+    assert_eq!(r.session_url(), &root_url);
+    assert_eq!(r.repos_root(), s.repos_root());
+    assert_eq!(r.uuid(), s.uuid());
+    assert_eq!(r.wire().session_rel().as_str(), "");
+    assert!(Arc::ptr_eq(r.wire().transport(), s.wire().transport()));
+    // Paths are now relative to the root: trunk/a.txt is the same node as a.txt before.
+    let cancel = CancelToken::new();
+    assert_eq!(
+        r.check_path(&p("trunk/a.txt"), Some(Revnum(5)), &cancel)
+            .await
+            .unwrap(),
+        NodeKind::File
+    );
+    assert_eq!(
+        s.check_path(&p("a.txt"), Some(Revnum(5)), &cancel)
+            .await
+            .unwrap(),
+        NodeKind::File
+    );
+    // And back down again.
+    let deeper = r
+        .reparent(&RepoUrl::parse(&format!("{}{ROOT}/trunk/src", srv.uri())).unwrap())
+        .unwrap();
+    assert_eq!(deeper.wire().session_rel().as_str(), "trunk/src");
+}
+
+#[tokio::test]
+async fn reparent_outside_the_repository_is_refused() {
+    let srv = server(Bulk::Prefer).await;
+    let s = open(&srv).await;
+    let before = request_count(&srv).await;
+    let port = srv.address().port();
+    for url in [
+        format!("{}/svn/other", srv.uri()),
+        format!("{}/svn", srv.uri()),
+        format!("{}/svn/repository/trunk", srv.uri()),
+        format!("{}{ROOT}/!svn/me", srv.uri()),
+        format!("{}{ROOT}/!svn/rvr/5/trunk", srv.uri()),
+        format!("http://localhost:{port}{ROOT}/trunk"),
+        format!("https://127.0.0.1:{port}{ROOT}/trunk"),
+        format!("http://127.0.0.1:{}{ROOT}/trunk", port.wrapping_add(1)),
+    ] {
+        let err = s.reparent(&RepoUrl::parse(&url).unwrap()).expect_err(&url);
+        assert_eq!(err.code, ErrorCode::UnsafePath, "{url}: {err:?}");
+    }
+    assert_eq!(request_count(&srv).await, before);
+}
+
+#[tokio::test]
+async fn reparent_accepts_a_root_spelled_in_another_case() {
+    let srv = server(Bulk::Prefer).await;
+    let s = open(&srv).await;
+    let r = s
+        .reparent(&RepoUrl::parse(&format!("{}/SVN/Repo/Trunk", srv.uri())).unwrap())
+        .expect("case-insensitive root (VisualSVN)");
+    // The root part takes the server's spelling; the rest keeps the caller's.
+    assert_eq!(
+        r.session_url().as_url().as_str(),
+        format!("{}{ROOT}/Trunk", srv.uri())
+    );
+    assert_eq!(r.wire().session_rel().as_str(), "Trunk");
+}
+
+/// An OPTIONS answer whose repository root is spelled differently from the session URL (as
+/// VisualSVN does on Windows) still opens; the session URL takes the server's spelling.
+#[tokio::test]
+async fn open_accepts_a_differently_cased_root_and_rejects_a_foreign_one() {
+    async fn options_server(root: &str) -> MockServer {
+        let srv = MockServer::start().await;
+        Mock::given(method("OPTIONS"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .append_header("DAV", "1,2")
+                    .append_header("SVN-Youngest-Rev", "5")
+                    .append_header(
+                        "SVN-Repository-UUID",
+                        "7462d98e-4071-4508-b797-d2922b5cda8f",
+                    )
+                    .append_header("SVN-Repository-Root", root)
+                    .append_header("SVN-Me-Resource", format!("{root}/!svn/me"))
+                    .append_header("SVN-Rev-Root-Stub", format!("{root}/!svn/rvr"))
+                    .append_header("SVN-Rev-Stub", format!("{root}/!svn/rev")),
+            )
+            .mount(&srv)
+            .await;
+        srv
+    }
+    let srv = options_server("/svn/MyRepo").await;
+    let s = HttpRaSession::open(
+        transport(Arc::new(FixedPrompter::default())),
+        RepoUrl::parse(&format!("{}/svn/myrepo/trunk", srv.uri())).unwrap(),
+        &CancelToken::new(),
+    )
+    .await
+    .expect("case-insensitive match");
+    assert_eq!(
+        s.session_url().as_url().as_str(),
+        format!("{}/svn/MyRepo/trunk", srv.uri())
+    );
+    assert_eq!(
+        s.repos_root().as_url().as_str(),
+        format!("{}/svn/MyRepo", srv.uri())
+    );
+
+    let srv = options_server("/elsewhere").await;
+    let err = HttpRaSession::open(
+        transport(Arc::new(FixedPrompter::default())),
+        RepoUrl::parse(&format!("{}/svn/repo/trunk", srv.uri())).unwrap(),
+        &CancelToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::UnsafePath);
+}
+
+/// HTTPS front that wants Basic `alice`/`pw` for everything and answers OPTIONS like
+/// mod_dav_svn once authenticated.
+async fn auth_server() -> (TestCa, TlsServer) {
+    let ca = TestCa::new();
+    let handler: Arc<common::Handler> = Arc::new(|seen: &common::Seen| {
+        if seen.header("authorization").as_deref() != Some(basic("alice", "pw").as_str()) {
+            return Reply::unauthorized("r");
+        }
+        Reply::ok("")
+            .header("DAV", "1,2")
+            .header("SVN-Youngest-Rev", "7")
+            .header(
+                "SVN-Repository-UUID",
+                "7462d98e-4071-4508-b797-d2922b5cda8f",
+            )
+            .header("SVN-Repository-Root", ROOT)
+            .header("SVN-Me-Resource", "/svn/repo/!svn/me")
+            .header("SVN-Rev-Root-Stub", "/svn/repo/!svn/rvr")
+            .header("SVN-Rev-Stub", "/svn/repo/!svn/rev")
+    });
+    let srv = TlsServer::start(&ca.leaf(&["localhost"], false), handler).await;
+    (ca, srv)
+}
+
+fn tls_session_url(srv: &TlsServer) -> RepoUrl {
+    RepoUrl::parse(srv.url("/svn/repo/trunk").as_str()).unwrap()
+}
+
+#[tokio::test]
+async fn unattended_session_fails_with_auth_required_and_never_prompts() {
+    let (ca, srv) = auth_server().await;
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let err =
+        HttpRaSession::open_unattended(Arc::clone(&t), tls_session_url(&srv), &CancelToken::new())
+            .await
+            .expect_err("needs credentials");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert_eq!(prompter.credential_prompts(), 0);
+
+    // An interactive session prompts once; its unattended twin reuses what was cached.
+    let s = HttpRaSession::open(Arc::clone(&t), tls_session_url(&srv), &CancelToken::new())
+        .await
+        .expect("interactive open");
+    assert_eq!(prompter.credential_prompts(), 1);
+    let u = s.unattended();
+    assert!(u.wire().is_unattended());
+    assert!(!s.wire().is_unattended());
+    assert_eq!(
+        u.youngest_rev(&CancelToken::new()).await.unwrap(),
+        Revnum(7)
+    );
+    assert!(u.reparent(s.repos_root()).unwrap().wire().is_unattended());
+    assert_eq!(prompter.credential_prompts(), 1);
+}
+
+#[tokio::test]
+async fn unattended_session_on_a_fresh_transport_never_prompts() {
+    let (ca, srv) = auth_server().await;
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    // Open interactively on another transport so the unattended session exists, then talk to
+    // the server through a transport that has nothing cached.
+    let other = transport_trusting(
+        &ca,
+        ScriptedPrompter::with_credentials("alice", "pw"),
+        |_| {},
+    );
+    let s = HttpRaSession::open(other, tls_session_url(&srv), &CancelToken::new())
+        .await
+        .unwrap();
+    let fresh = HttpRaSession::from_wire(
+        svn_ra::ops::update::RaWire::new(t, s.session_url().clone(), s.wire().caps().clone())
+            .unwrap()
+            .unattended(),
+    )
+    .unwrap();
+    let err = fresh
+        .youngest_rev(&CancelToken::new())
+        .await
+        .expect_err("401 without credentials");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert_eq!(prompter.credential_prompts(), 0);
+}
+
+#[tokio::test]
+async fn unattended_session_uses_stored_credentials_silently() {
+    let (ca, srv) = auth_server().await;
+    let prompter = ScriptedPrompter::with_stored("alice", "pw");
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let s = HttpRaSession::open_unattended(t, tls_session_url(&srv), &CancelToken::new())
+        .await
+        .expect("stored credentials");
+    assert_eq!(
+        s.youngest_rev(&CancelToken::new()).await.unwrap(),
+        Revnum(7)
+    );
+    assert_eq!(prompter.credential_prompts(), 0);
+    assert_eq!(prompter.stored_calls.load(Ordering::SeqCst), 1);
+}

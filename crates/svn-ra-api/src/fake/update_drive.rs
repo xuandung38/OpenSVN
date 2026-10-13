@@ -28,10 +28,16 @@ fn url_to_rel(root: &svn_types::RepoUrl, url: &svn_types::RepoUrl) -> Result<Rel
     RelPath::new(rest.trim_matches('/'))
 }
 
+/// Where the session of a drive is: repository root URL and the session URL relative to it.
+pub(super) struct SessionAt<'a> {
+    pub repos_root: &'a svn_types::RepoUrl,
+    pub session_rel: &'a RelPath,
+}
+
 /// Runs a report-driven drive against the fake repository.
 pub(super) async fn drive_update(
     state: &Mutex<RepoState>,
-    repos_root: &svn_types::RepoUrl,
+    at: SessionAt<'_>,
     max_open_files: usize,
     req: UpdateRequest,
     report: ReportFn,
@@ -39,12 +45,16 @@ pub(super) async fn drive_update(
     cancel: &CancelToken,
 ) -> Result<()> {
     cancel.check()?;
+    let SessionAt {
+        repos_root,
+        session_rel,
+    } = at;
     let mut reporter = CollectingReporter::default();
     report(&mut reporter)?;
 
     let tree_target = match &req.mode {
         UpdateMode::Switch(url) => url_to_rel(repos_root, url)?,
-        _ => req.target.clone(),
+        _ => super::prefixed::join(session_rel, &req.target)?,
     };
     let (target_rev, target_tree, base_trees) = {
         let st = lock_state(state);
@@ -56,7 +66,8 @@ pub(super) async fn drive_update(
             .filter(|e| !e.deleted && !e.start_empty)
         {
             let (r, brv) = st.revision(Some(e.rev))?;
-            bases.insert(r, brv.tree.clone());
+            // Report paths are session-relative: so are the base trees.
+            bases.insert(r, super::prefixed::subtree(&brv.tree, session_rel)?);
         }
         (rev, rv.tree.clone(), bases)
     };
