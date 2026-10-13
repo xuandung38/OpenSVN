@@ -21,11 +21,17 @@ pub enum ErrorCode {
     WcFormatUnsupported,
     NotAWorkingCopy,
     ConflictBlocksCommit,
+    HookFailed,
+    RepositoryMoved,
+    PristineNotHydrated,
+    WcInvalidOperation,
     PathNotFound,
     DiskFull,
     PermissionDenied,
     FileInUse,
     Cancelled,
+    /// The request itself is invalid (bad value, expired path grant, unsupported option).
+    InvalidArgument,
     Internal,
 }
 
@@ -134,6 +140,10 @@ pub fn map_svn_error_code(code: SvnErrorCode) -> (ErrorCode, bool, &'static [Err
         S::WcFormatUnsupported => (ErrorCode::WcFormatUnsupported, false, &[]),
         S::NotAWorkingCopy => (ErrorCode::NotAWorkingCopy, false, &[]),
         S::ConflictBlocksCommit => (ErrorCode::ConflictBlocksCommit, false, &[]),
+        S::HookFailed => (ErrorCode::HookFailed, false, &[]),
+        S::RepositoryMoved => (ErrorCode::RepositoryMoved, false, &[]),
+        S::PristineNotHydrated => (ErrorCode::PristineNotHydrated, false, &[]),
+        S::WcInvalidOperation => (ErrorCode::WcInvalidOperation, false, &[]),
         S::PathNotFound => (ErrorCode::PathNotFound, false, &[]),
         S::UnsafePath => (ErrorCode::Internal, false, &[]),
         S::DiskFull => (ErrorCode::DiskFull, false, &[]),

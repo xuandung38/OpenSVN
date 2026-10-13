@@ -1,8 +1,8 @@
 //! `LOCK` response and get-lock `PROPFIND` response parsing.
 
-use svn_types::{RelPath, Result, Timestamp};
+use svn_types::{LockInfo, RelPath, Result, Timestamp};
 
-use crate::display_path::{RepoDisplayPath, RepoLock};
+use crate::display_path::RepoDisplayPath;
 use crate::errors::error_from_response;
 use crate::http::{ResponseHead, parse_chunked};
 use crate::limits::ParserLimits;
@@ -25,7 +25,7 @@ struct ActiveLock {
 }
 
 /// Fields of a lock the server reports in headers rather than in the body.
-fn lock_from_parts(path: &RelPath, head: &ResponseHead, lock: &ActiveLock) -> Result<RepoLock> {
+fn lock_from_parts(path: &RelPath, head: &ResponseHead, lock: &ActiveLock) -> Result<LockInfo> {
     let owner = head
         .headers
         .get("X-SVN-Lock-Owner")
@@ -38,7 +38,7 @@ fn lock_from_parts(path: &RelPath, head: &ResponseHead, lock: &ActiveLock) -> Re
         .get("X-SVN-Creation-Date")
         .ok_or_else(|| corrupt("lock response without X-SVN-Creation-Date"))
         .and_then(parse_timestamp)?;
-    Ok(RepoLock {
+    Ok(LockInfo {
         path: RepoDisplayPath::from_rel(path),
         token: lock.token.clone(),
         owner,
@@ -58,7 +58,7 @@ fn expiry(created: Timestamp, timeout: Option<&str>) -> Option<Timestamp> {
 }
 
 /// Interprets the response to `LOCK` for `path`.
-pub fn parse_lock_response(path: &RelPath, head: &ResponseHead, body: &[u8]) -> Result<RepoLock> {
+pub fn parse_lock_response(path: &RelPath, head: &ResponseHead, body: &[u8]) -> Result<LockInfo> {
     if !(200..300).contains(&head.status) {
         return Err(error_from_response(head.status, &head.headers, body));
     }
@@ -77,8 +77,21 @@ pub fn parse_lock_response(path: &RelPath, head: &ResponseHead, body: &[u8]) -> 
                 text.clear();
             }
             XmlEvent::Text(t) => {
-                text.push_str(&t);
-                ParserLimits::check(text.len(), limits.max_href_bytes, "lock field")?;
+                let below = stack.get(2..).map(|s| s.join("/")).unwrap_or_default();
+                if below == OWNER_PATH {
+                    // The server has already taken the lock: an oversized comment is cut,
+                    // never turned into a failure.
+                    if text.len() < limits.max_text_bytes {
+                        let room = limits.max_text_bytes - text.len();
+                        let cut = (0..=room.min(t.len()))
+                            .rev()
+                            .find(|i| t.is_char_boundary(*i));
+                        text.push_str(&t[..cut.unwrap_or(0)]);
+                    }
+                } else {
+                    text.push_str(&t);
+                    ParserLimits::check(text.len(), limits.max_href_bytes, "lock field")?;
+                }
             }
             XmlEvent::End(_) => {
                 // Path below `D:prop/D:lockdiscovery`.
@@ -107,7 +120,7 @@ pub fn parse_get_lock_response(
     path: &RelPath,
     head: &ResponseHead,
     body: &[u8],
-) -> Result<Option<RepoLock>> {
+) -> Result<Option<LockInfo>> {
     if !(200..300).contains(&head.status) {
         return Err(error_from_response(head.status, &head.headers, body));
     }

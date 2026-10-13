@@ -13,8 +13,9 @@
 //!   digits of the checksum): pristine texts. svn 1.14.5 and TortoiseSVN 1.14 pass these
 //!   straight to `file-translate` as the merge-left/right sources (`update_editor.c` and
 //!   `preserve_pre_merge_files`); 1.15 sets the text aside into `.svn/tmp` first. A pristine is
-//!   **read-only data**: it is accepted only as the SOURCE of `file-install` and
-//!   `file-translate`, never as a destination or for remove/move.
+//!   **read-only data**: it is accepted only as the SOURCE of `file-translate` (the only item
+//!   svn 1.14 queues it for), never as a `file-install` source, a destination, or for
+//!   remove/move.
 //!
 //! Both shapes require `.svn` and every directory below it on the way to be real directories
 //! (a symlink is refused) and the final component not to be a symlink. This is working-copy-format
@@ -154,8 +155,8 @@ pub(crate) fn resolve_adm_path(wc_root: &Path, relpath: &str) -> Result<AdmPath,
 
 /// Resolves an operand that may be a working copy path or an [`AdmPath`].
 ///
-/// `allow_pristine` must be true only for read-only SOURCE operands (`file-install` source,
-/// `file-translate` source); `.svn/tmp/<name>` is accepted for every operand svn documents as
+/// `allow_pristine` must be true only for the `file-translate` source operand;
+/// `.svn/tmp/<name>` is accepted for every operand svn documents as
 /// possibly temporary. Every other operand must use [`resolve_wc_path`].
 pub(crate) fn resolve_operand(
     wc_root: &Path,

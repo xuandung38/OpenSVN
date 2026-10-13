@@ -1,0 +1,4 @@
+((update ((subversion file:///tmp/opensvn-golden-prej/repo a193ad26-9323-4e7b-9e43-d3cbf0eabb5a controls_and_lump 1 2 file) (subversion file:///tmp/opensvn-golden-prej/repo a193ad26-9323-4e7b-9e43-d3cbf0eabb5a controls_and_lump 1 3 file))) ((prop (controls_and_lump.prej) (k) (k 2 x
+) (k 11 m	bcde
+) (k 23 t’s – x y “q”
+))))

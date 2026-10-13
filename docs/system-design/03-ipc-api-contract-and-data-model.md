@@ -76,7 +76,8 @@ interface Conflict { path: string; kind: 'text' | 'property' | 'tree';
 
 interface OperationHandle { opId: OpId; kind: OperationKind; wcId?: WcId; title: string; }
 type OperationKind = 'checkout' | 'update' | 'switch' | 'commit' | 'revert' | 'cleanup' | 'lock'
-  | 'unlock' | 'status-remote' | 'log' | 'blame' | 'remote-edit' | 'set-depth' | 'upgrade' | 'merge';
+  | 'unlock' | 'status-remote' | 'log' | 'blame' | 'remote-edit' | 'set-depth' | 'upgrade' | 'merge'
+  | 'status-refresh' | 'add' | 'delete' | 'move' | 'copy' | 'save';
 
 interface Progress { opId: OpId; phase: string; current?: number; total?: number;
   bytesDone?: number; bytesTotal?: number; currentPath?: string; }
@@ -98,7 +99,7 @@ type Layout =
 | Command | Input | Output |
 |---|---|---|
 | `wc_list` | — | `WorkingCopy[]` |
-| `wc_add_existing` | `{ path }` | `WorkingCopy` |
+| `wc_add_existing` | `{ grant: PathGrantId }` (thư mục chọn qua `path_pick` hoặc kéo-thả) | `WorkingCopy` |
 | `wc_remove` | `{ wcId }` (không xóa file) | `void` |
 | `wc_rename` | `{ wcId, name }` | `void` |
 | `wc_open` | `{ wcId }` → bắt đầu watcher + status nền | `WorkingCopy` |
@@ -118,7 +119,7 @@ type Layout =
 ### 3.3 Thao tác ghi trên WC (đều trả `OperationHandle`)
 | Command | Input |
 |---|---|
-| `checkout` | `{ url, path, rev?, depth: Depth, sparse?: SparseSpec, format: 31 \| 32, storePristine, ignoreExternals }` |
+| `checkout` | `{ url, dest: PathGrantId, rev?, depth: Depth, sparse?: SparseSpec, format: 31 \| 32, storePristine, ignoreExternals }` |
 | `update` | `{ wcId, paths?, rev?, depth? }` |
 | `switch` | `{ wcId, url, rev? }` |
 | `commit` | `{ wcId, paths, message, keepLocks, autoAddRemove: true }` |
@@ -139,11 +140,11 @@ type Layout =
 | `repo_info` | `{ url }` | `{ repoRootUrl, repoUuid, youngestRev, kind }` |
 | `repo_list` | `{ url, rev? }` | `RepoEntry[]` |
 | `repo_cat` | `{ url, rev? }` | `TextSide` (giới hạn kích thước; quá lớn → lỗi, dùng `repo_save`) |
-| `repo_save` | `{ url, rev?, saveTo }` | `OperationHandle` (ghi thẳng ra đĩa) |
-| `log_get` | `{ target: LogTarget, fromRev?, toRev?, limit, stopOnCopy?, withPaths: true, filter? }` | `{ entries: LogEntry[], nextRev?: Rev }` (cache-first) |
+| `repo_save` | `{ url, rev?, grant: PathGrantId }` (file chọn qua `path_pick` kiểu `saveFile`) | `OperationHandle` (ghi thẳng ra đĩa) |
+| `log_get` | `{ target: LogTarget, fromRev?, toRev?, limit, stopOnCopy?, withPaths: true, filter? }` | `{ entries: LogEntry[], nextRev?: Rev }` (cache-first). Phân trang: mới nhất trước; `fromRev` là **cận trên bao gồm** (bỏ trống = HEAD); `entries` có tối đa `limit` phần tử (1–1000); `nextRev` là revision đầu tiên **chưa được trả về**, nên lần gọi kế tiếp truyền `fromRev = nextRev` (bao gồm); không có `nextRev` nghĩa là hết. `filter` khớp không phân biệt hoa thường trên message và author, áp dụng trước khi cắt trang |
 | `blame_get` | `{ url, rev? }` | `OperationHandle` → kết quả `{ lines: { rev, author, date, text }[] }` |
 | `lock` / `unlock` | `{ targets: LockTargets, comment?, steal? }` / `{ targets: LockTargets, breakLock? }` | `OperationHandle` |
-| `remote_edit` | `{ ops: RemoteOp[], message }` (mkdir/rename/delete/copy/upload) | `OperationHandle` |
+| `remote_edit` | `{ ops: RemoteOp[], message }` (mkdir/rename/delete/copy/upload; `upload` dùng `source: PathGrantId`, không nhận đường dẫn thô) | `OperationHandle` |
 | `branches_list` | `{ repoRootUrl }` | `BranchNode[]` (theo layout, cache 60s; rỗng khi `mode: 'none'`) |
 | `layout_get` / `layout_set` | `{ repoUuid }` / `{ repoUuid, layout }` | `Layout` / `void` |
 | `layout_detect` | `{ repoRootUrl, url }` | `{ found: boolean; layout?: Layout; current?: BranchRef }` |
@@ -154,11 +155,25 @@ type Layout =
 |---|---|
 | `op_cancel { opId }` | Hủy tác vụ |
 | `op_list` | Tác vụ đang chạy + 50 gần nhất |
-| `auth_respond { requestId, response }` | Trả lời prompt đăng nhập / trust cert |
+| `auth_respond { requestId, response }` | Trả lời prompt: `{kind:'credentials',username,password,save}`, `{kind:'negotiate'}` (SSO, chỉ khi `offered` có `negotiate`), `{kind:'certificate',decision}` hoặc `{kind:'cancel'}`. Prompt không trả lời sau 5 phút coi như hủy |
 | `accounts_list`, `accounts_sign_out { realm }` | Quản lý credential |
-| `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.checkoutRoot"`, `patch` chỉ chứa khóa cần đổi |
+| `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.checkoutRoot"`, `patch` chỉ chứa khóa cần đổi. `SettingsPatch` **không có** các khóa chạy chương trình (`diff.externalTool`, `diff.mergeTool`, `tools.editor`, `tools.terminal`); khóa lạ bị từ chối khi deserialize |
+| `program_choose { kind, args }`, `program_clear { kind }` | Đặt/xóa chương trình ngoài (`kind`: `diff-tool` \| `merge-tool` \| `editor` \| `terminal`). Rust mở dialog chọn file native rồi dialog xác nhận native (mỗi tham số một dòng, có quote; từ chối ký tự điều khiển/bidi); trả `Settings` mới (không đổi nếu người dùng hủy) |
+| `path_pick { request }` | Dialog native chọn thư mục / file / nơi lưu (`PickRequest`), trả `PathGrantInfo \| null` (xem §3.6) |
 | `reveal_in_os { wcId, path }`, `open_external { wcId, path, with: 'default' \| 'editor' \| 'terminal' }` | Tích hợp OS |
 | `diagnostics_export` | Tạo gói chẩn đoán zip, trả đường dẫn |
+
+### 3.6 Đường dẫn cục bộ ngoài WC: PathGrant
+WebView **không bao giờ** gửi đường dẫn thô cho thao tác đọc/ghi ngoài WC đã đăng ký (thư mục checkout, nơi lưu `repo_save`, file upload, WC cần thêm). Những đường dẫn đó đến từ dialog native (`path_pick`) hoặc kéo-thả native; Rust giữ đường dẫn thật và trả một mã mờ:
+```ts
+type PathGrantId = string;                         // mờ, dùng một lần
+interface PathGrantInfo { id: PathGrantId; displayName: string; kind: 'file' | 'dir'; }
+type PickRequest =
+  | { kind: 'folder'; title?: string } | { kind: 'file'; title?: string }
+  | { kind: 'saveFile'; suggestedName: string; title?: string };
+interface DroppedPaths { grants: PathGrantInfo[]; position: { x: number; y: number }; }  // event fs://dropped
+```
+Grant dùng một lần, hết hạn sau 5 phút, gắn với cửa sổ `main`; dùng sai loại (file/thư mục) cũng làm grant mất hiệu lực. Đường dẫn trong WC đã đăng ký là relpath, được kiểm bằng `RelPath` (chặn `..`, tuyệt đối, ký tự lạ). Rust xử lý `WindowEvent::DragDrop` và phát `fs://dropped`; UI không được hành động theo đường dẫn từ API kéo-thả của JS (không cấp quyền window nên API đó không dùng được).
 
 ## 4. Lỗi
 ```ts
@@ -170,8 +185,9 @@ interface AppError {
 }
 type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'forbidden' | 'tls-untrusted'
   | 'out-of-date' | 'locked-by-other' | 'lock-token-invalid' | 'wc-busy' | 'wc-needs-cleanup'
-  | 'wc-format-unsupported' | 'not-a-working-copy' | 'conflict-blocks-commit' | 'path-not-found'
-  | 'disk-full' | 'permission-denied' | 'file-in-use' | 'cancelled' | 'internal';
+  | 'wc-format-unsupported' | 'not-a-working-copy' | 'conflict-blocks-commit' | 'hook-failed' | 'repository-moved' | 'pristine-not-hydrated' | 'wc-invalid-operation' | 'path-not-found'
+  | 'disk-full' | 'permission-denied' | 'file-in-use' | 'cancelled' | 'invalid-argument' | 'internal';
+// invalid-argument: giá trị sai, grant hết hạn/đã dùng, tùy chọn không hỗ trợ (MVP chỉ ghi format 31)
 ```
 
 ## 5. Events (Rust → UI)
@@ -185,9 +201,12 @@ type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'forbidden' | 'tls-un
 | `wc://revision-changed` | `{ wcId, baseRev, revRange? }` | toolbar, History |
 | `wc://incoming` | `{ wcId, count, latestRev }` | badge Update, thông báo OS |
 | `wc://banner` | `{ wcId, kind, data }` (conflicts, mixed-rev, lock-stolen, needs-cleanup) | Banner |
-| `auth://prompt` | `{ requestId, kind: 'credentials' \| 'certificate', realm, url, cert?, reason?, attempt?, offered? }` | Dialog Sign in / Trust |
+| `auth://prompt` | `{ requestId, kind: 'credentials' \| 'certificate', realm, url, cert?, reason?, attempt, offered }` | Dialog Sign in / Trust |
+| `fs://dropped` | `DroppedPaths` (§3.6) | Thả thư mục/file vào cửa sổ |
 
-Payload `auth://prompt`: với `kind: 'credentials'` có `reason: 'initial' | 'rejected' | 'negotiate-failed'` (chọn câu chữ dialog), `attempt` (số lần thất bại, từ 0) và `offered: ('basic' | 'negotiate')[]`. Với `kind: 'certificate'`, `cert.failure` là `unknown-issuer | self-signed | expired | not-yet-valid | hostname-mismatch | revoked | { changed: { oldSha256, newSha256 } } | { other: string }`. Khi nhiều lỗi cùng áp dụng, báo lỗi nặng nhất: hostname-mismatch, expired, revoked, not-yet-valid đứng trên `changed`, `changed` đứng trên `self-signed`/`unknown-issuer`; cert vừa đổi vừa sai hostname phải báo `hostname-mismatch`. `changed` không bao giờ "luôn tin cậy" mà không có thao tác thay pin rõ ràng.
+Payload `auth://prompt`: với `kind: 'credentials'` có `reason: 'initial' | 'rejected' | 'negotiate-failed' | 'expired'` (chọn câu chữ dialog), `attempt` (số lần thất bại, từ 0) và `offered: ('basic' | 'negotiate')[]`; với `kind: 'certificate'` thì `reason` vắng, `attempt` là 0 và `offered` rỗng. `cert.failure` là `unknown-issuer | self-signed | expired | not-yet-valid | hostname-mismatch | revoked | { changed: { oldSha256, newSha256 } } | { other: string }`. Khi nhiều lỗi cùng áp dụng, báo lỗi nặng nhất: hostname-mismatch, expired, revoked, not-yet-valid đứng trên `changed`, `changed` đứng trên `self-signed`/`unknown-issuer`; cert vừa đổi vừa sai hostname phải báo `hostname-mismatch`. `changed` không bao giờ "luôn tin cậy" mà không có thao tác thay pin rõ ràng.
+
+Payload `auth://prompt`: với `kind: 'credentials'` có `reason: 'initial' | 'rejected' | 'negotiate-failed'` (chọn câu chữ dialog), `attempt` (số lần thất bại, từ 0) và `offered: ('basic' | 'negotiate')[]`. Với `kind: 'certificate'`, `cert.failure` là `unknown-issuer | self-signed | expired | not-yet-valid | hostname-mismatch | revoked | { changed: { oldSha256, newSha256 } } | { other: string }`. Khi nhiều lỗi cùng áp dụng, báo lỗi nặng nhất: hostname-mismatch, expired, revoked, not-yet-valid đứng trên `changed`, `changed` đứng trên `self-signed`/`unknown-issuer`; cert vừa đổi vừa sai hostname phải báo `hostname-mismatch`. Quyết định cho `auth_respond` (`kind: 'certificate'`): `reject | acceptOnce | acceptAlways | replacePin`. Với `changed` chỉ hợp lệ `reject` và `replacePin` (thay pin sau khi người dùng xác nhận); `acceptOnce`/`acceptAlways` không hợp lệ cho `changed`, `replacePin` chỉ hợp lệ cho `changed`, `acceptOnce`/`acceptAlways` chỉ cho `unknown-issuer`/`self-signed`; mọi lỗi khác (hostname-mismatch, expired, not-yet-valid, revoked, other) là lỗi cứng, chỉ hợp lệ `reject` (cố ý chặt hơn svn CLI, không có "accept temporarily"). UI không phải ranh giới tin cậy: transport kiểm quyết định với lỗi thực tế và coi tổ hợp sai là `reject`.
 
 Luồng prompt auth: engine gặp 401 → phát `auth://prompt`, **tạm dừng** operation → UI hiện dialog → `auth_respond` → engine tiếp tục hoặc hủy (`cancelled`).
 
@@ -205,9 +224,9 @@ CREATE TABLE repo_layout (
   trunk TEXT, branches TEXT, tags TEXT                                -- JSON array, chỉ khi mode='custom'
 );
 CREATE TABLE recent_url (url TEXT PRIMARY KEY, last_used_at TEXT NOT NULL);
-CREATE TABLE trusted_cert (
-  host TEXT NOT NULL, sha256 TEXT NOT NULL, subject TEXT, expires_at TEXT, trusted_at TEXT NOT NULL,
-  PRIMARY KEY (host, sha256)
+CREATE TABLE trusted_cert (               -- khóa theo host + port + sha256: tin cậy một cổng không áp sang dịch vụ khác cùng host
+  host TEXT NOT NULL, port INTEGER NOT NULL, sha256 TEXT NOT NULL, subject TEXT, expires_at TEXT, trusted_at TEXT NOT NULL,
+  PRIMARY KEY (host, port, sha256)
 );
 CREATE TABLE account (                    -- metadata, KHÔNG có mật khẩu; khóa theo origin (không chỉ realm)
   scheme TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, realm TEXT NOT NULL,
@@ -217,7 +236,9 @@ CREATE TABLE account (                    -- metadata, KHÔNG có mật khẩu; 
   PRIMARY KEY (scheme, host, port, realm)
 );
 CREATE TABLE wc_lock_owner (               -- sổ sở hữu WC_LOCK (wc.db không lưu PID)
-  wc_root TEXT NOT NULL, dir TEXT NOT NULL, pid INTEGER NOT NULL, boot_id TEXT NOT NULL, acquired_at TEXT NOT NULL,
+  wc_root TEXT NOT NULL, dir TEXT NOT NULL, pid INTEGER NOT NULL, boot_id TEXT NOT NULL,
+  start_time INTEGER,                      -- thời điểm khởi động process (giây): phân biệt pid bị tái sử dụng
+  acquired_at TEXT NOT NULL,
   PRIMARY KEY (wc_root, dir)
 );
 CREATE TABLE commit_message_history (id INTEGER PRIMARY KEY, repo_uuid TEXT, message TEXT, used_at TEXT);
@@ -247,7 +268,10 @@ Log theo path dùng `log_path_by_path`; khi khoảng revision chưa nằm trong 
 | `appearance.theme` | `'system' \| 'light' \| 'dark'` | system |
 | `diff.mode` | `'split' \| 'unified'` | split |
 | `diff.ignoreWhitespace` | boolean | false |
-| `diff.externalTool` | `{ path, args } \| null` | null |
+| `diff.externalTool` | `{ path, args } \| null` (chỉ đổi qua `program_choose`) | null |
+| `diff.mergeTool` | `{ path, args } \| null` (chỉ đổi qua `program_choose`) | null |
+| `tools.editor` | `{ path, args } \| null` (chỉ đổi qua `program_choose`) | null |
+| `tools.terminal` | `{ path, args } \| null` (chỉ đổi qua `program_choose`) | null |
 | `network.maxConnections` | number 1–8 | 4 |
 | `network.timeoutSec` | number | 60 |
 | `network.proxy` | `'system' \| { url }` | system |
