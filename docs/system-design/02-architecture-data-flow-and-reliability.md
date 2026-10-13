@@ -109,7 +109,7 @@ Tính atomic: server chỉ có revision mới sau MERGE thành công; WC chỉ c
 | Dữ liệu | Nơi lưu | Ghi chú |
 |---|---|---|
 | Metadata WC | `<wc>/.svn/wc.db` + `pristine/` | Chuẩn libsvn_wc, không thêm bảng (ADR-004) |
-| Danh sách WC, layout, settings, URL gần đây, cert tin cậy | `app.sqlite` trong thư mục dữ liệu app | `%APPDATA%\OpenSVN`, `~/Library/Application Support/OpenSVN`, `$XDG_DATA_HOME/opensvn` |
+| Danh sách WC, layout, settings, URL gần đây, cert tin cậy | `app.sqlite` trong thư mục dữ liệu app | `%APPDATA%\com.opensvn.desktop`, `~/Library/Application Support/com.opensvn.desktop`, `$XDG_DATA_HOME/com.opensvn.desktop` (tên thư mục = bundle identifier trong `tauri.conf.json`; app dùng engine giả thì dữ liệu nằm trong thư mục con `fake-engine/`) |
 | Cache log/list/blame | `cache.sqlite` (tách riêng, xóa được) | Key `(repo_uuid, path, rev)`; revision bất biến → cache vĩnh viễn |
 | Cache status | `cache.sqlite` | Chỉ để hiển thị nhanh lúc mở; luôn xác minh lại |
 | Mật khẩu | OS credential store (keyring-core) | Key theo origin: `opensvn:<scheme>://<host>:<port>/<realm>:<user>` |
