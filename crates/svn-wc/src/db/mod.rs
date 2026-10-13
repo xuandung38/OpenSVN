@@ -35,7 +35,7 @@ pub use connection::{BUSY_TIMEOUT, OpenMode, open_connection, open_existing, sql
 pub use nodes::{Node, Presence, Props};
 pub use ops::{BaseNode, CommitInfo};
 pub use schema::{FORMAT_MAX_READ, FORMAT_WRITE, check_supported_format, read_user_version};
-pub use wc_lock::{LockOwner, LockState, ObtainMode};
+pub use wc_lock::{LockCleanup, LockOwner, LockState, ObtainMode};
 
 /// Name of the administrative directory.
 pub const ADM_DIR: &str = ".svn";
@@ -92,6 +92,9 @@ pub struct WcDb {
     owned_locks: Mutex<BTreeMap<RelPath, i32>>,
     /// Who records lock ownership (set by the application before locking).
     lock_owner: Mutex<Option<LockOwner>>,
+    /// Serializes obtain/release/steal/cleanup of this handle (check, row, record and marker
+    /// must not interleave between threads).
+    lock_gate: Mutex<()>,
 }
 
 /// Returns the working copy root containing `path`, searching `path` and then its ancestors for
@@ -248,6 +251,7 @@ impl WcDb {
             conn: Mutex::new(conn),
             owned_locks: Mutex::new(BTreeMap::new()),
             lock_owner: Mutex::new(None),
+            lock_gate: Mutex::new(()),
         })
     }
 
@@ -320,6 +324,7 @@ impl WcDb {
             conn: Mutex::new(conn),
             owned_locks: Mutex::new(BTreeMap::new()),
             lock_owner: Mutex::new(None),
+            lock_gate: Mutex::new(()),
         })
     }
 
