@@ -47,7 +47,7 @@ fn created_schema_matches_svn_checkout() {
 
 #[test]
 fn created_schema_matches_svn_checkout_compatible_1_15_is_format_32_and_differs() {
-    if skip_without_svn() {
+    if skip_without_svn_1_15() {
         return;
     }
     // Guard: the comparison above is meaningful only because format 32 really differs.

@@ -94,41 +94,68 @@ fn depth_word(depth: Depth) -> &'static str {
     }
 }
 
+/// Error for a `.svn` that already exists when a creation was requested.
+fn existing_adm(wcroot: &Path) -> SvnError {
+    let adm = wcroot.join(ADM_DIR);
+    if adm.join(DB_FILE).exists() {
+        return SvnError::new(
+            ErrorCode::Internal,
+            format!(
+                "'{}' already holds a working copy database",
+                wcroot.display()
+            ),
+        );
+    }
+    SvnError::new(
+        ErrorCode::WcFormatUnsupported,
+        format!(
+            "'{}' already has an administrative area without wc.db (pre-1.7 working copy or an \
+             unfinished creation); upgrade it with the svn command line client or remove it",
+            wcroot.display()
+        ),
+    )
+}
+
 fn io_err(context: &str, path: &Path, err: &std::io::Error) -> SvnError {
     SvnError::from_io(format!("{context} '{}'", path.display()), err)
 }
 
 impl WcDb {
     /// Creates a new format 31 working copy administrative area in `wcroot` (which must exist and
-    /// contain no `.svn/wc.db`): `.svn/{wc.db,format,entries,tmp,pristine}` plus the REPOSITORY,
-    /// WCROOT and root BASE rows exactly as `svn_wc__db_init` inserts them.
+    /// must not contain a `.svn` entry of any kind): `.svn/{wc.db,format,entries,tmp,pristine}`
+    /// plus the REPOSITORY, WCROOT and root BASE rows exactly as `svn_wc__db_init` inserts them.
+    ///
+    /// Ownership: `.svn` is created with a non-recursive `mkdir`, which succeeds for exactly one
+    /// caller. That caller owns everything below it and removes it again on failure; every other
+    /// caller (concurrent creator, existing wc-ng or pre-1.7 working copy, leftovers of a crashed
+    /// creation) is rejected without touching the directory.
     pub fn create(wcroot: &Path, new: &NewWc) -> Result<WcDb> {
         let adm = wcroot.join(ADM_DIR);
-        let db_path = adm.join(DB_FILE);
-        if db_path.exists() {
-            return Err(SvnError::new(
-                ErrorCode::Internal,
-                format!(
-                    "'{}' already holds a working copy database",
-                    wcroot.display()
-                ),
-            ));
-        }
-        for dir in [adm.clone(), adm.join("tmp"), adm.join("pristine")] {
-            fs::create_dir_all(&dir).map_err(|e| io_err("cannot create", &dir, &e))?;
-        }
-        let built = Self::build_new(wcroot, &db_path, new);
-        if built.is_err() {
-            // Leave no half-initialised database behind (journal included).
-            let _ = fs::remove_file(&db_path);
-            let _ = fs::remove_file(adm.join("wc.db-journal"));
-        } else {
-            for name in ["format", "entries"] {
-                let p = adm.join(name);
-                fs::write(&p, LEGACY_FORMAT_MARKER).map_err(|e| io_err("cannot write", &p, &e))?;
+        match fs::create_dir(&adm) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(existing_adm(wcroot));
             }
+            Err(e) => return Err(io_err("cannot create", &adm, &e)),
+        }
+        let built = Self::populate_new(wcroot, &adm, new);
+        if built.is_err() {
+            // Only this call ever wrote below `.svn`, so removing it cannot hit a winner's files.
+            let _ = fs::remove_dir_all(&adm);
         }
         built
+    }
+
+    fn populate_new(wcroot: &Path, adm: &Path, new: &NewWc) -> Result<WcDb> {
+        for dir in [adm.join("tmp"), adm.join("pristine")] {
+            fs::create_dir(&dir).map_err(|e| io_err("cannot create", &dir, &e))?;
+        }
+        let db = Self::build_new(wcroot, &adm.join(DB_FILE), new)?;
+        for name in ["format", "entries"] {
+            let p = adm.join(name);
+            fs::write(&p, LEGACY_FORMAT_MARKER).map_err(|e| io_err("cannot write", &p, &e))?;
+        }
+        Ok(db)
     }
 
     fn build_new(wcroot: &Path, db_path: &Path, new: &NewWc) -> Result<WcDb> {
