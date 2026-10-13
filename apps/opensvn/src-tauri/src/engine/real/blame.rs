@@ -5,6 +5,7 @@
 //! each line comparison runs `svn-diff` under [`BLAME_MAX_COST`]; going over either limit fails
 //! with "file is too large to annotate" instead of exhausting memory.
 
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,9 +35,8 @@ fn too_large() -> SvnError {
 
 /// A revision whose delta is being received.
 struct Pending {
-    rev: Rev,
-    author: Option<String>,
-    date: String,
+    /// Attribution every line this revision introduces gets.
+    attribution: Attribution,
     out: SharedBuf,
     /// Set once the closing `window(None)` arrived, i.e. the delta is complete.
     complete: Arc<AtomicBool>,
@@ -58,8 +58,15 @@ impl<S: WindowSink> WindowSink for Tracked<S> {
     }
 }
 
-/// Attribution of each line of the current text.
-type Attribution = (Rev, Option<String>, String);
+/// Attribution of a line: the revision that introduced it. Author and date are shared by every
+/// line of that revision (and authors across revisions), so a line costs a few pointers instead
+/// of two heap strings.
+#[derive(Debug, Clone)]
+struct Attribution {
+    rev: Rev,
+    author: Option<Arc<str>>,
+    date: Arc<str>,
+}
 
 /// Line without its terminator (`\n`, `\r\n` or `\r`, the same terminators `svn-diff` splits on).
 fn strip_eol(line: &[u8]) -> &[u8] {
@@ -71,6 +78,8 @@ fn strip_eol(line: &[u8]) -> &[u8] {
 struct BlameCollector {
     previous: Arc<[u8]>,
     lines: Vec<Attribution>,
+    /// Interned author names, one allocation per distinct author.
+    authors: HashMap<String, Arc<str>>,
     pending: Option<Pending>,
     size_limit: usize,
     max_cost: u64,
@@ -86,11 +95,21 @@ impl BlameCollector {
         Self {
             previous: Arc::from(Vec::new()),
             lines: Vec::new(),
+            authors: HashMap::new(),
             pending: None,
             size_limit,
             max_cost,
             cancel,
         }
+    }
+
+    fn intern_author(&mut self, name: String) -> Arc<str> {
+        if let Some(shared) = self.authors.get(&name) {
+            return shared.clone();
+        }
+        let shared: Arc<str> = Arc::from(name.as_str());
+        self.authors.insert(name, shared.clone());
+        shared
     }
 
     /// Whether the revision being received went over the size limit.
@@ -128,7 +147,7 @@ impl BlameCollector {
                 DiffError::TooComplex => too_large(),
             })?;
         let new_count = svn_diff::split_lines(&data).len();
-        let fresh = || (p.rev, p.author.clone(), p.date.clone());
+        let fresh = || p.attribution.clone();
         let carried = std::mem::take(&mut self.lines);
         let mut lines = Vec::with_capacity(new_count);
         let (mut old, mut new) = (0usize, 0usize);
@@ -163,10 +182,10 @@ impl BlameCollector {
             .lines
             .into_iter()
             .zip(texts)
-            .map(|((rev, author, date), text)| BlameLine {
-                rev,
-                author,
-                date,
+            .map(|(a, text)| BlameLine {
+                rev: a.rev,
+                author: a.author.as_deref().map(str::to_owned),
+                date: a.date.to_string(),
                 text: String::from_utf8_lossy(strip_eol(text)).into_owned(),
             })
             .collect())
@@ -191,10 +210,13 @@ impl FileRevHandler for BlameCollector {
         let out = SharedBuf::with_limit(self.size_limit);
         let complete = Arc::new(AtomicBool::new(false));
         let applier = WindowApplier::new(Cursor::new(self.previous.clone()), out.clone());
+        let author = rev_prop(&rev, "svn:author").map(|name| self.intern_author(name));
         self.pending = Some(Pending {
-            rev: mapping::rev(rev.rev),
-            author: rev_prop(&rev, "svn:author"),
-            date: rev_prop(&rev, "svn:date").unwrap_or_default(),
+            attribution: Attribution {
+                rev: mapping::rev(rev.rev),
+                author,
+                date: Arc::from(rev_prop(&rev, "svn:date").unwrap_or_default()),
+            },
             out,
             complete: complete.clone(),
         });
@@ -294,6 +316,36 @@ mod tests {
             vec![(3, "new"), (1, "a"), (2, "x"), (3, "c"), (3, "d")]
         );
         assert_eq!(lines[1].author.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn lines_of_one_revision_share_author_and_date() {
+        let mut c = BlameCollector::new(CancelToken::new());
+        let text: String = (0..1_000).map(|i| format!("line {i}\n")).collect();
+        send(&mut c, 1, "alice", &text).unwrap();
+        send(&mut c, 2, "bob", &format!("{text}tail\n")).unwrap();
+        send(&mut c, 3, "alice", &format!("head\n{text}tail\n")).unwrap();
+        c.settle().unwrap();
+        let lines = &c.lines;
+        assert_eq!(lines.len(), 1_002);
+        let first = &lines[1];
+        assert_eq!(first.rev, Rev(1));
+        for line in &lines[2..1_001] {
+            assert!(Arc::ptr_eq(
+                line.author.as_ref().unwrap(),
+                first.author.as_ref().unwrap()
+            ));
+            assert!(Arc::ptr_eq(&line.date, &first.date));
+        }
+        // One allocation per author across revisions too.
+        let (head, tail) = (&lines[0], &lines[1_001]);
+        assert_eq!((head.rev, tail.rev), (Rev(3), Rev(2)));
+        assert!(Arc::ptr_eq(
+            head.author.as_ref().unwrap(),
+            first.author.as_ref().unwrap()
+        ));
+        assert_eq!(tail.author.as_deref(), Some("bob"));
+        assert_eq!(c.authors.len(), 2);
     }
 
     #[test]
