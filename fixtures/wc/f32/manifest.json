@@ -1,0 +1,87 @@
+{
+  "format": 32,
+  "svn_version": "1.15.0",
+  "repo_url": "file:///tmp/opensvn-wc-fixtures/repos/basic",
+  "wc_url": "file:///tmp/opensvn-wc-fixtures/repos/basic/trunk",
+  "wc_dir_in_tarball": "wc",
+  "generator": "fixtures/wc/make-wc-fixtures.sh",
+  "states": [
+    {
+      "name": "clean",
+      "description": "pristine checkout of trunk@HEAD (keywords, eol-style, needs-lock, externals expanded)",
+      "tarball": "clean.tar.zst",
+      "status": "clean.status.txt",
+      "sha256": "7c5f8cc3c247b53b04e73304983227972fa6ee0fd66f4b41a4c2f1a8f1ea6c64"
+    },
+    {
+      "name": "modified-text",
+      "description": "README.txt and crlf.txt edited",
+      "tarball": "modified-text.tar.zst",
+      "status": "modified-text.status.txt",
+      "sha256": "56d3f05b2c1d4da265cd093958b6ee8c7e4f58bfd5c5c0f2fd23e87e8cb6b202"
+    },
+    {
+      "name": "added",
+      "description": "new file, new directory tree and an added binary",
+      "tarball": "added.tar.zst",
+      "status": "added.status.txt",
+      "sha256": "2c28fb8092de31df9d9da242ce86028b8664d02cdc86a7c9dc2d8a7bbdadf14d"
+    },
+    {
+      "name": "deleted",
+      "description": "file and directory scheduled for deletion",
+      "tarball": "deleted.tar.zst",
+      "status": "deleted.status.txt",
+      "sha256": "2cf336e342bb292dddbe3b37c4010519ff8d7e17d6df650bb8d06ba839114cd2"
+    },
+    {
+      "name": "moved-file",
+      "description": "uncommitted move of a file (moved-from / moved-to)",
+      "tarball": "moved-file.tar.zst",
+      "status": "moved-file.status.txt",
+      "sha256": "c3ff1cec2b2d9f5e70fc26652898731acef313173e1ce146695e6b89ba3ea6be"
+    },
+    {
+      "name": "conflict-text",
+      "description": "text conflict on README.txt (checkout r10, local edit, update to r11)",
+      "tarball": "conflict-text.tar.zst",
+      "status": "conflict-text.status.txt",
+      "sha256": "a375b369565b63b0a0c6078140742c134a34e4412d79d97ad7c012814fca8c33"
+    },
+    {
+      "name": "conflict-tree",
+      "description": "tree conflict: local edit of docs/index.md, incoming delete (r13)",
+      "tarball": "conflict-tree.tar.zst",
+      "status": "conflict-tree.status.txt",
+      "sha256": "f84e69a3b1aacf771c1d75220131f68ca58e117f6a3961b5d12fe1ee30c0bfde"
+    },
+    {
+      "name": "locked",
+      "description": "locked.txt locked by this WC (lock token in wc.db, file writable)",
+      "tarball": "locked.tar.zst",
+      "status": "locked.status.txt",
+      "sha256": "aa5fdac3d7860be90fae1ee92cd39b1f99ae0aaebf094e6ea638355d06e21652"
+    },
+    {
+      "name": "sparse-immediates",
+      "description": "checkout --depth immediates, then src deepened to infinity",
+      "tarball": "sparse-immediates.tar.zst",
+      "status": "sparse-immediates.status.txt",
+      "sha256": "367572c9e9dffd26d3580642441b26a22b8609be7ec313f52fed527bea1e6534"
+    },
+    {
+      "name": "externals",
+      "description": "dir external ^/trunk/docs and file external ^/trunk/README.txt; the file external edited",
+      "tarball": "externals.tar.zst",
+      "status": "externals.status.txt",
+      "sha256": "a75c216cc03e4fd9d7f867af6ac9736d4ece447e446e5f89d132dadc474ab91f"
+    },
+    {
+      "name": "no-pristine",
+      "description": "format 32 only: checkout --store-pristine no, README.txt edited (pristine not stored)",
+      "tarball": "no-pristine.tar.zst",
+      "status": "no-pristine.status.txt",
+      "sha256": "a566e1e901be7b09c608ac9f8fe140b37b723675419a76559f89b11dd99e43cc"
+    }
+  ]
+}

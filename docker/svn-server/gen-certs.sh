@@ -15,7 +15,7 @@ openssl req -x509 -new -key ca.key -sha256 -days 3650 -subj "/CN=OpenSVN Compat 
 openssl genrsa -out server.key 2048 2>/dev/null
 openssl req -new -key server.key -subj "/CN=svn.test.local" -out server.csr
 cat > server.ext <<EXT
-subjectAltName=DNS:svn.test.local,DNS:svn14.test.local,DNS:svn15.test.local,DNS:localhost,IP:127.0.0.1
+subjectAltName=DNS:svn.test.local,DNS:svn14.test.local,DNS:svn15.test.local,DNS:svn110.test.local,DNS:svn19.test.local,DNS:svn18.test.local,DNS:localhost,IP:127.0.0.1
 basicConstraints=CA:FALSE
 keyUsage=digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth

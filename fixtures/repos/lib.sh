@@ -25,22 +25,31 @@ fx_random_bytes() {
 # Rewrite svn:date / svn:author of every revision to fixed values (rev N = epoch + N hours).
 # Usage: fx_pin_revprops <repo-path>
 fx_pin_revprops() {
-  local repo="$1" head rev
+  local repo="$1" head rev tmp
   head=$(svnlook youngest "$repo")
+  # Plain files, not <(...): svnadmin 1.9 cannot read a revprop value from a pipe.
+  tmp=$(mktemp)
   for rev in $(seq 0 "$head"); do
-    svnadmin setrevprop "$repo" -r "$rev" svn:date \
-      <(printf '2024-01-01T%02d:00:00.000000Z' "$rev")
+    printf '2024-01-01T%02d:00:00.000000Z' "$rev" > "$tmp"
+    svnadmin setrevprop "$repo" -r "$rev" svn:date "$tmp"
     if [ "$rev" -gt 0 ]; then
-      svnadmin setrevprop "$repo" -r "$rev" svn:author <(printf '%s' "$FIXTURE_AUTHOR")
+      printf '%s' "$FIXTURE_AUTHOR" > "$tmp"
+      svnadmin setrevprop "$repo" -r "$rev" svn:author "$tmp"
     fi
   done
+  rm -f "$tmp"
 }
 
 # Verify (or with FIXTURE_UPDATE_HASH=1, record) the SHA-256 of the full dump.
 # Usage: fx_check_hash <repo-path> <name>
 fx_check_hash() {
-  local repo="$1" name="$2" actual expected_file
+  local repo="$1" name="$2" actual expected_file series
   expected_file="$(dirname "${BASH_SOURCE[0]}")/expected/${name}.sha256"
+  # svnadmin 1.8 writes the same dump with different header order, so it has its own pin.
+  series=$(svnadmin --version --quiet | cut -d. -f1-2)
+  if [ -f "${expected_file%.sha256}.${series}.sha256" ]; then
+    expected_file="${expected_file%.sha256}.${series}.sha256"
+  fi
   actual=$(svnadmin dump -q "$repo" | sha256sum | cut -d' ' -f1)
   if [ "${FIXTURE_UPDATE_HASH:-0}" = "1" ]; then
     printf '%s\n' "$actual" > "$expected_file"

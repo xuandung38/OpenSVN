@@ -1,0 +1,206 @@
+{
+  "format": 31,
+  "svn_version": "1.14.3",
+  "repo_url": "file:///tmp/opensvn-wc-fixtures/repos/basic",
+  "wc_url": "file:///tmp/opensvn-wc-fixtures/repos/basic/trunk",
+  "wc_dir_in_tarball": "wc",
+  "generator": "fixtures/wc/make-wc-fixtures.sh",
+  "states": [
+    {
+      "name": "clean",
+      "description": "pristine checkout of trunk@HEAD (keywords, eol-style, needs-lock, externals expanded)",
+      "tarball": "clean.tar.zst",
+      "status": "clean.status.txt",
+      "sha256": "290b36c40c8d1cbffe8633012b06d7850d75f92ceabff35e3b9419edb790d377"
+    },
+    {
+      "name": "modified-text",
+      "description": "README.txt and crlf.txt edited",
+      "tarball": "modified-text.tar.zst",
+      "status": "modified-text.status.txt",
+      "sha256": "d596c10e40173975a70dfd0cc7dc658b8732f22c6204bf101f6ad28574069bf0"
+    },
+    {
+      "name": "modified-binary",
+      "description": "data/blob.bin overwritten with different bytes",
+      "tarball": "modified-binary.tar.zst",
+      "status": "modified-binary.status.txt",
+      "sha256": "d8fca68ad521f2f17676aed3a127a6c87e130b589c5a8e1b5b5424d6c4139f13"
+    },
+    {
+      "name": "modified-props",
+      "description": "property added, changed and deleted on file and directory",
+      "tarball": "modified-props.tar.zst",
+      "status": "modified-props.status.txt",
+      "sha256": "f5320e43092d1fcc95a023c2614fb76f1d17892f574bac75f91f2bfdd436f988"
+    },
+    {
+      "name": "added",
+      "description": "new file, new directory tree and an added binary",
+      "tarball": "added.tar.zst",
+      "status": "added.status.txt",
+      "sha256": "73bc8cfe95f30add122d1bbdc1f27797f6a87e334c929258588f040099c0bf6b"
+    },
+    {
+      "name": "deleted",
+      "description": "file and directory scheduled for deletion",
+      "tarball": "deleted.tar.zst",
+      "status": "deleted.status.txt",
+      "sha256": "be60a373a9dd250e311c4bc6efe70d3b0a9f10958a580b6554a5fd8bbfa9be88"
+    },
+    {
+      "name": "missing",
+      "description": "versioned file and directory removed without svn (status !)",
+      "tarball": "missing.tar.zst",
+      "status": "missing.status.txt",
+      "sha256": "0ff7f5a0944b497f8a07386e13adc704dd38e48e8fe7a34dc4eb9c5d7129e881"
+    },
+    {
+      "name": "unversioned-ignored",
+      "description": "unversioned files, one matching svn:ignore (*.o, build)",
+      "tarball": "unversioned-ignored.tar.zst",
+      "status": "unversioned-ignored.status.txt",
+      "sha256": "a25e9925055bb8bf08b10458c26effc24a79e4c8277bff12bdfcbe9c1fc1cd8b"
+    },
+    {
+      "name": "replaced",
+      "description": "file deleted and re-added in the same place (status R)",
+      "tarball": "replaced.tar.zst",
+      "status": "replaced.status.txt",
+      "sha256": "bef2b8378eadc47b87e6d270652ee8ea56a1bd5e34b9dc7851a47e66a7c84c16"
+    },
+    {
+      "name": "copied",
+      "description": "uncommitted copy of a file and a directory (copyfrom recorded)",
+      "tarball": "copied.tar.zst",
+      "status": "copied.status.txt",
+      "sha256": "0a715d2effba880175b296d5d2e6098763d7982de3120ccc21115f1bb0f71591"
+    },
+    {
+      "name": "moved-file",
+      "description": "uncommitted move of a file (moved-from / moved-to)",
+      "tarball": "moved-file.tar.zst",
+      "status": "moved-file.status.txt",
+      "sha256": "16ba0b679dbc17e8a517b35c9d1843c4ab45accada95c9435f728ba60baefe1d"
+    },
+    {
+      "name": "moved-dir",
+      "description": "uncommitted move of a directory, then an edit inside the moved copy",
+      "tarball": "moved-dir.tar.zst",
+      "status": "moved-dir.status.txt",
+      "sha256": "9b7445276de8ea0bb58b25e02757a7d68c03bd300596729850b922d7cdbd6814"
+    },
+    {
+      "name": "conflict-text",
+      "description": "text conflict on README.txt (checkout r10, local edit, update to r11)",
+      "tarball": "conflict-text.tar.zst",
+      "status": "conflict-text.status.txt",
+      "sha256": "46da38afea149e072bcb3c076864e28337b52bfec77848f64d3de71e272c6a3d"
+    },
+    {
+      "name": "conflict-prop",
+      "description": "property conflict on src/app.c (local vs upstream custom:reviewed)",
+      "tarball": "conflict-prop.tar.zst",
+      "status": "conflict-prop.status.txt",
+      "sha256": "d1073401e2a0593dbf3679a120b9357233016ad4a474753346cab0c742fac81f"
+    },
+    {
+      "name": "conflict-tree",
+      "description": "tree conflict: local edit of docs/index.md, incoming delete (r13)",
+      "tarball": "conflict-tree.tar.zst",
+      "status": "conflict-tree.status.txt",
+      "sha256": "91f7d14b4733dce32750682b153ff3eae3705da0178683e7f337c271f89b7d53"
+    },
+    {
+      "name": "obstructed",
+      "description": "unversioned local new.txt obstructs the incoming add (update --force not used)",
+      "tarball": "obstructed.tar.zst",
+      "status": "obstructed.status.txt",
+      "sha256": "d4d8be4d89fa1911a3e0cfde2c238f09e3d7aee14adb27b48ca1db10d3048ae9"
+    },
+    {
+      "name": "kind-changed",
+      "description": "versioned file replaced on disk by a directory (status ~)",
+      "tarball": "kind-changed.tar.zst",
+      "status": "kind-changed.status.txt",
+      "sha256": "b67b31095c3d084af8a3dd08a001eddb88749567131a52445be03ff26b7cdf96"
+    },
+    {
+      "name": "locked",
+      "description": "locked.txt locked by this WC (lock token in wc.db, file writable)",
+      "tarball": "locked.tar.zst",
+      "status": "locked.status.txt",
+      "sha256": "2558029ed7c8c9418697fdd126406bb959dfe37a251eead36a15f22b82fda2f8"
+    },
+    {
+      "name": "sparse-empty",
+      "description": "checkout --depth empty",
+      "tarball": "sparse-empty.tar.zst",
+      "status": "sparse-empty.status.txt",
+      "sha256": "8c7b557906eb94575c07fdd3a0be2f7af30f26af1a565de50a20fc21a4a1ea14"
+    },
+    {
+      "name": "sparse-files",
+      "description": "checkout --depth files",
+      "tarball": "sparse-files.tar.zst",
+      "status": "sparse-files.status.txt",
+      "sha256": "e7d02cb52dd7d3ab9b7e8d3ca851a2dc943057e6700a002413a36d3baac91a50"
+    },
+    {
+      "name": "sparse-immediates",
+      "description": "checkout --depth immediates, then src deepened to infinity",
+      "tarball": "sparse-immediates.tar.zst",
+      "status": "sparse-immediates.status.txt",
+      "sha256": "49458c02cf84bc02bbeebf3c3c675294b3e0059564b2838b3eb61a1cc32cb24a"
+    },
+    {
+      "name": "excluded",
+      "description": "docs excluded with --set-depth exclude",
+      "tarball": "excluded.tar.zst",
+      "status": "excluded.status.txt",
+      "sha256": "745e0882056a25918a16d208068e27ec155c1058cdc92eccfbc754e54e73ba66"
+    },
+    {
+      "name": "externals",
+      "description": "dir external ^/trunk/docs and file external ^/trunk/README.txt; the file external edited",
+      "tarball": "externals.tar.zst",
+      "status": "externals.status.txt",
+      "sha256": "b884a533cdb439b00f2cf0e969e5bd18cc78bb509fbf27a5e72ed5064048ae2d"
+    },
+    {
+      "name": "mixed-rev",
+      "description": "mixed revisions: WC at r14, README.txt at r10, docs at r12",
+      "tarball": "mixed-rev.tar.zst",
+      "status": "mixed-rev.status.txt",
+      "sha256": "50f1e62ae84058fe02ae406db0d722201a02af8931f044aec4a269974194eaf2"
+    },
+    {
+      "name": "switched",
+      "description": "src switched to branches/feature-x/src",
+      "tarball": "switched.tar.zst",
+      "status": "switched.status.txt",
+      "sha256": "1f9d758d1544444cfbd11f37331a6849f9599de22c867bd9bb3bddf488e6e075"
+    },
+    {
+      "name": "changelist",
+      "description": "two files assigned to changelist 'fixture-cl', one of them edited",
+      "tarball": "changelist.tar.zst",
+      "status": "changelist.status.txt",
+      "sha256": "ffb3526531974546145be4b0267ab03d630de1f8924cca54ce21e8cc08a47f87"
+    },
+    {
+      "name": "merged-uncommitted",
+      "description": "branch change merged into trunk WC, not committed (svn:mergeinfo modified)",
+      "tarball": "merged-uncommitted.tar.zst",
+      "status": "merged-uncommitted.status.txt",
+      "sha256": "f5614024ad6abd9da8465087978b6b20bd5c5b0c879f5fd4eedba1b6ee6f7409"
+    },
+    {
+      "name": "unicode-paths",
+      "description": "added files with Vietnamese (NFC) names and spaces",
+      "tarball": "unicode-paths.tar.zst",
+      "status": "unicode-paths.status.txt",
+      "sha256": "70c87bbff85e68d3ec152502e19344ce9a654496db8581b6872e5b937ce4b5b5"
+    }
+  ]
+}
