@@ -22,11 +22,18 @@ const FORBIDDEN: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
 fn is_reserved_windows_name(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or(name).trim_end();
     let upper = stem.to_ascii_uppercase();
-    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
+    if matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
         return true;
     }
     let mut chars = stem.chars();
-    let prefix: String = chars.by_ref().take(3).collect::<String>().to_ascii_uppercase();
+    let prefix: String = chars
+        .by_ref()
+        .take(3)
+        .collect::<String>()
+        .to_ascii_uppercase();
     let rest: Vec<char> = chars.collect();
     (prefix == "COM" || prefix == "LPT")
         && rest.len() == 1
@@ -36,7 +43,8 @@ fn is_reserved_windows_name(name: &str) -> bool {
 /// Checks the name of the folder a checkout creates: exactly one path component that is valid on
 /// every supported platform.
 pub fn validate_folder_name(name: &str) -> Result<&str, AppError> {
-    let bad = |why: &str| invalid_argument(format!("Invalid folder name: {why}.")).with_detail(name);
+    let bad =
+        |why: &str| invalid_argument(format!("Invalid folder name: {why}.")).with_detail(name);
     if name.is_empty() {
         return Err(bad("enter a name"));
     }
@@ -50,7 +58,9 @@ pub fn validate_folder_name(name: &str) -> Result<&str, AppError> {
         return Err(bad("\".\" and \"..\" are not folder names"));
     }
     if name.chars().any(char::is_control) || name.contains(FORBIDDEN) {
-        return Err(bad("the name contains a character that is not allowed (< > : \" | ? *)"));
+        return Err(bad(
+            "the name contains a character that is not allowed (< > : \" | ? *)",
+        ));
     }
     if name.ends_with('.') || name.ends_with(' ') {
         return Err(bad("the name must not end with a dot or a space"));
@@ -92,7 +102,8 @@ fn check_existing(path: &Path, meta: &std::fs::Metadata) -> Result<(), AppError>
     let shown = path.to_string_lossy().into_owned();
     if meta.file_type().is_symlink() {
         return Err(
-            invalid_argument("The checkout folder is a link. Choose another name.").with_path(shown)
+            invalid_argument("The checkout folder is a link. Choose another name.")
+                .with_path(shown),
         );
     }
     if !meta.is_dir() {
@@ -117,7 +128,9 @@ fn check_existing(path: &Path, meta: &std::fs::Metadata) -> Result<(), AppError>
 /// not exist yet.
 pub fn prepare(dest: &Path, name: Option<&str>) -> Result<CheckoutTarget, AppError> {
     if !dest.is_absolute() {
-        return Err(invalid_argument("The checkout folder must be an absolute path."));
+        return Err(invalid_argument(
+            "The checkout folder must be an absolute path.",
+        ));
     }
     let Some(name) = name else {
         return match std::fs::symlink_metadata(dest) {
@@ -137,8 +150,10 @@ pub fn prepare(dest: &Path, name: Option<&str>) -> Result<CheckoutTarget, AppErr
     };
     let name = validate_folder_name(name)?;
     if !dest.is_dir() {
-        return Err(invalid_argument("The parent folder no longer exists. Choose it again.")
-            .with_path(dest.to_string_lossy()));
+        return Err(
+            invalid_argument("The parent folder no longer exists. Choose it again.")
+                .with_path(dest.to_string_lossy()),
+        );
     }
     let path = dest.join(name);
     match std::fs::create_dir(&path) {
@@ -181,9 +196,12 @@ pub fn expand_root(root: &str) -> Result<PathBuf, AppError> {
     };
     let path = match rest {
         Some(rest) => {
-            let home = home_dir()
-                .ok_or_else(|| invalid_argument("The home folder is unknown."))?;
-            if rest.is_empty() { home } else { home.join(rest) }
+            let home = home_dir().ok_or_else(|| invalid_argument("The home folder is unknown."))?;
+            if rest.is_empty() {
+                home
+            } else {
+                home.join(rest)
+            }
         }
         None => PathBuf::from(root),
     };
@@ -202,15 +220,53 @@ mod tests {
 
     #[test]
     fn folder_names_are_one_portable_component() {
-        for ok in ["project", "my repo", "a.b", "trunk-2026", "Ünïcödé", ".hidden", "con-tools", "COM10"] {
+        for ok in [
+            "project",
+            "my repo",
+            "a.b",
+            "trunk-2026",
+            "Ünïcödé",
+            ".hidden",
+            "con-tools",
+            "COM10",
+        ] {
             assert_eq!(validate_folder_name(ok).unwrap(), ok, "{ok}");
         }
         for bad in [
-            "", ".", "..", "a/b", "a\\b", "../x", "x/..", "/abs", "C:", "a:b", "a*b", "q?", "p|q",
-            "<x>", "\"q\"", "tab\there", "nul\0x", "dot.", "space ", " lead", "CON", "con", "nul.txt",
-            "Aux", "PRN.tar.gz", "COM1", "lpt9", "COM¹", "CONIN$",
+            "",
+            ".",
+            "..",
+            "a/b",
+            "a\\b",
+            "../x",
+            "x/..",
+            "/abs",
+            "C:",
+            "a:b",
+            "a*b",
+            "q?",
+            "p|q",
+            "<x>",
+            "\"q\"",
+            "tab\there",
+            "nul\0x",
+            "dot.",
+            "space ",
+            " lead",
+            "CON",
+            "con",
+            "nul.txt",
+            "Aux",
+            "PRN.tar.gz",
+            "COM1",
+            "lpt9",
+            "COM¹",
+            "CONIN$",
         ] {
-            assert!(validate_folder_name(bad).is_err(), "{bad:?} must be refused");
+            assert!(
+                validate_folder_name(bad).is_err(),
+                "{bad:?} must be refused"
+            );
         }
         assert!(validate_folder_name(&"a".repeat(256)).is_err());
         assert!(validate_folder_name(&"a".repeat(255)).is_ok());
@@ -236,7 +292,10 @@ mod tests {
         let t = prepare(dir.path(), Some("empty")).unwrap();
         assert!(!t.created);
         t.discard_if_empty();
-        assert!(dir.path().join("empty").is_dir(), "a folder the user had stays");
+        assert!(
+            dir.path().join("empty").is_dir(),
+            "a folder the user had stays"
+        );
 
         std::fs::create_dir(dir.path().join("full")).unwrap();
         std::fs::write(dir.path().join("full/a"), b"x").unwrap();
@@ -253,7 +312,10 @@ mod tests {
             assert!(err.message.contains("link"), "{}", err.message);
         }
         assert!(prepare(Path::new("relative"), Some("x")).is_err());
-        assert!(prepare(&dir.path().join("gone"), Some("x")).is_err(), "parent must exist");
+        assert!(
+            prepare(&dir.path().join("gone"), Some("x")).is_err(),
+            "parent must exist"
+        );
         // the folder itself as target: a missing folder is fine, an empty one too
         assert!(prepare(&dir.path().join("new"), None).is_ok());
         assert!(prepare(&dir.path().join("empty"), None).is_ok());

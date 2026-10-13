@@ -105,6 +105,21 @@ type Layout =
 | `wc_rename` | `{ wcId, name }` | `void` |
 | `wc_open` | `{ wcId }` → bắt đầu watcher + status nền | `WorkingCopy` |
 | `wc_close` | `{ wcId }` | `void` |
+| `wc_entries` | — (trình quản lý repository) | `WcEntry[]`: mọi WC đã đăng ký kể cả WC mất/đã di chuyển (`wc_list` bỏ qua chúng) |
+| `wc_locate` | `{ wcId, grant: PathGrantId }` (thư mục mới của WC đã bị di chuyển; phải cùng repo UUID, chưa đăng ký dưới mục khác) | `WorkingCopy` |
+| `recent_urls` | — | `string[]` (20 URL gần nhất, mới nhất trước) |
+| `checkout_root_grant` | — | `PathGrantInfo`: grant thư mục cho `general.checkoutRoot` (Rust tạo thư mục nếu thiếu; `~` = thư mục home) |
+| `checkout_root_choose` | — | `Settings`: Rust mở dialog chọn thư mục native và lưu `general.checkoutRoot` (không đổi nếu hủy) |
+
+```ts
+interface WcEntry {
+  id: WcId; name: string;            // name: tên hiển thị, chỉ lưu trong app.sqlite (wc_rename không đổi tên thư mục)
+  rootPath: string; repoRootUrl: string; repoUuid: string;
+  url: string | null;                // null khi không đọc được WC
+  addedAt: string; lastOpenedAt: string | null;
+  missing: boolean; problem: string | null;  // missing: thư mục mất/bị chuyển → UI đề nghị "Locate…" hoặc "Remove"
+}
+```
 
 ### 3.2 Status & thay đổi local
 | Command | Input | Output |
@@ -121,7 +136,7 @@ type Layout =
 ### 3.3 Thao tác ghi trên WC (đều trả `OperationHandle`)
 | Command | Input |
 |---|---|
-| `checkout` | `{ url, dest: PathGrantId, rev?, depth: Depth, sparse?: SparseSpec, format: 31 \| 32, storePristine, ignoreExternals }` |
+| `checkout` | `{ url, dest: PathGrantId, destName: string \| null, rev?, depth: Depth, sparse?: SparseSpec, format: 31 \| 32, storePristine, ignoreExternals }`. Có `destName`: `dest` là thư mục cha, WC được tạo trong thư mục con mới `destName` (một thành phần đường dẫn: không `/` `\\`, không `.`/`..`, không ký tự `<>:"\|?*`/điều khiển, không tên dành riêng Windows `CON`/`NUL`/`COM1`…, không kết thúc bằng dấu chấm/khoảng trắng, ≤ 255 byte; kiểm trước khi dùng grant). Không có `destName`: chính `dest` là gốc WC. Đích đã tồn tại mà không rỗng (hoặc là file/symlink) bị từ chối. Thành công → WC được đăng ký, `op://finished` trả `{ kind: 'checkedOut', wcId, newRev }`; thất bại/hủy → thư mục do lần checkout này tạo được xóa nếu vẫn rỗng |
 | `update` | `{ wcId, paths?, rev?, depth? }` |
 | `switch` | `{ wcId, url, rev? }` |
 | `commit` | `{ wcId, paths, message, keepLocks, autoAddRemove: true }` |
@@ -159,10 +174,11 @@ type Layout =
 | `op_list` | Tác vụ đang chạy + 50 gần nhất |
 | `auth_respond { requestId, response }` | Trả lời prompt: `{kind:'credentials',username,password,save}`, `{kind:'negotiate'}` (SSO, chỉ khi `offered` có `negotiate`), `{kind:'certificate',decision}` hoặc `{kind:'cancel'}`. Prompt không trả lời sau 5 phút coi như hủy |
 | `accounts_list`, `accounts_sign_out { realm }` | Quản lý credential |
-| `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.checkoutRoot"`, `patch` chỉ chứa khóa cần đổi. `SettingsPatch` **không có** các khóa chạy chương trình (`diff.externalTool`, `diff.mergeTool`, `tools.editor`, `tools.terminal`); khóa lạ bị từ chối khi deserialize |
+| `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.language"`, `patch` chỉ chứa khóa cần đổi. `SettingsPatch` **không có** các khóa chạy chương trình (`diff.externalTool`, `diff.mergeTool`, `tools.editor`, `tools.terminal`) và **không có** `general.checkoutRoot` (nơi app ghi; chỉ đổi qua `checkout_root_choose`); khóa lạ bị từ chối khi deserialize |
 | `program_choose { kind, args }`, `program_clear { kind }` | Đặt/xóa chương trình ngoài (`kind`: `diff-tool` \| `merge-tool` \| `editor` \| `terminal`). Rust mở dialog chọn file native rồi dialog xác nhận native (mỗi tham số một dòng, có quote; từ chối ký tự điều khiển/bidi); trả `Settings` mới (không đổi nếu người dùng hủy) |
 | `path_pick { request }` | Dialog native chọn thư mục / file / nơi lưu (`PickRequest`), trả `PathGrantInfo \| null` (xem §3.6) |
-| `reveal_in_os { wcId, path }`, `open_external { wcId, path, with: 'default' \| 'editor' \| 'terminal' }` | Tích hợp OS |
+| `reveal_in_os { wcId, path }` | Hiện mục trong trình quản lý file; `path` là relpath trong WC, `""` = thư mục gốc WC. Mục không tồn tại → lỗi |
+| `open_external { wcId, path, with: 'default' \| 'editor' \| 'terminal' }` | Tích hợp OS |
 | `diagnostics_export` | Tạo gói chẩn đoán zip, trả đường dẫn |
 
 ### 3.6 Đường dẫn cục bộ ngoài WC: PathGrant
@@ -175,7 +191,10 @@ type PickRequest =
   | { kind: 'saveFile'; suggestedName: string; title?: string };
 interface DroppedPaths { grants: PathGrantInfo[]; position: { x: number; y: number }; }  // event fs://dropped
 ```
-Grant dùng một lần, hết hạn sau 5 phút, gắn với cửa sổ `main`; dùng sai loại (file/thư mục) cũng làm grant mất hiệu lực. Đường dẫn trong WC đã đăng ký là relpath, được kiểm bằng `RelPath` (chặn `..`, tuyệt đối, ký tự lạ). Rust xử lý `WindowEvent::DragDrop` và phát `fs://dropped`; UI không được hành động theo đường dẫn từ API kéo-thả của JS (không cấp quyền window nên API đó không dùng được).
+Grant dùng một lần, hết hạn sau 5 phút, gắn với cửa sổ `main`; dùng sai loại (file/thư mục) cũng làm grant mất hiệu lực. Đường dẫn trong WC đã đăng ký là relpath, được kiểm bằng `RelPath` (chặn `..`, tuyệt đối, ký tự lạ). Rust có thể tự mint grant cho thư mục do chính nó quản lý (`checkout_root_grant` cho `general.checkoutRoot`, giá trị chỉ đến từ dialog native hoặc mặc định). Rust xử lý `WindowEvent::DragDrop` và phát `fs://dropped`; UI không được hành động theo đường dẫn từ API kéo-thả của JS (không cấp quyền window nên API đó không dùng được).
+
+### 3.7 Menu native
+Menu bar do Rust dựng (`menu.rs`): **File** › Checkout Repository… `Mod+Shift+O` · Add Existing Working Copy… `Mod+O` · Switch Repository… `Mod+T` (· Settings… `Ctrl+,` · Quit trên Win/Linux; trên macOS Settings `Cmd+,` nằm ở menu ứng dụng) và **Edit** chuẩn (undo/redo/cut/copy/paste/select all). Mục của app phát event không payload `menu://checkout`, `menu://add-working-copy`, `menu://switch-repository`, `menu://settings`; UI chạy cùng hành động với phím tắt tương ứng và bỏ qua event menu đến trong 400 ms sau khi cùng hành động vừa chạy từ bàn phím (accelerator native có thể gửi cả hai).
 
 ## 4. Lỗi
 ```ts
@@ -197,7 +216,7 @@ type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'forbidden' | 'tls-un
 |---|---|---|
 | `op://started` | `OperationHandle` | Activity |
 | `op://progress` | `Progress` (throttle ≤ 10/s/op) | Activity, nút Update |
-| `op://finished` | `{ opId, result }` (kết quả theo loại, vd `{ newRev }`) | toast, invalidate query |
+| `op://finished` | `{ opId, result }` (kết quả theo loại, vd `{ kind: 'newRev', newRev }`; checkout: `{ kind: 'checkedOut', wcId: WcId \| null, newRev }`) | toast, invalidate query; checkout → mở WC mới |
 | `op://failed` | `{ opId, error: AppError }` | Activity, banner |
 | `wc://status-changed` | `{ wcId, changed: FileStatus[], removed: string[] }` (delta) | tab Changes |
 | `wc://revision-changed` | `{ wcId, baseRev, revRange? }` | toolbar, History |
@@ -264,7 +283,7 @@ Log theo path dùng `log_path_by_path`; khi khoảng revision chưa nằm trong 
 ### 6.3 Settings (key chính)
 | Key | Kiểu | Mặc định |
 |---|---|---|
-| `general.checkoutRoot` | string | `~/svn` |
+| `general.checkoutRoot` | string (chỉ đọc qua `settings_set`; đổi bằng `checkout_root_choose`) | `~/svn` |
 | `general.checkIntervalMin` | number | 10 |
 | `general.language` | `'vi' \| 'en'` | theo OS |
 | `appearance.theme` | `'system' \| 'light' \| 'dark'` | system |
