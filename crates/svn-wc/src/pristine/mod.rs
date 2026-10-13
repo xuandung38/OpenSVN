@@ -31,11 +31,6 @@ use md5::Md5;
 use sha1::{Digest, Sha1};
 use svn_types::{ErrorCode, SvnError, rename_replacing};
 
-/// `SvnError::svn_code` of a converted [`PristineError::NotHydrated`]. It lies outside the range
-/// svn itself uses and tells the caller to fetch the text through RA. A dedicated `ErrorCode`
-/// would be cleaner (proposed contract addition).
-pub const NOT_HYDRATED_SVN_CODE: u32 = 900_001;
-
 /// File suffix of stored pristines.
 const SUFFIX: &str = ".svn-base";
 
@@ -187,9 +182,8 @@ pub enum PristineError {
     /// No row (or no file) for this checksum.
     #[error("pristine text {0:?} is not in the store")]
     NotInstalled(Sha1Digest),
-    /// Row exists but the text was dehydrated; it must be fetched from the repository. P11 must
-    /// match this variant before converting to `SvnError` (the conversion carries
-    /// [`NOT_HYDRATED_SVN_CODE`] as a fallback signal).
+    /// Row exists but the text was dehydrated; it must be fetched from the repository. Converts
+    /// to [`ErrorCode::PristineNotHydrated`], which callers use to decide to fetch it through RA.
     #[error("pristine text {0:?} is not hydrated (fetch it from the repository)")]
     NotHydrated(Sha1Digest),
     /// The working copy format only allows reading pristines (format 32).
@@ -214,12 +208,8 @@ impl From<PristineError> for SvnError {
             PristineError::NotInstalled(_) => {
                 SvnError::new(ErrorCode::Corrupt, err.to_string()).with_svn_code(155_017)
             }
-            // No ErrorCode means "fetch the text from the repository", so the converted error
-            // stays distinguishable through an OpenSVN-private svn_code. P11 should still match
-            // `PristineError::NotHydrated` before converting when it can.
             PristineError::NotHydrated(_) => {
-                SvnError::new(ErrorCode::PathNotFound, err.to_string())
-                    .with_svn_code(NOT_HYDRATED_SVN_CODE)
+                SvnError::new(ErrorCode::PristineNotHydrated, err.to_string())
             }
             PristineError::ReadOnlyFormat | PristineError::RehydrateUnsupported(_) => {
                 SvnError::new(ErrorCode::WcFormatUnsupported, err.to_string())
