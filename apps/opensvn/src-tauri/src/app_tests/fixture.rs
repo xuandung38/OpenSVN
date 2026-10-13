@@ -23,6 +23,8 @@ use crate::os_integration::OsOpener;
 use crate::path_grants::{MAIN_WINDOW, PathPicker};
 use crate::programs::ProgramPicker;
 use crate::status::StatusTiming;
+use crate::updater::{MemorySecretStore, UpdateControl, UpdateInfo};
+use secrecy::{ExposeSecret, SecretString};
 
 /// Records launcher calls.
 #[derive(Default)]
@@ -66,6 +68,31 @@ impl Notifier for RecordingNotifier {
             .lock()
             .unwrap()
             .push((title.to_owned(), body.to_owned()));
+    }
+}
+
+/// Update double: records the token it was given.
+#[derive(Default)]
+pub struct RecordingUpdates {
+    pub tokens: Mutex<Vec<Option<String>>>,
+    pub available: Mutex<Option<UpdateInfo>>,
+}
+
+#[async_trait]
+impl UpdateControl for RecordingUpdates {
+    async fn check(&self, token: Option<SecretString>) -> Result<Option<UpdateInfo>, AppError> {
+        self.tokens
+            .lock()
+            .unwrap()
+            .push(token.map(|t| t.expose_secret().to_owned()));
+        Ok(self.available.lock().unwrap().clone())
+    }
+    async fn install(&self, _token: Option<SecretString>) -> Result<(), AppError> {
+        if self.available.lock().unwrap().is_some() {
+            Ok(())
+        } else {
+            Err(crate::errors::invalid_argument("Check for updates first."))
+        }
     }
 }
 
@@ -125,6 +152,8 @@ pub struct Fixture {
     pub opener: Arc<RecordingOpener>,
     pub notifier: Arc<RecordingNotifier>,
     pub menu: Arc<RecordingMenu>,
+    pub updates: Arc<RecordingUpdates>,
+    pub secrets: Arc<MemorySecretStore>,
     pub engine: Arc<FakeEngine>,
     _dir: tempfile::TempDir,
 }
@@ -145,6 +174,8 @@ impl Fixture {
         let opener = Arc::new(RecordingOpener::default());
         let notifier = Arc::new(RecordingNotifier::default());
         let menu = Arc::new(RecordingMenu::default());
+        let updates = Arc::new(RecordingUpdates::default());
+        let secrets = Arc::new(MemorySecretStore::default());
         let state = AppState::build(AppDeps {
             data_dir: dir.path().to_path_buf(),
             engine: engine.clone(),
@@ -155,6 +186,8 @@ impl Fixture {
             opener: opener.clone(),
             notifier: notifier.clone(),
             menu: menu.clone(),
+            updates: updates.clone(),
+            secrets: secrets.clone(),
         })
         .unwrap();
         let app = tauri::test::mock_app();
@@ -167,6 +200,8 @@ impl Fixture {
             opener,
             notifier,
             menu,
+            updates,
+            secrets,
             engine,
             _dir: dir,
         }

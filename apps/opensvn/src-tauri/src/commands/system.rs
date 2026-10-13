@@ -293,3 +293,61 @@ pub async fn diagnostics_export(
     })
     .await
 }
+
+/// Stores the GitHub read token used for app updates (write-only: it is never returned).
+#[tauri::command]
+#[specta::specta]
+pub async fn updater_token_set(
+    state: State<'_, AppState>,
+    token: opensvn_ipc::SecretText,
+) -> Result<(), AppError> {
+    guard(async {
+        let value = token.expose().trim();
+        if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+            return Err(crate::errors::invalid_argument("The token is not valid."));
+        }
+        state.secrets.set(
+            crate::updater::TOKEN_KEY,
+            &secrecy::SecretString::from(value.to_owned()),
+        )
+    })
+    .await
+}
+
+/// Removes the stored update token.
+#[tauri::command]
+#[specta::specta]
+pub async fn updater_token_clear(state: State<'_, AppState>) -> Result<(), AppError> {
+    guard(async { state.secrets.delete(crate::updater::TOKEN_KEY) }).await
+}
+
+/// Whether an update token is stored (the value itself is never readable).
+#[tauri::command]
+#[specta::specta]
+pub async fn updater_token_status(state: State<'_, AppState>) -> Result<bool, AppError> {
+    guard(async { Ok(state.secrets.get(crate::updater::TOKEN_KEY)?.is_some()) }).await
+}
+
+/// Looks for a newer app version. User initiated; there is no background check.
+#[tauri::command]
+#[specta::specta]
+pub async fn update_check(
+    state: State<'_, AppState>,
+) -> Result<Option<crate::updater::UpdateInfo>, AppError> {
+    guard(async {
+        let token = state.secrets.get(crate::updater::TOKEN_KEY)?;
+        state.updates.check(token).await
+    })
+    .await
+}
+
+/// Installs the update found by `update_check` and restarts the app.
+#[tauri::command]
+#[specta::specta]
+pub async fn update_install(state: State<'_, AppState>) -> Result<(), AppError> {
+    guard(async {
+        let token = state.secrets.get(crate::updater::TOKEN_KEY)?;
+        state.updates.install(token).await
+    })
+    .await
+}

@@ -33,6 +33,10 @@ tauri-plugin-opener = "=2.7.1"
 # OS notifications are shown from Rust only (new revisions); no notification permission is granted
 # to the WebView.
 tauri-plugin-notification = "=2.6.0"
+# Updates come from a private GitHub releases repository. The read token is kept in the credential
+# store (`updater/github-token`), never in settings or the binary; no updater permission is granted
+# to the WebView (the app exposes its own `update_check` / `update_install` commands).
+tauri-plugin-updater = "=2.13.3"
 tauri-specta = { workspace = true, features = ["derive", "typescript"] }
 specta.workspace = true
 specta-typescript.workspace = true

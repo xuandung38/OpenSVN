@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-updater-token-status"
+description = "Enables the updater_token_status command without any pre-configured scope."
+commands.allow = ["updater_token_status"]
+
+[[permission]]
+identifier = "deny-updater-token-status"
+description = "Denies the updater_token_status command without any pre-configured scope."
+commands.deny = ["updater_token_status"]

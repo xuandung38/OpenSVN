@@ -25,6 +25,7 @@ mod preview;
 mod programs;
 pub mod settings;
 mod status;
+mod updater;
 mod wc;
 
 use std::sync::Arc;
@@ -79,6 +80,9 @@ fn build_state<R: tauri::Runtime>(
         path_picker: Arc::new(path_grants::NativePathPicker),
         opener: Arc::new(os_integration::SystemOpener),
         menu: Arc::new(menu::TauriMenu::new(app.handle().clone())),
+        updates: Arc::new(updater::TauriUpdater::new(app.handle().clone())),
+        // In memory until the OS credential store crate is wired in.
+        secrets: Arc::new(updater::MemorySecretStore::default()),
         notifier: Arc::new(notify::TauriNotifier::new(app.handle().clone())),
     })
     .map_err(|e| startup_error(format!("{} {}", e.message, e.detail.unwrap_or_default())))
@@ -106,7 +110,17 @@ fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
 /// Starts the Tauri application.
 pub fn run() {
     let builder = builder::<tauri::Wry>();
-    let result = tauri::Builder::default()
+    let context = app_context::<tauri::Wry>();
+    // The updater plugin fails to start without its `plugins.updater` config (public key and
+    // endpoints), so it is registered only when the config has one.
+    let has_updater = context.config().plugins.0.contains_key("updater");
+    let app_builder = tauri::Builder::default();
+    let app_builder = if has_updater {
+        app_builder.plugin(tauri_plugin_updater::Builder::new().build())
+    } else {
+        app_builder
+    };
+    let result = app_builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .on_window_event(|window, event| {
@@ -131,7 +145,7 @@ pub fn run() {
             tauri::async_runtime::spawn(finish_startup(app.handle().clone()));
             Ok(())
         })
-        .run(app_context::<tauri::Wry>());
+        .run(context);
     if let Err(e) = result {
         eprintln!("OpenSVN failed to start: {e}");
         std::process::exit(1);
