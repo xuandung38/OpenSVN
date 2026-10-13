@@ -1,0 +1,102 @@
+/*
+ * Design tokens: docs/design-guidelines.md section 2.1 (light/dark) and 2.3 (shadcn mapping).
+ * Theme selection: system via prefers-color-scheme, forced via data-theme="light|dark" on <html>
+ * (or on any wrapper element, which the dev gallery uses to show both themes side by side).
+ * Components must use these tokens only, never raw colour codes.
+ */
+:root,
+[data-theme="light"] {
+  --bg: #eef1f5;
+  --surface: #ffffff;
+  --surface-2: #f6f8fb;
+  --line: #dbe1ea;
+  --fg: #1b2533;
+  --muted: #5d6b7e;
+  --accent: #2363d1;
+  --accent-soft: #e3ecfb;
+  --sel: #dbe7fb;
+  --ok: #1f8a4c;
+  --warn: #b26a00;
+  --warn-soft: #fff4dc;
+  --bad: #c23b32;
+  --bad-soft: #fde8e6;
+  --info: #6a4bc4;
+  --add-bg: #e6f6ec;
+  --del-bg: #fdeceb;
+  --shadow: 0 12px 40px rgba(20, 34, 58, 0.16);
+  --on-accent: #ffffff;
+  --overlay: rgba(10, 18, 30, 0.35);
+
+  --f-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Consolas, monospace;
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f141b;
+    --surface: #161d27;
+    --surface-2: #1b2430;
+    --line: #2a3544;
+    --fg: #e3e9f2;
+    --muted: #93a1b5;
+    --accent: #6ea0f5;
+    --accent-soft: #1d2d4a;
+    --sel: #22365a;
+    --ok: #4cc27e;
+    --warn: #e6a23c;
+    --warn-soft: #3a2d12;
+    --bad: #f07067;
+    --bad-soft: #3d1c1a;
+    --info: #a58cf0;
+    --add-bg: #16301f;
+    --del-bg: #3a1b1a;
+    --shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+    color-scheme: dark;
+  }
+}
+
+[data-theme="dark"] {
+  --bg: #0f141b;
+  --surface: #161d27;
+  --surface-2: #1b2430;
+  --line: #2a3544;
+  --fg: #e3e9f2;
+  --muted: #93a1b5;
+  --accent: #6ea0f5;
+  --accent-soft: #1d2d4a;
+  --sel: #22365a;
+  --ok: #4cc27e;
+  --warn: #e6a23c;
+  --warn-soft: #3a2d12;
+  --bad: #f07067;
+  --bad-soft: #3d1c1a;
+  --info: #a58cf0;
+  --add-bg: #16301f;
+  --del-bg: #3a1b1a;
+  --shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}
+
+/*
+ * shadcn/ui names (design-guidelines 2.3). Re-declared per theme scope because var() references
+ * resolve where they are declared, so a nested [data-theme] scope needs its own copy.
+ */
+:root,
+[data-theme] {
+  /* shadcn/ui mapping (design-guidelines 2.3) */
+  --background: var(--surface);
+  --foreground: var(--fg);
+  --card: var(--surface);
+  --card-foreground: var(--fg);
+  --popover: var(--surface);
+  --popover-foreground: var(--fg);
+  --primary: var(--accent);
+  --primary-foreground: var(--on-accent);
+  --muted-foreground: var(--muted);
+  --destructive: var(--bad);
+  --border: var(--line);
+  --input: var(--line);
+  --ring: var(--accent);
+}

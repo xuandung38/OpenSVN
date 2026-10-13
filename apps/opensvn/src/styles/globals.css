@@ -1,0 +1,79 @@
+@import "tailwindcss";
+@import "./fonts.css";
+@import "./tokens.css";
+
+/* Expose tokens as Tailwind utilities (bg-surface, text-muted, border-line, ...). */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-sel: var(--sel);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-info: var(--info);
+  --color-add-bg: var(--add-bg);
+  --color-del-bg: var(--del-bg);
+  --color-on-accent: var(--on-accent);
+  --font-sans: var(--f-ui);
+  --font-mono: var(--f-mono);
+  --shadow-float: var(--shadow);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--f-ui);
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+/* Focus ring for every interactive element (design-guidelines 4). */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes spin-kf {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* Spinner only animates when the user has not asked for reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .spin {
+    animation: spin-kf 1s linear infinite;
+  }
+}
+
+dialog::backdrop {
+  background: var(--overlay);
+}
