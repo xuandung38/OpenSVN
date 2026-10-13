@@ -19,6 +19,12 @@ fn is_xml_char(c: char) -> bool {
     matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}')
 }
 
+/// Escapes markup characters and keeps carriage returns, which a parser would otherwise
+/// normalize to line feeds, as character references.
+fn escape_value(raw: &str) -> String {
+    escape(raw).replace('\r', "&#13;")
+}
+
 impl XmlWriter {
     /// Creates an empty writer.
     pub fn new() -> Self {
@@ -49,7 +55,7 @@ impl XmlWriter {
             self.out.push(' ');
             self.out.push_str(k);
             self.out.push_str("=\"");
-            self.out.push_str(&escape(*v));
+            self.out.push_str(&escape_value(v));
             self.out.push('"');
         }
         self.out.push_str(close);
@@ -86,7 +92,7 @@ impl XmlWriter {
     /// Writes escaped character data.
     pub fn text(&mut self, text: &str) -> &mut Self {
         self.check(text);
-        self.out.push_str(&escape(text));
+        self.out.push_str(&escape_value(text));
         self
     }
 
@@ -122,6 +128,22 @@ mod tests {
             w.finish().unwrap(),
             r#"<a k="x&quot;&lt;y">1 &lt; 2 &amp; 3</a>"#
         );
+    }
+
+    #[test]
+    fn carriage_returns_survive_a_round_trip() {
+        let mut w = XmlWriter::new();
+        w.element("a", &[("k", "x\ry")], "l1\r\nl2");
+        let xml = w.finish().unwrap();
+        let events = crate::xml::read_all(&xml).unwrap();
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                crate::xml::XmlEvent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "l1\r\nl2");
     }
 
     #[test]

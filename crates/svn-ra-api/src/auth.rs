@@ -95,8 +95,7 @@ pub enum CertFailure {
     /// Revoked.
     Revoked,
     /// The server presented a different certificate than the one pinned for this origin
-    /// (for example after a renewal). Never eligible for `AcceptAlways` without an explicit
-    /// user action that replaces the pin.
+    /// (for example after a renewal). Only `Reject` and `ReplacePin` are valid decisions.
     Changed {
         /// SHA-256 fingerprint of the pinned certificate.
         old_sha256: [u8; 32],
@@ -129,15 +128,52 @@ pub struct CertInfo {
 }
 
 /// User decision about an untrusted certificate.
+///
+/// Which decisions are valid depends on the failure being decided:
+///
+/// | failure | `Reject` | `AcceptOnce` | `AcceptAlways` | `ReplacePin` |
+/// |---|---|---|---|---|
+/// | `UnknownIssuer`, `SelfSigned` | yes | yes | yes | no |
+/// | `Changed` | yes | **no** | **no** | yes |
+/// | every other failure (hostname mismatch, expired, not yet valid, revoked, other, and any failure added later) | yes | **no** | **no** | **no** |
+///
+/// Those other failures are hard errors with no override, not even `AcceptOnce`: OpenSVN is
+/// intentionally stricter than the svn command line client. The only valid decision is `Reject`. For a changed
+/// certificate the only valid choices are `Reject` and `ReplacePin` (replace the stored pin after
+/// the user confirmed the new fingerprint). `ReplacePin` is valid only for `Changed`. The check
+/// is an allow-list, so a failure added in the future is rejected until it is listed.
+///
+/// **The UI is not a trust boundary.** The transport must check the decision against the actual
+/// failure with [`CertDecision::is_valid_for`] and treat an invalid combination as `Reject`,
+/// whatever the app layer or the webview sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CertDecision {
-    /// Refuse the connection.
+    /// Refuse the connection. Always valid.
     Reject,
-    /// Trust for this session only.
+    /// Trust for this session only. Valid only for `UnknownIssuer` and `SelfSigned`.
     AcceptOnce,
-    /// Trust permanently; the transport only honors this for `UnknownIssuer` and `SelfSigned`; for `Changed` it is
-    /// treated as `AcceptOnce` unless the app explicitly replaces the pin.
+    /// Trust permanently. Valid only for `UnknownIssuer` and `SelfSigned`.
     AcceptAlways,
+    /// Replace the pinned certificate with the one now presented. Valid only for `Changed`.
+    ReplacePin,
+}
+
+impl CertDecision {
+    /// Whether this decision is allowed for `failure` (see the table on [`CertDecision`]).
+    /// The transport calls this on every decision it receives and rejects invalid ones.
+    pub fn is_valid_for(self, failure: &CertFailure) -> bool {
+        // Allow-list: anything not named here is invalid, including failures added later.
+        matches!(
+            (self, failure),
+            (Self::Reject, _)
+                | (Self::ReplacePin, CertFailure::Changed { .. })
+                | (
+                    Self::AcceptOnce | Self::AcceptAlways,
+                    CertFailure::UnknownIssuer | CertFailure::SelfSigned
+                )
+        )
+    }
 }
 
 /// Implemented by the app layer; called by the transport.

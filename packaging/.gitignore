@@ -1,0 +1,4 @@
+# Everything produced by scripts/release: license report, version/updater config, artifacts, test keys.
+/generated/
+# Standalone updater test harness build output.
+/updater-harness/target/

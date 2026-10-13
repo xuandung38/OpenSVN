@@ -1,0 +1,6 @@
+Trying to change property 'k'
+but the property has been locally deleted.
+<<<<<<< (local property value)
+||||||| (incoming 'changed from' value)
+v=======
+w>>>>>>> (incoming 'changed to' value)

@@ -1,0 +1,11 @@
+---
+source: crates/svn-protocol/tests/request_snapshots_update_commit.rs
+expression: render(&b.build(&urls()).unwrap())
+---
+REPORT http://svn.test.local/svn/repo/!svn/me
+Content-Type: text/xml
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+
+<S:update-report xmlns:S="svn:"><S:include-props>yes</S:include-props><S:src-path>/svn/repo/trunk</S:src-path><S:target-revision>42</S:target-revision><S:dst-path>http://svn.test.local/svn/repo/branches/b%201</S:dst-path><S:update-target>sub dir</S:update-target><S:ignore-ancestry>yes</S:ignore-ancestry><S:send-copyfrom-args>yes</S:send-copyfrom-args><S:text-deltas>no</S:text-deltas><S:depth>immediates</S:depth><S:entry rev="40" depth="infinity" start-empty="true"></S:entry><S:entry rev="41" lock-token="opaquelocktoken:1">a&lt;b&gt;.txt</S:entry><S:entry rev="40" depth="files" linkpath="/branches/x">sw</S:entry><S:missing>gone dir</S:missing></S:update-report>

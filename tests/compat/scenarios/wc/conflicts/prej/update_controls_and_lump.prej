@@ -1,0 +1,9 @@
+Trying to change property 'k'
+but the property has already been locally changed to a different value.
+<<<<<<< (local property value)
+m	bcd{U+0085}e
+||||||| (incoming 'changed from' value)
+x
+=======
+t's - x y {U+201C}q{U+201D}
+>>>>>>> (incoming 'changed to' value)

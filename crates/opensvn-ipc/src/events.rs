@@ -90,6 +90,47 @@ pub enum AuthPromptKind {
     Certificate,
 }
 
+/// Why credentials are requested (mirrors the transport's prompt reason).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthPromptReason {
+    /// First request for this origin.
+    Initial,
+    /// The server rejected the credentials just offered.
+    Rejected,
+    /// Single sign-on failed; the user may fall back to a password.
+    NegotiateFailed,
+    /// Stored credentials are no longer valid.
+    Expired,
+}
+
+/// Authentication scheme the server offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMethodKind {
+    Basic,
+    /// Single sign-on (Windows SSO / Kerberos).
+    Negotiate,
+}
+
+/// Why a TLS certificate needs a decision (`unknown-issuer`, ..., `{ changed: { oldSha256, newSha256 } }`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "kebab-case", rename_all_fields = "camelCase")]
+pub enum CertFailureInfo {
+    UnknownIssuer,
+    SelfSigned,
+    Expired,
+    NotYetValid,
+    HostnameMismatch,
+    Revoked,
+    /// A different certificate than the pinned one; "always trust" is not offered.
+    Changed {
+        old_sha256: String,
+        new_sha256: String,
+    },
+    Other(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CertSummary {
@@ -99,7 +140,7 @@ pub struct CertSummary {
     pub not_before: String,
     pub not_after: String,
     pub sha256: String,
-    pub failure: String,
+    pub failure: CertFailureInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -110,4 +151,10 @@ pub struct AuthPrompt {
     pub realm: String,
     pub url: String,
     pub cert: Option<CertSummary>,
+    /// Why credentials are requested; `None` for certificate prompts.
+    pub reason: Option<AuthPromptReason>,
+    /// Failed tries so far in this prompt sequence, starting at 0.
+    pub attempt: u32,
+    /// Schemes the server offers (credentials prompts; empty for certificate prompts).
+    pub offered: Vec<AuthMethodKind>,
 }
