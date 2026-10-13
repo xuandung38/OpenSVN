@@ -25,14 +25,14 @@ use super::state::{
 };
 use super::text_sink::{BaseSource, DiscardSink, TextSink};
 use crate::ctx::{UpdateAction, UpdateEvent};
-use crate::wc::{self, adapters, txn};
+use crate::wc;
 
 /// Failpoint hook; compiled out without the `failpoints` feature.
 #[cfg(feature = "failpoints")]
 macro_rules! failpoint {
     ($name:literal) => {
-        fail::fail_point!($name, |_| Err(SvnError::new(
-            ErrorCode::Internal,
+        fail::fail_point!($name, |_| Err(svn_types::SvnError::new(
+            svn_types::ErrorCode::Internal,
             concat!("failpoint ", $name)
         )));
     };
@@ -149,7 +149,7 @@ impl UpdateEditor {
 
     pub(super) fn run_queue(&self) -> Result<()> {
         self.s.cancel.check()?;
-        adapters::run_work_queue(&self.s.db, &self.s.cancel).map(|_| ())
+        crate::wc::run_work_queue(&self.s.db, &self.s.cancel).map(|_| ())
     }
 
     fn dir(&self, id: DirId) -> Result<&DirState> {
@@ -164,7 +164,12 @@ impl UpdateEditor {
             .ok_or_else(|| SvnError::new(ErrorCode::Internal, "unknown directory handle"))
     }
 
-    pub(super) fn side(&self, node: Option<&Node>, new_repos: &str, kind: NodeKind) -> (Option<Side>, Option<Side>) {
+    pub(super) fn side(
+        &self,
+        node: Option<&Node>,
+        new_repos: &str,
+        kind: NodeKind,
+    ) -> (Option<Side>, Option<Side>) {
         let old = node.and_then(|n| {
             Some(Side {
                 repos_relpath: n.repos_relpath.clone()?,
@@ -181,6 +186,7 @@ impl UpdateEditor {
     }
 
     /// Records a tree conflict on `wc` and remembers that the path was left alone.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn record_tree_conflict(
         &mut self,
         wc: &RelPath,
@@ -199,12 +205,11 @@ impl UpdateEditor {
             old.as_ref(),
             new.as_ref(),
         );
-        let wc_id = self.s.db.wc_id();
-        self.s.db.with_write(|tx| {
+        self.s.db.with_txn(|t| {
             if copy_base {
-                txn::convert_base_to_copy(tx, wc_id, wc)?;
+                t.convert_base_to_copy(wc)?;
             }
-            conflict_record::record(tx, wc_id, wc, &info, vec![NewConflict::Tree(reason, action)])
+            conflict_record::record(t, wc, &info, vec![NewConflict::Tree(reason, action)])
         })?;
         self.skipped.push(wc.clone());
         self.emit(wc, kind, UpdateAction::TreeConflicted);
@@ -271,7 +276,9 @@ impl UpdateEditor {
         } else if relocating {
             repos_child(&p_repos, name)
         } else {
-            base.repos_relpath.clone().unwrap_or_else(|| repos_child(&p_repos, name))
+            base.repos_relpath
+                .clone()
+                .unwrap_or_else(|| repos_child(&p_repos, name))
         };
         let in_target = wc.starts_with(&self.target_wc);
         let mut skipped = p_skipped;
@@ -299,16 +306,15 @@ impl UpdateEditor {
         let depth = if wc == self.target_wc && self.s.depth != Depth::Unknown {
             self.s.depth
         } else {
-            base.depth.filter(|d| *d != Depth::Unknown).unwrap_or(Depth::Infinity)
+            base.depth
+                .filter(|d| *d != Depth::Unknown)
+                .unwrap_or(Depth::Infinity)
         };
         let _ = p_depth;
         if in_target && !skipped {
             let rev = self.rev()?;
-            let wc_id = self.s.db.wc_id();
             let reloc = relocating.then_some(new_repos.as_str());
-            self.s
-                .db
-                .with_write(|tx| txn::mark_incomplete(tx, wc_id, &wc, rev, reloc))?;
+            self.s.db.with_txn(|t| t.mark_incomplete(&wc, rev, reloc))?;
         }
         let id = self.alloc();
         self.dirs.insert(
@@ -402,7 +408,6 @@ impl DeltaEditor for UpdateEditor {
             Depth::Infinity
         };
         let rev = self.rev()?;
-        let wc_id = self.s.db.wc_id();
         let mut skipped = p_skipped;
         let mut was_incomplete = false;
         let existing = self.s.db.read_node(&wc)?;
@@ -453,9 +458,9 @@ impl DeltaEditor for UpdateEditor {
                 relpath: wc.as_str().to_owned(),
             }
             .to_skel()];
-            self.s.db.with_write(|tx| {
-                txn::base_add(tx, wc_id, &wc, &node)?;
-                txn::queue_work(tx, &work)
+            self.s.db.with_txn(|t| {
+                t.base_add(&wc, &node)?;
+                t.queue_work(&work)
             })?;
             self.run_queue()?;
             if !was_incomplete {
@@ -557,9 +562,10 @@ impl DeltaEditor for UpdateEditor {
             Some(cs) => {
                 let sha1 = Sha1Digest::from_svn_string(cs)
                     .ok_or_else(|| corrupt("malformed checksum in wc.db"))?;
-                let store = adapters::pristine_store(&self.s.db);
+                let store = self.s.db.pristine_store();
                 if let Some(Checksum::Md5(expected)) = base_checksum
-                    && let Some(row) = svn_wc::pristine::PristineIndex::lookup(store.index(), &sha1)?
+                    && let Some(row) =
+                        svn_wc::pristine::PristineIndex::lookup(store.index(), &sha1)?
                     && row.md5.0 != expected
                 {
                     return Err(corrupt(format!(
@@ -578,12 +584,22 @@ impl DeltaEditor for UpdateEditor {
         let tmp = tempfile::Builder::new()
             .prefix("update-")
             .tempfile_in(&dir)
-            .map_err(|e| SvnError::from_io(format!("cannot create temp file in '{}'", dir.display()), &e))?;
+            .map_err(|e| {
+                SvnError::from_io(
+                    format!("cannot create temp file in '{}'", dir.display()),
+                    &e,
+                )
+            })?;
         let out = tmp
             .as_file()
             .try_clone()
             .map_err(|e| SvnError::from_io("cannot duplicate temp file handle", &e))?;
-        Ok(Box::new(TextSink::new(source, out, tmp.into_temp_path(), slot)))
+        Ok(Box::new(TextSink::new(
+            source,
+            out,
+            tmp.into_temp_path(),
+            slot,
+        )))
     }
 
     fn change_file_prop(&mut self, file: FileId, change: PropChange) -> Result<()> {
@@ -632,17 +648,18 @@ impl UpdateEditor {
         let (p_repos, ..) = self.parent_info(parent)?;
         let new_repos = repos_child(&p_repos, wc.file_name().unwrap_or(""));
         let node = self.base_node_for(kind, Presence::ServerExcluded, &new_repos, None, None)?;
-        let wc_id = self.s.db.wc_id();
-        self.s
-            .db
-            .with_write(|tx| txn::base_add(tx, wc_id, &wc, &node))?;
+        self.s.db.with_txn(|t| t.base_add(&wc, &node))?;
         Ok(())
     }
 
     fn begin_file(&mut self, wc: RelPath, parent: DirId, add: bool) -> Result<u32> {
         let (p_repos, p_reloc, p_skipped, _) = self.parent_info(parent)?;
         let name = wc.file_name().unwrap_or("").to_owned();
-        let base = self.s.db.read_base(&wc)?.filter(|b| b.presence.is_present());
+        let base = self
+            .s
+            .db
+            .read_base(&wc)?
+            .filter(|b| b.presence.is_present());
         let new_repos = if p_reloc || base.is_none() {
             repos_child(&p_repos, &name)
         } else {
@@ -662,13 +679,20 @@ impl UpdateEditor {
             let cur = self.s.db.read_node(&wc)?;
             match (&base, add) {
                 (Some(b), _) if b.kind != NodeKind::File => {
-                    return Err(corrupt(format!("'{wc}' changed kind in the working copy base")));
+                    return Err(corrupt(format!(
+                        "'{wc}' changed kind in the working copy base"
+                    )));
                 }
                 (None, false) => {
-                    return Err(corrupt(format!("file '{wc}' is not in the working copy base")));
+                    return Err(corrupt(format!(
+                        "file '{wc}' is not in the working copy base"
+                    )));
                 }
                 (None, true) => {
-                    if cur.as_ref().is_some_and(|c| c.op_depth > 0 && c.presence == Presence::Normal) {
+                    if cur
+                        .as_ref()
+                        .is_some_and(|c| c.op_depth > 0 && c.presence == Presence::Normal)
+                    {
                         self.record_tree_conflict(
                             &wc,
                             None,

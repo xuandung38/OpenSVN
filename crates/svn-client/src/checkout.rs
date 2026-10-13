@@ -9,8 +9,8 @@ use svn_types::{CancelToken, Depth, ErrorCode, RelPath, Result, Revnum, SvnError
 use svn_wc::db::{NewWc, WcDb};
 
 use crate::ctx::{ClientCtx, UpdateSummary};
-use crate::update::{UpdateKind, UpdateParams, drive_update};
 use crate::update::repos_relpath_of;
+use crate::update::{UpdateKind, UpdateParams, drive_update};
 
 /// Checks out the session URL at `revision` (HEAD when `None`) into `path`.
 ///

@@ -3,15 +3,17 @@
 use std::sync::{Arc, PoisonError};
 
 use svn_ra_api::{RaSession, UpdateMode, UpdateRequest};
-use svn_types::{CancelToken, Depth, ErrorCode, NodeKind, RelPath, RepoUrl, Result, Revnum, SvnError};
+use svn_types::{
+    CancelToken, Depth, ErrorCode, NodeKind, RelPath, RepoUrl, Result, Revnum, SvnError,
+};
 use svn_wc::db::{ObtainMode, WcDb};
 
 use super::editor::UpdateEditor;
-use super::restore;
 use super::reporter::build_report;
+use super::restore;
 use super::state::UpdateSetup;
 use crate::ctx::{ClientCtx, UpdateAction, UpdateEvent, UpdateSummary};
-use crate::wc::{self, adapters};
+use crate::wc;
 
 /// What the drive does to the target.
 #[derive(Debug, Clone)]
@@ -57,8 +59,10 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%'
-            && i + 2 < b.len() + 0
-            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+            && i + 2 < b.len()
+            && let Some(v) = std::str::from_utf8(&b[i + 1..i + 3])
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
         {
             out.push(v);
             i += 3;
@@ -91,7 +95,11 @@ pub fn repos_relpath_of(root: &RepoUrl, url: &RepoUrl) -> Result<String> {
 
 /// Root URL string the way wc.db stores it.
 pub fn root_string(session: &dyn RaSession) -> String {
-    session.repos_root().to_string().trim_end_matches('/').to_owned()
+    session
+        .repos_root()
+        .to_string()
+        .trim_end_matches('/')
+        .to_owned()
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
@@ -126,7 +134,10 @@ pub fn anchor_of(db: &WcDb, session: &dyn RaSession) -> Result<RelPath> {
     } else {
         return Err(SvnError::new(
             ErrorCode::WcInvalidOperation,
-            format!("the session URL '{}' is outside the working copy", session.session_url()),
+            format!(
+                "the session URL '{}' is outside the working copy",
+                session.session_url()
+            ),
         ));
     };
     RelPath::new(&anchor)
@@ -175,7 +186,7 @@ pub async fn drive_update(
     // An earlier operation may have been interrupted: finish its queued work first.
     {
         let (db, cancel) = (Arc::clone(&db), cancel.clone());
-        blocking(move || adapters::run_work_queue(&db, &cancel).map(|_| ())).await?;
+        blocking(move || crate::wc::run_work_queue(&db, &cancel).map(|_| ())).await?;
     }
 
     // `svn update` first restores versioned items that were removed from disk behind its back.
@@ -187,7 +198,7 @@ pub async fn drive_update(
         );
         blocking(move || {
             let restored = restore::queue_missing(&db, &tc.0, tc.1)?;
-            adapters::run_work_queue(&db, &cancel)?;
+            crate::wc::run_work_queue(&db, &cancel)?;
             Ok(restored)
         })
         .await?
@@ -230,11 +241,14 @@ pub async fn drive_update(
         send_copyfrom: false,
         ignore_ancestry: params.ignore_ancestry,
     };
-    let result = session.do_update(req, report, Box::new(editor), cancel).await;
+    let result = session
+        .do_update(req, report, Box::new(editor), cancel)
+        .await;
     if let Err(e) = result {
         // Nodes committed before the failure have queued work; finish it so the tree matches.
         let db2 = Arc::clone(&db);
-        let _ = blocking(move || adapters::run_work_queue(&db2, &CancelToken::new()).map(|_| ())).await;
+        let _ = blocking(move || crate::wc::run_work_queue(&db2, &CancelToken::new()).map(|_| ()))
+            .await;
         return Err(e);
     }
     let out = outcome.lock().unwrap_or_else(PoisonError::into_inner);

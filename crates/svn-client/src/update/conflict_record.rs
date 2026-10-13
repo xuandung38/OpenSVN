@@ -1,13 +1,11 @@
 //! Building and storing conflict skels for update and switch.
 
-use rusqlite::Transaction;
 use svn_types::{NodeKind, RelPath, Result};
 use svn_wc::conflicts::{
-    Conflict, ConflictSkel, Location, Operation, OperationInfo, Origin, PropConflict, TextConflict,
-    TreeAction, TreeConflict, TreeReason,
+    Conflict, Location, Operation, OperationInfo, Origin, PropConflict, TextConflict, TreeAction,
+    TreeConflict, TreeReason,
 };
-
-use crate::wc::txn;
+use svn_wc::db::WcTxn;
 
 /// One side of the operation origin.
 #[derive(Debug, Clone)]
@@ -90,22 +88,14 @@ impl NewConflict {
 /// Adds `conflicts` to the conflict record of `path` inside the caller's transaction. A conflict
 /// of a kind that is already recorded replaces the old one; the operation info is refreshed.
 pub fn record(
-    tx: &Transaction<'_>,
-    wc_id: i64,
+    t: &WcTxn<'_>,
     path: &RelPath,
     info: &OperationInfo,
     conflicts: Vec<NewConflict>,
 ) -> Result<()> {
-    let mut skel = match txn::read_conflict_skel(tx, wc_id, path)? {
-        Some(s) => ConflictSkel::from_skel(&s)?,
-        None => ConflictSkel::default(),
-    };
-    skel.operation = Some(info.clone());
-    for c in conflicts {
-        let c = c.into_conflict();
-        skel.conflicts
-            .retain(|e| std::mem::discriminant(e) != std::mem::discriminant(&c));
-        skel.add(c)?;
-    }
-    txn::write_conflict_skel(tx, wc_id, path, &skel.to_skel())
+    t.add_conflicts(
+        path,
+        info,
+        conflicts.into_iter().map(NewConflict::into_conflict),
+    )
 }

@@ -86,7 +86,9 @@ pub fn base_rows(db: &WcDb) -> Vec<(String, String, String, i64, String)> {
             )
             .expect("prepare");
         let rows = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
             .expect("query");
         Ok(rows.map(|r| r.expect("row")).collect())
     })

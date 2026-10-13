@@ -1,26 +1,24 @@
-//! Working copy plumbing shared by the operations: store adapters, change detection and the
-//! single-transaction writers.
+//! Working copy plumbing shared by the operations: path helpers, change detection and the
+//! working copy discovery. All wc.db access goes through the `svn-wc` facade (`WcDb`, `WcTxn`).
 
-pub mod adapters;
 pub mod inspect;
-pub mod txn;
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::OptionalExtension;
-use svn_types::{ErrorCode, RelPath, Result, SvnError, safe_join};
-use svn_wc::db::{WcDb, sql_err};
+use svn_types::{CancelToken, ErrorCode, RelPath, Result, SvnError, safe_join};
+use svn_wc::db::WcDb;
 
-/// `(repository root URL, UUID)` recorded in the working copy.
+/// `(repository root URL, UUID)` of the working copy root.
 pub fn repos_identity(db: &WcDb) -> Result<(String, String)> {
-    db.with_read(|c| {
-        c.query_row("SELECT root, uuid FROM repository ORDER BY id LIMIT 1", [], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })
-        .optional()
-        .map_err(sql_err)?
-        .ok_or_else(|| SvnError::new(ErrorCode::Corrupt, "wc.db has no repository row"))
-    })
+    let info = db.read_repos_info(&RelPath::root())?;
+    Ok((info.repos_root_url, info.repos_uuid))
+}
+
+/// Runs every pending work item of `db` (see [`WcDb::run_work_queue`]); `cancel` is polled
+/// between items and the unfinished items stay queued.
+pub fn run_work_queue(db: &WcDb, cancel: &CancelToken) -> Result<usize> {
+    let cancelled = || cancel.is_cancelled();
+    db.run_work_queue(Some(&cancelled))
 }
 
 /// `a/b` for two relative paths (`b` may be the root).
@@ -42,7 +40,10 @@ pub fn strip_rel(path: &RelPath, base: &RelPath) -> Option<RelPath> {
     if base.is_root() {
         return Some(path.clone());
     }
-    let rest = path.as_str().get(base.as_str().len()..)?.trim_start_matches('/');
+    let rest = path
+        .as_str()
+        .get(base.as_str().len()..)?
+        .trim_start_matches('/');
     RelPath::new(rest).ok()
 }
 
@@ -61,19 +62,18 @@ pub fn rel_of(wcroot: &Path, path: &Path) -> Result<RelPath> {
     })?;
     let mut parts = Vec::new();
     for c in stripped.components() {
-        parts.push(c.as_os_str().to_str().ok_or_else(|| {
-            SvnError::new(ErrorCode::UnsafePath, "path is not valid UTF-8")
-        })?);
+        parts.push(
+            c.as_os_str()
+                .to_str()
+                .ok_or_else(|| SvnError::new(ErrorCode::UnsafePath, "path is not valid UTF-8"))?,
+        );
     }
     RelPath::new(&parts.join("/"))
 }
 
 /// Opens the working copy that contains `path` and registers the lock owner; recovers locks that
 /// a dead process of this application left behind.
-pub fn open_containing(
-    owner: &svn_wc::db::LockOwner,
-    path: &Path,
-) -> Result<(WcDb, RelPath)> {
+pub fn open_containing(owner: &svn_wc::db::LockOwner, path: &Path) -> Result<(WcDb, RelPath)> {
     let canonical = std::fs::canonicalize(path)
         .map_err(|e| SvnError::from_io(format!("cannot resolve '{}'", path.display()), &e))?;
     let root = svn_wc::db::find_wcroot(&canonical)?;

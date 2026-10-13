@@ -20,7 +20,6 @@ svn-ra-api.workspace = true
 svn-wc.workspace = true
 svn-diff.workspace = true
 svn-delta.workspace = true
-rusqlite.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 tempfile.workspace = true
 bytes.workspace = true

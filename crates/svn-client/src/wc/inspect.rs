@@ -68,7 +68,11 @@ fn normalized_sha1(path: &std::path::Path, info: &TranslateInfo) -> Result<[u8; 
     } else {
         let mut f = File::open(path)
             .map_err(|e| SvnError::from_io(format!("cannot open '{}'", path.display()), &e))?;
-        translate_stream(&mut f, &mut hasher, ContentTranslator::to_repo_normal(info, true)?)?;
+        translate_stream(
+            &mut f,
+            &mut hasher,
+            ContentTranslator::to_repo_normal(info, true)?,
+        )?;
     }
     Ok(hasher.0.finalize().into())
 }
@@ -89,7 +93,11 @@ pub fn text_modified(db: &WcDb, rel: &RelPath, node: &Node) -> Result<bool> {
     {
         return Ok(false);
     }
-    let Some(expected) = node.checksum.as_deref().and_then(Sha1Digest::from_svn_string) else {
+    let Some(expected) = node
+        .checksum
+        .as_deref()
+        .and_then(Sha1Digest::from_svn_string)
+    else {
         return Ok(true);
     };
     let info = translate_info(&db.actual_props(rel)?);
@@ -108,7 +116,11 @@ pub fn working_repo_normal(db: &WcDb, rel: &RelPath) -> Result<Vec<u8>> {
     let mut f = File::open(&path)
         .map_err(|e| SvnError::from_io(format!("cannot open '{}'", path.display()), &e))?;
     let mut out = Vec::new();
-    translate_stream(&mut f, &mut out, ContentTranslator::to_repo_normal(&info, true)?)?;
+    translate_stream(
+        &mut f,
+        &mut out,
+        ContentTranslator::to_repo_normal(&info, true)?,
+    )?;
     Ok(out)
 }
 

@@ -68,9 +68,10 @@ impl WindowSink for TextSink {
                 let outcome = self.handle.outcome().ok_or_else(|| {
                     SvnError::new(ErrorCode::Internal, "text delta ended without a result")
                 })?;
-                let path = self.path.take().ok_or_else(|| {
-                    SvnError::new(ErrorCode::Internal, "text delta ended twice")
-                })?;
+                let path = self
+                    .path
+                    .take()
+                    .ok_or_else(|| SvnError::new(ErrorCode::Internal, "text delta ended twice"))?;
                 *self.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(NewText {
                     path,
                     md5: outcome.md5,
@@ -90,4 +91,3 @@ impl WindowSink for DiscardSink {
         Ok(())
     }
 }
-
