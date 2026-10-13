@@ -3,45 +3,45 @@
 <logentry
    revision="6">
 <author>alice</author>
-<date>2026-10-13T09:05:12.806268Z</date>
+<date>2026-10-13T09:45:15.764184Z</date>
 <paths>
 <path
-   action="M"
    prop-mods="false"
    text-mods="true"
-   kind="file">/trunk/a.txt</path>
+   kind="file"
+   action="M">/trunk/a.txt</path>
 <path
    action="A"
    prop-mods="false"
    text-mods="false"
    kind="dir">/trunk/newdir</path>
 <path
-   action="A"
    prop-mods="false"
    text-mods="true"
-   kind="file">/trunk/newdir/n.txt</path>
+   kind="file"
+   action="A">/trunk/newdir/n.txt</path>
 </paths>
 <msg>second commit: add dir &amp; edit</msg>
 </logentry>
 <logentry
    revision="5">
 <author>alice</author>
-<date>2026-10-13T09:04:38.541421Z</date>
+<date>2026-10-13T09:45:08.662021Z</date>
 <paths>
 <path
-   action="A"
-   prop-mods="false"
-   text-mods="false"
    kind="dir"
    copyfrom-path="/trunk/src"
-   copyfrom-rev="4">/branches/b1</path>
+   copyfrom-rev="4"
+   action="A"
+   prop-mods="false"
+   text-mods="false">/branches/b1</path>
 </paths>
 <msg>branch b1 copy</msg>
 </logentry>
 <logentry
    revision="4">
 <author>alice</author>
-<date>2026-10-13T09:04:36.423797Z</date>
+<date>2026-10-13T09:45:08.321957Z</date>
 <paths>
 <path
    action="D"
@@ -54,7 +54,7 @@
 <logentry
    revision="3">
 <author>alice</author>
-<date>2026-10-13T09:04:34.547831Z</date>
+<date>2026-10-13T09:45:07.190780Z</date>
 <paths>
 <path
    action="M"
@@ -67,7 +67,7 @@
 <logentry
    revision="2">
 <author>alice</author>
-<date>2026-10-13T09:04:32.379651Z</date>
+<date>2026-10-13T09:45:06.669520Z</date>
 <paths>
 <path
    prop-mods="true"
@@ -75,58 +75,58 @@
    kind="file"
    action="A">/trunk/a.txt</path>
 <path
+   prop-mods="false"
    text-mods="false"
    kind="dir"
-   action="A"
-   prop-mods="false">/trunk/docs</path>
+   action="A">/trunk/docs</path>
 <path
+   prop-mods="false"
    text-mods="true"
    kind="file"
-   action="A"
-   prop-mods="false">/trunk/docs/readme.md</path>
+   action="A">/trunk/docs/readme.md</path>
 <path
+   prop-mods="false"
    text-mods="false"
    kind="dir"
-   action="A"
-   prop-mods="false">/trunk/src</path>
+   action="A">/trunk/src</path>
 <path
+   action="A"
+   prop-mods="true"
    text-mods="true"
-   kind="file"
-   action="A"
-   prop-mods="true">/trunk/src/b.txt</path>
+   kind="file">/trunk/src/b.txt</path>
 <path
-   text-mods="false"
    kind="dir"
    action="A"
-   prop-mods="false">/trunk/src/deep</path>
+   prop-mods="false"
+   text-mods="false">/trunk/src/deep</path>
 <path
-   text-mods="true"
    kind="file"
    action="A"
-   prop-mods="false">/trunk/src/deep/c.cfg</path>
+   prop-mods="false"
+   text-mods="true">/trunk/src/deep/c.cfg</path>
 <path
-   text-mods="true"
-   kind="file"
    action="A"
-   prop-mods="false">/trunk/unicodé file.txt</path>
+   prop-mods="false"
+   text-mods="true"
+   kind="file">/trunk/unicodé file.txt</path>
 </paths>
 <msg>initial: files &amp; props &lt;&amp;&gt; unicode é</msg>
 </logentry>
 <logentry
    revision="1">
 <author>alice</author>
-<date>2026-10-13T09:04:26.856003Z</date>
+<date>2026-10-13T09:45:05.135496Z</date>
 <paths>
 <path
-   action="A"
-   prop-mods="false"
    text-mods="false"
-   kind="dir">/branches</path>
+   kind="dir"
+   action="A"
+   prop-mods="false">/branches</path>
 <path
-   action="A"
-   prop-mods="false"
    text-mods="false"
-   kind="dir">/trunk</path>
+   kind="dir"
+   action="A"
+   prop-mods="false">/trunk</path>
 </paths>
 <msg>layout</msg>
 </logentry>

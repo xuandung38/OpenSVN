@@ -1,0 +1,12 @@
+---
+source: crates/svn-protocol/tests/request_snapshots_update_commit.rs
+expression: "render(&merge_request(&u, &rel(\"trunk\"), \"12-ab\", &keep).unwrap())"
+---
+MERGE http://svn.test.local/svn/repo/trunk
+Content-Type: text/xml
+X-SVN-Options: keep-locks
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+
+<?xml version="1.0" encoding="utf-8"?><D:merge xmlns:D="DAV:"><D:source><D:href>/svn/repo/!svn/txn/12-ab</D:href></D:source><D:no-auto-merge/><D:no-checkout/><D:prop><D:checked-in/><D:version-name/><D:resourcetype/><D:creationdate/><D:creator-displayname/></D:prop><S:lock-token-list xmlns:S="svn:"><S:lock><lock-path>a.txt</lock-path><lock-token>opaquelocktoken:1</lock-token></S:lock><S:lock><lock-path>sub/b &amp; c.txt</lock-path><lock-token>opaquelocktoken:2</lock-token></S:lock></S:lock-token-list></D:merge>

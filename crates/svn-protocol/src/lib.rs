@@ -7,13 +7,16 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod caps;
+pub mod commit;
 pub mod display_path;
 pub mod errors;
+pub mod file_revs;
 pub mod get;
 pub mod http;
 pub mod locks;
 pub mod log;
 pub mod propfind;
+pub mod update;
 pub mod xml;
 
 mod util;

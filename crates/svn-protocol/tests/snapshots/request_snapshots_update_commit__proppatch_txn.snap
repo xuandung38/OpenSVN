@@ -1,0 +1,11 @@
+---
+source: crates/svn-protocol/tests/request_snapshots_update_commit.rs
+expression: "render(&txn_proppatch_request(&u, t, &rev).unwrap())"
+---
+PROPPATCH http://svn.test.local/svn/repo/!svn/txn/12-ab
+Content-Type: text/xml
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+
+<?xml version="1.0" encoding="utf-8"?><D:propertyupdate xmlns:D="DAV:" xmlns:V="http://subversion.tigris.org/xmlns/dav/" xmlns:C="http://subversion.tigris.org/xmlns/custom/" xmlns:S="http://subversion.tigris.org/xmlns/svn/"><D:set><D:prop><S:log>message &lt;&amp;&gt;</S:log></D:prop></D:set></D:propertyupdate>

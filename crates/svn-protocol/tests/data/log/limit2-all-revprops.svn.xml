@@ -3,22 +3,22 @@
 <logentry
    revision="5">
 <author>alice</author>
-<date>2026-10-13T09:04:38.541421Z</date>
+<date>2026-10-13T09:45:08.662021Z</date>
 <paths>
 <path
+   action="A"
    prop-mods="false"
    text-mods="false"
    kind="dir"
    copyfrom-path="/trunk/src"
-   copyfrom-rev="4"
-   action="A">/branches/b1</path>
+   copyfrom-rev="4">/branches/b1</path>
 </paths>
 <msg>branch b1 copy</msg>
 </logentry>
 <logentry
    revision="4">
 <author>alice</author>
-<date>2026-10-13T09:04:36.423797Z</date>
+<date>2026-10-13T09:45:08.321957Z</date>
 <paths>
 <path
    action="D"
