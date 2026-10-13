@@ -19,7 +19,8 @@ async fn settings_round_trip_and_survive_a_restart_of_the_service() {
     assert_eq!(before.general_check_interval_min, 10);
     let after = commands::settings_set(
         f.state(),
-        patch(serde_json::json!({"appearance.theme": "dark", "general.checkIntervalMin": 5})),
+        patch(serde_json::json!({"appearance.theme": "dark", "general.checkIntervalMin": 5}))
+            .into(),
     )
     .await
     .unwrap();

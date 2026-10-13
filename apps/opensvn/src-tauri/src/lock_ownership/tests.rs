@@ -36,6 +36,9 @@ impl ProcessProbe for Fake {
     fn start_time(&self, pid: u32) -> Option<u64> {
         self.procs.lock().unwrap().get(&pid).copied()
     }
+    fn same_process(&self, recorded: u64, current: u64) -> bool {
+        recorded.abs_diff(current) <= 2
+    }
     fn same_boot(&self, recorded: &str) -> bool {
         *self.boot.lock().unwrap() == recorded
     }

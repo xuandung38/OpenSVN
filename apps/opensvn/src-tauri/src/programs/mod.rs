@@ -74,12 +74,13 @@ fn validate_program(path: &Path) -> Result<PathBuf, AppError> {
 }
 
 /// Characters that could hide or reorder text in the confirmation dialog: controls (including
-/// newline, DEL and C1), zero-width and bidirectional formatting characters, the BOM.
+/// newline, DEL and C1), line and paragraph separators, soft hyphen, Arabic letter mark, Mongolian
+/// vowel separator, zero-width and bidirectional formatting characters, the BOM.
 fn is_deceptive(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+            '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
         )
 }
 
