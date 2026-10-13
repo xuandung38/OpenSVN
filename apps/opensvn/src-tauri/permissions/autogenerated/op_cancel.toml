@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-op-cancel"
+description = "Enables the op_cancel command without any pre-configured scope."
+commands.allow = ["op_cancel"]
+
+[[permission]]
+identifier = "deny-op-cancel"
+description = "Denies the op_cancel command without any pre-configured scope."
+commands.deny = ["op_cancel"]

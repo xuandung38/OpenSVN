@@ -18,3 +18,7 @@ dist/
 # Editors
 .idea/
 .vscode/
+
+# Tauri generated
+apps/opensvn/src-tauri/gen/
+
