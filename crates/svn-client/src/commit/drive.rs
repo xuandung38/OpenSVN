@@ -124,7 +124,10 @@ pub async fn drive(
     ctx: &DriveContext<'_>,
 ) -> Result<()> {
     let trie = build_trie(items, ctx.session_prefix)?;
-    let root = editor.open_root(None).await?;
+    // A changed session root is opened at its BASE revision, so the server's out-of-date check
+    // covers its property changes (svn's `do_item_commit` opens it with `item->revision`).
+    let root_rev = trie.item.and_then(|i| items[i].item.base_rev).map(Revnum);
+    let root = editor.open_root(root_rev).await?;
     if let Some(i) = trie.item {
         for change in &items[i].item.prop_changes {
             editor.change_dir_prop(root, change.clone()).await?;

@@ -279,3 +279,89 @@ async fn post_commit_work_keeps_a_file_changed_after_the_commit_modified() {
     );
     assert_eq!(svn_status(&e.fx.oracle, &e.wc), "M       d/f1\n");
 }
+
+/// A merged commit left behind by a failure after MERGE is folded in before the next commit on
+/// the same working copy, so that commit starts from the true BASE.
+#[tokio::test]
+async fn next_commit_finalizes_a_pending_merged_journal_first() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "changed\n");
+    fail::cfg("commit.after_merge_before_finalize", "return").expect("cfg");
+    e.commit().await.expect_err("crash");
+    fail::remove("commit.after_merge_before_finalize");
+
+    write(&e.wc, "d/f2", "other\n");
+    let res = e.commit().await.expect("commit").expect("some");
+    assert_eq!(res.revision.0, 3);
+    assert_eq!(
+        res.committed,
+        vec![rp("d/f2")],
+        "d/f1 came from the journal"
+    );
+    assert!(JournalStore::new(&e.state).list().expect("list").is_empty());
+    let f1 = e.db.read_base(&rp("d/f1")).expect("read").expect("base");
+    assert_eq!(f1.revision, Some(2));
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
+}
+
+/// A stale journal replayed after the path was committed again must not take BASE back to the
+/// older revision and text.
+#[tokio::test]
+async fn stale_journal_never_moves_base_backwards() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "rev $Rev$\nfirst\n");
+    svn_client::local::propset(
+        &e.db,
+        &e.cancel,
+        &rp("d/f1"),
+        "svn:keywords",
+        Some(b"Rev"),
+        svn_client::local::PropSetOptions::default(),
+    )
+    .expect("propset");
+    fail::cfg("commit.after_merge_before_finalize", "return").expect("cfg");
+    e.commit().await.expect_err("crash");
+    fail::remove("commit.after_merge_before_finalize");
+
+    // Keep a copy of the r2 journal and its data, as a process that died mid-removal would.
+    let store = JournalStore::new(&e.state);
+    let path = store.list().expect("list").remove(0);
+    let data = JournalStore::read(&path).expect("read");
+    let saved = e.fx.base.join("saved");
+    std::fs::create_dir_all(&saved).expect("mkdir");
+    std::fs::copy(&path, saved.join("journal.json")).expect("copy");
+    let data_dir = store.data_dir_of(&data.id);
+    let saved_data = saved.join("data");
+    std::fs::create_dir_all(&saved_data).expect("mkdir");
+    for f in std::fs::read_dir(&data_dir).expect("rd").flatten() {
+        std::fs::copy(f.path(), saved_data.join(f.file_name())).expect("copy");
+    }
+    assert_eq!(e.recover().await.finalized.len(), 1);
+
+    // The same file moves on to r3.
+    write(&e.wc, "d/f1", "rev $Rev: 2 $\nsecond\n");
+    assert_eq!(
+        e.commit().await.expect("commit").expect("some").revision.0,
+        3
+    );
+    let r3 = e.db.read_base(&rp("d/f1")).expect("read").expect("base");
+    assert_eq!(r3.revision, Some(3));
+    let rows_r3 = dump_rows(&e.wc);
+
+    // The stale r2 journal reappears and is recovered.
+    std::fs::copy(saved.join("journal.json"), &path).expect("restore");
+    std::fs::create_dir_all(&data_dir).expect("mkdir");
+    for f in std::fs::read_dir(&saved_data).expect("rd").flatten() {
+        std::fs::copy(f.path(), data_dir.join(f.file_name())).expect("copy");
+    }
+    let report = e.recover().await;
+    assert_eq!(report.finalized.len(), 1, "{report:?}");
+    let after = e.db.read_base(&rp("d/f1")).expect("read").expect("base");
+    assert_eq!(after.revision, Some(3), "BASE stays at r3");
+    assert_eq!(after.checksum, r3.checksum, "BASE text stays r3");
+    assert_eq!(dump_rows(&e.wc), rows_r3, "nothing changed");
+    assert_eq!(read(&e.wc, "d/f1"), "rev $Rev: 3 $\nsecond\n");
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
+}

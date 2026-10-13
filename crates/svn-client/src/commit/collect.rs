@@ -69,11 +69,27 @@ pub struct Committable {
     pub lock_token: Option<String>,
 }
 
+/// A repository lock held by this working copy on a path met by the harvest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarvestLock {
+    /// Working copy relative path.
+    pub relpath: RelPath,
+    /// Repository relative path the lock is on.
+    pub repos_relpath: String,
+    /// Lock token.
+    pub token: String,
+}
+
 /// Result of harvesting.
 #[derive(Debug, Clone, Default)]
 pub struct Harvest {
     /// Committables sorted by repository path.
     pub items: Vec<Committable>,
+    /// Every lock token met by the walk (`harvest_status_callback`): those of committed paths,
+    /// of unmodified locked files below the targets, and of every locked node below a deleted
+    /// directory. All are sent with the commit (the server needs the ones below a deleted
+    /// directory) and released afterwards unless the locks are kept.
+    pub locks: Vec<HarvestLock>,
     /// BASE revision of every versioned ancestor directory of an item, by repository path, used
     /// to open the intermediate directories of the commit drive.
     pub dir_revisions: BTreeMap<String, u64>,
@@ -102,6 +118,7 @@ struct Collector<'a> {
     db: &'a WcDb,
     opts: &'a CollectOptions,
     items: BTreeMap<RelPath, Committable>,
+    locks: BTreeMap<RelPath, HarvestLock>,
 }
 
 /// Harvests the changes below `targets`.
@@ -110,6 +127,7 @@ pub fn collect(db: &WcDb, targets: &[RelPath], opts: &CollectOptions) -> Result<
         db,
         opts,
         items: BTreeMap::new(),
+        locks: BTreeMap::new(),
     };
     for t in targets {
         // An explicit target must be versioned.
@@ -117,6 +135,7 @@ pub fn collect(db: &WcDb, targets: &[RelPath], opts: &CollectOptions) -> Result<
         c.walk(t, opts.depth, true)?;
     }
     c.check_parents()?;
+    c.check_moves()?;
     let mut items: Vec<Committable> = c.items.into_values().collect();
     items.sort_by(|a, b| a.repos_relpath.cmp(&b.repos_relpath));
     let mut dir_revisions = BTreeMap::new();
@@ -135,6 +154,7 @@ pub fn collect(db: &WcDb, targets: &[RelPath], opts: &CollectOptions) -> Result<
     Ok(Harvest {
         items,
         dir_revisions,
+        locks: c.locks.into_values().collect(),
     })
 }
 
@@ -193,6 +213,7 @@ impl Collector<'_> {
                 return Ok(());
             }
         }
+        self.gather_locks(info)?;
         let (action, copy_from, base_rev, needs_text) = match info.schedule {
             Schedule::Deleted => {
                 if !info.op_root {
@@ -280,6 +301,87 @@ impl Collector<'_> {
         Ok(())
     }
 
+    /// Records the lock tokens of `info`: its own BASE lock, or for the root of a deletion every
+    /// lock at or below it.
+    fn gather_locks(&mut self, info: &NodeInfo) -> Result<()> {
+        let found = if info.schedule == Schedule::Deleted && info.op_root {
+            self.db.repos_locks_below(&info.rel)?
+        } else if info.schedule == Schedule::Deleted {
+            Vec::new() // gathered with its deletion root
+        } else {
+            match (&info.base, self.db.repos_lock(&info.rel)?) {
+                (Some(b), Some(l)) => b
+                    .repos_relpath
+                    .clone()
+                    .map(|r| vec![(info.rel.clone(), r, l)])
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            }
+        };
+        for (rel, repos_relpath, lock) in found {
+            self.locks.insert(
+                rel.clone(),
+                HarvestLock {
+                    relpath: rel,
+                    repos_relpath,
+                    token: lock.token,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// `rel` or one of its ancestors is committed (a move source inside a deleted directory is
+    /// committed with that deletion).
+    fn covers(&self, rel: &RelPath, ancestor_action: ItemAction) -> bool {
+        if self.items.contains_key(rel) {
+            return true;
+        }
+        let mut cur = rel.parent();
+        while let Some(p) = cur {
+            if self
+                .items
+                .get(&p)
+                .is_some_and(|i| i.action == ancestor_action || i.action == ItemAction::Replace)
+            {
+                return true;
+            }
+            cur = p.parent();
+        }
+        false
+    }
+
+    /// Both halves of a local move must be committed together (svn's E200009).
+    fn check_moves(&self) -> Result<()> {
+        let illegal =
+            |msg: String| SvnError::new(ErrorCode::WcInvalidOperation, msg).with_svn_code(200_009);
+        for (rel, item) in &self.items {
+            if matches!(item.action, ItemAction::Add | ItemAction::Replace)
+                && self
+                    .db
+                    .read_node(rel)?
+                    .is_some_and(|n| n.moved_here && n.op_depth == depth_of(rel))
+                && let Some(src) = self.db.moved_from(rel)?
+                && !self.covers(&src, ItemAction::Delete)
+            {
+                return Err(illegal(format!(
+                    "Cannot commit '{rel}' because it was moved from '{src}' which is not part \
+                     of the commit; both sides of the move must be committed together"
+                )));
+            }
+            if matches!(item.action, ItemAction::Delete | ItemAction::Replace)
+                && let Some(dst) = self.db.moved_to(rel)?
+                && !self.covers(&dst, ItemAction::Add)
+            {
+                return Err(illegal(format!(
+                    "Cannot commit '{rel}' because it was moved to '{dst}' which is not part \
+                     of the commit; both sides of the move must be committed together"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// An added file always needs its text; a copied or versioned one only when modified.
     fn file_needs_text(&self, info: &NodeInfo, plain_add: bool) -> Result<bool> {
         let abs = abs_of(self.db, &info.rel);
@@ -298,10 +400,13 @@ impl Collector<'_> {
         text_modified(self.db, info)
     }
 
-    /// Every added path whose parent is added too needs that parent in the commit.
+    /// Every added path whose parent is added too needs that parent in the commit, and so does
+    /// a change below a copy (the server does not know the copied path yet).
     fn check_parents(&self) -> Result<()> {
         for (rel, item) in &self.items {
-            if !matches!(item.action, ItemAction::Add | ItemAction::Replace) {
+            let in_working_layer = item.action == ItemAction::Modify
+                && self.db.read_node(rel)?.is_some_and(|n| n.op_depth != 0);
+            if !matches!(item.action, ItemAction::Add | ItemAction::Replace) && !in_working_layer {
                 continue;
             }
             let mut cur = rel.parent();
@@ -320,8 +425,8 @@ impl Collector<'_> {
                     return Err(SvnError::new(
                         ErrorCode::WcInvalidOperation,
                         format!(
-                            "'{p}' is not under version control in the repository and is not \
-                             part of the commit, yet its child '{rel}' is part of the commit"
+                            "'{p}' is not known to exist in the repository and is not part of \
+                             the commit, yet its child '{rel}' is part of the commit"
                         ),
                     ));
                 }

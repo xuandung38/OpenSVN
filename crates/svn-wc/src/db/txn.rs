@@ -255,6 +255,20 @@ impl WcTxn<'_> {
         Ok(())
     }
 
+    /// Like [`lock_remove`](Self::lock_remove), but only when the cached lock still has
+    /// `token`: a lock taken again since then is left alone.
+    pub fn lock_remove_token(&self, path: &RelPath, token: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM lock WHERE lock_token = ?3 AND EXISTS (SELECT 1 FROM nodes n \
+                 WHERE n.wc_id = ?1 AND n.local_relpath = ?2 AND n.op_depth = 0 \
+                 AND n.repos_id = lock.repos_id AND n.repos_path = lock.repos_relpath)",
+                params![self.wc_id, path.as_str(), token],
+            )
+            .map_err(sql_err)?;
+        Ok(())
+    }
+
     /// Paths of the BASE children of `path`.
     fn base_children(&self, path: &RelPath) -> Result<Vec<RelPath>> {
         let mut stmt = self
@@ -403,6 +417,16 @@ impl WcTxn<'_> {
             skel.add(c)?;
         }
         actual::write_conflict_data(self.conn, self.wc_id, path, &skel.to_skel())
+    }
+
+    /// Replaces the conflict record of `path` like [`WcDb::mark_conflict`].
+    pub fn write_conflict(&self, path: &RelPath, record: &actual::ConflictRecord) -> Result<()> {
+        actual::write_conflict(self.conn, self.wc_id, path, record)
+    }
+
+    /// Drops every conflict of `path` like [`WcDb::resolve`].
+    pub fn clear_conflict(&self, path: &RelPath) -> Result<()> {
+        actual::clear_conflict(self.conn, self.wc_id, path)
     }
 
     // ---- stat cache and work queue ------------------------------------------------------

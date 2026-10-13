@@ -594,6 +594,7 @@ impl RaSession for FakeRaSession {
             tree,
             base_head,
             changed: Vec::new(),
+            dir_bases: HashMap::new(),
             dirs: HashMap::new(),
             files: HashMap::new(),
             next_id: 0,
