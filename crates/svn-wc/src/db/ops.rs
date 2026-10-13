@@ -593,7 +593,8 @@ pub(crate) fn op_revert(
                 .map_err(sql_err)?;
             if nested {
                 return Err(SvnError::new(
-                    ErrorCode::Internal,
+                    // No closer user-facing code exists; the caller should retry recursively.
+                    ErrorCode::WcFormatUnsupported,
                     format!("can't revert '{path}' without reverting children"),
                 )
                 .with_svn_code(155_038));
@@ -823,7 +824,7 @@ pub(crate) fn commit_node(
             .map_err(sql_err)?;
             conn.execute(
                 &format!(
-                    "DELETE FROM nodes WHERE wc_id = ?1 AND {} AND presence = 'base-deleted' AND op_depth >= ?3",
+                    "DELETE FROM nodes WHERE wc_id = ?1 AND {} AND presence = 'base-deleted' AND op_depth = ?3",
                     scope_sql()
                 ),
                 params![wc_id, path.as_str(), cur.op_depth],
@@ -881,6 +882,54 @@ pub(crate) fn commit_node(
             .map_err(sql_err)?;
         }
         let scope = scope_sql();
+        // Nodes deleted inside the committed layer (delete layers above it) become not-present in
+        // BASE, with their descendants gone, and the delete layers are consumed.
+        let deleted: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT local_relpath, kind FROM nodes WHERE wc_id = ?1 AND {scope} \
+                     AND presence = 'base-deleted' AND op_depth > ?3 AND local_relpath <> ?2"
+                ))
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map(params![wc_id, path.as_str(), cur.op_depth], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
+                .map_err(sql_err)?;
+            rows.collect::<std::result::Result<_, _>>()
+                .map_err(sql_err)?
+        };
+        for (rel, kind) in &deleted {
+            let suffix = rel
+                .strip_prefix(path.as_str())
+                .unwrap_or("")
+                .trim_start_matches('/');
+            conn.execute(
+                "DELETE FROM nodes WHERE wc_id = ?1 AND op_depth = 0 \
+                 AND (local_relpath = ?2 OR local_relpath LIKE ?2 || '/%' ESCAPE '\\')",
+                params![
+                    wc_id,
+                    rel.replace('\\', "\\\\")
+                        .replace('%', "\\%")
+                        .replace('_', "\\_")
+                ],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "INSERT INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, repos_id, repos_path, \
+                 revision, presence, kind, changed_date) VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, 'not-present', ?7, 0)",
+                params![
+                    wc_id, rel, parent_text(&RelPath::new(rel.as_str())?), pbase.repos_id,
+                    format!("{new_root}/{suffix}"), new_rev, kind,
+                ],
+            )
+            .map_err(sql_err)?;
+        }
+        conn.execute(
+            &format!("DELETE FROM nodes WHERE wc_id = ?1 AND {scope} AND presence = 'base-deleted' AND op_depth > ?3"),
+            params![wc_id, path.as_str(), cur.op_depth],
+        )
+        .map_err(sql_err)?;
         detach_moves(conn, wc_id, path, cur.op_depth)?;
         conn.execute(
             &format!("DELETE FROM nodes WHERE wc_id = ?1 AND {scope} AND op_depth = ?3 AND presence IN ('normal', 'incomplete')"),
