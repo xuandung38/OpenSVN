@@ -8,11 +8,10 @@ use svn_types::{RelPath, Result, Revnum};
 use super::events::{Md5, Sha1, UpdateEvent};
 use crate::caps::{AcceptedHref, UrlBuilder};
 use crate::http::{ResponseParser, parse_chunked};
+use crate::limits::ParserLimits;
 use crate::util::{Base64Stream, corrupt, parse_hex, parse_revnum};
 use crate::xml::{Ns, StartTag, XmlEvent, XmlReader};
 
-/// Longest property value accepted from an update-report.
-const MAX_PROP_BYTES: usize = 8 << 20;
 /// Deepest directory nesting accepted.
 const MAX_NODE_DEPTH: usize = 256;
 
@@ -62,6 +61,7 @@ pub struct UpdateParser {
     capture: Capture,
     capture_depth: usize,
     value: String,
+    limits: ParserLimits,
     failed: bool,
 }
 
@@ -87,7 +87,16 @@ impl UpdateParser {
             capture: Capture::None,
             capture_depth: 0,
             value: String::new(),
+            limits: ParserLimits::default(),
             failed: false,
+        }
+    }
+
+    /// Creates a parser with explicit limits.
+    pub fn with_limits(urls: UrlBuilder, limits: ParserLimits) -> Self {
+        Self {
+            limits,
+            ..Self::new(urls)
         }
     }
 
@@ -274,15 +283,15 @@ impl UpdateParser {
             Capture::None => {}
             Capture::Href | Capture::Md5 => {
                 self.value.push_str(text);
-                if self.value.len() > 4096 {
-                    return Err(corrupt("oversized href or checksum"));
-                }
+                ParserLimits::check(
+                    self.value.len(),
+                    self.limits.max_href_bytes,
+                    "href or checksum",
+                )?;
             }
             Capture::Prop { text: buf, .. } => {
                 buf.push_str(text);
-                if buf.len() > MAX_PROP_BYTES {
-                    return Err(corrupt("property value too large"));
-                }
+                ParserLimits::check(buf.len(), self.limits.max_text_bytes, "property value")?;
             }
             Capture::TxDelta(b64) => {
                 let data = b64.push(text)?;

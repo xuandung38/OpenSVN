@@ -127,17 +127,78 @@ not.** The builders follow this (test `wire_parity`).
   the report and is covered by synthetic tests only.
 * The errcode table in `errors.rs` was generated from `svn_error_codes.h` of 1.15.0.
 
-### Seen while capturing, needed for later work
-* update-report: request on `!svn/me`, `send-all="true"` when the server says
-  `SVN-Allow-Bulk-Updates: Prefer`; response root has `inline-props="true"`; `add-file` carries
-  `sha1-checksum`, `add-directory` carries `bc-url` and `checked-in` hrefs are `!svn/rvr/<rev>/..`.
-* commit: `POST !svn/me` with `application/vnd.svn-skel` (`create-txn-with-props`), reply header
-  `SVN-Txn-Name`; `PUT !svn/txr/<txn>/<path>` with `Content-Type: application/vnd.svn-svndiff`,
-  `X-SVN-Version-Name`, `X-SVN-Base-Fulltext-MD5`; success echoes `X-SVN-Result-Fulltext-MD5`;
-  **`MERGE` goes to the public URL of the session path** (`/svn/repo/trunk`), body names the txn
-  in `D:source/D:href`, header `X-SVN-Options: release-locks no-merge-response`; with
-  `no-merge-response` the answer only carries the new revision under `!svn/vcc/default`.
-* A stale PUT is answered 409 and the client then `DELETE`s the transaction.
+### update-report (verified with svn 1.15.0 against 1.14.5)
+
+* `REPORT !svn/me`. Body: optional `send-all="true"` attribute, `S:include-props yes` (skelta
+  only), `S:src-path` (server path of the session URL), `S:target-revision` (omitted for HEAD),
+  `S:dst-path` (**absolute URL**, switch only), `S:update-target`, `S:text-deltas no`
+  (status -u), `S:depth` (`unknown` when unspecified), then one `S:entry` per reporter call.
+  `ignore-ancestry` and `send-copyfrom-args` were not observed; their position follows the client
+  source.
+* Entries: `rev`, `depth` (omitted when unknown), `start-empty="true"`, `lock-token`
+  (`opaquelocktoken:...`), and for switched subtrees `linkpath="/branches/b1"` (repository path,
+  leading slash); the text is the path relative to the update root, empty for the root.
+  Attribute order differs between operations: compare as XML, not as bytes. `S:missing` for
+  `delete_path` follows the client source, not an observation.
+* Answer: `S:target-revision@rev`, nested `open/add-directory` and `open/add-file` (`name`,
+  `rev`, `sha1-checksum`; `bc-url` is ignored), `D:checked-in/D:href` (`!svn/rvr/<rev>/..`),
+  `S:set-prop` (also `svn:entry:*`), `S:txdelta` (base64 svndiff, send-all only),
+  `S:prop/V:md5-checksum`, `S:delete-entry`. With `update-target` the root `open-directory` has
+  no `name` and the target appears as a child.
+* `S:fetch-file` and `S:fetch-props` (servers without `inline-props`) and `S:absent-*` are
+  parsed per the client source and covered by synthetic tests only.
+
+### commit (verified)
+
+* `POST !svn/me`, `application/vnd.svn-skel`:
+  `(create-txn-with-props (name value ...))`, bare atoms for names, `<len> <bytes>` otherwise;
+  answer `201` with `SVN-Txn-Name`.
+* `COPY` is addressed to the **source** (`rvr/<rev>/<src>`) with `Destination: <absolute txr URL>`
+  and `Overwrite: F`; no `Depth` header was sent.
+* `MKCOL`/`DELETE`/`PROPPATCH`/`PUT` address `!svn/txr/<txn>/<path>`; `X-SVN-Version-Name` is the
+  base revision (absent on MKCOL and on adds). PUT sends `X-SVN-Base-Fulltext-MD5` for existing
+  files and no result checksum; the answer carries `X-SVN-Result-Fulltext-MD5`.
+* PROPPATCH body: `D:propertyupdate` declaring `D`, `V`, `C`, `S`; `svn:x` is `S:x`, other names
+  `C:<full name>`; unsafe values would use `V:encoding="base64"` (builder-tested, not observed).
+* Locked path: `If: <public URL> (<opaquelocktoken:...>)`, and the `MERGE` body gets
+  `<S:lock-token-list xmlns:S="svn:"><S:lock><lock-path>..</lock-path><lock-token>..</lock-token></S:lock>..`
+  with **unprefixed** `lock-path`/`lock-token`, the path relative to the merge root. A PUT on a
+  locked path without the header gets plain `423` HTML.
+* `MERGE` goes to the public URL of the commit root; `X-SVN-Options: release-locks
+  no-merge-response`; the answer names the new revision in the `D:response` whose resourcetype is
+  `D:baseline`. Abort is `DELETE !svn/txn/<txn>` (204).
+
+### blame (verified)
+
+`REPORT rvr/<peg>/<file>`: `S:file-revs-report` with `start-revision`, `end-revision`, `S:path`
+(empty). Answer: `S:file-rev@path,@rev` containing `S:rev-prop@name`, `S:set-prop@name`,
+`S:txdelta` (base64 svndiff against the previous version). `include-merged-revisions` position
+and `S:merged-revision` / `S:remove-prop` are from the client source.
+
+## Capabilities and fallbacks (mod_dav_svn 1.8 - 1.15, HTTPv2)
+
+Behaviour is chosen from the `OPTIONS` answer only, never from a version string. Releases are
+approximate (Subversion release notes, not re-verified here); the capability token is what counts.
+
+| Capability / header | About since | Used for | When absent |
+|---|---|---|---|
+| `SVN-Me-Resource` + stubs | 1.7 | everything | refused with `ServerUnsupported` |
+| `depth`, `mergeinfo`, `log-revprops` | < 1.8 | sent on our requests | assumed present (all 1.8+) |
+| `list` | 1.10 | `list-report` listing | `Depth: 1` PROPFIND (`Capabilities::list_strategy`) |
+| `svndiff1`, `svndiff2` | 1.10 | svndiff version of PUT | version 0 (`svndiff_version`) |
+| `inline-props` | 1.8 | skelta `include-props` | skelta without it; answer has `fetch-props`/`fetch-file` |
+| `SVN-Allow-Bulk-Updates` | 1.8 | send-all vs skelta | header absent = no restriction; `Off` forces skelta |
+| `put-result-checksum` | 1.8 | `X-SVN-Result-Fulltext-MD5` on PUT | header not sent (`PutOptions::with_result_md5`) |
+| `SVN-Supported-Posts: create-txn-with-props` | 1.8 | revprops with the txn | plain `create-txn` + PROPPATCH on the txn (`create_txn_plan`) |
+| `ephemeral-txnprops` | 1.8 | `svn:txn-client-*` txn props | none sent (`ephemeral_txn_props`) |
+| `reverse-file-revs` | 1.8 | descending file-revs range | ask ascending, caller reverses (`plan_file_revs`) |
+| `inherited-props`, `replay-rev-resource`, `atomic-revprops`, `partial-replay` | 1.5 - 1.8 | not used by this crate | not requested |
+| `SVN-Repository-MergeInfo` | 1.5 | mergeinfo (out of scope) | not requested |
+| `SVN-VTxn-*` stubs | 1.8 | optional | `Option` fields stay `None` |
+
+Tests for these paths (`tests/older_servers.rs`) use OPTIONS answers synthesized from the recorded
+1.14.5 answer by removing tokens and headers. Replace them with recordings from real 1.8, 1.9
+and 1.10 servers once the compat images exist; no behaviour was verified against such a server.
 
 ## Hard limits and encodings
 
@@ -179,6 +240,6 @@ not.** The builders follow this (test `wire_parity`).
 * Behaviour of a Subversion **1.15 server** (needs P06 image) and of **VisualSVN**.
 * `Timeout` header semantics on LOCK, HTTP status for a failed `If:` precondition (assumed 412 ->
   `LockTokenInvalid`), `Negotiate` challenge headers.
-* `strict-node-history` element position; `file-revs-report`, `mergeinfo-report`, `list-report`,
-  `get-location-segments` bodies.
+* `strict-node-history` element position; `mergeinfo-report` and `get-location-segments` bodies.
+* Everything about servers older than 1.14 (see the capability table).
 * Server GC of abandoned transactions.
