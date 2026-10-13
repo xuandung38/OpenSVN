@@ -610,6 +610,93 @@ async fn out_of_date_at_merge_deletes_the_transaction() {
 }
 
 #[tokio::test]
+async fn definite_merge_refusals_delete_the_transaction() {
+    for status in [409u16, 423, 500] {
+        let srv = server(Bulk::Prefer).await;
+        mount_txn(&srv).await;
+        Mock::given(method("MERGE"))
+            .respond_with(ResponseTemplate::new(status).set_body_string("refused"))
+            .mount(&srv)
+            .await;
+        let rec = Arc::new(Recorder::default());
+        let mut ed = begin(&srv, &rec, &[], &CancelToken::new()).await.unwrap();
+        let root = ed.open_root(None).await.unwrap();
+        ed.close_directory(root).await.unwrap();
+        let err = ed.close_edit().await.unwrap_err();
+        assert_ne!(err.code, ErrorCode::CommitOutcomeUnknown, "HTTP {status}");
+        let reqs = requests(&srv).await;
+        assert_eq!(
+            reqs.last().unwrap(),
+            &("DELETE".to_owned(), format!("{ROOT}/!svn/txn/{TXN}")),
+            "HTTP {status}"
+        );
+    }
+}
+
+/// Asserts that no `DELETE` was sent, also after giving a stray background task time to run.
+async fn assert_txn_kept(srv: &MockServer) {
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let reqs = requests(srv).await;
+    assert!(reqs.iter().any(|(m, _)| m == "MERGE"), "{reqs:?}");
+    assert!(reqs.iter().all(|(m, _)| m != "DELETE"), "{reqs:?}");
+}
+
+#[tokio::test]
+async fn merge_cancelled_in_flight_keeps_the_transaction() {
+    let srv = server(Bulk::Prefer).await;
+    mount_txn(&srv).await;
+    Mock::given(method("MERGE"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(fixture("commit/full-merge.resp"))
+                .set_delay(Duration::from_millis(800)),
+        )
+        .mount(&srv)
+        .await;
+    let rec = Arc::new(Recorder::default());
+    let cancel = CancelToken::new();
+    let mut ed = begin(&srv, &rec, &[], &cancel).await.unwrap();
+    let root = ed.open_root(None).await.unwrap();
+    ed.close_directory(root).await.unwrap();
+    let canceller = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel.cancel();
+        })
+    };
+    let err = ed.close_edit().await.unwrap_err();
+    canceller.await.unwrap();
+    assert_eq!(err.code, ErrorCode::CommitOutcomeUnknown);
+    assert!(err.message.contains(TXN), "{}", err.message);
+    assert_eq!(err.child.as_ref().unwrap().code, ErrorCode::Cancelled);
+    // Not reported as merged either: the journal still has to reconcile it.
+    assert_eq!(rec.events(), [format!("txn:{TXN}")]);
+    assert_txn_kept(&srv).await;
+}
+
+#[tokio::test]
+async fn unreadable_merge_success_keeps_the_transaction() {
+    for body in [
+        &b"not xml at all"[..],
+        b"",
+        b"<D:merge-response xmlns:D=\"DAV:\">",
+    ] {
+        let srv = server(Bulk::Prefer).await;
+        mount_txn(&srv).await;
+        mount_merge(&srv, body.to_vec()).await;
+        let rec = Arc::new(Recorder::default());
+        let mut ed = begin(&srv, &rec, &[], &CancelToken::new()).await.unwrap();
+        let root = ed.open_root(None).await.unwrap();
+        ed.close_directory(root).await.unwrap();
+        let err = ed.close_edit().await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::CommitOutcomeUnknown, "{body:?}");
+        assert!(err.message.contains(TXN), "{}", err.message);
+        assert_txn_kept(&srv).await;
+    }
+}
+
+#[tokio::test]
 async fn post_commit_error_is_a_warning() {
     let srv = server(Bulk::Prefer).await;
     mount_txn(&srv).await;

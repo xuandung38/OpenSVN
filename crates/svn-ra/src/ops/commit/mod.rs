@@ -30,6 +30,10 @@ const COMPAT_VERSION: &str = "1.15.0";
 /// leaves the transaction on the server unless the best-effort background delete described on
 /// [`HttpCommitEditor`] gets through; the journaled name and [`abort_txn`] are the reliable way
 /// to clean up.
+///
+/// `close_edit` fails with [`ErrorCode::CommitOutcomeUnknown`] when the final `MERGE` was sent
+/// but its result is unknown; the transaction is then kept for the caller to reconcile (see
+/// [`HttpCommitEditor`]).
 pub async fn start_commit(
     wire: &RaWire,
     message: &str,
@@ -74,7 +78,7 @@ pub async fn start_commit(
 
     if let Err(e) = begin(wire, &txn, &plan.deferred_revprops, &*observer, cancel).await {
         // Best effort: the transaction must not outlive a failed start.
-        let _ = merge::delete_txn(wire, &txn, &CancelToken::new()).await;
+        let _ = merge::cleanup_txn(wire, &txn).await;
         return Err(e);
     }
     Ok(Box::new(HttpCommitEditor::new(
@@ -108,7 +112,7 @@ async fn begin(
 pub async fn abort_txn(wire: &RaWire, txn_name: &str) -> Result<()> {
     let cancel = CancelToken::new();
     // A journaled name does not say whether the transaction was plain or virtual.
-    match merge::delete_txn_found(wire, &TxnName::plain(txn_name), &cancel).await {
+    match merge::delete_txn_found(wire, &TxnName::plain(txn_name), &cancel, false).await {
         Ok(true) => return Ok(()),
         Ok(false) => {}
         // No plain stub announced: only virtual transactions exist on this server.

@@ -15,8 +15,10 @@ use super::config::{ProxyConfig, TransportConfig};
 use super::redact::{RedactedHeaders, redacted_url};
 use super::request::{HttpRequest, HttpResponse};
 use super::retry::{classify_error, error_chain, is_idempotent, is_transient_status};
-use super::tls::{CertProblem, OriginTls, PinAction, TrustStore, make_client_config};
-use crate::auth::{AuthManager, Challenges, HostKey, or_cancel};
+use super::tls::{
+    CertProblem, OriginTls, PinAction, TrustStore, make_client_config, tls_server_end_point,
+};
+use crate::auth::{Attached, AuthManager, Challenges, HostKey, NegotiateProvider, or_cancel};
 
 /// How many certificate prompts one request may trigger before giving up.
 const MAX_TLS_ROUNDS: u8 = 2;
@@ -30,6 +32,34 @@ struct OriginClient {
     client: reqwest::Client,
     tls: Arc<OriginTls>,
     slots: Arc<Semaphore>,
+    /// RFC 5929 `tls-server-end-point` channel binding of the certificate the server presented on
+    /// its latest response, for Negotiate (Extended Protection).
+    channel_binding: Mutex<Option<Arc<[u8]>>>,
+}
+
+impl OriginClient {
+    fn channel_binding(&self) -> Option<Arc<[u8]>> {
+        self.channel_binding
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Remembers the binding for the certificate the response came with.
+    fn record_certificate(&self, resp: &reqwest::Response) {
+        let Some(der) = resp
+            .extensions()
+            .get::<reqwest::tls::TlsInfo>()
+            .and_then(reqwest::tls::TlsInfo::peer_certificate)
+        else {
+            return;
+        };
+        let binding = tls_server_end_point(der).map(Arc::from);
+        *self
+            .channel_binding
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = binding;
+    }
 }
 
 /// Why a single attempt failed.
@@ -43,6 +73,13 @@ impl From<SvnError> for AttemptError {
     fn from(e: SvnError) -> Self {
         Self::Other(e)
     }
+}
+
+/// Whether a send may ask the [`AuthPrompter`] for credentials or a certificate decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interaction {
+    Allowed,
+    Forbidden,
 }
 
 /// HTTP/1.1 transport with a bounded connection pool per origin.
@@ -69,7 +106,10 @@ impl HttpTransport {
         trust: Arc<dyn TrustStore>,
     ) -> Self {
         Self {
-            auth: AuthManager::new(Arc::clone(&prompter)),
+            auth: AuthManager::new(
+                Arc::clone(&prompter),
+                crate::auth::negotiate::system_provider(),
+            ),
             config,
             prompter,
             trust,
@@ -77,18 +117,60 @@ impl HttpTransport {
         }
     }
 
+    /// Replaces the Negotiate (Kerberos SSO) provider; `None` disables Negotiate. By default the
+    /// platform provider is used when the build has one (see [`crate::auth::negotiate`]).
+    #[must_use]
+    pub fn with_negotiate(mut self, provider: Option<Arc<dyn NegotiateProvider>>) -> Self {
+        self.auth.set_negotiate(provider);
+        self
+    }
+
+    /// Changes how long a Negotiate failure is remembered per host before single sign-on is
+    /// tried again (default [`crate::auth::NEGOTIATE_RETRY_AFTER`]).
+    #[must_use]
+    pub fn with_negotiate_retry_after(mut self, after: Duration) -> Self {
+        self.auth.set_negotiate_retry_after(after);
+        self
+    }
+
     /// Sends a request and returns the response once its headers arrive.
     ///
     /// Handles 401 challenges (prompting through the `AuthPrompter`), transient failures of
     /// idempotent methods, TLS exceptions and same-origin redirects. Statuses other than those
     /// are returned for the caller to interpret; see [`super::classify_status`].
-    pub async fn send(&self, mut req: HttpRequest, cancel: &CancelToken) -> Result<HttpResponse> {
+    pub async fn send(&self, req: HttpRequest, cancel: &CancelToken) -> Result<HttpResponse> {
+        self.send_mode(req, cancel, Interaction::Allowed).await
+    }
+
+    /// Like [`Self::send`], but never asks the [`AuthPrompter`]: only credentials already cached
+    /// for the origin and certificates already accepted are used. A 401 that the cached
+    /// credentials do not satisfy fails with `AuthRequired`, and a certificate that would need a
+    /// decision fails with its TLS error.
+    ///
+    /// Meant for best-effort background work (such as deleting an abandoned commit
+    /// transaction) that must not pop up a prompt after the user has moved on.
+    pub async fn send_unattended(
+        &self,
+        req: HttpRequest,
+        cancel: &CancelToken,
+    ) -> Result<HttpResponse> {
+        self.send_mode(req, cancel, Interaction::Forbidden).await
+    }
+
+    async fn send_mode(
+        &self,
+        mut req: HttpRequest,
+        cancel: &CancelToken,
+        interaction: Interaction,
+    ) -> Result<HttpResponse> {
         validate_url(&req.url)?;
         req.headers.remove(AUTHORIZATION);
         let mut redirects = 0u8;
         loop {
             let origin = self.origin_client(&req.url)?;
-            let resp = self.send_authenticated(&origin, &mut req, cancel).await?;
+            let resp = self
+                .send_authenticated(&origin, &mut req, cancel, interaction)
+                .await?;
             if !is_redirect(resp.status) {
                 return Ok(resp);
             }
@@ -139,6 +221,7 @@ impl HttpTransport {
             client,
             tls,
             slots: Arc::new(Semaphore::new(self.config.effective_connections())),
+            channel_binding: Mutex::default(),
         });
         map.insert(key, Arc::clone(&entry));
         Ok(entry)
@@ -153,6 +236,8 @@ impl HttpTransport {
             .read_timeout(self.config.read_timeout)
             .pool_max_idle_per_host(self.config.effective_connections())
             .user_agent(self.config.user_agent.clone())
+            // Exposes the server certificate per response, for Negotiate channel bindings.
+            .tls_info(true)
             .use_preconfigured_tls(tls_config);
         match &self.config.proxy {
             ProxyConfig::System => {}
@@ -188,14 +273,18 @@ impl HttpTransport {
         origin: &Arc<OriginClient>,
         req: &mut HttpRequest,
         cancel: &CancelToken,
+        interaction: Interaction,
     ) -> Result<HttpResponse> {
-        let mut sent = self.auth.prepare(&req.url)?;
+        let mut sent = self
+            .auth
+            .prepare(&req.url, origin.channel_binding(), cancel)
+            .await?;
         let mut tls_rounds = 0u8;
         let mut round_trips = 0u8;
         let mut per_realm: HashMap<String, u8> = HashMap::new();
         loop {
             cancel.check()?;
-            match self.attempt(origin, req, &sent.header, cancel).await {
+            match self.attempt(origin, req, &mut sent, cancel).await {
                 Ok(resp) if resp.status == StatusCode::UNAUTHORIZED => {
                     let challenges = Challenges::from_headers(&resp.headers);
                     drop(resp);
@@ -204,7 +293,10 @@ impl HttpTransport {
                     let realm_count = per_realm
                         .entry(challenges.basic_realm.clone().unwrap_or_default())
                         .or_default();
-                    *realm_count += 1;
+                    // A rejected Negotiate token does not use up one of the Basic attempts.
+                    if !sent.is_negotiate() {
+                        *realm_count += 1;
+                    }
                     if round_trips > MAX_AUTH_ROUND_TRIPS || *realm_count > MAX_CHALLENGES_PER_REALM
                     {
                         return Err(SvnError::new(
@@ -219,19 +311,37 @@ impl HttpTransport {
                              authenticate with a small request first",
                         ));
                     }
+                    if interaction == Interaction::Forbidden {
+                        return Err(SvnError::new(
+                            ErrorCode::AuthRequired,
+                            "server requested authentication for an unattended request; \
+                             not prompting",
+                        ));
+                    }
                     sent = self
                         .auth
-                        .on_unauthorized(&req.url, &challenges, &sent, cancel)
+                        .on_unauthorized(
+                            &req.url,
+                            &challenges,
+                            &sent,
+                            origin.channel_binding(),
+                            cancel,
+                        )
                         .await?;
                 }
                 Ok(resp) => {
-                    self.auth.on_success(&sent);
+                    self.auth
+                        .on_success(&req.url, &sent, &resp.headers, cancel)
+                        .await?;
                     origin.tls.connected();
                     return Ok(resp);
                 }
                 Err(AttemptError::Tls(problem)) => {
                     tls_rounds += 1;
-                    if tls_rounds > MAX_TLS_ROUNDS || !req.body.is_replayable() {
+                    if tls_rounds > MAX_TLS_ROUNDS
+                        || !req.body.is_replayable()
+                        || interaction == Interaction::Forbidden
+                    {
                         return Err(problem.to_error());
                     }
                     self.resolve_certificate(origin, *problem, cancel).await?;
@@ -301,12 +411,13 @@ impl HttpTransport {
         }
     }
 
-    /// Sends once (plus transient retries for idempotent requests).
+    /// Sends once (plus transient retries for idempotent requests). A retry never resends a
+    /// Negotiate token: `sent` is renewed with a fresh context first.
     async fn attempt(
         &self,
         origin: &OriginClient,
         req: &mut HttpRequest,
-        authorization: &Option<reqwest::header::HeaderValue>,
+        sent: &mut Attached,
         cancel: &CancelToken,
     ) -> std::result::Result<HttpResponse, AttemptError> {
         let permit = tokio::select! {
@@ -320,6 +431,13 @@ impl HttpTransport {
         let mut retries = 0usize;
         loop {
             cancel.check()?;
+            if retries > 0 && sent.is_negotiate() {
+                *sent = self
+                    .auth
+                    .renew(&req.url, sent, origin.channel_binding(), cancel)
+                    .await?;
+            }
+            let authorization = &sent.header;
             let prepared = req.body.prepare().await?;
             let mut rb = origin
                 .client
@@ -352,6 +470,7 @@ impl HttpTransport {
                 Ok(resp) => {
                     let status = resp.status();
                     tracing::debug!(status = status.as_u16(), "http response");
+                    origin.record_certificate(&resp);
                     if retriable
                         && is_transient_status(status.as_u16())
                         && let Some(d) = delay

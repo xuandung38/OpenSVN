@@ -20,7 +20,7 @@ use svn_types::{
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
-use super::merge::{check_proppatch, delete_txn, merge};
+use super::merge::{CommitFailure, check_proppatch, cleanup_txn, merge};
 use super::put::{PutJob, put_empty, require_md5, run_put};
 use crate::ops::update::RaWire;
 
@@ -70,7 +70,16 @@ struct FileState {
 /// a best-effort `DELETE` of the transaction, unless a `MERGE` was already sent (then the
 /// outcome is unknown and deleting could race the commit). Callers that need certainty journal
 /// the name passed to [`CommitObserver::on_txn_created`] and remove leftovers with
-/// [`super::abort_txn`].
+/// [`super::abort_txn`]. That background `DELETE` never prompts for credentials or a
+/// certificate and gives up after a short timeout.
+///
+/// `close_edit` deletes the transaction after a failure only when the transaction was certainly
+/// not merged: the failure came before the `MERGE` was sent, or the server answered the `MERGE`
+/// with a non-2xx status. If the `MERGE` was sent and its result is unknown (cancellation, a
+/// transport failure, an unreadable 2xx answer), the transaction is kept and `close_edit`
+/// fails with [`ErrorCode::CommitOutcomeUnknown`], whose message names the transaction. The
+/// caller then checks the repository (youngest revision, or whether the transaction still
+/// exists) before retrying or calling [`super::abort_txn`].
 pub struct HttpCommitEditor {
     wire: RaWire,
     txn: TxnName,
@@ -222,9 +231,9 @@ impl HttpCommitEditor {
     }
 
     /// Deletes the transaction after a failure; its own failure must not hide the cause.
+    /// Never prompts and gives up after a short timeout (see [`cleanup_txn`]).
     async fn discard_txn(&self) {
-        // Cleanup must work after cancellation, so it uses a fresh token.
-        let _ = delete_txn(&self.wire, &self.txn, &CancelToken::new()).await;
+        let _ = cleanup_txn(&self.wire, &self.txn).await;
     }
 
     async fn finish_upload(&mut self, file: u32) -> Result<()> {
@@ -234,13 +243,14 @@ impl HttpCommitEditor {
         Ok(())
     }
 
-    async fn close_edit_inner(&mut self) -> Result<CommitInfo> {
+    async fn close_edit_inner(&mut self) -> std::result::Result<CommitInfo, CommitFailure> {
         self.cancel.check()?;
         if !self.files.is_empty() || !self.dirs.is_empty() {
             return Err(SvnError::new(
                 ErrorCode::Internal,
                 "commit editor closed while files or directories are still open",
-            ));
+            )
+            .into());
         }
         let tokens = self.locks.clone();
         // From here on the commit may succeed on the server even if this future is dropped.
@@ -507,8 +517,14 @@ impl CommitEditor for HttpCommitEditor {
     async fn close_edit(mut self: Box<Self>) -> Result<CommitInfo> {
         let info = match self.close_edit_inner().await {
             Ok(info) => info,
-            Err(e) => {
+            Err(CommitFailure::NotMerged(e)) => {
                 self.discard_txn().await;
+                self.settled = true;
+                return Err(e);
+            }
+            // The MERGE may still be applied on the server: deleting the transaction could race
+            // it, so it is kept for the caller to reconcile (as libsvn_ra_serf does).
+            Err(CommitFailure::OutcomeUnknown(e)) => {
                 self.settled = true;
                 return Err(e);
             }
@@ -525,11 +541,17 @@ impl CommitEditor for HttpCommitEditor {
         Ok(info)
     }
 
+    /// Deletes the transaction. The `DELETE` never prompts (only cached credentials are used)
+    /// and gives up after a short timeout, since it typically runs after a cancellation.
+    ///
+    /// If this future is dropped before the `DELETE` completes, the delete is not retried
+    /// (neither here nor from `Drop`): the transaction may then remain on the server, and the
+    /// journaled name plus [`super::abort_txn`] remove it.
     async fn abort_edit(mut self: Box<Self>) -> Result<()> {
         // Stop uploads first so nothing writes into the transaction while it is deleted.
         drop(std::mem::take(&mut self.files));
         self.settled = true;
-        delete_txn(&self.wire, &self.txn, &CancelToken::new()).await
+        cleanup_txn(&self.wire, &self.txn).await
     }
 }
 
@@ -544,7 +566,8 @@ impl Drop for HttpCommitEditor {
             let wire = self.wire.clone();
             let txn = self.txn.clone();
             rt.spawn(async move {
-                let _ = delete_txn(&wire, &txn, &CancelToken::new()).await;
+                // Detached: never prompts, and gives up after a short timeout.
+                let _ = cleanup_txn(&wire, &txn).await;
             });
         }
     }

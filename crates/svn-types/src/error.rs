@@ -11,6 +11,21 @@ pub enum ErrorCode {
     Timeout,
     /// Credentials are required or were rejected.
     AuthRequired,
+    /// Negotiate (Kerberos single sign-on) was offered by the server but could not be used.
+    ///
+    /// Returned when:
+    /// - Negotiate fails (no ticket, no SPN for the host, the URL host is an IP address, the
+    ///   system would only offer NTLM, the server rejected the ticket, or this build has no
+    ///   Negotiate support) and the server offers no Basic fallback;
+    /// - the server's mutual-authentication token fails verification, even when Basic is offered
+    ///   (the response is discarded);
+    /// - the repository URL is plain `http://` (tokens are only sent over https);
+    /// - the user picks Negotiate in the `PromptReason::NegotiateFailed` prompt instead of
+    ///   entering Basic credentials.
+    ///
+    /// When Negotiate fails and Basic is offered over https, the user is prompted with
+    /// `PromptReason::NegotiateFailed` instead of receiving this error.
+    NegotiateFailed,
     /// Server refused the operation (authorization).
     Forbidden,
     /// TLS certificate is not trusted.
@@ -60,6 +75,16 @@ pub enum ErrorCode {
     FileInUse,
     /// Operation was cancelled.
     Cancelled,
+    /// A commit's final request (`MERGE`) reached the server, but its answer never arrived or
+    /// could not be read (cancellation, a broken connection, an unreadable success response).
+    /// The commit may or may not have become a revision.
+    ///
+    /// The server transaction is deliberately kept: deleting it could race a commit that is
+    /// still being applied. The message names the transaction; callers that journaled it
+    /// (`CommitObserver::on_txn_created`) reconcile later: if the youngest revision carries the
+    /// commit, it happened; otherwise remove the transaction with `abort_txn`. Never retry the
+    /// commit blindly: it could be applied twice.
+    CommitOutcomeUnknown,
     /// Data on disk or on the wire is corrupt or violates a protocol rule.
     Corrupt,
     /// Server lacks a required capability.

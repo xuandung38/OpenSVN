@@ -166,6 +166,20 @@ impl RaWire {
         send_with(&self.transport, req, body, cancel).await
     }
 
+    /// Sends a protocol request without ever prompting (see
+    /// [`HttpTransport::send_unattended`]); for best-effort background cleanup.
+    pub async fn send_unattended(
+        &self,
+        req: svn_protocol::HttpRequest,
+        cancel: &CancelToken,
+    ) -> Result<HttpResponse> {
+        let body = buffered_body(&req)?;
+        cancel.check()?;
+        self.transport
+            .send_unattended(convert(req, body)?, cancel)
+            .await
+    }
+
     /// Sends a request and fails with the server's error unless the status is 2xx.
     pub async fn send_ok(
         &self,
