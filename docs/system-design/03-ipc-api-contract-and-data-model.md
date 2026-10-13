@@ -203,9 +203,9 @@ CREATE TABLE repo_layout (
   trunk TEXT, branches TEXT, tags TEXT                                -- JSON array, chỉ khi mode='custom'
 );
 CREATE TABLE recent_url (url TEXT PRIMARY KEY, last_used_at TEXT NOT NULL);
-CREATE TABLE trusted_cert (
-  host TEXT NOT NULL, sha256 TEXT NOT NULL, subject TEXT, expires_at TEXT, trusted_at TEXT NOT NULL,
-  PRIMARY KEY (host, sha256)
+CREATE TABLE trusted_cert (               -- khóa theo host + port + sha256: tin cậy một cổng không áp sang dịch vụ khác cùng host
+  host TEXT NOT NULL, port INTEGER NOT NULL, sha256 TEXT NOT NULL, subject TEXT, expires_at TEXT, trusted_at TEXT NOT NULL,
+  PRIMARY KEY (host, port, sha256)
 );
 CREATE TABLE account (                    -- metadata, KHÔNG có mật khẩu; khóa theo origin (không chỉ realm)
   scheme TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, realm TEXT NOT NULL,
