@@ -141,10 +141,14 @@ async fn plan(
             }
         }
     }
-    // Parents before children, deletes before adds at the same path; stable otherwise.
+    // Depth-first editor order: compare paths component by component, so every directory's
+    // children come right after it (`a`, `a/c`, `a-b`; a plain string sort would put `a-b`
+    // between `a` and `a/c` and reopen `a`). Deletes before adds at the same path; stable
+    // otherwise.
     edits.sort_by(|a, b| {
         a.0.as_str()
-            .cmp(b.0.as_str())
+            .split('/')
+            .cmp(b.0.as_str().split('/'))
             .then_with(|| matches!(b.1, Edit::Delete(_)).cmp(&matches!(a.1, Edit::Delete(_))))
     });
     Ok(edits)
@@ -313,4 +317,42 @@ pub async fn move_path(
         dst: dst.clone(),
     };
     commit_ops(session, &[op], commit, cancel).await
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use svn_ra_api::fake::FakeRaSession;
+
+    #[tokio::test]
+    async fn plan_orders_paths_depth_first() {
+        let s = FakeRaSession::new("https://svn.test.local/repos/demo", "uuid-1").unwrap();
+        let p = |s: &str| RelPath::new(s).unwrap();
+        let ops = [
+            RemoteOp::Mkdir(p("a-b")),
+            RemoteOp::Mkdir(p("a/c")),
+            RemoteOp::Mkdir(p("a")),
+            RemoteOp::Mkdir(p("a.d/e")),
+            RemoteOp::Delete {
+                path: p("a"),
+                rev: None,
+            },
+        ];
+        let edits = plan(&s, &ops, &CancelToken::new()).await.unwrap();
+        let order: Vec<(&str, bool)> = edits
+            .iter()
+            .map(|(path, e)| (path.as_str(), matches!(e, Edit::Delete(_))))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("a", true),
+                ("a", false),
+                ("a/c", false),
+                ("a-b", false),
+                ("a.d/e", false),
+            ]
+        );
+    }
 }

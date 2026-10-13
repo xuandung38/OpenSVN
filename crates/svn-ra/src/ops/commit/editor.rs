@@ -63,6 +63,14 @@ struct FileState {
 }
 
 /// Commit editor bound to one server transaction.
+///
+/// End every edit with [`CommitEditor::close_edit`] or [`CommitEditor::abort_edit`]. An editor
+/// dropped without either (a panic, or the caller dropping the future) cannot wait for the
+/// server, so the transaction may outlive it: when a Tokio runtime is available the drop spawns
+/// a best-effort `DELETE` of the transaction, unless a `MERGE` was already sent (then the
+/// outcome is unknown and deleting could race the commit). Callers that need certainty journal
+/// the name passed to [`CommitObserver::on_txn_created`] and remove leftovers with
+/// [`super::abort_txn`].
 pub struct HttpCommitEditor {
     wire: RaWire,
     txn: TxnName,
@@ -77,6 +85,9 @@ pub struct HttpCommitEditor {
     /// Session-relative paths deleted so far; mod_dav removes the lock of a deleted node itself.
     deleted: HashSet<RelPath>,
     slots: Arc<Semaphore>,
+    /// The edit ended (`close_edit` or `abort_edit` ran), or a `MERGE` was sent: `Drop` must not
+    /// delete the transaction.
+    settled: bool,
 }
 
 impl HttpCommitEditor {
@@ -101,6 +112,7 @@ impl HttpCommitEditor {
             files: HashMap::new(),
             deleted: HashSet::new(),
             slots,
+            settled: false,
         }
     }
 
@@ -122,8 +134,10 @@ impl HttpCommitEditor {
     }
 
     /// `If:` header value naming every lock at or below `path` (session-relative) that has not
-    /// been deleted yet, like libsvn_ra_serf's recursive If header: deleting a directory needs
-    /// the tokens of the locked files inside it.
+    /// been deleted yet, like libsvn_ra_serf's `setup_if_header_recursive`. Deleting a directory
+    /// needs the tokens of the locked files inside it; so does creating (`MKCOL`) or copying a
+    /// directory over a path that was just deleted, because mod_dav still sees the locks of the
+    /// old nodes below it (a DAV lock may name a path that does not exist).
     fn recursive_if_header(&self, path: &RelPath) -> Result<Option<String>> {
         let mut parts = Vec::new();
         for (p, token) in &self.locks {
@@ -142,11 +156,25 @@ impl HttpCommitEditor {
             .ok_or_else(|| SvnError::new(ErrorCode::Internal, format!("{what}: unknown directory")))
     }
 
-    /// Resolves a copy source: an absolute URL below the repository root or an absolute
-    /// repository path (`/trunk/a`).
+    /// Resolves a copy source to a repository-relative path. Accepted forms:
+    ///
+    /// - an absolute `http(s)://` URL below the repository root of this server (what
+    ///   libsvn_ra_serf accepts), percent-encoded like any URL;
+    /// - an absolute repository path such as `/trunk/a` (not percent-encoded), which is
+    ///   relative to the repository root, not to the server or the session URL.
     fn copy_source(&self, from: &str) -> Result<RelPath> {
-        if from.starts_with('/') || from.contains("://") {
+        if from.contains("://") {
             self.wire.repo_path_of_url(from)
+        } else if let Some(path) = from.strip_prefix('/') {
+            RelPath::new(path.trim_end_matches('/')).map_err(|e| {
+                SvnError::new(
+                    ErrorCode::UnsafePath,
+                    format!(
+                        "copy source {from:?} is not a valid repository path: {}",
+                        e.message
+                    ),
+                )
+            })
         } else {
             Err(SvnError::new(
                 ErrorCode::UnsafePath,
@@ -155,9 +183,17 @@ impl HttpCommitEditor {
         }
     }
 
+    /// `COPY` into the transaction. A directory copy carries the recursive `If:` header for the
+    /// same reason as `MKCOL` (see [`Self::recursive_if_header`]).
     async fn copy_node(&self, dst: &RelPath, from: (&str, Revnum), kind: NodeKind) -> Result<()> {
         let src = self.copy_source(from.0)?;
-        let req = copy_request(self.wire.urls(), from.1, &src, kind, &self.txn, dst)?;
+        let repo_dst = self.wire.repo_path(dst)?;
+        let mut req = copy_request(self.wire.urls(), from.1, &src, kind, &self.txn, &repo_dst)?;
+        if kind == NodeKind::Dir
+            && let Some(header) = self.recursive_if_header(dst)?
+        {
+            req = req.header("If", header);
+        }
         self.wire.send_ok(req, &self.cancel).await?;
         Ok(())
     }
@@ -182,7 +218,7 @@ impl HttpCommitEditor {
             lock,
         )?;
         let resp = self.wire.send_ok(req, &self.cancel).await?;
-        check_proppatch(&RaWire::read_small(resp).await?)
+        check_proppatch(&RaWire::read_small(resp, &self.cancel).await?)
     }
 
     /// Deletes the transaction after a failure; its own failure must not hide the cause.
@@ -207,6 +243,8 @@ impl HttpCommitEditor {
             ));
         }
         let tokens = self.locks.clone();
+        // From here on the commit may succeed on the server even if this future is dropped.
+        self.settled = true;
         let merged = merge(
             &self.wire,
             &self.txn,
@@ -253,9 +291,14 @@ impl CommitEditor for HttpCommitEditor {
         self.dir(parent, "add_directory")?;
         let repo = self.wire.repo_path(path)?;
         match copy_from {
-            Some(from) => self.copy_node(&repo, from, NodeKind::Dir).await?,
+            Some(from) => self.copy_node(path, from, NodeKind::Dir).await?,
             None => {
-                let req = mkcol_request(self.wire.urls(), &self.txn, &repo)?;
+                let mut req = mkcol_request(self.wire.urls(), &self.txn, &repo)?;
+                // Like ra_serf's setup_add_dir_common_headers: no keep-locks option here, the
+                // locks are kept or released by the MERGE.
+                if let Some(header) = self.recursive_if_header(path)? {
+                    req = req.header("If", header);
+                }
                 self.wire.send_ok(req, &self.cancel).await?;
             }
         }
@@ -299,9 +342,8 @@ impl CommitEditor for HttpCommitEditor {
     ) -> Result<FileId> {
         self.cancel.check()?;
         self.dir(parent, "add_file")?;
-        let repo = self.wire.repo_path(path)?;
         if let Some(from) = copy_from {
-            self.copy_node(&repo, from, NodeKind::File).await?;
+            self.copy_node(path, from, NodeKind::File).await?;
         }
         let id = self.fresh_id();
         self.files.insert(
@@ -467,6 +509,7 @@ impl CommitEditor for HttpCommitEditor {
             Ok(info) => info,
             Err(e) => {
                 self.discard_txn().await;
+                self.settled = true;
                 return Err(e);
             }
         };
@@ -482,14 +525,28 @@ impl CommitEditor for HttpCommitEditor {
         Ok(info)
     }
 
-    async fn abort_edit(self: Box<Self>) -> Result<()> {
+    async fn abort_edit(mut self: Box<Self>) -> Result<()> {
         // Stop uploads first so nothing writes into the transaction while it is deleted.
-        let this = *self;
-        let HttpCommitEditor {
-            wire, txn, files, ..
-        } = this;
-        drop(files);
-        delete_txn(&wire, &txn, &CancelToken::new()).await
+        drop(std::mem::take(&mut self.files));
+        self.settled = true;
+        delete_txn(&self.wire, &self.txn, &CancelToken::new()).await
+    }
+}
+
+impl Drop for HttpCommitEditor {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        // Uploads stop with their handles; then the transaction is deleted in the background.
+        drop(std::mem::take(&mut self.files));
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let wire = self.wire.clone();
+            let txn = self.txn.clone();
+            rt.spawn(async move {
+                let _ = delete_txn(&wire, &txn, &CancelToken::new()).await;
+            });
+        }
     }
 }
 

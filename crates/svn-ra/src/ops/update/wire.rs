@@ -184,9 +184,15 @@ impl RaWire {
         Err(error_of(resp, cancel).await)
     }
 
-    /// Reads a small answer completely (at most 4 MiB).
-    pub async fn read_small(resp: HttpResponse) -> Result<Bytes> {
-        resp.bytes(SMALL_BODY_LIMIT).await
+    /// Reads a small answer completely (at most 4 MiB). Fails with `Cancelled` as soon as
+    /// `cancel` fires (as well as when the token the request was sent with fires).
+    pub async fn read_small(resp: HttpResponse, cancel: &CancelToken) -> Result<Bytes> {
+        cancel.check()?;
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(SvnError::new(ErrorCode::Cancelled, "operation cancelled")),
+            r = resp.bytes(SMALL_BODY_LIMIT) => r,
+        }
     }
 }
 
