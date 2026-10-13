@@ -1,0 +1,10 @@
+svn_version=1.15.0
+prop.svn:keywords=Rev Id
+rev=25
+author=alice
+date_micros=1791884717287308
+utc_offset_secs=0
+url=file:///tmp/opensvn-golden/repo/kw_fixed_interior_dollar_expand_lossy
+root=file:///tmp/opensvn-golden/repo
+tz=UTC
+path=kw_fixed_interior_dollar_expand_lossy

@@ -150,7 +150,12 @@ Chọn thư mục → engine đọc `.svn/wc.db` → hiện URL, revision, forma
 - Username / Password, ☑ Ghi nhớ (lưu vào OS credential store). Lỗi 401 lặp lại → thông báo rõ, không khóa tài khoản (tối đa 3 lần rồi dừng).
 
 ### 4.4 Trust certificate
-Hiển thị host:port, subject, issuer, hiệu lực, SHA-256 fingerprint, lỗi cụ thể. **CA không tin cậy / tự ký**: Từ chối · Tin tạm thời (phiên này) · Tin vĩnh viễn (pin host:port + fingerprint leaf). **Sai hostname / hết hạn / bị thu hồi**: chặn cứng, chỉ có nút Đóng + hướng dẫn liên hệ IT. Cert của host đã pin bị đổi → cảnh báo riêng "Chứng chỉ server đã thay đổi".
+Hiển thị host:port, subject, issuer, hiệu lực, SHA-256 fingerprint, lỗi cụ thể. Bộ nút theo loại lỗi (đóng dialog hoặc Esc luôn = Từ chối):
+| Lỗi | Nút | Ghi chú |
+|---|---|---|
+| CA không tin cậy (`unknown-issuer`) / tự ký (`self-signed`) | **Từ chối** · **Tin tạm thời** (phiên này) · **Tin vĩnh viễn** (pin host:port + fingerprint leaf) | Chỉ hai lỗi này được phép tin |
+| Sai hostname / hết hạn / chưa có hiệu lực / bị thu hồi / lỗi khác | **Đóng** | Chặn cứng, kèm hướng dẫn liên hệ IT. Cert vừa đổi vừa sai hostname được báo là sai hostname |
+| Cert của host đã pin bị đổi (`changed`) | **Từ chối** · **Thay chứng chỉ đã ghim** | Cảnh báo riêng "Chứng chỉ máy chủ đã thay đổi", hiện fingerprint cũ và mới. Không có "Tin tạm thời" và không có "Tin vĩnh viễn" một cú click: nút thay pin chỉ bật sau khi tick "Tôi đã đối chiếu vân tay mới với quản trị viên máy chủ" |
 
 ### 4.5 Switch / New branch / New tag / Copy to new location
 - Switch: chọn từ cây (có layout) hoặc nhập/duyệt URL bất kỳ trong cùng repo (không có layout; `svn switch` yêu cầu cùng repository UUID); nếu có thay đổi local → "Mang thay đổi sang branch mới" (svn switch giữ thay đổi) hoặc "Hủy".
