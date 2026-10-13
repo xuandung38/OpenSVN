@@ -38,13 +38,24 @@ const DEPTHS: {
 
 const NAME_ERRORS: Record<
   FolderNameError,
-  "nameEmpty" | "nameSeparator" | "nameDots" | "nameChars" | "nameTrailing" | "nameReserved"
+  | "nameEmpty"
+  | "nameTooLong"
+  | "nameSeparator"
+  | "nameDots"
+  | "nameFormat"
+  | "nameChars"
+  | "nameTrailing"
+  | "nameAdmin"
+  | "nameReserved"
 > = {
   empty: "nameEmpty",
+  tooLong: "nameTooLong",
   separator: "nameSeparator",
   dots: "nameDots",
+  format: "nameFormat",
   chars: "nameChars",
   trailing: "nameTrailing",
+  admin: "nameAdmin",
   reserved: "nameReserved",
 };
 
@@ -127,8 +138,6 @@ export function CheckoutDialog({
     const usedPicked = picked !== null;
     try {
       const dest = picked ?? (await unwrap(ipc().commands.checkoutRootGrant()));
-      // Grants are single use: whatever happens next, a picked parent must be chosen again.
-      if (usedPicked) setPicked(null);
       const handle = await unwrap(
         ipc().commands.checkout({
           url: trimmedUrl,
@@ -142,10 +151,19 @@ export function CheckoutDialog({
           ignoreExternals,
         }),
       );
+      if (usedPicked) setPicked(null); // grants are single use
       setOpId(handle.opId);
     } catch (e) {
-      if (usedPicked) setNeedsRepick(true);
-      setError(toAppError(e).message);
+      const err = toAppError(e);
+      // The backend checks the folder name before it redeems the grant and returns the refused
+      // name as `detail`; then the picked parent is still valid. Any other refusal may have spent
+      // it, so the parent must be chosen again.
+      const nameRefused = err.code === "invalid-argument" && err.detail === folderName;
+      if (usedPicked && !nameRefused) {
+        setPicked(null);
+        setNeedsRepick(true);
+      }
+      setError(err.message);
     } finally {
       setPending(false);
     }

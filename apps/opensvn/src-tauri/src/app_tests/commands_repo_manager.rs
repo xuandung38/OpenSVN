@@ -87,6 +87,10 @@ async fn bad_folder_names_are_refused_before_the_grant_is_spent() {
         "a:b",
         "q?",
         "bad\0",
+        ".svn",
+        "_SVN.",
+        "COM0",
+        "a\u{202E}b",
     ] {
         let err = commands::checkout(f.state(), request(grant.clone(), Some(bad)))
             .await
@@ -199,6 +203,33 @@ async fn missing_working_copies_are_listed_and_can_be_located() {
             .await
             .is_err()
     );
+    // a working copy of another repository (different UUID) is refused, and the entry keeps
+    // its old root and root URL
+    let before = commands::wc_entries(f.state()).await.unwrap().remove(0);
+    f.engine
+        .simulate_repository(&new, Some("00000000-0000-4000-8000-00000000beef"), None)
+        .unwrap();
+    let err = commands::wc_locate(f.state(), id.clone(), f.grant_dir(&new))
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.contains("another repository"),
+        "{}",
+        err.message
+    );
+    let e = commands::wc_entries(f.state()).await.unwrap().remove(0);
+    assert_eq!(Path::new(&e.root_path), old.as_path());
+    assert_eq!(e.repo_root_url, before.repo_root_url);
+    assert!(e.missing);
+    // same repository (UUID), but relocated to another root URL while it was missing: accepted
+    // below, and the entry takes the new root URL
+    f.engine
+        .simulate_repository(
+            &new,
+            Some(&before.repo_uuid),
+            Some("https://relocated.example/svn/demo"),
+        )
+        .unwrap();
     // a folder already registered under another entry is refused
     f.add_demo_wc().await;
     let err = commands::wc_locate(f.state(), id.clone(), f.grant_dir(&demo_wc_root()))
@@ -214,9 +245,11 @@ async fn missing_working_copies_are_listed_and_can_be_located() {
         .await
         .unwrap();
     assert_eq!(Path::new(&wc.root_path), new.as_path());
+    assert_eq!(wc.repo_root_url, "https://relocated.example/svn/demo");
     let entries = commands::wc_entries(f.state()).await.unwrap();
     let e = entries.iter().find(|e| e.id == id).unwrap();
     assert!(!e.missing && e.last_opened_at.is_some());
+    assert_eq!(e.repo_root_url, "https://relocated.example/svn/demo");
 }
 
 #[tokio::test]
@@ -258,14 +291,20 @@ async fn reveal_shows_items_inside_the_working_copy_only() {
     commands::reveal_in_os(f.state(), id.clone(), "readme.txt".into())
         .await
         .unwrap();
+    let root = parent.path().join("proj").canonicalize().unwrap();
     assert_eq!(
         *f.revealer.revealed.lock().unwrap(),
-        [
-            parent.path().join("proj"),
-            parent.path().join("proj").join("readme.txt")
-        ]
+        [root.clone(), root.join("readme.txt")]
     );
-    for bad in ["../outside", "/etc", "a/../../b", "missing.txt"] {
+    for bad in [
+        "../outside",
+        "/etc",
+        "a/../../b",
+        "missing.txt",
+        ".svn",
+        "C:\\Windows",
+        "readme.txt.",
+    ] {
         assert!(
             commands::reveal_in_os(f.state(), id.clone(), bad.into())
                 .await
@@ -274,6 +313,66 @@ async fn reveal_shows_items_inside_the_working_copy_only() {
         );
     }
     assert_eq!(f.revealer.revealed.lock().unwrap().len(), 2);
+}
+
+/// Versioned symlinks (`svn:special`) are real links on Unix; the file manager would follow them.
+#[cfg(unix)]
+#[tokio::test]
+async fn reveal_refuses_items_reached_through_a_symlink() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new(Duration::ZERO).await;
+    let parent = tempfile::tempdir().unwrap();
+    let id = checkout_into(&f, parent.path(), "proj").await;
+    let wc = parent.path().join("proj");
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("id_rsa"), b"secret").unwrap();
+    std::fs::create_dir(wc.join("inside")).unwrap();
+    std::fs::write(wc.join("inside/file.txt"), b"x").unwrap();
+    symlink(outside.path(), wc.join("docs")).unwrap(); // directory link to outside
+    symlink(outside.path().join("id_rsa"), wc.join("key")).unwrap(); // file link to outside
+    symlink(wc.join("inside"), wc.join("in-link")).unwrap(); // link that stays inside
+    symlink(wc.join("nowhere"), wc.join("dangling")).unwrap(); // dangling link
+    for bad in [
+        "docs",
+        "docs/id_rsa",
+        "key",
+        "in-link",
+        "in-link/file.txt",
+        "dangling",
+        "dangling/x",
+    ] {
+        let err = commands::reveal_in_os(f.state(), id.clone(), bad.into())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument, "{bad}");
+    }
+    assert!(
+        f.revealer.revealed.lock().unwrap().is_empty(),
+        "nothing was revealed"
+    );
+    // the real folder the inside link points at is fine
+    commands::reveal_in_os(f.state(), id.clone(), "inside/file.txt".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        *f.revealer.revealed.lock().unwrap(),
+        [wc.canonicalize().unwrap().join("inside/file.txt")]
+    );
+}
+
+/// The working copy root itself reached through a symlink (e.g. registered via a linked folder)
+/// still reveals items inside it, by their real path.
+#[cfg(unix)]
+#[test]
+fn reveal_target_resolves_a_linked_root_and_stays_inside_it() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(real.join("a.txt"), b"x").unwrap();
+    symlink(&real, dir.path().join("link")).unwrap();
+    let got = crate::os_shell::reveal_target(&dir.path().join("link"), "a.txt").unwrap();
+    assert_eq!(got, real.canonicalize().unwrap().join("a.txt"));
 }
 
 #[tokio::test]

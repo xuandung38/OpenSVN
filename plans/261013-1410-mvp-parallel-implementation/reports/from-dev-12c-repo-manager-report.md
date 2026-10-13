@@ -87,3 +87,47 @@ Date: 2026-10-13 · Branch `feat/12c-repo-manager` (from `feat/12b-fe-wc-m1`, PR
 - Checkout uses only `general.checkoutRoot`/picked parent; "Open recent ▸" (doc 01 §8.2) and grouping by server in the picker are not done.
 - Relative times ("5m ago") come from the existing English-only `relativeTime`.
 - A working copy whose registration fails after a successful checkout yields `CheckedOut { wcId: null }`. The FE only refreshes the list; the user can still use "Add existing…".
+
+## Round 2: merge of main (#73 merged) and review 5506451901
+
+`origin/main` merged with a merge commit and no conflicts. The PR no longer depends on an unmerged branch.
+
+### Blocking items
+1. **`reveal_in_os` and symlinks.** The new `os_shell::reveal_target` does this:
+   - It parses the path with `RelPath::from_server` (server-name rules; `""` means the root).
+   - It refuses any component below the WC root that is a symlink: links to outside, links to inside, and dangling links. This matches `has_symlink_component` in the #62 opener.
+   - It then uses `safe_join` and canonicalizes both the root and the target with `dunce` (so Windows paths carry no `\\?\` prefix), and refuses a target that is not under the root.
+   - It passes the canonical path to the revealer.
+
+   Unix tests cover a directory link to outside (`docs`, `docs/id_rsa`), a file link to outside, a link to inside (`in-link`, `in-link/file.txt`), a dangling link (`dangling`, `dangling/x`), and a WC root that is itself reached through a link. In each refused case the `RecordingRevealer` records nothing. Doc 03 §3.5 is updated.
+2. **`wc_locate` with another repository.** The fake engine gets `simulate_repository(root, uuid, root_url)`. The test checks two cases:
+   - A WC with a different UUID is refused ("another repository"), and the entry keeps its old `root_path` and `repo_root_url`.
+   - The same UUID relocated to another root URL is accepted, and the entry takes the new root URL.
+
+### Non-blocking items
+- **`wc_locate`** now stores `repo_root_url` together with `root_path` (`wc_set_root(id, root, url)`).
+- **`destName`:**
+  - Refuses `.svn` and `_svn` with their case, NFKC, ignorable-code-point and trailing dot/space aliases, plus `SVN~n`. This uses the new `svn_types::is_any_admin_dir_name`, which shares its folding with `is_admin_dir_alias`.
+  - Must also pass `RelPath::from_server` segment rules, so it refuses `COM0`/`LPT0` and the superscript digit forms. The local reserved-name copy is removed.
+  - Refuses Cf format characters (bidi, zero-width, BOM, soft hyphen, tags). It shares `programs::is_deceptive`, which was widened to the full Cf set.
+  - The FE mirror (`validateFolderName`, `isAdminFolderName`) adds the error kinds `tooLong`, `format` and `admin`, each with its own message (en and vi).
+- **Echo suppression** now works in both orders: menu then key, and key then menu. Each echo suppresses exactly one event. New tests check that a menu event 401 ms after the key runs, and that a key press 401 ms after a menu event runs.
+- **Checkout dialog:**
+  - A name refused by the backend (`invalid_argument` whose `detail` is the name) keeps the picked parent; other refusals still ask for it again. This contract is documented on `validate_folder_name` and in doc 03.
+  - Side fix: `toAppError` now unwraps `IpcError`. Before, `toAppError(e)` on an `unwrap` rejection returned `internal` and dropped the code and detail; only the message survived.
+- **Doc 01 §3.2:** the old "Ban đầu…" sentence is replaced. Server grouping and per-WC counts are now marked as a later phase.
+
+### Gates (round 2)
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo clippy -p opensvn --all-targets --features real-engine -- -D warnings` | pass |
+| `cargo test -p opensvn -p opensvn-ipc -p svn-types` | opensvn lib 156 pass. All opensvn-ipc and svn-types targets pass. 0 fail. Includes `committed_bindings_are_up_to_date` |
+| `cargo test -p opensvn --features real-engine` | 212 pass, 0 fail |
+| `pnpm gen:ipc` | regenerated (the `reveal_in_os` doc comment changed); no drift afterwards |
+| `pnpm lint` / `typecheck` / `lint:safety` | pass / pass / pass |
+| `pnpm test` | 191/191 pass (25 files) |
+| `pnpm build` + check-dist | pass |
+
+Not verified: Windows junctions or symlinks on a real Windows machine. The canonical `starts_with` check covers them in principle, but the tests are Unix-only.

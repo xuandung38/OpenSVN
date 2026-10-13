@@ -114,12 +114,18 @@ impl AppDb {
         })
     }
 
-    /// Points a working copy at a new root folder (it was moved). Returns whether a row existed.
-    pub fn wc_set_root(&self, id: &str, root_path: &str) -> Result<bool, DbError> {
+    /// Points a working copy at a new root folder (it was moved) and records the repository root
+    /// URL read from it (it may have been relocated as well). Returns whether a row existed.
+    pub fn wc_set_root(
+        &self,
+        id: &str,
+        root_path: &str,
+        repo_root_url: &str,
+    ) -> Result<bool, DbError> {
         self.db.with(|c| {
             Ok(c.execute(
-                "UPDATE working_copy SET root_path = ?2 WHERE id = ?1",
-                params![id, root_path],
+                "UPDATE working_copy SET root_path = ?2, repo_root_url = ?3 WHERE id = ?1",
+                params![id, root_path, repo_root_url],
             )? > 0)
         })
     }
@@ -169,11 +175,15 @@ mod tests {
         assert_eq!(db.wc_get("a").unwrap().unwrap().name, "Alpha");
         assert_eq!(db.wc_get_by_root("/wc/b").unwrap().unwrap().id, "b");
         assert_eq!(db.wc_get("b").unwrap().unwrap().last_opened_at, None);
-        assert!(db.wc_set_root("b", "/wc/b2").unwrap());
-        assert!(!db.wc_set_root("zz", "/wc/z").unwrap());
-        assert!(db.wc_set_root("b", "/wc/a").is_err(), "root stays unique");
+        assert!(db.wc_set_root("b", "/wc/b2", "https://new/repo").unwrap());
+        assert!(!db.wc_set_root("zz", "/wc/z", "https://x").unwrap());
+        assert!(
+            db.wc_set_root("b", "/wc/a", "https://x").is_err(),
+            "root stays unique"
+        );
         db.wc_touch_opened("b").unwrap();
         let b = db.wc_get_by_root("/wc/b2").unwrap().unwrap();
+        assert_eq!(b.repo_root_url, "https://new/repo");
         assert!(b.last_opened_at.is_some() && !b.added_at.is_empty());
         assert!(db.wc_remove("a").unwrap());
         assert!(!db.wc_remove("a").unwrap());

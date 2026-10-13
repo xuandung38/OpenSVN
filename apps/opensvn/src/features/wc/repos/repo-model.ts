@@ -31,9 +31,48 @@ export function sortByLastOpened(entries: readonly WcEntry[]): WcEntry[] {
   return [...entries].sort((a, b) => (b.lastOpenedAt ?? "").localeCompare(a.lastOpenedAt ?? ""));
 }
 
-export type FolderNameError = "empty" | "separator" | "dots" | "chars" | "trailing" | "reserved";
+export type FolderNameError =
+  | "empty"
+  | "tooLong"
+  | "separator"
+  | "dots"
+  | "format"
+  | "chars"
+  | "trailing"
+  | "admin"
+  | "reserved";
 
-const RESERVED = /^(con|prn|aux|nul|conin\$|conout\$|(com|lpt)[1-9¹²³])$/i;
+/** Longest folder name the backend accepts, in UTF-8 bytes. */
+const MAX_NAME_BYTES = 255;
+
+/** Windows device names, with the digit forms Windows also reserves (0-9 and superscripts). */
+const RESERVED = /^(con|prn|aux|nul|conin\$|conout\$|(com|lpt)[0-9¹²³])$/i;
+
+/**
+ * Invisible format characters (Unicode Cf): zero-width and bidirectional controls, the BOM, soft
+ * hyphen, interlinear annotation and tag characters. A name containing them can display as a
+ * different name. Same set as the backend.
+ */
+const FORMAT_CHARS =
+  /[\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\uFFF9-\uFFFB\u{E0000}-\u{E007F}]/u;
+
+/** Code points some file systems ignore when they compare names. */
+const FS_IGNORABLE = /[\u200C-\u200F\u202A-\u202E\u206A-\u206F\uFEFF]/gu;
+
+/**
+ * Whether `name` would be taken for a Subversion administrative folder (`.svn`, `_svn`, the NTFS
+ * short name `SVN~1`), after compatibility normalization, case folding and dropping the trailing
+ * dots and spaces Windows ignores.
+ */
+export function isAdminFolderName(name: string): boolean {
+  const folded = name
+    .normalize("NFKC")
+    .replace(FS_IGNORABLE, "")
+    .toUpperCase()
+    .toLowerCase()
+    .replace(/[. ]+$/, "");
+  return folded === ".svn" || folded === "_svn" || /^svn~\d+$/.test(folded);
+}
 
 /**
  * Mirrors the backend check of the folder a checkout creates (one portable path component). The
@@ -41,14 +80,16 @@ const RESERVED = /^(con|prn|aux|nul|conin\$|conout\$|(com|lpt)[1-9¹²³])$/i;
  */
 export function validateFolderName(name: string): FolderNameError | null {
   if (name.length === 0) return "empty";
+  if (new TextEncoder().encode(name).length > MAX_NAME_BYTES) return "tooLong";
   if (/[\\/]/.test(name)) return "separator";
   if (name === "." || name === "..") return "dots";
+  if (FORMAT_CHARS.test(name)) return "format";
   // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what we refuse
-  if (/[<>:"|?*\u0000-\u001f\u007f]/.test(name)) return "chars";
+  if (/[<>:"|?*\u0000-\u001f\u007f-\u009f]/.test(name)) return "chars";
   if (/[. ]$/.test(name) || name.startsWith(" ")) return "trailing";
+  if (isAdminFolderName(name)) return "admin";
   const stem = (name.split(".")[0] ?? name).trimEnd();
   if (RESERVED.test(stem)) return "reserved";
-  if (new TextEncoder().encode(name).length > 255) return "chars";
   return null;
 }
 
@@ -68,10 +109,11 @@ export function suggestFolderName(url: string): string {
   if (name.toLowerCase() === "trunk" && segs.length > 1) name = segs.at(-2) ?? name;
   name = name
     // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are replaced
-    .replace(/[\\/<>:"|?*\u0000-\u001f\u007f]/g, "-")
+    .replace(/[\\/<>:"|?*\u0000-\u001f\u007f-\u009f]/g, "-")
+    .replace(new RegExp(FORMAT_CHARS.source, "gu"), "")
     .replace(/[. ]+$/, "")
     .trimStart();
-  if (name === "." || name === ".." || validateFolderName(name) === "reserved") return "";
+  if (validateFolderName(name) !== null) return "";
   return name;
 }
 

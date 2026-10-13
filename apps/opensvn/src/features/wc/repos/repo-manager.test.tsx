@@ -7,6 +7,7 @@ import { resetWcMock } from "../../../ipc/mock/wc-mock-commands";
 import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../../test-utils";
 import {
   filterEntries,
+  isAdminFolderName,
   joinDisplay,
   pathTail,
   sortByLastOpened,
@@ -73,7 +74,19 @@ describe("repo model", () => {
   });
 
   test("folder names mirror the backend rules", () => {
-    for (const ok of ["project", "my repo", "a.b", ".hidden", "COM10", "con-tools"]) {
+    for (const ok of [
+      "project",
+      "my repo",
+      "a.b",
+      ".hidden",
+      "COM10",
+      "con-tools",
+      "svn",
+      "my_svn",
+      ".svnignore",
+      "a".repeat(255),
+      "é".repeat(127),
+    ]) {
       expect(validateFolderName(ok)).toBeNull();
     }
     expect(validateFolderName("")).toBe("empty");
@@ -86,7 +99,29 @@ describe("repo model", () => {
     expect(validateFolderName(" x")).toBe("trailing");
     expect(validateFolderName("nul.txt")).toBe("reserved");
     expect(validateFolderName("Lpt3")).toBe("reserved");
-    expect(validateFolderName("a".repeat(256))).toBe("chars");
+    expect(validateFolderName("a".repeat(256))).toBe("tooLong");
+    expect(validateFolderName("é".repeat(128))).toBe("tooLong"); // 256 UTF-8 bytes
+    for (const reserved of ["COM0", "lpt0.log", "LPT²", "com³.txt", "COM¹"]) {
+      expect(validateFolderName(reserved)).toBe("reserved");
+    }
+    for (const admin of [".svn", ".SVN", "_svn", "_SvN", "\uFF3Fsvn", "SVN~1", "_ſvn"]) {
+      expect(validateFolderName(admin), admin).toBe("admin");
+    }
+    expect(validateFolderName("_svn.")).toBe("trailing");
+    // ignorable code points are dropped before comparing (the name is refused as "format" first)
+    expect(isAdminFolderName("_s\u200Dvn")).toBe(true);
+    expect(isAdminFolderName("svn")).toBe(false);
+    for (const hidden of [
+      "a\u202Egnp.exe",
+      "a\u2066b",
+      "zero\u200Bwidth",
+      "bom\uFEFF",
+      "soft\u00ADhyphen",
+      "tag\u{E0041}",
+    ]) {
+      expect(validateFolderName(hidden), hidden).toBe("format");
+    }
+    expect(validateFolderName("c1\u0085")).toBe("chars");
   });
 
   test("suggested folder names", () => {
@@ -96,6 +131,8 @@ describe("repo model", () => {
     expect(suggestFolderName("svn://h/r/My%20Project")).toBe("My Project");
     expect(suggestFolderName("https://h/r/a:b.")).toBe("a-b");
     expect(suggestFolderName("https://h/r/CON")).toBe("");
+    expect(suggestFolderName("https://h/r/_svn")).toBe("");
+    expect(suggestFolderName("https://h/r/a%E2%80%AEb")).toBe("ab");
     expect(suggestFolderName("not a url")).toBe("");
   });
 
@@ -213,7 +250,7 @@ test("Shift+F10 opens the actions of the active row: reveal and copy URL", async
   expect(await navigator.clipboard.readText()).toBe("https://svn.example.com/repos/game/trunk");
 });
 
-test("footer and File menu events open checkout and add existing; a menu echo of a key is ignored", async () => {
+test("footer and File menu events open checkout and add existing; a menu/key echo is ignored in either order", async () => {
   await openPicker();
   await user().click(screen.getByRole("button", { name: "Checkout repository…" }));
   expect(
@@ -236,8 +273,31 @@ test("footer and File menu events open checkout and add existing; a menu echo of
   const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
   await user().keyboard("{Control>}o{/Control}");
   await act(async () => mockEmit("menu://add-working-copy"));
-  now.mockRestore();
   await waitFor(() => expect(calls("pathPick")).toBe(1));
   expect(await screen.findByText(/Added working copy/)).toBeTruthy();
   expect(calls("pathPick")).toBe(1);
+
+  // The other order (Windows/Linux can deliver the menu event first): still shown once.
+  now.mockReturnValue(2_000_000);
+  await act(async () => mockEmit("menu://add-working-copy"));
+  now.mockReturnValue(2_000_050);
+  await user().keyboard("{Control>}o{/Control}");
+  await waitFor(() => expect(calls("pathPick")).toBe(2));
+  expect(calls("pathPick")).toBe(2);
+
+  // A menu event more than 400 ms after the key is a new request, not an echo: it runs.
+  now.mockReturnValue(3_000_000);
+  await user().keyboard("{Control>}o{/Control}");
+  await waitFor(() => expect(calls("pathPick")).toBe(3));
+  now.mockReturnValue(3_000_401);
+  await act(async () => mockEmit("menu://add-working-copy"));
+  await waitFor(() => expect(calls("pathPick")).toBe(4));
+  // ...and so is a key press more than 400 ms after a menu event.
+  now.mockReturnValue(4_000_000);
+  await act(async () => mockEmit("menu://add-working-copy"));
+  await waitFor(() => expect(calls("pathPick")).toBe(5));
+  now.mockReturnValue(4_000_401);
+  await user().keyboard("{Control>}o{/Control}");
+  await waitFor(() => expect(calls("pathPick")).toBe(6));
+  now.mockRestore();
 });

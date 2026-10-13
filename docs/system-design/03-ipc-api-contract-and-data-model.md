@@ -106,7 +106,7 @@ type Layout =
 | `wc_open` | `{ wcId }` → bắt đầu watcher + status nền | `WorkingCopy` |
 | `wc_close` | `{ wcId }` | `void` |
 | `wc_entries` | — (trình quản lý repository) | `WcEntry[]`: mọi WC đã đăng ký kể cả WC mất/đã di chuyển (`wc_list` bỏ qua chúng) |
-| `wc_locate` | `{ wcId, grant: PathGrantId }` (thư mục mới của WC đã bị di chuyển; phải cùng repo UUID, chưa đăng ký dưới mục khác) | `WorkingCopy` |
+| `wc_locate` | `{ wcId, grant: PathGrantId }` (thư mục mới của WC đã bị di chuyển; phải cùng repo UUID, chưa đăng ký dưới mục khác; repo root URL được cập nhật theo WC tìm thấy, vì WC có thể đã relocate) | `WorkingCopy` |
 | `recent_urls` | — | `string[]` (20 URL gần nhất, mới nhất trước) |
 | `checkout_root_grant` | — | `PathGrantInfo`: grant thư mục cho `general.checkoutRoot` (Rust tạo thư mục nếu thiếu; `~` = thư mục home) |
 | `checkout_root_choose` | — | `Settings`: Rust mở dialog chọn thư mục native và lưu `general.checkoutRoot` (không đổi nếu hủy) |
@@ -136,7 +136,7 @@ interface WcEntry {
 ### 3.3 Thao tác ghi trên WC (đều trả `OperationHandle`)
 | Command | Input |
 |---|---|
-| `checkout` | `{ url, dest: PathGrantId, destName: string \| null, rev?, depth: Depth, sparse?: SparseSpec, format: 31 \| 32, storePristine, ignoreExternals }`. Có `destName`: `dest` là thư mục cha, WC được tạo trong thư mục con mới `destName` (một thành phần đường dẫn: không `/` `\\`, không `.`/`..`, không ký tự `<>:"\|?*`/điều khiển, không tên dành riêng Windows `CON`/`NUL`/`COM1`…, không kết thúc bằng dấu chấm/khoảng trắng, ≤ 255 byte; kiểm trước khi dùng grant). Không có `destName`: chính `dest` là gốc WC. Đích đã tồn tại mà không rỗng (hoặc là file/symlink) bị từ chối. Thành công → WC được đăng ký, `op://finished` trả `{ kind: 'checkedOut', wcId, newRev }`; thất bại/hủy → thư mục do lần checkout này tạo được xóa nếu vẫn rỗng |
+| `checkout` | `{ url, dest: PathGrantId, destName: string \| null, rev?, depth: Depth, sparse?: SparseSpec, format: 31 \| 32, storePristine, ignoreExternals }`. Có `destName`: `dest` là thư mục cha, WC được tạo trong thư mục con mới `destName` (một thành phần đường dẫn: không `/` `\\`, không `.`/`..`, không ký tự `<>:"\|?*`/điều khiển, không ký tự định dạng ẩn (Unicode Cf: bidi, zero-width, BOM…), không tên thư mục quản trị `.svn`/`_svn` và các biến thể (hoa/thường, Unicode, dấu chấm/khoảng trắng cuối, `SVN~1`), không tên dành riêng Windows `CON`/`NUL`/`COM0`–`COM9`/`LPT¹`…, không kết thúc bằng dấu chấm/khoảng trắng, ≤ 255 byte; kiểm trước khi dùng grant; lỗi tên là `invalid_argument` với `detail` = tên bị từ chối, khi đó grant chưa bị dùng). Không có `destName`: chính `dest` là gốc WC. Đích đã tồn tại mà không rỗng (hoặc là file/symlink) bị từ chối. Thành công → WC được đăng ký, `op://finished` trả `{ kind: 'checkedOut', wcId, newRev }`; thất bại/hủy → thư mục do lần checkout này tạo được xóa nếu vẫn rỗng |
 | `update` | `{ wcId, paths?, rev?, depth? }` |
 | `switch` | `{ wcId, url, rev? }` |
 | `commit` | `{ wcId, paths, message, keepLocks, autoAddRemove: true }` |
@@ -177,7 +177,7 @@ interface WcEntry {
 | `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.language"`, `patch` chỉ chứa khóa cần đổi. `SettingsPatch` **không có** các khóa chạy chương trình (`diff.externalTool`, `diff.mergeTool`, `tools.editor`, `tools.terminal`) và **không có** `general.checkoutRoot` (nơi app ghi; chỉ đổi qua `checkout_root_choose`); khóa lạ bị từ chối khi deserialize |
 | `program_choose { kind, args }`, `program_clear { kind }` | Đặt/xóa chương trình ngoài (`kind`: `diff-tool` \| `merge-tool` \| `editor` \| `terminal`). Rust mở dialog chọn file native rồi dialog xác nhận native (mỗi tham số một dòng, có quote; từ chối ký tự điều khiển/bidi); trả `Settings` mới (không đổi nếu người dùng hủy) |
 | `path_pick { request }` | Dialog native chọn thư mục / file / nơi lưu (`PickRequest`), trả `PathGrantInfo \| null` (xem §3.6) |
-| `reveal_in_os { wcId, path }` | Hiện mục trong trình quản lý file; `path` là relpath trong WC, `""` = thư mục gốc WC. Mục không tồn tại → lỗi |
+| `reveal_in_os { wcId, path }` | Hiện mục trong trình quản lý file; `path` là relpath trong WC (quy tắc tên như từ server), `""` = thư mục gốc WC. Mục không tồn tại → lỗi. Không thành phần nào dưới gốc WC được là symlink (kể cả symlink trỏ vào trong WC hoặc symlink hỏng), và đích sau khi canonicalize phải nằm trong gốc WC đã canonicalize; đường dẫn canonical được đưa cho trình quản lý file |
 | `open_external { wcId, path, with: 'default' \| 'editor' \| 'terminal' }` | Tích hợp OS |
 | `diagnostics_export` | Tạo gói chẩn đoán zip, trả đường dẫn |
 

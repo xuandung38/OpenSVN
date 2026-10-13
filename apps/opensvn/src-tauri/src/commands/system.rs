@@ -94,7 +94,8 @@ pub async fn path_pick(
 }
 
 /// Shows a working copy item in the file manager. `path` is relative to the working copy root;
-/// an empty path reveals the root folder itself.
+/// an empty path reveals the root folder itself. Items reached through a symbolic link are
+/// refused, so the file manager never opens a folder outside the working copy.
 #[tauri::command]
 #[specta::specta]
 pub async fn reveal_in_os(
@@ -104,19 +105,7 @@ pub async fn reveal_in_os(
 ) -> Result<(), AppError> {
     guard(async {
         let resolved = state.wcs.resolve(&wc_id)?;
-        let mut target = resolved.wc.root.clone();
-        if !path.is_empty() {
-            let rel = svn_types::RelPath::new(&path).map_err(|e| AppError::from(&e))?;
-            for part in rel.components() {
-                target.push(part);
-            }
-        }
-        if std::fs::symlink_metadata(&target).is_err() {
-            return Err(crate::errors::invalid_argument(
-                "The folder no longer exists. Locate the working copy or remove it from the list.",
-            )
-            .with_path(target.to_string_lossy()));
-        }
+        let target = crate::os_shell::reveal_target(&resolved.wc.root, &path)?;
         state.revealer.reveal(&target)
     })
     .await

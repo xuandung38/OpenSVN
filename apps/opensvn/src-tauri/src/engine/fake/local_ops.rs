@@ -382,4 +382,23 @@ impl FakeEngine {
         }
         Ok(())
     }
+
+    /// Pretends the working copy at `root` belongs to another repository (`uuid`) or was relocated
+    /// to another repository root URL.
+    pub fn simulate_repository(
+        &self,
+        root: &Path,
+        uuid: Option<&str>,
+        repo_root_url: Option<&str>,
+    ) -> Result<(), SvnError> {
+        self.with_wc(root, |wc| {
+            if let Some(u) = uuid {
+                wc.uuid = u.to_owned();
+            }
+            if let Some(r) = repo_root_url {
+                wc.repo_root_url = r.to_owned();
+            }
+            Ok(())
+        })
+    }
 }

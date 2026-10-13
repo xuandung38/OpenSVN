@@ -8,8 +8,9 @@ export type MainView = "changes" | "history" | "browse";
 
 /**
  * A native menu item and its accelerator can both reach the WebView for one key press (the menu
- * event and the keydown). A menu event this soon after the same action ran from the keyboard is
- * the echo and is ignored.
+ * event and the keydown), in either order: on macOS the keydown usually comes first, on Windows
+ * and Linux the menu event can. Whichever arrives second within this window after the same action
+ * ran from the other source is the echo and is ignored.
  */
 export const MENU_ECHO_MS = 400;
 
@@ -40,7 +41,11 @@ export function useWcShortcuts({
   latest.current = { session, actions, ...props };
 
   useEffect(() => {
+    // When each action last ran from the keyboard and from the native menu.
     const lastKey = new Map<ShortcutId, number>();
+    const lastMenu = new Map<ShortcutId, number>();
+    const isEcho = (from: Map<ShortcutId, number>, id: ShortcutId) =>
+      Date.now() - (from.get(id) ?? Number.NEGATIVE_INFINITY) < MENU_ECHO_MS;
     const run = (id: ShortcutId): boolean => {
       const {
         session: s,
@@ -131,7 +136,14 @@ export function useWcShortcuts({
       // Dialogs are modal: shortcuts must not fire behind them.
       if (document.querySelector("dialog[open]")) return;
       for (const id of ids) {
-        if (matchShortcut(e, id) && run(id)) {
+        if (!matchShortcut(e, id)) continue;
+        if (isEcho(lastMenu, id)) {
+          // The menu already ran it for this key press.
+          lastMenu.delete(id);
+          e.preventDefault();
+          return;
+        }
+        if (run(id)) {
           lastKey.set(id, Date.now());
           e.preventDefault();
           return;
@@ -156,8 +168,11 @@ export function useWcShortcuts({
       };
       const id = map[name];
       if (!id) return;
-      if (Date.now() - (lastKey.get(id) ?? Number.NEGATIVE_INFINITY) < MENU_ECHO_MS) return;
-      run(id);
+      if (isEcho(lastKey, id)) {
+        lastKey.delete(id);
+        return;
+      }
+      if (run(id)) lastMenu.set(id, Date.now());
     });
     return () => {
       window.removeEventListener("keydown", onKey);

@@ -43,13 +43,13 @@ const err = (message: string): Promise<{ status: "error"; error: AppError }> =>
     error: { code: "internal", message, detail: null, path: null, retryable: false, actions: null },
   });
 
-const errCode = (code: AppError["code"], message: string) =>
+const errCode = (code: AppError["code"], message: string, detail: string | null = null) =>
   Promise.resolve({
     status: "error" as const,
     error: {
       code,
       message,
-      detail: null,
+      detail,
       path: null,
       retryable: false,
       actions: null,
