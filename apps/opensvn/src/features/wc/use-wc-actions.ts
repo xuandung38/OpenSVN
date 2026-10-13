@@ -70,6 +70,11 @@ export function useWcActions() {
         if (!wcId) return;
         await attempt(() => unwrap(ipc().commands.openExternal(wcId, path, how)));
       },
+      /** Opens the file's base-vs-working diff in the configured external diff tool. */
+      async openExternalDiff(path: string) {
+        if (!wcId) return;
+        await attempt(() => unwrap(ipc().commands.diffExternal({ kind: "wc", wcId, path })));
+      },
       async copyPath(path: string, relative: boolean) {
         const text = relative || !wc ? path : `${wc.rootPath}/${path}`;
         try {

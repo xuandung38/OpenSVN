@@ -21,6 +21,7 @@ tauri-build.workspace = true
 [dependencies]
 opensvn-ipc = { path = "../../../crates/opensvn-ipc" }
 svn-types.workspace = true
+svn-diff.workspace = true
 # `fake` ships the in-memory repository that backs FakeEngine (the default engine until the real
 # engine is registered behind the `real-engine` feature).
 svn-ra-api = { workspace = true, features = ["fake"] }

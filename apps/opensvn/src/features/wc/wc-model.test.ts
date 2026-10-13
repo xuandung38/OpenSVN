@@ -6,8 +6,6 @@ import {
   buildRows,
   changedFiles,
   checkCommit,
-  DISPLAY_MAX_COST,
-  estimateDiffCost,
   extensionPattern,
   fileGlyph,
   filterFiles,
@@ -131,15 +129,6 @@ test("message history is newest first, de-duplicated, capped and survives corrup
   expect(loadMessageHistory(memoryStorage("{not json"))).toEqual([]);
   expect(loadMessageHistory(memoryStorage('[1,"ok",""]'))).toEqual(["ok"]);
   expect(loadMessageHistory(null)).toEqual([]);
-});
-
-test("diff cost: small edits are cheap, disjoint large files exceed the display budget", () => {
-  const a = Array.from({ length: 1000 }, (_, i) => `line ${i}`).join("\n");
-  expect(estimateDiffCost(a, a.replace("line 500", "changed"))).toBeLessThan(DISPLAY_MAX_COST);
-  const left = Array.from({ length: 5000 }, (_, i) => `a${i}`).join("\n");
-  const right = Array.from({ length: 5000 }, (_, i) => `b${i}`).join("\n");
-  expect(estimateDiffCost(left, right)).toBeGreaterThan(DISPLAY_MAX_COST);
-  expect(estimateDiffCost("", "")).toBe(0);
 });
 
 test("helpers: extension pattern, checkout url, wc path url, safe relative path", () => {

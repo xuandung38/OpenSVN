@@ -18,6 +18,7 @@ const NO_DIFF: Omit<FileDiff, "path"> = {
   propChanges: [],
   image: null,
   tooLarge: null,
+  tooComplex: null,
 };
 
 function status(path: string, patch: Partial<FileStatus>): FileStatus {
@@ -37,11 +38,6 @@ function status(path: string, patch: Partial<FileStatus>): FileStatus {
     size: 4096,
     ...patch,
   };
-}
-
-/** Lines `a-0..a-N` vs `b-0..b-N`: nothing in common, so the diff cost exceeds DISPLAY_MAX_COST. */
-function disjointLines(prefix: string, n: number): string {
-  return Array.from({ length: n }, (_, i) => `${prefix}-${i}`).join("\n");
 }
 
 /** A fresh copy of the demo status of the main working copy (plus files for every diff state). */
@@ -83,11 +79,8 @@ export function mockWcDiff(path: string, forceLarge: boolean): FileDiff {
     case "assets/models/crate.fbx":
       return { ...base, binary: true, mime: "application/octet-stream" };
     case "data/big-table.csv":
-      return {
-        ...base,
-        left: side(disjointLines("a", 6000), "base"),
-        right: side(disjointLines("b", 6000), "working"),
-      };
+      // Over the backend's display budget: flagged, sides omitted (doc 03 `FileDiff.tooComplex`).
+      return { ...base, tooComplex: true };
     case "logs/huge-trace.log":
       return forceLarge
         ? {

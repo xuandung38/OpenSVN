@@ -70,6 +70,7 @@ fn build_state<R: tauri::Runtime>(
         events: Arc::new(ops::TauriEvents::new(app.handle().clone())),
         picker: Arc::new(programs::NativeProgramPicker),
         path_picker: Arc::new(path_grants::NativePathPicker),
+        launcher: Arc::new(programs::NativeLauncher),
     })
     .map_err(|e| startup_error(format!("{} {}", e.message, e.detail.unwrap_or_default())))
 }

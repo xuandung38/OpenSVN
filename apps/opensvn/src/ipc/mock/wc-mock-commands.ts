@@ -8,6 +8,7 @@ import type {
   CheckoutRequest,
   CommitRequest,
   DiffGetRequest,
+  DiffTarget,
   FileStatus,
   IgnoreAddRequest,
   LockRequest,
@@ -20,7 +21,7 @@ import type {
   UpdateRequest,
   WorkingCopy,
 } from "../bindings";
-import { MOCK_WC_ID, mockWorkingCopies } from "./data";
+import { MOCK_WC_ID, mockSettings, mockWorkingCopies } from "./data";
 import { MOCK_REPO_ROOT, MOCK_YOUNGEST, mockRevDiff } from "./remote-data";
 import { freshMainStatus, mockWcDiff } from "./wc-mock-fixtures";
 
@@ -174,6 +175,22 @@ export function wcMockCommands(deps: MockDeps) {
           ? mockWcDiff(req.target.path, req.forceLarge === true)
           : mockRevDiff("/trunk/src/engine/renderer.ts"),
       ),
+    diffExternal: (target: DiffTarget) => {
+      if (!mockSettings["diff.externalTool"]) {
+        return Promise.resolve({
+          status: "error" as const,
+          error: {
+            code: "invalid-argument",
+            message: "No external diff tool is configured. Choose one in Settings.",
+            detail: null,
+            path: "path" in target ? target.path : null,
+            retryable: false,
+            actions: ["open-settings"],
+          } satisfies AppError,
+        });
+      }
+      return deps.ok(null);
+    },
     changelistSet: (wcId: string, paths: string[], name: string | null) => {
       setStatus(
         deps,

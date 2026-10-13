@@ -37,6 +37,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "status_refresh",
     "status_remote",
     "diff_get",
+    "diff_external",
     "changelist_set",
     "ignore_add",
     "mark_move",

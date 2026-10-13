@@ -15,7 +15,7 @@ use svn_types::{ErrorCode, NodeKind, RelPath, Revnum, SvnError};
 
 use super::FakeEngine;
 use super::state::rel;
-use super::text::{is_binary, match_lines, text_side};
+use super::text::{exceeds_display_budget, is_binary, match_lines, text_side};
 use crate::engine::context::{OpContext, ProgressUpdate};
 use crate::engine::facade::{DiffOptions, EditOp, LockScope, LogScope, RemoteEditPlan, WcRef};
 
@@ -200,22 +200,34 @@ impl FakeEngine {
         path: &str,
         left: Option<(Vec<u8>, String)>,
         right: Option<(Vec<u8>, String)>,
-    ) -> FileDiff {
+        opts: DiffOptions,
+        ctx: &OpContext,
+    ) -> Result<FileDiff, SvnError> {
         let binary = [&left, &right]
             .iter()
             .any(|s| s.as_ref().is_some_and(|(d, _)| is_binary(d)));
+        let too_complex = !binary
+            && !opts.full_text
+            && exceeds_display_budget(
+                left.as_ref().map_or(&[][..], |(d, _)| d),
+                right.as_ref().map_or(&[][..], |(d, _)| d),
+                opts.ignore_whitespace,
+                ctx,
+            )?;
+        let keep_sides = !binary && !too_complex;
         let side = |s: Option<(Vec<u8>, String)>| s.map(|(d, label)| text_side(&d, label));
-        FileDiff {
+        Ok(FileDiff {
             path: path.to_owned(),
             binary,
             mime: binary.then(|| "application/octet-stream".to_owned()),
-            left: if binary { None } else { side(left) },
-            right: if binary { None } else { side(right) },
+            left: if keep_sides { side(left) } else { None },
+            right: if keep_sides { side(right) } else { None },
             hunks: None,
             prop_changes: Vec::new(),
             image: None,
             too_large: None,
-        }
+            too_complex: too_complex.then_some(true),
+        })
     }
 
     pub(super) async fn do_diff_wc(
@@ -223,7 +235,7 @@ impl FakeEngine {
         wc: &WcRef,
         path: &str,
         against: Option<Rev>,
-        _opts: DiffOptions,
+        opts: DiffOptions,
         ctx: &OpContext,
     ) -> Result<FileDiff, SvnError> {
         let rp = rel(path)?;
@@ -259,7 +271,7 @@ impl FakeEngine {
             .work
             .as_ref()
             .map(|b| (b.to_vec(), format!("{rp} (working)")));
-        Ok(Self::diff_of(path, left, right))
+        Self::diff_of(path, left, right, opts, ctx)
     }
 
     pub(super) async fn do_diff_rev(
@@ -267,7 +279,7 @@ impl FakeEngine {
         url: &str,
         from: Option<Rev>,
         to: Rev,
-        _opts: DiffOptions,
+        opts: DiffOptions,
         ctx: &OpContext,
     ) -> Result<FileDiff, SvnError> {
         let (session, path) = self.locate(url)?;
@@ -291,7 +303,7 @@ impl FakeEngine {
         };
         let left = read(from).await?.map(|d| (d, format!("{name}@r{from}")));
         let right = read(to.0).await?.map(|d| (d, format!("{name}@r{}", to.0)));
-        Ok(Self::diff_of(&name, left, right))
+        Self::diff_of(&name, left, right, opts, ctx)
     }
 
     pub(super) async fn do_log(
@@ -774,5 +786,64 @@ fn map_log_entry(e: svn_types::LogEntry) -> LogEntry {
         message: e.message.unwrap_or_default(),
         changed_paths: (!paths.is_empty()).then_some(paths),
         has_children: Some(e.has_children),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn lines(rev: bool) -> Vec<u8> {
+        let mut v: Vec<usize> = (0..20_000).collect();
+        if rev {
+            v.reverse();
+        }
+        v.iter()
+            .flat_map(|i| format!("line {i}\n").into_bytes())
+            .collect()
+    }
+
+    type Side = Option<(Vec<u8>, String)>;
+
+    fn sides(l: Vec<u8>, r: Vec<u8>) -> (Side, Side) {
+        (Some((l, "l".into())), Some((r, "r".into())))
+    }
+
+    #[test]
+    fn a_diff_over_the_display_budget_is_flagged_and_sent_without_sides() {
+        let (l, r) = sides(lines(false), lines(true));
+        let ctx = OpContext::detached();
+        let d = FakeEngine::diff_of("big.txt", l, r, DiffOptions::default(), &ctx).unwrap();
+        assert_eq!(d.too_complex, Some(true));
+        assert!(d.left.is_none() && d.right.is_none() && !d.binary);
+    }
+
+    #[test]
+    fn full_text_skips_the_budget_for_the_external_tool() {
+        let (l, r) = sides(lines(false), lines(true));
+        let opts = DiffOptions {
+            full_text: true,
+            ..DiffOptions::default()
+        };
+        let d = FakeEngine::diff_of("big.txt", l, r, opts, &OpContext::detached()).unwrap();
+        assert_eq!(d.too_complex, None);
+        assert!(d.left.unwrap().content.starts_with("line 0\n"));
+        assert!(d.right.unwrap().content.starts_with("line 19999\n"));
+    }
+
+    #[test]
+    fn an_ordinary_edit_keeps_both_sides() {
+        let (l, r) = sides(b"a\nb\nc\n".to_vec(), b"a\nB\nc\n".to_vec());
+        let d = FakeEngine::diff_of(
+            "s.txt",
+            l,
+            r,
+            DiffOptions::default(),
+            &OpContext::detached(),
+        )
+        .unwrap();
+        assert_eq!(d.too_complex, None);
+        assert_eq!(d.right.unwrap().content, "a\nB\nc\n");
     }
 }

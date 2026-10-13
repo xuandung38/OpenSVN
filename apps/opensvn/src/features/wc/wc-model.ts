@@ -1,4 +1,4 @@
-import type { FileStatus, TextSide } from "../../ipc/bindings";
+import type { FileStatus } from "../../ipc/bindings";
 import { type StatusCode, statusCode } from "../../lib/status";
 
 /** Status glyph of a changed file, or `null` when the row is not a local change (normal, ignored...). */
@@ -193,52 +193,6 @@ export function pushMessageHistory(
     // Storage full or blocked: history is a convenience, never fail a commit over it.
   }
   return next;
-}
-
-/**
- * Work budget in LCS steps the backend uses for display diffs (`svn_diff::DISPLAY_MAX_COST`). Above
- * it the backend gives up (`DiffError::TooComplex`) and the UI offers an external tool instead of
- * retrying.
- */
-export const DISPLAY_MAX_COST = 10_000_000;
-
-/**
- * Lower bound of the Myers cost, used to refuse rendering a diff the backend would have refused:
- * after trimming the common head/tail, cost ~ (n + m) * D where D is at least the number of lines
- * with no counterpart on the other side.
- */
-export function estimateDiffCost(left: string, right: string): number {
-  const a = left.split("\n");
-  const b = right.split("\n");
-  let start = 0;
-  while (start < a.length && start < b.length && a[start] === b[start]) start++;
-  let endA = a.length;
-  let endB = b.length;
-  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
-    endA--;
-    endB--;
-  }
-  const counts = new Map<string, number>();
-  for (let i = start; i < endA; i++) {
-    const line = a[i] as string;
-    counts.set(line, (counts.get(line) ?? 0) + 1);
-  }
-  let matched = 0;
-  for (let i = start; i < endB; i++) {
-    const line = b[i] as string;
-    const c = counts.get(line) ?? 0;
-    if (c > 0) {
-      counts.set(line, c - 1);
-      matched++;
-    }
-  }
-  const n = endA - start;
-  const m = endB - start;
-  return (n + m) * (n - matched + (m - matched));
-}
-
-export function isTooComplex(left: TextSide | null, right: TextSide | null): boolean {
-  return estimateDiffCost(left?.content ?? "", right?.content ?? "") > DISPLAY_MAX_COST;
 }
 
 /** `*.ext` pattern for a path, or `null` when the file has no extension. */
