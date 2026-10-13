@@ -162,3 +162,18 @@ fn nullable_patch_key_distinguishes_unchanged_clear_and_set() {
         json!({"diff.externalTool": {"path": "/usr/bin/meld", "args": ["%l", "%r"]}})
     );
 }
+
+#[test]
+fn certificate_decisions_use_camel_case_on_the_wire() {
+    for (d, wire) in [
+        (CertDecision::Reject, "reject"),
+        (CertDecision::AcceptOnce, "acceptOnce"),
+        (CertDecision::AcceptAlways, "acceptAlways"),
+        (CertDecision::ReplacePin, "replacePin"),
+    ] {
+        let r = AuthResponse::Certificate { decision: d };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v, json!({"kind":"certificate","decision":wire}));
+        assert_eq!(serde_json::from_value::<AuthResponse>(v).unwrap(), r);
+    }
+}

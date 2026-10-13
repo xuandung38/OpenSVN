@@ -276,7 +276,11 @@ fn skelta_fetches_contents_instead_of_leaving_empty_files() {
             _ => None,
         })
         .collect();
-    assert_eq!(fetched, ["new.txt", "a.txt"]);
+    assert_eq!(
+        fetched,
+        ["new.txt"],
+        "only added files; a.txt is opened and keeps its text"
+    );
     // The fetch comes before the file closes, so the driver can finish the file with the text.
     let fetch = evs
         .iter()
@@ -475,4 +479,38 @@ mod mutated {
             }
         }
     }
+}
+
+#[test]
+fn checked_in_with_two_hrefs_is_corrupt() {
+    let two = root(
+        r#"<S:add-file name="f"><D:checked-in><D:href>/svn/repo/!svn/rvr/2/trunk/f</D:href><D:href>/svn/repo/!svn/rvr/2/trunk/g</D:href></D:checked-in></S:add-file>"#,
+    );
+    corrupt(&two, "two hrefs");
+    let twice = root(
+        r#"<S:add-file name="f"><D:checked-in><D:href>/svn/repo/!svn/rvr/2/trunk/f</D:href></D:checked-in><D:checked-in><D:href>/svn/repo/!svn/rvr/2/trunk/f</D:href></D:checked-in></S:add-file>"#,
+    );
+    corrupt(&twice, "two checked-in elements");
+    let one = root(
+        r#"<S:add-file name="f"><D:checked-in><D:href>/svn/repo/!svn/rvr/2/trunk/f</D:href></D:checked-in></S:add-file>"#,
+    );
+    assert!(parse(&one).is_ok());
+}
+
+#[test]
+fn skelta_does_not_refetch_opened_files_with_only_property_changes() {
+    let doc = report(
+        "",
+        r#"<S:open-directory rev="1"><S:open-file name="a.txt" rev="1"><S:set-prop name="p">v</S:set-prop></S:open-file><S:add-file name="n.txt"/></S:open-directory>"#,
+    );
+    let evs = parse(&doc).unwrap();
+    check(&evs);
+    let fetched: Vec<&str> = evs
+        .iter()
+        .filter_map(|e| match e {
+            UpdateEvent::FetchFile { path, .. } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fetched, ["n.txt"]);
 }

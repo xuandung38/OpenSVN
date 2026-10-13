@@ -21,6 +21,7 @@ mod misc;
 mod node_api;
 mod nodes;
 mod ops;
+mod repos_info;
 mod schema;
 mod wc_lock;
 
@@ -36,8 +37,10 @@ pub use actual::{ConflictRecord, ConflictTexts};
 pub use connection::{BUSY_TIMEOUT, OpenMode, open_connection, open_existing, sql_err};
 pub use externals::External;
 pub use misc::LockInfo;
+pub use node_api::FileInfo;
 pub use nodes::{Node, Presence, Props};
 pub use ops::{BaseNode, CommitInfo};
+pub use repos_info::ReposInfo;
 pub use schema::{FORMAT_MAX_READ, FORMAT_WRITE, check_supported_format, read_user_version};
 pub use wc_lock::{LockCleanup, LockOwner, LockState, ObtainMode};
 
@@ -69,8 +72,8 @@ pub struct NewWc {
 #[cfg(feature = "failpoints")]
 macro_rules! failpoint {
     ($name:literal) => {
-        fail::fail_point!($name, |_| Err(SvnError::new(
-            ErrorCode::Internal,
+        fail::fail_point!($name, |_| Err(svn_types::SvnError::new(
+            svn_types::ErrorCode::Internal,
             concat!("failpoint ", $name)
         )));
     };
@@ -80,6 +83,8 @@ macro_rules! failpoint {
 macro_rules! failpoint {
     ($name:literal) => {};
 }
+// Path-based scope so the submodules (declared above) can use it too.
+use failpoint;
 
 /// Handle to one working copy's `wc.db`.
 ///

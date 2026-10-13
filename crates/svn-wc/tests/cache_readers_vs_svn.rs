@@ -5,7 +5,6 @@
 mod schema_support;
 
 use std::fs;
-use std::process::Command;
 
 use rusqlite::OptionalExtension;
 use schema_support::*;
@@ -17,17 +16,7 @@ fn rp(s: &str) -> RelPath {
 }
 
 fn svn_out(cwd: &std::path::Path, args: &[&str]) -> String {
-    let out = Command::new("svn")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("svn");
-    assert!(
-        out.status.success(),
-        "svn {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    svn_stdout(cwd, args)
 }
 
 /// Repository with `top.txt`, `e/inner.txt` and `d/sub/g` at r1; returns (tempdir, base, url).

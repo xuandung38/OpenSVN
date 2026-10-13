@@ -27,7 +27,7 @@ pub use caps::{
     AcceptedHref, BulkPreference, BulkUpdates, Capabilities, DavCaps, HrefKind, ListStrategy,
     TxnName, UrlBuilder, options_request,
 };
-pub use display_path::{DisplayChangedPath, RepoDisplayPath, RepoLock};
+pub use display_path::RepoDisplayPath;
 pub use errors::{error_from_response, map_errcode, map_http_status};
 pub use http::{
     Body, BodyStream, Headers, HttpRequest, Method, ResponseHead, ResponseParser, parse_chunked,

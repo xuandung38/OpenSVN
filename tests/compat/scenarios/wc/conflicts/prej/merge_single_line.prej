@@ -1,0 +1,6 @@
+Trying to change property 'k'
+but the property has already been locally changed to a different value.
+<<<<<<< (local property value)
+local-merge||||||| (incoming 'changed from' value)
+base=======
+theirs-merge>>>>>>> (incoming 'changed to' value)
