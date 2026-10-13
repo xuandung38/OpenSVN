@@ -1,0 +1,94 @@
+import { memo } from "react";
+import { LockBadge } from "../../../components/ui/lock-badge";
+import { SafeText } from "../../../components/ui/safe-text";
+import { StatusGlyph } from "../../../components/ui/status-glyph";
+import { cn } from "../../../lib/cn";
+import type { StatusCode } from "../../../lib/status";
+
+export interface WcFileRowProps {
+  id: string;
+  path: string;
+  glyph: StatusCode;
+  checked: boolean;
+  selected: boolean;
+  active: boolean;
+  lock?: "me" | "other";
+  needsLock: boolean;
+  outOfDate: boolean;
+  /** Localised labels for the non-colour badges. */
+  labels: { needsLock: string; outOfDate: string };
+  onToggle: (path: string) => void;
+  onSelect: (path: string) => void;
+  onPointerActivate: () => void;
+}
+
+/**
+ * Changes row: checkbox, status glyph, path (dir muted, name strong), badges. Like the shared
+ * `FileRow` it is a listbox option driven by `aria-activedescendant`, but it also shows the
+ * needs-lock and out-of-date markers. The path is always rendered as text.
+ */
+export const WcFileRow = memo(function WcFileRow(p: WcFileRowProps) {
+  const slash = p.path.lastIndexOf("/");
+  const dir = slash >= 0 ? p.path.slice(0, slash + 1) : "";
+  const name = slash >= 0 ? p.path.slice(slash + 1) : p.path;
+  return (
+    // biome-ignore lint/a11y/useFocusableInteractive: roving focus lives on the owning listbox (aria-activedescendant)
+    // biome-ignore lint/a11y/useKeyWithClickEvents: keyboard activation is handled by the listbox (Enter/Space)
+    <div
+      id={p.id}
+      role="option"
+      aria-selected={p.selected}
+      aria-checked={p.checked}
+      onClick={() => {
+        p.onPointerActivate();
+        p.onSelect(p.path);
+      }}
+      onContextMenu={() => {
+        p.onPointerActivate();
+        p.onSelect(p.path);
+      }}
+      className={cn(
+        "grid h-full cursor-default grid-cols-[18px_20px_1fr_auto] items-center gap-1.5 px-2.5 py-[5px]",
+        p.selected ? "bg-sel" : "hover:bg-surface-2",
+        p.active &&
+          "group-focus-visible:outline-2 group-focus-visible:-outline-offset-2 group-focus-visible:outline-accent",
+      )}
+    >
+      <input
+        type="checkbox"
+        tabIndex={-1}
+        aria-hidden="true"
+        checked={p.checked}
+        onClick={(e) => {
+          e.stopPropagation();
+          p.onPointerActivate();
+        }}
+        onChange={() => p.onToggle(p.path)}
+        className="m-0 h-[14px] w-[14px] accent-[var(--accent)]"
+      />
+      <StatusGlyph code={p.glyph} />
+      <span className="min-w-0 truncate font-mono text-[12px]" title={p.path}>
+        <SafeText as="span" className="text-muted-text">
+          {dir}
+        </SafeText>
+        <SafeText as="span" className="text-fg">
+          {name}
+        </SafeText>
+      </span>
+      <span className="flex items-center gap-1.5 text-[11px]">
+        {p.outOfDate && (
+          <span title={p.labels.outOfDate} className="text-info-text">
+            <span aria-hidden="true">↓</span>
+            <span className="sr-only">{p.labels.outOfDate}</span>
+          </span>
+        )}
+        {p.needsLock && !p.lock && (
+          <span className="rounded-[4px] border border-line px-1 text-muted-text">
+            {p.labels.needsLock}
+          </span>
+        )}
+        {p.lock && <LockBadge owner={p.lock} />}
+      </span>
+    </div>
+  );
+});

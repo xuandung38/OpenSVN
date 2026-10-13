@@ -1,7 +1,7 @@
 import type { NodeStatus } from "../ipc/bindings";
 
 /** One-letter SVN status glyphs (design-guidelines 7). */
-export type StatusCode = "M" | "A" | "D" | "R" | "?" | "!" | "C";
+export type StatusCode = "M" | "A" | "D" | "R" | "?" | "!" | "C" | "P";
 
 const NODE_STATUS_TO_CODE: Partial<Record<NodeStatus, StatusCode>> = {
   modified: "M",
@@ -27,4 +27,5 @@ export const STATUS_LABEL: Record<StatusCode, string> = {
   "?": "Unversioned",
   "!": "Missing",
   C: "Conflicted",
+  P: "Properties changed",
 };

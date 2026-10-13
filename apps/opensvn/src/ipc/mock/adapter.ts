@@ -10,9 +10,8 @@ import type {
   RemoteEditRequest,
   SettingsPatch_Deserialize,
   UnlockRequest,
-  UpdateRequest,
 } from "../bindings";
-import { MOCK_WC_ID, mockSettings, mockStatus, mockWorkingCopies } from "./data";
+import { mockSettings } from "./data";
 import {
   MOCK_REPO_ROOT,
   MOCK_REPO_UUID,
@@ -22,10 +21,10 @@ import {
   mockFileText,
   mockList,
   mockLogWithPaths,
-  mockRevDiff,
   myLocks,
   otherLocks,
 } from "./remote-data";
+import { wcMockCommands } from "./wc-mock-commands";
 
 type Handler = (payload: unknown) => void;
 const listeners = new Map<string, Set<Handler>>();
@@ -56,18 +55,32 @@ const errCode = (code: AppError["code"], message: string) =>
   });
 
 let opSeq = 0;
-/** Simulates a long-running operation: op://started, a few op://progress ticks, op://finished. */
+let opDurationMs = 2000;
+/** Length of a simulated operation (tests shorten it; the dev server keeps it visible). */
+export function setMockOpDuration(ms: number): void {
+  opDurationMs = ms;
+}
+/** Operations the user cancelled; their remaining timers do nothing. */
+const cancelled = new Set<string>();
+
+/**
+ * Simulates a long-running operation: op://started, a few op://progress ticks, then `onDone` (the
+ * state change the real engine would have made) and op://finished. `op_cancel` turns it into an
+ * op://failed with the `cancelled` code instead.
+ */
 function simulateOp(
   kind: OperationKind,
   title: string,
   wcId: string | null,
   result: OpResult = { kind: "done" },
+  onDone?: () => void,
 ): OperationHandle {
   const handle: OperationHandle = { opId: `mock-op-${++opSeq}`, kind, wcId, title };
   setTimeout(() => mockEmit("op://started", handle), 0);
   for (const pct of [25, 50, 75]) {
     setTimeout(
-      () =>
+      () => {
+        if (cancelled.has(handle.opId)) return;
         mockEmit("op://progress", {
           opId: handle.opId,
           phase: kind,
@@ -76,14 +89,17 @@ function simulateOp(
           bytesDone: null,
           bytesTotal: null,
           currentPath: null,
-        }),
-      pct * 20,
+        });
+      },
+      (pct / 100) * opDurationMs * 0.9,
     );
   }
   setTimeout(() => {
+    if (cancelled.has(handle.opId)) return;
+    onDone?.();
     mockEmit("op://finished", { opId: handle.opId, result });
     if (wcId) mockEmit("wc://status-changed", { wcId, changed: [], removed: [] });
-  }, 2000);
+  }, opDurationMs);
   return handle;
 }
 
@@ -93,9 +109,34 @@ export const mockCalls: { name: string; args: unknown[] }[] = [];
 /** Answers sent through `auth_respond`, newest last (assertions in tests and dev demos). */
 export const mockAuthResponses: { requestId: string; response: unknown }[] = [];
 
+const {
+  lock: wcLock,
+  unlock: wcUnlock,
+  ...wcCommands
+} = wcMockCommands({
+  ok,
+  fail: errCode,
+  simulateOp,
+  emit: mockEmit,
+});
+
 const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>> = {
-  wcList: () => ok(mockWorkingCopies),
-  statusGet: () => ok(mockStatus),
+  ...wcCommands,
+  opCancel: (opId: string) => {
+    cancelled.add(opId);
+    mockEmit("op://failed", {
+      opId,
+      error: {
+        code: "cancelled",
+        message: "Cancelled",
+        detail: null,
+        path: null,
+        retryable: false,
+        actions: null,
+      } satisfies AppError,
+    });
+    return ok(null);
+  },
   settingsGet: () => ok(mockSettings),
   opList: () => ok([]),
   repoInfo: (url: string) =>
@@ -133,8 +174,8 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     });
   },
   blameGet: () => ok(simulateOp("blame", "Blame", null, { kind: "blame", lines: mockBlame() })),
-  diffGet: () => ok(mockRevDiff("/trunk/src/engine/renderer.ts")),
   lock: (req: LockRequest) => {
+    if (req.targets.kind === "wc") return wcLock(req);
     if (req.targets.kind === "url") {
       for (const u of req.targets.urls) {
         if (otherLocks.has(u) && !req.steal) {
@@ -147,6 +188,7 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     return ok(simulateOp("lock", "Lock", null));
   },
   unlock: (req: UnlockRequest) => {
+    if (req.targets.kind === "wc") return wcUnlock(req);
     if (req.targets.kind === "url") {
       for (const u of req.targets.urls) {
         myLocks.delete(u);
@@ -187,9 +229,6 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     Object.assign(mockSettings, patch);
     return ok({ ...mockSettings });
   },
-  update: (req: UpdateRequest) =>
-    ok(simulateOp("update", "Update to HEAD", req.wcId ?? MOCK_WC_ID)),
-  commit: () => ok(simulateOp("commit", "Commit", MOCK_WC_ID)),
 };
 
 // Commands are looked up lazily; anything not mocked resolves to a typed AppError instead of throwing.
