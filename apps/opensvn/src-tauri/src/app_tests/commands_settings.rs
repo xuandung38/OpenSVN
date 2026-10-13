@@ -143,7 +143,8 @@ async fn diff_external_needs_a_configured_tool_and_launches_it_on_read_only_copi
         std::path::Path::new(&args[1]),
         std::path::Path::new(&args[2]),
     );
-    assert!(left.ends_with("left/README.md") && right.ends_with("right/README.md"));
+    assert!(left.ends_with("left.md") && right.ends_with("right.md"));
+    assert_eq!(left.parent(), right.parent());
     assert!(left.starts_with(&f.state().data_dir));
     assert!(
         std::fs::read_to_string(left)
