@@ -74,21 +74,42 @@ pub fn file_modified(
     recorded: &RecordedFile,
     pristine: &dyn PristineSource,
 ) -> Result<Verdict, SvnError> {
-    let unmodified = Verdict { modified: false, unchanged_stat: None };
-    let Some(checksum) = recorded.checksum.as_ref() else {
-        return Ok(Verdict { modified: true, unchanged_stat: None });
+    let unmodified = Verdict {
+        modified: false,
+        unchanged_stat: None,
     };
-    let Some(disk) = disk else { return Ok(unmodified) };
+    let Some(checksum) = recorded.checksum.as_ref() else {
+        return Ok(Verdict {
+            modified: true,
+            unchanged_stat: None,
+        });
+    };
+    let Some(disk) = disk else {
+        return Ok(unmodified);
+    };
 
     // Fast path: size and mtime identical to what was recorded when the file was last verified.
-    let size_matches = recorded.size.is_none_or(|s| u64::try_from(s).is_ok_and(|s| s == disk.size));
-    let mtime_matches = recorded.mtime_micros.is_some_and(|m| m != 0 && m == disk.mtime_micros);
+    let size_matches = recorded
+        .size
+        .is_none_or(|s| u64::try_from(s).is_ok_and(|s| s == disk.size));
+    let mtime_matches = recorded
+        .mtime_micros
+        .is_some_and(|m| m != 0 && m == disk.mtime_micros);
     if size_matches && mtime_matches {
         return Ok(unmodified);
     }
 
-    let modified = compare_with_pristine(path, disk.size, checksum, recorded.translate.as_ref(), pristine)?;
-    Ok(Verdict { modified, unchanged_stat: (!modified).then_some(disk) })
+    let modified = compare_with_pristine(
+        path,
+        disk.size,
+        checksum,
+        recorded.translate.as_ref(),
+        pristine,
+    )?;
+    Ok(Verdict {
+        modified,
+        unchanged_stat: (!modified).then_some(disk),
+    })
 }
 
 /// `compare_and_verify`.
@@ -103,7 +124,9 @@ fn compare_with_pristine(
     if let Some(info) = translate
         && info.eol_style == crate::translate::EolStyle::Unknown
     {
-        return Err(SvnError::new(ErrorCode::Corrupt, "unknown svn:eol-style value").with_svn_code(135_001));
+        return Err(
+            SvnError::new(ErrorCode::Corrupt, "unknown svn:eol-style value").with_svn_code(135_001),
+        );
     }
     let pristine_size = pristine.text_size(checksum)?;
     // Easy out: without translation a different size means a modified file.
@@ -134,7 +157,9 @@ fn same(
     pristine: &mut dyn Read,
     mut translator: Option<ContentTranslator>,
 ) -> Result<bool, SvnError> {
-    let chunk = translator.as_ref().map_or(64 * 1024, ContentTranslator::chunk_size);
+    let chunk = translator
+        .as_ref()
+        .map_or(64 * 1024, ContentTranslator::chunk_size);
     let mut buf = vec![0u8; chunk];
     let mut translated = Vec::new();
     let mut expected = vec![0u8; chunk.max(64 * 1024)];
@@ -145,10 +170,10 @@ fn same(
             Some(t) => t.push(&buf[..n], &mut translated)?,
             None => translated.extend_from_slice(&buf[..n]),
         }
-        if n == 0 {
-            if let Some(t) = translator.take() {
-                t.finish(&mut translated)?;
-            }
+        if n == 0
+            && let Some(t) = translator.take()
+        {
+            t.finish(&mut translated)?;
         }
         if !matches_prefix(pristine, &translated, &mut expected)? {
             return Ok(false);
@@ -163,7 +188,11 @@ fn same(
 }
 
 /// Reads `data.len()` bytes from `pristine` and compares them with `data`.
-fn matches_prefix(pristine: &mut dyn Read, data: &[u8], scratch: &mut [u8]) -> Result<bool, SvnError> {
+fn matches_prefix(
+    pristine: &mut dyn Read,
+    data: &[u8],
+    scratch: &mut [u8],
+) -> Result<bool, SvnError> {
     for part in data.chunks(scratch.len()) {
         let got = &mut scratch[..part.len()];
         if read_full(pristine, got)? != part.len() || got != part {

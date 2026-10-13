@@ -52,7 +52,11 @@ impl FsEntry {
                 Err(e) => -i64::try_from(e.duration().as_micros()).unwrap_or(i64::MAX),
             })
             .unwrap_or(0);
-        Self { kind, size: md.len(), mtime_micros }
+        Self {
+            kind,
+            size: md.len(),
+            mtime_micros,
+        }
     }
 }
 
@@ -82,7 +86,6 @@ pub(crate) fn scan(
 ) -> Result<HashMap<String, FsEntry>, SvnError> {
     let root_path = wc_root.join(target.as_str());
     let base = wc_root.to_path_buf();
-    let filter_base = base.clone();
     let descend = Arc::new(descend);
     let sink: Arc<Mutex<Collected>> = Arc::new(Mutex::new(Vec::new()));
     let errors: Arc<Mutex<Vec<ignore::Error>>> = Arc::new(Mutex::new(Vec::new()));
@@ -92,41 +95,56 @@ pub(crate) fn scan(
         .hidden(false)
         .follow_links(false)
         .threads(threads)
-        .filter_entry(move |entry| {
-            if entry.file_name() == ADM_DIR && entry.depth() > 0 {
-                return false;
-            }
-            if !entry.file_type().is_some_and(|t| t.is_dir()) || entry.depth() == 0 {
-                return true;
-            }
-            let rel = rel_string(&filter_base, entry.path());
-            descend.contains(&rel)
-        })
+        .filter_entry(|entry| !(entry.file_name() == ADM_DIR && entry.depth() > 0))
         .build_parallel();
 
     walker.run(|| {
-        let mut batch = Batch { local: Vec::new(), sink: Arc::clone(&sink) };
+        let mut batch = Batch {
+            local: Vec::new(),
+            sink: Arc::clone(&sink),
+        };
         let base = base.clone();
         let errors = Arc::clone(&errors);
+        let descend = Arc::clone(&descend);
         Box::new(move |result| {
+            let mut state = WalkState::Continue;
             match result {
                 Ok(entry) => match entry.metadata() {
-                    Ok(md) => batch.local.push((rel_string(&base, entry.path()), FsEntry::from_metadata(&md))),
+                    Ok(md) => {
+                        let rel = rel_string(&base, entry.path());
+                        // An unknown directory is one item of its parent: reported, not entered.
+                        if md.is_dir() && entry.depth() > 0 && !descend.contains(&rel) {
+                            state = WalkState::Skip;
+                        }
+                        batch.local.push((rel, FsEntry::from_metadata(&md)));
+                    }
                     // The entry vanished between readdir and lstat: treat it as absent.
-                    Err(e) if e.io_error().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) => {}
-                    Err(e) => errors.lock().unwrap_or_else(PoisonError::into_inner).push(e),
+                    Err(e)
+                        if e.io_error()
+                            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) => {}
+                    Err(e) => errors
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(e),
                 },
-                Err(e) => errors.lock().unwrap_or_else(PoisonError::into_inner).push(e),
+                Err(e) => errors
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(e),
             }
-            WalkState::Continue
+            state
         })
     });
 
     let errors = std::mem::take(&mut *errors.lock().unwrap_or_else(PoisonError::into_inner));
     if let Some(err) = errors.into_iter().find(|e| {
-        !e.io_error().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+        !e.io_error()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
     }) {
-        return Err(SvnError::new(ErrorCode::PermissionDenied, format!("cannot scan working copy: {err}")));
+        return Err(SvnError::new(
+            ErrorCode::PermissionDenied,
+            format!("cannot scan working copy: {err}"),
+        ));
     }
     let entries = std::mem::take(&mut *sink.lock().unwrap_or_else(PoisonError::into_inner));
     Ok(entries.into_iter().collect())

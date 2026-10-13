@@ -34,7 +34,10 @@ impl Presence {
             "excluded" => Self::Excluded,
             "server-excluded" => Self::ServerExcluded,
             other => {
-                return Err(SvnError::new(ErrorCode::Corrupt, format!("wc.db: unknown presence {other:?}")));
+                return Err(SvnError::new(
+                    ErrorCode::Corrupt,
+                    format!("wc.db: unknown presence {other:?}"),
+                ));
             }
         })
     }
@@ -56,12 +59,10 @@ pub(crate) enum DbStatus {
 pub(crate) struct NodeRec {
     pub status: DbStatus,
     pub kind: NodeKind,
-    pub op_depth: u32,
     pub have_base: bool,
     pub have_more_work: bool,
     pub copied: bool,
     pub op_root: bool,
-    pub moved_here: bool,
     pub moved_to: Option<String>,
     /// Presence of the layer right below the top working layer.
     pub below_working: Option<Presence>,
@@ -103,7 +104,11 @@ fn node_kind(word: &str) -> NodeKind {
 
 /// Number of path components (`0` for the root); an `op_depth` equal to this marks an op root.
 fn depth_of(relpath: &str) -> u32 {
-    if relpath.is_empty() { 0 } else { u32::try_from(relpath.split('/').count()).unwrap_or(u32::MAX) }
+    if relpath.is_empty() {
+        0
+    } else {
+        u32::try_from(relpath.split('/').count()).unwrap_or(u32::MAX)
+    }
 }
 
 /// SQL predicate selecting `target` and everything below it. Parameter `?2` is the target.
@@ -125,7 +130,6 @@ struct Row {
     changed_rev: Option<u64>,
     changed_date: Option<i64>,
     changed_author: Option<String>,
-    moved_here: bool,
     moved_to: Option<String>,
     file_external: bool,
     had_props: bool,
@@ -159,20 +163,25 @@ fn build(group: &[Row]) -> Option<NodeRec> {
         _ => false,
     };
     let base = group.iter().find(|r| r.op_depth == 0);
-    let below_working = if top.op_depth > 0 { group.get(1).map(|r| r.presence) } else { None };
+    let below_working = if top.op_depth > 0 {
+        group.get(1).map(|r| r.presence)
+    } else {
+        None
+    };
     let moved_to = group.iter().find_map(|r| r.moved_to.clone());
     Some(NodeRec {
         status,
         kind: top.kind,
-        op_depth: top.op_depth,
         have_base,
         have_more_work: working > 1,
         copied,
         op_root: top.op_depth == depth_of(&top.relpath),
-        moved_here: top.moved_here,
         moved_to,
         below_working,
-        checksum: top.checksum.as_deref().and_then(Sha1Digest::from_svn_string),
+        checksum: top
+            .checksum
+            .as_deref()
+            .and_then(Sha1Digest::from_svn_string),
         translated_size: top.translated_size,
         last_mod_time: top.last_mod_time,
         repos_relpath: top.repos_path.clone(),
@@ -188,7 +197,11 @@ fn build(group: &[Row]) -> Option<NodeRec> {
 }
 
 /// Loads the current node state of `target` and all its descendants, keyed by relpath.
-pub(crate) fn load_nodes(conn: &Connection, wc_id: i64, target: &RelPath) -> Result<HashMap<String, NodeRec>> {
+pub(crate) fn load_nodes(
+    conn: &Connection,
+    wc_id: i64,
+    target: &RelPath,
+) -> Result<HashMap<String, NodeRec>> {
     let sql = format!(
         "SELECT local_relpath, op_depth, presence, kind, repos_id, checksum, translated_size, last_mod_time, \
          repos_path, revision, changed_revision, changed_date, changed_author, moved_here, moved_to, \
@@ -197,7 +210,9 @@ pub(crate) fn load_nodes(conn: &Connection, wc_id: i64, target: &RelPath) -> Res
         subtree("local_relpath")
     );
     let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
-    let mut rows = stmt.query(params![wc_id, target.as_str()]).map_err(sql_err)?;
+    let mut rows = stmt
+        .query(params![wc_id, target.as_str()])
+        .map_err(sql_err)?;
     let mut out = HashMap::new();
     let mut group: Vec<Row> = Vec::new();
     while let Some(r) = rows.next().map_err(sql_err)? {
@@ -214,15 +229,27 @@ pub(crate) fn load_nodes(conn: &Connection, wc_id: i64, target: &RelPath) -> Res
             translated_size: r.get(6).map_err(sql_err)?,
             last_mod_time: r.get(7).map_err(sql_err)?,
             repos_path: r.get(8).map_err(sql_err)?,
-            revision: r.get::<_, Option<i64>>(9).map_err(sql_err)?.and_then(|v| u64::try_from(v).ok()),
-            changed_rev: r.get::<_, Option<i64>>(10).map_err(sql_err)?.and_then(|v| u64::try_from(v).ok()),
+            revision: r
+                .get::<_, Option<i64>>(9)
+                .map_err(sql_err)?
+                .and_then(|v| u64::try_from(v).ok()),
+            changed_rev: r
+                .get::<_, Option<i64>>(10)
+                .map_err(sql_err)?
+                .and_then(|v| u64::try_from(v).ok()),
             changed_date: r.get(11).map_err(sql_err)?,
             changed_author: r.get(12).map_err(sql_err)?,
-            moved_here: r.get::<_, Option<i64>>(13).map_err(sql_err)?.unwrap_or(0) != 0,
             moved_to: r.get(14).map_err(sql_err)?,
-            file_external: r.get::<_, Option<i64>>(15).map_err(sql_err)?.is_some_and(|v| v != 0),
-            had_props: props.as_deref().is_some_and(|p| !p.is_empty() && p != b"()"),
-            special: props.as_deref().is_some_and(|p| p.windows(11).any(|w| w == b"svn:special")),
+            file_external: r
+                .get::<_, Option<i64>>(15)
+                .map_err(sql_err)?
+                .is_some_and(|v| v != 0),
+            had_props: props
+                .as_deref()
+                .is_some_and(|p| !p.is_empty() && p != b"()"),
+            special: props
+                .as_deref()
+                .is_some_and(|p| p.windows(11).any(|w| w == b"svn:special")),
             relpath,
         };
         if group.first().is_some_and(|g| g.relpath != row.relpath) {
@@ -240,14 +267,20 @@ pub(crate) fn load_nodes(conn: &Connection, wc_id: i64, target: &RelPath) -> Res
 }
 
 /// Loads the ACTUAL_NODE rows of `target` and its descendants.
-pub(crate) fn load_actual(conn: &Connection, wc_id: i64, target: &RelPath) -> Result<HashMap<String, ActualRec>> {
+pub(crate) fn load_actual(
+    conn: &Connection,
+    wc_id: i64,
+    target: &RelPath,
+) -> Result<HashMap<String, ActualRec>> {
     let sql = format!(
         "SELECT local_relpath, properties IS NOT NULL, changelist, conflict_data FROM actual_node \
          WHERE wc_id = ?1 AND {}",
         subtree("local_relpath")
     );
     let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
-    let mut rows = stmt.query(params![wc_id, target.as_str()]).map_err(sql_err)?;
+    let mut rows = stmt
+        .query(params![wc_id, target.as_str()])
+        .map_err(sql_err)?;
     let mut out = HashMap::new();
     while let Some(r) = rows.next().map_err(sql_err)? {
         let relpath: String = r.get(0).map_err(sql_err)?;
