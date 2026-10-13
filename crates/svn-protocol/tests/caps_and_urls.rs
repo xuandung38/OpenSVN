@@ -230,6 +230,15 @@ fn rejects_hostile_hrefs() {
         "http://user:pw@svn.test.local/svn/repo/trunk",
         "http://svn.test.local@evil.test/svn/repo/trunk",
         "/svn/repo/trunk/a\nb",
+        // The URL parser deletes tab, CR and LF; `.\t.` would become `..`.
+        "/svn/repo/trunk/.\t./.\t./x",
+        "/svn/repo/trunk/a\rb",
+        "http://svn.test.local\\svn\\repo\\trunk",
+        "/svn/repo/trunk/a%09b",
+        "/svn/repo/trunk/a%0Db",
+        "/svn/repo/trunk/a%0ab",
+        "/svn/repo/trunk/a%7Fb",
+        "/svn/repo/trunk/a%5cb",
     ];
     for href in hostile {
         let err = u.accept_href(href).expect_err(href);
@@ -318,6 +327,25 @@ fn repository_root_with_dot_segments_is_refused() {
         "/svn/repo\\.\\",
         "/svn/repo\\%2E%2E",
         "http://svn.test.local/svn/repo\\..",
+        // Review of #96: a backslash right after the host, and tab (which the URL parser
+        // deletes anywhere) between the dots.
+        "http://svn.test.local\\svn\\repo\\..",
+        "/svn/repo/.\t.",
+        "/svn/repo/\t..",
+        "/svn/repo/%2e\t%2e",
+        // CR, LF, other controls and their escapes; an encoded backslash.
+        "/svn/repo/.\r.",
+        "/svn/repo/.\n.",
+        "/svn/repo/\u{0}",
+        "/svn/repo/\u{7f}",
+        "/svn/repo/.%09.",
+        "/svn/repo/%2e%0d%2e",
+        "/svn/repo/%0A..",
+        "/svn/repo/%00",
+        "/svn/repo/%7F",
+        "/svn/repo%5C..",
+        "/svn/repo%5c..",
+        "http://svn.test.local%5Csvn/repo",
     ] {
         let mut head = f.head();
         let mut headers = svn_protocol::Headers::new();
@@ -332,6 +360,93 @@ fn repository_root_with_dot_segments_is_refused() {
         let err =
             Capabilities::from_options_response(&session_url(), &head, &f.resp_body).unwrap_err();
         assert_eq!(err.code, ErrorCode::UnsafePath, "{root}");
+    }
+}
+
+#[test]
+fn every_stub_header_refuses_control_characters_and_backslashes() {
+    let f = load("caps/options-200");
+    for name in [
+        "SVN-Me-Resource",
+        "SVN-Rev-Stub",
+        "SVN-Rev-Root-Stub",
+        "SVN-Txn-Stub",
+        "SVN-Txn-Root-Stub",
+        "SVN-VTxn-Stub",
+        "SVN-VTxn-Root-Stub",
+    ] {
+        for value in [
+            "/svn/repo/!svn/x\ty",
+            "/svn/repo\\!svn/x",
+            "/svn/repo/!svn/x%09",
+            "/svn/repo/!svn/x%5Cy",
+        ] {
+            let mut head = f.head();
+            let mut headers = svn_protocol::Headers::new();
+            let mut replaced = false;
+            for (k, v) in head.headers.iter() {
+                if k.eq_ignore_ascii_case(name) {
+                    headers.push(k, value);
+                    replaced = true;
+                } else {
+                    headers.push(k, v);
+                }
+            }
+            if !replaced {
+                headers.push(name, value);
+            }
+            head.headers = headers;
+            let err = Capabilities::from_options_response(&session_url(), &head, &f.resp_body)
+                .expect_err(value);
+            assert_eq!(err.code, ErrorCode::UnsafePath, "{name}: {value:?}");
+        }
+    }
+}
+
+#[test]
+fn url_builder_refuses_unsafe_stubs_given_directly() {
+    // `Capabilities` has public fields, so `UrlBuilder::new` checks again.
+    let at = svn_types::RepoUrl::parse("http://svn.test.local/svn/repo/trunk").unwrap();
+    for root in [
+        "/svn/repo/.\t.",
+        "/svn/repo\\..",
+        "/svn/repo/..",
+        "/svn/repo/%2e%09%2e",
+        "/svn/repo%5C..",
+        "/svn/repo\n",
+    ] {
+        let err = UrlBuilder::new(&at, &caps_with_root(root)).expect_err(root);
+        assert_eq!(err.code, ErrorCode::UnsafePath, "{root:?}");
+    }
+    let mut c = caps();
+    c.me_resource = "/svn/repo/!svn/m\te".to_owned();
+    assert_eq!(
+        UrlBuilder::new(&at, &c).unwrap_err().code,
+        ErrorCode::UnsafePath
+    );
+}
+
+#[test]
+fn check_server_url_text_accepts_ordinary_escapes() {
+    for ok in [
+        "/svn/repo/a%20b",
+        "/svn/repo/%E2%82%AC",
+        "http://svn.test.local/svn/repo/%2Fx",
+        "/svn/repo/100%",
+    ] {
+        svn_protocol::check_server_url_text("t", ok).unwrap();
+    }
+    for bad in [
+        "a\tb", "a\rb", "a\nb", "a\\b", "a%09b", "a%0db", "a%0Ab", "a%1fb", "a%7fb", "a%5cb",
+        "a%5Cb", "a\u{85}b",
+    ] {
+        assert_eq!(
+            svn_protocol::check_server_url_text("t", bad)
+                .unwrap_err()
+                .code,
+            ErrorCode::UnsafePath,
+            "{bad:?}"
+        );
     }
 }
 

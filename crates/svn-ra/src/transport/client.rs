@@ -559,6 +559,9 @@ fn redirect_target(current: &Url, resp: &HttpResponse) -> Result<Url> {
         .get(LOCATION)
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| SvnError::new(ErrorCode::Network, "redirect without a Location header"))?;
+    // The URL parser deletes tab, CR and LF and reads `\` as `/`; refuse such text outright
+    // instead of following whatever it normalises to.
+    svn_protocol::check_server_url_text("redirect Location", location)?;
     let target = current.join(location).map_err(|_| {
         SvnError::new(
             ErrorCode::Network,

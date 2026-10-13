@@ -49,6 +49,11 @@ options/root-other-host	options	options/root-other-host.headers	reject	repositor
 options/root-not-prefix	options	options/root-not-prefix.headers	reject	repository root that is not a prefix of the session URL
 options/root-dotdot	options	options/root-dotdot.headers	reject	repository root with a .. segment
 options/root-backslash-dotdot	options	options/root-backslash-dotdot.headers	reject	repository root with a backslash .. segment (the URL parser reads \ as /)
+options/root-abs-backslash-dotdot	options	options/root-abs-backslash-dotdot.headers	reject	absolute repository root with a backslash right after the host and a .. segment
+options/root-tab-dotdot	options	options/root-tab-dotdot.headers	reject	repository root with a tab between dots (the URL parser deletes tabs)
+options/root-encoded-tab-dotdot	options	options/root-encoded-tab-dotdot.headers	reject	repository root with an encoded tab between encoded dots
+options/root-encoded-backslash	options	options/root-encoded-backslash.headers	reject	repository root with an encoded backslash before ..
+options/me-tab	options	options/me-tab.headers	reject	me resource with a tab between dots
 options/me-other-host	options	options/me-other-host.headers	reject	me resource on another host (commits would go there)
 options/stub-other-host	options	options/stub-other-host.headers	reject	protocol-relative stub URL on another host
 options/youngest-garbage	options	options/youngest-garbage.headers	reject	youngest revision overflows

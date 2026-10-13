@@ -10,6 +10,62 @@ fn unsafe_href(msg: impl Into<String>) -> SvnError {
     SvnError::new(ErrorCode::UnsafePath, msg)
 }
 
+/// Refuses server-supplied URL text (a root, stub, href or `Location`) that the URL parser
+/// would rewrite before any check could see it. The WHATWG parser deletes tab, CR and LF
+/// anywhere in the input and reads `\` as `/` for http(s), so `/svn/repo/.\t.` and
+/// `http://host\svn\repo\..` both collapse to `/svn` after a raw dot-segment scan passed them.
+/// A real mod_dav_svn or VisualSVN never sends any of these, so the text is refused, never
+/// normalised: any `\` or control character, and any percent escape of a control character
+/// or of `\` (`%5C`), which later decoding steps would turn into the same thing.
+pub fn check_server_url_text(what: &str, value: &str) -> Result<()> {
+    if let Some(c) = value.chars().find(|c| c.is_control() || *c == '\\') {
+        return Err(unsafe_href(format!(
+            "{what} contains a forbidden character {c:?}"
+        )));
+    }
+    let bytes = value.as_bytes();
+    for (i, _) in value.match_indices('%') {
+        let byte = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        if let Some(b) = byte
+            && (b < 0x20 || b == 0x7F || b == b'\\')
+        {
+            return Err(unsafe_href(format!(
+                "{what} contains an encoded control character or backslash (%{b:02X})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// [`check_server_url_text`] plus a refusal of `.` and `..` segments (also percent-encoded) in
+/// the raw path: the URL parser collapses them (`/svn/repo/..` becomes `/svn`) and a server
+/// never needs them, so the raw text is judged instead of what it normalises to.
+pub(crate) fn check_server_path_text(what: &str, value: &str) -> Result<()> {
+    check_server_url_text(what, value)?;
+    for seg in raw_path_of(value).split('/') {
+        let decoded =
+            percent_decode(seg).map_err(|_| corrupt(format!("{what} has a bad escape")))?;
+        if decoded == "." || decoded == ".." {
+            return Err(unsafe_href(format!("{what} contains a dot segment")));
+        }
+    }
+    Ok(())
+}
+
+/// The raw path of server-supplied URL text, before the URL parser touched it: after
+/// `scheme://authority` for an absolute URL (the authority ends at `/` or, defensively, `\`,
+/// where the parser ends it for http(s)), and without query or fragment.
+pub(crate) fn raw_path_of(value: &str) -> &str {
+    let raw = match value.split_once("://") {
+        Some((_, rest)) => rest.find(['/', '\\']).map_or("", |i| &rest[i..]),
+        None => value,
+    };
+    raw.split(['?', '#']).next().unwrap_or("")
+}
+
 /// Name of a transaction and which kind of stub addresses it: the server answers
 /// `SVN-VTxn-Name` (virtual transaction, used behind write-through proxies) instead of
 /// `SVN-Txn-Name` when the client sent a `SVN-VTxn-Name` request header.
@@ -207,10 +263,16 @@ impl UrlBuilder {
         origin.set_path("/");
         origin.set_query(None);
         origin.set_fragment(None);
-        let norm = |p: &str| -> Result<String> {
+        // `Capabilities` has public fields, so the stubs may not have come through
+        // `from_options_response`; `set_path` would collapse dot segments and drop tabs too.
+        let set_path = |p: &str| -> String {
             let mut u = origin.clone();
             u.set_path(p);
-            Ok(u.path().trim_end_matches('/').to_owned())
+            u.path().trim_end_matches('/').to_owned()
+        };
+        let norm = |p: &str| -> Result<String> {
+            check_server_path_text("server stub", p)?;
+            Ok(set_path(p))
         };
         let mut txn: Vec<(bool, String)> = Vec::new();
         let mut txn_root: Vec<(bool, String)> = Vec::new();
@@ -230,7 +292,7 @@ impl UrlBuilder {
         let root = norm(&caps.repository_root)?;
         // The repository root must be the session URL or one of its ancestors; anything else
         // would let the server steer every public URL (locks, copies) somewhere else.
-        let session_path = decode_path(&norm(session_url.as_url().path())?)?;
+        let session_path = decode_path(&set_path(session_url.as_url().path()))?;
         if below_root(&decode_path(&root)?, &session_path).is_none() {
             return Err(unsafe_href(
                 "SVN-Repository-Root is not an ancestor of the session URL",
@@ -376,22 +438,21 @@ impl UrlBuilder {
     /// Accepts an href from a response only if it names this session's origin and lies below
     /// a known stub or the repository root. Everything else is [`ErrorCode::UnsafePath`].
     pub fn accept_href(&self, href: &str) -> Result<AcceptedHref> {
-        if href.is_empty() || href.chars().any(|c| c.is_control() || c == '\\') {
-            return Err(unsafe_href(format!("invalid href {href:?}")));
+        if href.is_empty() {
+            return Err(unsafe_href("empty href"));
         }
-        let (url, raw_path) = if let Some(rest) = href.strip_prefix('/') {
+        check_server_url_text("href", href)?;
+        let raw_path = raw_path_of(href);
+        let url = if let Some(rest) = href.strip_prefix('/') {
             if rest.starts_with('/') {
                 return Err(unsafe_href("network-path reference in href"));
             }
-            let raw = href.split(['?', '#']).next().unwrap_or(href);
-            (self.origin.join(href), raw.to_owned())
-        } else if let Some((scheme, rest)) = href.split_once("://") {
+            self.origin.join(href)
+        } else if let Some((scheme, _)) = href.split_once("://") {
             if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
                 return Err(unsafe_href("href with unsupported scheme"));
             }
-            let raw = rest.find('/').map_or("", |i| &rest[i..]);
-            let raw = raw.split(['?', '#']).next().unwrap_or("");
-            (Url::parse(href), raw.to_owned())
+            Url::parse(href)
         } else {
             return Err(unsafe_href(format!("relative href not accepted: {href:?}")));
         };

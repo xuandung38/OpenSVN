@@ -7,4 +7,4 @@ mod url_builder;
 pub use fallbacks::{BulkPreference, ListStrategy};
 pub(crate) use options::advertise_caps;
 pub use options::{BulkUpdates, Capabilities, DavCaps, options_request};
-pub use url_builder::{AcceptedHref, HrefKind, TxnName, UrlBuilder};
+pub use url_builder::{AcceptedHref, HrefKind, TxnName, UrlBuilder, check_server_url_text};

@@ -16,7 +16,7 @@ Documents assume the session `http(s)://svn.test.local/svn/repo` (repository roo
 | `log/` | `svn_protocol::log::parse_log` | changed paths / copyfrom with `..` or not absolute, bad revision, truncation; an HTML/script commit message |
 | `merge/` | `svn_protocol::commit::parse_merge_response` | negative or non-numeric new revision |
 | `locks/` | `svn_protocol::locks::parse_get_locks` | lock paths with `..` or not absolute |
-| `options/` | `Capabilities::from_options_response` + `UrlBuilder::new` | repository root / `me` / stubs on another host or protocol-relative, root outside the session, root with `..` (also after `\`), overflowing youngest revision |
+| `options/` | `Capabilities::from_options_response` + `UrlBuilder::new` | repository root / `me` / stubs on another host or protocol-relative, root outside the session, root with `..` (also after `\`), any `\`, tab or other control character and their percent escapes (`%09`, `%5C`, ...) in a root or stub, overflowing youngest revision |
 | `svndiff/` | `svn_delta::SvndiffDecoder` (+ `WindowApplier` for `svndiff-apply`, + `Base64SvndiffDecoder`) | bad magic, unknown version, truncation, varint overflow, 1 TiB target view / new data, source view overflow, reads past new data / source view / unwritten target, short/long target, reserved opcode, zlib bomb (claims 5 B, inflates to 1 MiB), bad zlib/lz4, source beyond the base text |
 
 Transport-level attacks have no data file; `crates/svn-ra/tests/evil_transport.rs` serves them

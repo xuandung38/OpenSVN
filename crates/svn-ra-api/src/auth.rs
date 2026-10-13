@@ -209,11 +209,21 @@ pub trait AuthPrompter: Send + Sync {
     /// the transport prompts (interactive) or fails with `AuthRequired` (unattended); `req`
     /// carries [`PromptReason::Rejected`].
     ///
-    /// The app should stop returning that password from [`Self::stored_credentials`] (mark it
-    /// stale or evict it) until the user enters a new one, so later transports do not submit
-    /// it again. A 403 is not reported: mod_dav_svn answers 403 to valid credentials that lack
-    /// access to a path, which says nothing about the password. Must never show UI and should
-    /// return promptly. The default does nothing.
+    /// The app should stop returning that password from [`Self::stored_credentials`] until the
+    /// user enters a new one, so later transports do not submit it again. A 403 is not
+    /// reported: mod_dav_svn answers 403 to valid credentials that lack access to a path,
+    /// which says nothing about the password.
+    ///
+    /// **Mark the password stale; do not delete it.** A 401 does not always mean the password
+    /// is wrong: on Apache 2.4 an authenticated user who fails a mod_authz_core `Require`
+    /// rule (for example `Require ldap-group`) also gets 401, unless the server sets
+    /// `AuthzSendForbiddenOnFailure On`. So the app should stop offering it automatically,
+    /// keep it in the store, and re-prompt (pre-filling the user name) when the user next
+    /// acts; a correct password then costs one prompt instead of being lost.
+    ///
+    /// Must never show UI and should return promptly (in-memory bookkeeping): the transport
+    /// does not race this call against cancellation, so that a cancel cannot drop the report;
+    /// a pending cancel takes effect as soon as it returns. The default does nothing.
     async fn stored_credentials_rejected(&self, req: &CredentialRequest) {
         let _ = req;
     }
