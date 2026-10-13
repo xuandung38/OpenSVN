@@ -81,7 +81,8 @@ impl StatusService {
         }
     }
 
-    /// Number of active watches (diagnostics, tests).
+    /// Number of active watches.
+    #[cfg(test)]
     pub fn active(&self) -> usize {
         self.tasks
             .lock()
@@ -111,7 +112,7 @@ async fn watch_loop(wc: ResolvedWc, publisher: Arc<StatusPublisher>, timing: Sta
     let mut poll = tokio::time::interval(timing.fallback_poll);
     poll.tick().await; // the first tick is immediate; the open path already scanned
     loop {
-        let deadline = debouncer.deadline().map(|d| Instant::from_std(d));
+        let deadline = debouncer.deadline().map(Instant::from_std);
         tokio::select! {
             event = rx.recv(), if watching => {
                 let Some((path, is_dir)) = event else { break };
