@@ -17,9 +17,51 @@ use svn_ra_api::{CommitInfo, CommitObserver};
 use svn_types::{ErrorCode, Result, SvnError, write_file_replacing};
 
 /// Current journal file format.
+///
+/// Any change to what is written ([`JournalRecord`], [`JournalPhase`], their serde attributes or
+/// field meaning) MUST bump this. [`JournalStore::load`] relies on it: a file with another version
+/// is left untouched for the app version that wrote it, while a file of this version that fails to
+/// parse is treated as corrupt and set aside. Without a bump, a journal from a newer build would be
+/// misread as corruption and quarantined, losing the interrupted commit's recovery state.
 const VERSION: u32 = 1;
 /// Directory below the state directory that holds the journals.
 const DIR: &str = "commit-journal";
+/// How many corrupt journals of one working copy are kept aside before quarantine refuses.
+const QUARANTINE_SLOTS: usize = 8;
+
+/// Why a journal could not be loaded. Only [`JournalLoadError::Corrupt`] may be set aside; a
+/// journal is never deleted because it could not be read.
+#[derive(Debug)]
+pub enum JournalLoadError {
+    /// The file exists but could not be read (permissions, I/O, another program holding it).
+    /// It stays; the next open tries again.
+    Unreadable(SvnError),
+    /// A file that is not a journal of any version: safe to move aside.
+    Corrupt(SvnError),
+    /// A journal format this build does not know (written by another app version). It stays
+    /// untouched and nothing is finalized from it.
+    UnsupportedVersion {
+        /// Format version found in the file.
+        version: u64,
+        /// Error explaining what the user can do.
+        error: SvnError,
+    },
+}
+
+impl JournalLoadError {
+    /// The underlying error.
+    pub fn error(&self) -> &SvnError {
+        match self {
+            Self::Unreadable(e) | Self::Corrupt(e) | Self::UnsupportedVersion { error: e, .. } => e,
+        }
+    }
+}
+
+impl std::fmt::Display for JournalLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error().fmt(f)
+    }
+}
 
 /// How far a commit got.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +124,9 @@ impl JournalStore {
     pub fn begin(&self, wc_root: &Path, repo_root_url: &str) -> Result<CommitJournal> {
         let path = self.file_for(wc_root);
         if path.exists() {
+            if let Err(JournalLoadError::UnsupportedVersion { error, .. }) = self.load(wc_root) {
+                return Err(error);
+            }
             return Err(SvnError::new(
                 ErrorCode::WcNeedsCleanup,
                 "an earlier commit of this working copy was interrupted; reopen the working copy to recover it",
@@ -106,40 +151,86 @@ impl JournalStore {
         })
     }
 
-    /// Journal of an interrupted commit, if any.
-    pub fn load(&self, wc_root: &Path) -> Result<Option<JournalRecord>> {
+    /// Journal of an interrupted commit, if any. The error says whether the file may be set
+    /// aside ([`JournalLoadError::Corrupt`]) or must stay where it is.
+    pub fn load(
+        &self,
+        wc_root: &Path,
+    ) -> std::result::Result<Option<JournalRecord>, JournalLoadError> {
         let path = self.file_for(wc_root);
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(SvnError::from_io(format!("read {}", path.display()), &e)),
+            Err(e) => {
+                return Err(JournalLoadError::Unreadable(SvnError::from_io(
+                    format!("read {}", path.display()),
+                    &e,
+                )));
+            }
         };
-        let record: JournalRecord = serde_json::from_slice(&bytes).map_err(|e| {
-            SvnError::new(
+        let corrupt = |why: String| {
+            JournalLoadError::Corrupt(SvnError::new(
                 ErrorCode::Corrupt,
-                format!("commit journal {} is unreadable: {e}", path.display()),
-            )
-        })?;
-        if record.version != VERSION {
-            return Err(SvnError::new(
-                ErrorCode::Corrupt,
-                format!(
-                    "commit journal {} has version {}",
-                    path.display(),
-                    record.version
+                format!("commit journal {} is unreadable: {why}", path.display()),
+            ))
+        };
+        // Every version of the app writes a JSON object with a numeric `version`, atomically. A
+        // file without one is damage; a different version is a format this build does not know
+        // (written by a newer app) and must not be touched.
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| corrupt(e.to_string()))?;
+        let Some(version) = value.get("version").and_then(serde_json::Value::as_u64) else {
+            return Err(corrupt("no format version".to_owned()));
+        };
+        if version != u64::from(VERSION) {
+            return Err(JournalLoadError::UnsupportedVersion {
+                version,
+                error: SvnError::new(
+                    ErrorCode::WcNeedsCleanup,
+                    format!(
+                        "an interrupted commit of this working copy was recorded by another version \
+                         of OpenSVN (journal format {version}, this version reads {VERSION}); open \
+                         the working copy with that version to finish it, or move {} away to \
+                         discard it",
+                        path.display()
+                    ),
                 ),
-            ));
+            });
         }
+        let record: JournalRecord =
+            serde_json::from_value(value).map_err(|e| corrupt(e.to_string()))?;
         Ok(Some(record))
     }
 
-    /// Moves an unreadable journal of `wc_root` aside (`<name>.json.corrupt`, replacing an older
-    /// one) so it no longer blocks commits but stays available for diagnosis.
+    /// Moves a corrupt journal of `wc_root` aside so it no longer blocks commits but stays
+    /// available for diagnosis. The first free name of `<name>.json.corrupt`,
+    /// `<name>.json.corrupt.1`, ... is used: an earlier quarantined journal is never replaced.
+    /// On failure the journal stays where it is.
     pub fn quarantine(&self, wc_root: &Path) -> Result<PathBuf> {
         let path = self.file_for(wc_root);
-        let aside = path.with_extension("json.corrupt");
-        svn_types::rename_replacing(&path, &aside)?;
-        Ok(aside)
+        for n in 0..QUARANTINE_SLOTS {
+            let aside = match n {
+                0 => path.with_extension("json.corrupt"),
+                n => path.with_extension(format!("json.corrupt.{n}")),
+            };
+            match move_no_replace(&path, &aside) {
+                Ok(()) => return Ok(aside),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(SvnError::from_io(
+                        format!("move {} to {}", path.display(), aside.display()),
+                        &e,
+                    ));
+                }
+            }
+        }
+        Err(SvnError::new(
+            ErrorCode::WcNeedsCleanup,
+            format!(
+                "no free name to set the commit journal {} aside; remove old *.json.corrupt* files",
+                path.display()
+            ),
+        ))
     }
 
     /// Removes the journal of `wc_root` (no error when there is none).
@@ -151,6 +242,42 @@ impl JournalStore {
             Err(e) => Err(SvnError::from_io(format!("remove {}", path.display()), &e)),
         }
     }
+}
+
+/// Moves `from` to `to` without ever replacing an existing `to`: fails with
+/// [`std::io::ErrorKind::AlreadyExists`] when something is there, even if it appeared after the
+/// caller looked. `std::fs::rename` cannot be used for this: it silently replaces the target on
+/// Unix and (with `MOVEFILE_REPLACE_EXISTING`) on Windows.
+///
+/// A hard link is created first (`link(2)` / `CreateHardLinkW` both refuse an existing target
+/// atomically), then the original is removed. On file systems without hard links (FAT, some
+/// network shares) the contents are copied into a file opened with `create_new` (`O_EXCL` /
+/// `CREATE_NEW`), which is just as exclusive. If the original cannot be removed afterwards the
+/// new name is removed again, so on any error `from` is left as it was.
+fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(from, to) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e),
+        Err(_) => {
+            use std::io::Write as _;
+            let data = std::fs::read(from)?;
+            let mut out = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(to)?;
+            if let Err(e) = out.write_all(&data).and_then(|()| out.sync_all()) {
+                drop(out);
+                let _ = std::fs::remove_file(to);
+                return Err(e);
+            }
+        }
+    }
+    if let Err(e) = std::fs::remove_file(from) {
+        let _ = std::fs::remove_file(to);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Canonical form of a working copy root; the path as given when it cannot be resolved (the
@@ -213,5 +340,41 @@ impl CommitObserver for CommitJournal {
         self.advance(JournalPhase::Merged {
             rev: info.revision.0,
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::move_no_replace;
+
+    #[test]
+    fn move_no_replace_moves_but_never_replaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (from, to) = (tmp.path().join("a"), tmp.path().join("b"));
+        std::fs::write(&from, b"journal").unwrap();
+        std::fs::write(&to, b"older").unwrap();
+        let err = move_no_replace(&from, &to).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&from).unwrap(),
+            b"journal",
+            "source untouched"
+        );
+        assert_eq!(std::fs::read(&to).unwrap(), b"older", "target untouched");
+
+        #[cfg(unix)]
+        {
+            let dangling = tmp.path().join("c");
+            std::os::unix::fs::symlink(tmp.path().join("missing"), &dangling).unwrap();
+            let err = move_no_replace(&from, &dangling).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+            assert!(std::fs::symlink_metadata(&dangling).unwrap().is_symlink());
+        }
+
+        let free = tmp.path().join("d");
+        move_no_replace(&from, &free).unwrap();
+        assert!(!from.exists());
+        assert_eq!(std::fs::read(&free).unwrap(), b"journal");
     }
 }
