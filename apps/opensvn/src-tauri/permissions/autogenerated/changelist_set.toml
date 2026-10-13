@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-changelist-set"
+description = "Enables the changelist_set command without any pre-configured scope."
+commands.allow = ["changelist_set"]
+
+[[permission]]
+identifier = "deny-changelist-set"
+description = "Denies the changelist_set command without any pre-configured scope."
+commands.deny = ["changelist_set"]

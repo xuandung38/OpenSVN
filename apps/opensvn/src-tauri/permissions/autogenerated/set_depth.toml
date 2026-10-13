@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-depth"
+description = "Enables the set_depth command without any pre-configured scope."
+commands.allow = ["set_depth"]
+
+[[permission]]
+identifier = "deny-set-depth"
+description = "Denies the set_depth command without any pre-configured scope."
+commands.deny = ["set_depth"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-repo-save"
+description = "Enables the repo_save command without any pre-configured scope."
+commands.allow = ["repo_save"]
+
+[[permission]]
+identifier = "deny-repo-save"
+description = "Denies the repo_save command without any pre-configured scope."
+commands.deny = ["repo_save"]
