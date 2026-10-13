@@ -89,6 +89,7 @@ steps:
   - { on: svn15, wc: a, sh: "echo x >> README.txt" }
   - { on: engine, wc: b, svn: [checkout, "{url}/trunk", "."] }     # needs an EngineDriver
   - { on: tortoise-manual, wc: c, note: "Update in TortoiseSVN, then press Enter" }
+  - { on: svn14, wc: d, svn: [status], fails_with: E155021 }   # must exit non-zero with this in stderr
 compare:
   - { left: a, right: b, checks: [tree, status, info, wcdb], reader: svn15 }   # reader defaults to svn15
 expect: match                # `mismatch` = negative control: every listed check must find a difference
@@ -103,6 +104,10 @@ appended. Comparisons:
 - `wcdb`: `user_version`, every index/trigger/view, all rows sorted. Only `NODES.last_mod_time`
   is masked (SET/NULL) and skel property columns are canonicalised (svn writes them in hash
   order). A non-empty `WORK_QUEUE` after the steps is a failure.
+
+A step with `fails_with` is a negative step: it passes only if the command exits non-zero and
+stderr contains the text. `format32-refused-svn14.yaml` and the legacy smokes use it to check
+that 1.8-1.14 clients refuse a format-32 working copy with `E155021`.
 
 `selfcheck-must-fail.yaml` is the negative control (`expect: mismatch`): it proves each comparator
 notices a real difference. Run one scenario run at a time (work dir and ports are shared).
