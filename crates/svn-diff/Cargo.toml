@@ -5,8 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Subversion-compatible line diff, unified output and three-way merge"
 
 [lints]
 workspace = true
 
 [dependencies]
+svn-types = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[[bench]]
+name = "diff_merge"
+harness = false

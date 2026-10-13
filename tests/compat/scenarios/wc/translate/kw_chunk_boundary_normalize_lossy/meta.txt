@@ -1,0 +1,10 @@
+svn_version=1.15.0
+prop.svn:keywords=Rev Id
+rev=27
+author=alice
+date_micros=1791884719280174
+utc_offset_secs=0
+url=file:///tmp/opensvn-golden/repo/kw_chunk_boundary_normalize_lossy
+root=file:///tmp/opensvn-golden/repo
+tz=UTC
+path=kw_chunk_boundary_normalize_lossy
