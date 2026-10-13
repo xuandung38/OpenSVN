@@ -1,6 +1,7 @@
 //! Shared engine contracts: plain data types, error model, path safety and the
 //! synchronous delta-editor traits. This crate must not depend on an async runtime.
 
+mod admin_name;
 mod cancel;
 mod editor;
 mod error;
