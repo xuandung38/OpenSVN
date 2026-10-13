@@ -53,7 +53,10 @@ pub fn path_extension(path: &str) -> &str {
 /// Parses the inside of a `[...]` set (after the `[`): returns whether it is negated, the
 /// inclusive byte ranges, and the pattern after the closing `]`. A backslash escapes the next
 /// byte; the first `]` right after the opening (or after `!`/`^`) is a literal.
-fn parse_bracket(rest: &[u8]) -> Option<(bool, Vec<(u8, u8)>, &[u8])> {
+/// Negation flag, inclusive byte ranges, and the pattern after the closing `]`.
+type Bracket<'a> = (bool, Vec<(u8, u8)>, &'a [u8]);
+
+fn parse_bracket(rest: &[u8]) -> Option<Bracket<'_>> {
     let (negate, mut i) = match rest.first() {
         Some(b'!' | b'^') => (true, 1),
         _ => (false, 0),
