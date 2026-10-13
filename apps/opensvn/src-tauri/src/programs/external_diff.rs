@@ -1,17 +1,16 @@
 //! Opening a diff in the external diff tool (`diff.externalTool`).
 //!
-//! The two sides are written as read-only copies into a fresh folder under the private
-//! `external-diff` directory and the configured program is started directly (never through a
+//! The two sides are written as read-only copies (`left.<ext>` / `right.<ext>`) into a fresh
+//! folder under the private `external-diff` directory and the configured program is started directly (never through a
 //! shell) with `{left}` / `{right}` in its arguments replaced by those copies. When the arguments
 //! name neither placeholder, the two paths are appended, which is what most tools expect.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use opensvn_ipc::AppError;
-
-use super::is_deceptive;
 
 /// Placeholder replaced by the left (older) copy.
 pub const LEFT_TOKEN: &str = "{left}";
@@ -76,38 +75,32 @@ pub fn expand_args(args: &[String], left: &str, right: &str) -> Vec<String> {
         .collect()
 }
 
-/// File name for the staged copies: the last segment of `path`, reduced to characters that are
-/// safe in a file name on every OS (the extension is kept so tools pick the right syntax).
-pub fn staged_file_name(path: &str) -> String {
-    let last = path
-        .rsplit(['/', '\\'])
-        .find(|s| !s.is_empty())
-        .unwrap_or("");
-    let cleaned: String = last
-        .chars()
-        .map(|c| {
-            if is_deceptive(c) || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') {
-                '_'
-            } else {
-                c
-            }
-        })
-        .take(120)
-        .collect();
-    let trimmed = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
-    if trimmed.is_empty() {
-        return "file".to_owned();
-    }
-    // Device names stay special on Windows whatever the extension (`NUL.txt`).
-    let stem = trimmed.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (stem.len() == 4
-            && (stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.as_bytes()[3].is_ascii_digit());
-    if reserved {
-        format!("_{trimmed}")
-    } else {
-        trimmed.to_owned()
+/// Longest extension kept on the staged copies.
+pub const MAX_EXT_LEN: usize = 16;
+/// Most staged folders kept at once; the oldest are removed first to make room.
+pub const MAX_STAGED_DIRS: usize = 32;
+/// Most bytes kept across all staged folders; the oldest are removed first to make room.
+pub const MAX_STAGED_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Extension for the staged copies, taken from the last segment of `path` so tools pick the
+/// right syntax. Only `[A-Za-z0-9]{1,16}` is kept; anything else (streams such as `::$DATA`,
+/// spaces, shell metacharacters, non-ASCII) drops the extension entirely.
+pub fn staged_extension(path: &str) -> Option<String> {
+    let last = path.rsplit(['/', '\\']).find(|s| !s.is_empty())?;
+    let (_, ext) = last.rsplit_once('.')?;
+    let ok =
+        (1..=MAX_EXT_LEN).contains(&ext.len()) && ext.bytes().all(|b| b.is_ascii_alphanumeric());
+    ok.then(|| ext.to_owned())
+}
+
+/// Fixed names of the staged copies: `left.<ext>` / `right.<ext>` (or bare `left` / `right`).
+/// Nothing from the repository reaches the file name except a sanitized extension, so device
+/// names (`NUL .txt`), drive letters, UNC paths, alternate data streams and `cmd` metacharacters
+/// cannot appear in it.
+pub fn staged_names(path: &str) -> (String, String) {
+    match staged_extension(path) {
+        Some(ext) => (format!("left.{ext}"), format!("right.{ext}")),
+        None => ("left".to_owned(), "right".to_owned()),
     }
 }
 
@@ -119,7 +112,6 @@ fn io_error(what: &str, e: &std::io::Error) -> AppError {
 }
 
 fn write_copy(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf, AppError> {
-    std::fs::create_dir(dir).map_err(|e| io_error("folder", &e))?;
     let path = dir.join(name);
     let mut f = std::fs::OpenOptions::new()
         .write(true)
@@ -137,54 +129,144 @@ fn write_copy(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf, AppError> 
     Ok(path)
 }
 
-/// Writes both sides under a new folder in `root` (the private external-diff directory) and
-/// returns their paths. A missing side (added or deleted file) is staged as an empty file.
+/// Serializes staging so the folder and byte caps hold when launches overlap.
+static STAGING: Mutex<()> = Mutex::new(());
+
+/// Writes both sides into a new folder in `root` (the private external-diff directory) as
+/// `left.<ext>` / `right.<ext>` (see [`staged_names`]) and returns their paths. A missing side
+/// (added or deleted file) is staged as an empty file. Older folders are removed first, oldest
+/// first, so at most [`MAX_STAGED_DIRS`] folders and [`MAX_STAGED_BYTES`] bytes stay staged.
 pub fn stage_sides(
     root: &Path,
-    name: &str,
+    path: &str,
     left: &[u8],
     right: &[u8],
 ) -> Result<(PathBuf, PathBuf), AppError> {
+    stage_sides_capped(root, path, left, right, MAX_STAGED_DIRS, MAX_STAGED_BYTES)
+}
+
+fn stage_sides_capped(
+    root: &Path,
+    path: &str,
+    left: &[u8],
+    right: &[u8],
+    max_dirs: usize,
+    max_bytes: u64,
+) -> Result<(PathBuf, PathBuf), AppError> {
+    let incoming = (left.len() + right.len()) as u64;
+    if incoming > max_bytes {
+        return Err(crate::errors::invalid_argument(
+            "The file is too large to open in the external diff tool.",
+        ));
+    }
+    let _guard = STAGING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    make_room(root, max_dirs.saturating_sub(1), max_bytes - incoming);
     let session = root.join(uuid::Uuid::now_v7().simple().to_string());
     std::fs::create_dir(&session).map_err(|e| io_error("folder", &e))?;
-    let l = write_copy(&session.join("left"), name, left)?;
-    let r = write_copy(&session.join("right"), name, right)?;
+    let (ln, rn) = staged_names(path);
+    let l = write_copy(&session, &ln, left)?;
+    let r = write_copy(&session, &rn, right)?;
     Ok((l, r))
+}
+
+/// Staged folders in `root`, oldest first (names are UUIDv7, which sort by creation time).
+/// Symbolic links and plain files are never treated as staged folders.
+fn staged_dirs(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// Removes the oldest staged folders until at most `keep_dirs` remain and they hold at most
+/// `keep_bytes` bytes.
+fn make_room(root: &Path, keep_dirs: usize, keep_bytes: u64) {
+    let dirs: Vec<(PathBuf, u64)> = staged_dirs(root)
+        .into_iter()
+        .map(|d| {
+            let size = tree_size(&d);
+            (d, size)
+        })
+        .collect();
+    let mut total: u64 = dirs.iter().map(|(_, s)| s).sum();
+    let mut count = dirs.len();
+    for (dir, size) in dirs {
+        if count <= keep_dirs && total <= keep_bytes {
+            break;
+        }
+        remove_tree(&dir);
+        count -= 1;
+        total -= size;
+    }
+}
+
+/// Calls `f` for every regular file under `dir`, never following symbolic links.
+fn walk_files(dir: &Path, f: &mut dyn FnMut(&Path, &std::fs::Metadata)) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let kind = meta.file_type();
+        if kind.is_dir() {
+            walk_files(&path, f);
+        } else if kind.is_file() {
+            f(&path, &meta);
+        }
+    }
+}
+
+fn tree_size(dir: &Path) -> u64 {
+    let mut total = 0;
+    walk_files(dir, &mut |_, m| total += m.len());
+    total
 }
 
 /// Best effort: removes staged folders in `root` last modified more than `max_age` ago.
 pub fn sweep_stale(root: &Path, max_age: Duration) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
     let now = SystemTime::now();
-    for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
-        let old = meta
-            .modified()
+    for dir in staged_dirs(root) {
+        let old = std::fs::symlink_metadata(&dir)
+            .and_then(|m| m.modified())
             .ok()
             .and_then(|m| now.duration_since(m).ok())
             .is_some_and(|age| age > max_age);
-        if meta.is_dir() && old {
-            remove_tree(&entry.path());
+        if old {
+            remove_tree(&dir);
         }
     }
 }
 
-/// Removes a staged folder; the copies are read-only, which blocks removal on Windows.
+/// Removes a staged folder without following symbolic links: a link inside it is removed, never
+/// its target. On Windows the read-only copies block removal, so the flag is cleared first, on
+/// regular files only; Unix removal depends on the folder's permissions alone, so nothing is
+/// changed there.
 fn remove_tree(dir: &Path) {
-    for side in ["left", "right"] {
-        if let Ok(files) = std::fs::read_dir(dir.join(side)) {
-            for f in files.flatten() {
-                if let Ok(meta) = std::fs::symlink_metadata(f.path()) {
-                    let mut perms = meta.permissions();
-                    #[allow(clippy::permissions_set_readonly_false)]
-                    perms.set_readonly(false);
-                    let _ = std::fs::set_permissions(f.path(), perms);
-                }
-            }
-        }
+    let Ok(meta) = std::fs::symlink_metadata(dir) else {
+        return;
+    };
+    if !meta.file_type().is_dir() {
+        return;
     }
+    #[cfg(windows)]
+    walk_files(dir, &mut |path, meta| {
+        let mut perms = meta.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(path, perms);
+    });
+    // `remove_dir_all` removes symbolic links themselves and does not descend into them.
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -212,24 +294,70 @@ mod tests {
     }
 
     #[test]
-    fn staged_names_keep_the_extension_and_drop_unsafe_characters() {
-        assert_eq!(staged_file_name("src/engine/renderer.ts"), "renderer.ts");
-        assert_eq!(staged_file_name("a/b/"), "b");
-        assert_eq!(staged_file_name("x/..\u{202E}gpj.exe"), "_gpj.exe");
-        assert_eq!(staged_file_name("we:ird|na*me?.txt"), "we_ird_na_me_.txt");
-        assert_eq!(staged_file_name(""), "file");
-        assert_eq!(staged_file_name("/.."), "file");
-        assert_eq!(staged_file_name("dir/nul.txt"), "_nul.txt");
-        assert_eq!(staged_file_name("COM1"), "_COM1");
+    fn staged_names_are_fixed_and_keep_only_a_safe_extension() {
+        let n = |p: &str| staged_names(p);
+        let txt = ("left.txt".to_owned(), "right.txt".to_owned());
+        let bare = ("left".to_owned(), "right".to_owned());
+        assert_eq!(
+            n("src/engine/renderer.ts"),
+            ("left.ts".into(), "right.ts".into())
+        );
+        assert_eq!(n("a/b/"), bare);
+        assert_eq!(n(""), bare);
+        assert_eq!(n("/.."), bare);
+        // Drive letters, UNC paths and device names never reach the file name.
+        assert_eq!(n(r"C:\x\a.txt"), txt);
+        assert_eq!(n(r"\\srv\share\a.txt"), txt);
+        assert_eq!(n("dir/NUL .txt"), txt);
+        assert_eq!(n("COM1 .txt"), txt);
+        assert_eq!(n("CONIN$"), bare);
+        assert_eq!(n("COM1"), bare);
+        // Alternate data streams, shell metacharacters, bidi and over-long extensions are dropped.
+        assert_eq!(n("a.txt::$DATA"), bare);
+        assert_eq!(n("a.txt:stream"), bare);
+        assert_eq!(n("x&calc.b^a%t"), bare);
+        assert_eq!(n("x.c(m)d"), bare);
+        assert_eq!(
+            n("x/..\u{202E}gpj.exe"),
+            ("left.exe".into(), "right.exe".into())
+        );
+        assert_eq!(n("x.t xt"), bare);
+        assert_eq!(n("x.abcdefghijklmnopq"), bare);
+        assert_eq!(
+            n("x.abcdefghijklmnop"),
+            (
+                "left.abcdefghijklmnop".into(),
+                "right.abcdefghijklmnop".into()
+            )
+        );
+        assert_eq!(n("x.tx\u{0442}"), bare);
+        for p in [
+            r"C:\x\a.txt",
+            "a.txt::$DATA",
+            "NUL .txt",
+            "x&y.b%t",
+            "..\\..\\evil.sh",
+        ] {
+            let (l, r) = n(p);
+            for name in [l, r] {
+                assert!(
+                    name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.'),
+                    "{p} -> {name}"
+                );
+                assert!(name.starts_with("left") || name.starts_with("right"));
+            }
+        }
     }
 
     #[test]
-    fn sides_are_staged_read_only_in_separate_folders() {
+    fn sides_are_staged_read_only_under_fixed_names() {
         let root = tempfile::tempdir().unwrap();
-        let (l, r) = stage_sides(root.path(), "a.txt", b"old\n", b"").unwrap();
+        let (l, r) = stage_sides(root.path(), "dir/NUL .txt", b"old\n", b"").unwrap();
         assert_eq!(std::fs::read(&l).unwrap(), b"old\n");
         assert_eq!(std::fs::read(&r).unwrap(), b"");
-        assert_ne!(l.parent(), r.parent());
+        assert_eq!(l.file_name().unwrap(), "left.txt");
+        assert_eq!(r.file_name().unwrap(), "right.txt");
+        assert_eq!(l.parent(), r.parent());
         assert!(l.starts_with(root.path()) && r.starts_with(root.path()));
         assert!(std::fs::metadata(&l).unwrap().permissions().readonly());
         // A second launch never reuses or overwrites the first copies.
@@ -238,6 +366,42 @@ mod tests {
         assert_eq!(std::fs::read(&l).unwrap(), b"old\n");
     }
 
+    #[test]
+    fn staging_keeps_at_most_the_folder_cap_removing_the_oldest() {
+        let root = tempfile::tempdir().unwrap();
+        let mut firsts = Vec::new();
+        for i in 0..5 {
+            let (l, _) = stage_sides_capped(
+                root.path(),
+                "a.txt",
+                format!("{i}").as_bytes(),
+                b"",
+                3,
+                1 << 20,
+            )
+            .unwrap();
+            firsts.push(l);
+        }
+        assert_eq!(staged_dirs(root.path()).len(), 3);
+        assert!(!firsts[0].exists() && !firsts[1].exists());
+        assert!(firsts[2].exists() && firsts[4].exists());
+    }
+
+    #[test]
+    fn staging_keeps_at_most_the_byte_cap_removing_the_oldest() {
+        let root = tempfile::tempdir().unwrap();
+        let kib = vec![b'x'; 1024];
+        let (a, _) = stage_sides_capped(root.path(), "a", &kib, &kib, 32, 5 * 1024).unwrap();
+        let (b, _) = stage_sides_capped(root.path(), "b", &kib, &kib, 32, 5 * 1024).unwrap();
+        // 4 KiB staged; 2 more KiB do not fit, so the oldest folder goes.
+        let (c, _) = stage_sides_capped(root.path(), "c", &kib, &kib, 32, 5 * 1024).unwrap();
+        assert!(!a.exists() && b.exists() && c.exists());
+        assert!(tree_size(root.path()) <= 5 * 1024);
+        // A single launch larger than the cap is refused and removes nothing.
+        let big = vec![b'x'; 6 * 1024];
+        assert!(stage_sides_capped(root.path(), "d", &big, b"", 32, 5 * 1024).is_err());
+        assert!(b.exists() && c.exists());
+    }
     #[test]
     fn sweep_removes_only_stale_folders() {
         let root = tempfile::tempdir().unwrap();
@@ -249,5 +413,41 @@ mod tests {
         sweep_stale(root.path(), Duration::ZERO);
         assert!(!l.exists());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    /// A symbolic link planted in a staged folder is removed, never followed: the target keeps
+    /// its permissions and contents, and a linked folder's files are left alone.
+    #[cfg(unix)]
+    #[test]
+    fn removal_never_follows_planted_symlinks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret");
+        std::fs::write(&secret, b"keep").unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (l, _) = stage_sides(root.path(), "a.txt", b"x", b"y").unwrap();
+        let staged = l.parent().unwrap();
+        symlink(&secret, staged.join("link")).unwrap();
+        symlink(outside.path(), staged.join("linked-dir")).unwrap();
+        // A link in the root itself is not a staged folder.
+        symlink(
+            outside.path(),
+            root.path().join("ffffffffffffffffffffffffffffffff"),
+        )
+        .unwrap();
+
+        sweep_stale(root.path(), Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(20));
+        sweep_stale(root.path(), Duration::ZERO);
+        make_room(root.path(), 0, 0);
+
+        assert!(!staged.exists());
+        assert_eq!(std::fs::read(&secret).unwrap(), b"keep");
+        let mode = std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(outside.path().exists());
+        // The size walk does not follow links either.
+        assert_eq!(tree_size(root.path()), 0);
     }
 }

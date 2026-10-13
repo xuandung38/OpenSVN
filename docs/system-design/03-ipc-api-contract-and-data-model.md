@@ -113,7 +113,7 @@ type Layout =
 | `status_refresh` | `{ wcId, paths? }` | `OperationHandle` |
 | `status_remote` | `{ wcId }` | `OperationHandle` (cập nhật `remote` trong FileStatus + `incoming`) |
 | `diff_get` | `{ target: DiffTarget, ignoreWhitespace?, forceLarge? }` | `FileDiff` |
-| `diff_external` | `{ target: DiffTarget }` | `void`. Mở `diff.externalTool` trên hai bản sao chỉ-đọc của hai bên (thư mục riêng `<data>/external-diff/<id>/{left,right}/<tên file>`, tự xóa sau 24h). Chạy trực tiếp, không qua shell; trong `args`, `{left}`/`{right}` được thay bằng đường dẫn hai bản sao, nếu không có placeholder thì hai đường dẫn được nối vào cuối. Chưa cấu hình → `invalidArgument` + action `openSettings`; file nhị phân → `invalidArgument` |
+| `diff_external` | `{ target: DiffTarget }` | `void`. Mở `diff.externalTool` trên hai bản sao chỉ-đọc của hai bên (thư mục riêng `<data>/external-diff/<id>/{left,right}.<ext>`, tên cố định, `ext` chỉ giữ `[A-Za-z0-9]{1,16}`; tự xóa sau 24h, giữ tối đa 32 thư mục / 512 MiB, xóa cũ nhất trước; khi xóa không bao giờ đi theo symlink). Chạy trực tiếp, không qua shell; trong `args`, `{left}`/`{right}` được thay bằng đường dẫn hai bản sao, nếu không có placeholder thì hai đường dẫn được nối vào cuối. Chưa cấu hình → `invalidArgument` + action `openSettings`; file nhị phân → `invalidArgument` |
 | `changelist_set` | `{ wcId, paths, name \| null }` | `void` |
 | `ignore_add` | `{ wcId, pattern, dir, scope: 'svn:ignore' \| 'local' }` | `void` |
 | `mark_move` | `{ wcId, from, to }` | `void` |
