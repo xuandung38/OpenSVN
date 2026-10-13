@@ -79,7 +79,12 @@ fn unified_matches_svn_diff() {
                 ignore_eol_style: true,
                 ..DiffOptions::default()
             },
-            _ => DiffOptions::default(),
+            None => DiffOptions::default(),
+            Some(other) => panic!(
+                "unrecognised opts {:?} in {}",
+                String::from_utf8_lossy(other),
+                dir.display()
+            ),
         };
         let opts = UnifiedOptions {
             diff,
