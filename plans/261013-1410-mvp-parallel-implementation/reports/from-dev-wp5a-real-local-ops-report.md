@@ -75,3 +75,46 @@ schedule/move/revert, metadata and conflict-theirs on WCs made and checked by sv
   externals with local edits, and remove_items continuing past a failure.
 - Still open (non-blocking): `set_subversion_config_dir` wiring is WP7; fake engine `Mine` semantics
   differ from real (real = svn mine-full).
+
+## Review round 2 fix (blocking: a request path inside an external / nested WC was deleted)
+- Merged origin/main up to a3e9f2e (WP3 #93, WP4 #95). The one conflict was the module doc in
+  `engine/real/mod.rs`; it now lists status (WP3), sync (WP4) and local ops (this PR), and says only
+  commit is still unwired.
+- New `local_util::ensure_own_path`. It applies to a request path that this WC's wc.db does not know.
+  It checks every prefix, from the first component down to the path itself, and refuses the path
+  (`WcInvalidOperation`) if any prefix is either of these:
+  - a WC root: a directory with its own `.svn`, meaning a fetched external or a nested checkout;
+  - an external: an `EXTERNALS` row, or an `svn:externals` definition even when the external is not
+    fetched yet.
+
+  The error reads "'ext/main.rs' belongs to an external working copy ('ext'); open that working copy
+  to revert or change it". Where it runs:
+  - `target()` calls it, so revert, add, delete, move (both ends), resolve, props, changelist and
+    ignore all refuse such a path before anything changes. Revert without `remove_unversioned` no
+    longer skips the path silently.
+  - `unversioned_items` calls it as well, as a second line of defence.
+  - Naming an external or nested root directly (`ext`, `nested`) is now an error too; before, it was
+    a silent no-op. A directory that only leads to an external (`deep`) is still this WC's, so it is
+    accepted and kept.
+- `svn_client::status::ExternalPaths` changes:
+  - new `is_external` and `within` methods;
+  - case-insensitive matching on macOS, iOS and Windows (`CASE_INSENSITIVE_FS`, `ExternalPaths::new(fold)`).
+    On a case-sensitive volume of those platforms this only protects more paths, never fewer.
+  - A doc comment now says that when the parser skips a definition line it cannot read, the `.svn`
+    check (`is_wc_root_dir`) is the safety net.
+- WP3's `TODO(#94)` is done: `do_status` now uses as global ignores the configured ones (or svn's
+  defaults) plus `read_local_ignores`. This is the same list the local ops use.
+- New tests:
+  - Oracle regression tests (svn 1.15) for the three probe cases: `ext/main.rs`, `nested/README.md`,
+    and `u/inner/src` (a checkout hidden in an unversioned dir). Each must fail with the error and leave
+    the inner WC intact, which is checked with svn.
+  - Always-run engine tests:
+    - paths inside externals and nested WCs are refused for revert, add, delete and move;
+    - a defined but unfetched external that holds user files (no `.svn`) shows as `X`, its contents
+      are refused, and cleanup and revert keep it;
+    - the engine status applies the local ignore list.
+  - Unit tests for `within` and for case folding.
+- Non-vacuity, checked locally:
+  - With `ensure_own_path` disabled, 7 tests fail: the 3 oracle cases, the 3 new engine tests and the
+    updated named-target test.
+  - With `ExternalPaths::is_external` and `covers` forced to false, the unfetched-external test fails.
