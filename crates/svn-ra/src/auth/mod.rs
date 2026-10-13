@@ -7,14 +7,24 @@
 //! outcome. After three rejected credentials the flight stops with `AuthRequired` to avoid
 //! locking a directory account.
 //!
-//! Negotiate (SPNEGO) is not implemented yet: a server that offers it is surfaced to the prompter
-//! through the `offered` list, and the transport never falls back to Basic on its own.
+//! Negotiate (SPNEGO/Kerberos, see [`negotiate`]) is tried first when the server offers it, the
+//! build has a provider and the URL is `https`. On plain `http` no Negotiate token is ever sent
+//! and the request fails with `ErrorCode::NegotiateFailed` ("use an https:// URL"). When it fails
+//! for a host (no ticket, rejected ticket, IP host, unavailable), the host is remembered for
+//! [`NEGOTIATE_RETRY_AFTER`] and the user is prompted with [`PromptReason::NegotiateFailed`] if
+//! Basic is also offered; otherwise the request fails with `ErrorCode::NegotiateFailed`. The
+//! transport never switches to Basic without asking. After a successful exchange, later requests
+//! to the host start Negotiate up front with a fresh context (each token is single use), which
+//! also lets one-shot bodies through. If such an up-front token is rejected, one fresh context
+//! answers the server's challenge before the host counts as failed. NTLM is not supported.
 
 mod basic;
 mod challenge;
+pub mod negotiate;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use reqwest::header::HeaderValue;
 use secrecy::SecretString;
@@ -24,9 +34,16 @@ use url::Url;
 
 pub use basic::basic_header;
 pub use challenge::Challenges;
+pub use negotiate::{NegotiateContext, NegotiateProvider, NegotiateStep};
+
+use negotiate::PendingNegotiate;
 
 /// Maximum number of rejected credentials per origin before giving up.
 pub const MAX_ATTEMPTS: u8 = 3;
+
+/// How long a Negotiate failure is remembered for a host. Afterwards SSO is tried again, so a
+/// ticket obtained later (`kinit`, renewed logon session) is picked up without a restart.
+pub const NEGOTIATE_RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
 
 /// `(scheme, host, port)` of a request; the realm is only known after a challenge.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -71,6 +88,17 @@ pub(crate) struct Attached {
     origin: Option<OriginKey>,
     /// Flight generation the header came from.
     generation: u64,
+    /// Negotiate context whose token is in `header`, waiting for the server's final token.
+    negotiate: Option<Arc<PendingNegotiate>>,
+    /// The Negotiate token was sent up front (not in answer to a challenge).
+    proactive: bool,
+}
+
+impl Attached {
+    /// The request carried a Negotiate token.
+    pub(crate) fn is_negotiate(&self) -> bool {
+        self.negotiate.is_some()
+    }
 }
 
 struct Credential {
@@ -102,6 +130,14 @@ pub(crate) struct AuthManager {
     flights: Mutex<HashMap<OriginKey, Arc<Flight>>>,
     /// Last origin (realm) that produced credentials for a host, for preemptive Basic.
     hosts: Mutex<HashMap<HostKey, OriginKey>>,
+    /// Platform Negotiate provider; `None` when the build has no SSO support.
+    negotiate: Option<Arc<dyn NegotiateProvider>>,
+    /// Hosts where Negotiate failed recently, with when and why; they go straight to the Basic
+    /// prompt until the entry is older than `negotiate_retry_after`.
+    negotiate_failed: Mutex<HashMap<HostKey, (Instant, String)>>,
+    negotiate_retry_after: Duration,
+    /// Hosts where Negotiate succeeded; later requests start it up front.
+    negotiate_ok: Mutex<HashSet<HostKey>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -109,11 +145,92 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl AuthManager {
-    pub(crate) fn new(prompter: Arc<dyn AuthPrompter>) -> Self {
+    pub(crate) fn new(
+        prompter: Arc<dyn AuthPrompter>,
+        negotiate: Option<Arc<dyn NegotiateProvider>>,
+    ) -> Self {
         Self {
             prompter,
             flights: Mutex::default(),
             hosts: Mutex::default(),
+            negotiate,
+            negotiate_failed: Mutex::default(),
+            negotiate_retry_after: NEGOTIATE_RETRY_AFTER,
+            negotiate_ok: Mutex::default(),
+        }
+    }
+
+    /// Replaces the Negotiate provider (tests inject a fake one).
+    pub(crate) fn set_negotiate(&mut self, provider: Option<Arc<dyn NegotiateProvider>>) {
+        self.negotiate = provider;
+    }
+
+    /// Changes how long a Negotiate failure is remembered per host.
+    pub(crate) fn set_negotiate_retry_after(&mut self, after: Duration) {
+        self.negotiate_retry_after = after;
+    }
+
+    fn mark_negotiate_failed(&self, key: &HostKey, reason: &str) {
+        lock(&self.negotiate_ok).remove(key);
+        lock(&self.negotiate_failed).insert(key.clone(), (Instant::now(), reason.to_owned()));
+    }
+
+    /// The reason Negotiate recently failed for `key`, dropping an expired entry.
+    fn recent_negotiate_failure(&self, key: &HostKey) -> Option<String> {
+        let mut failed = lock(&self.negotiate_failed);
+        match failed.get(key) {
+            Some((at, _)) if at.elapsed() >= self.negotiate_retry_after => {
+                failed.remove(key);
+                None
+            }
+            Some((_, reason)) => Some(reason.clone()),
+            None => None,
+        }
+    }
+
+    /// Starts a fresh Negotiate context for `key` (never reuses a token).
+    async fn start_negotiate(
+        &self,
+        provider: &Arc<dyn NegotiateProvider>,
+        key: &HostKey,
+        channel_binding: Option<Arc<[u8]>>,
+        proactive: bool,
+        cancel: &CancelToken,
+    ) -> Result<Attached> {
+        let (header, pending) =
+            negotiate::start(provider, &key.host, channel_binding, cancel).await?;
+        Ok(Attached {
+            header: Some(header),
+            negotiate: Some(pending),
+            proactive,
+            ..Attached::default()
+        })
+    }
+
+    /// Credentials for resending `sent` after a transient failure. A Negotiate token is single
+    /// use (servers keep a replay cache), so a fresh context is started; if that fails, the
+    /// request goes out without credentials and the server's challenge decides what follows.
+    pub(crate) async fn renew(
+        &self,
+        url: &Url,
+        sent: &Attached,
+        channel_binding: Option<Arc<[u8]>>,
+        cancel: &CancelToken,
+    ) -> Result<Attached> {
+        let Some(provider) = sent.negotiate.as_ref().and(self.negotiate.as_ref()) else {
+            return Ok(sent.clone());
+        };
+        let key = HostKey::from_url(url)?;
+        match self
+            .start_negotiate(provider, &key, channel_binding, sent.proactive, cancel)
+            .await
+        {
+            Ok(next) => Ok(next),
+            Err(e) if e.code == ErrorCode::Cancelled => Err(e),
+            Err(e) => {
+                tracing::debug!(error = %e.message, "cannot renew the Negotiate token");
+                Ok(Attached::default())
+            }
         }
     }
 
@@ -121,9 +238,32 @@ impl AuthManager {
         Arc::clone(lock(&self.flights).entry(origin.clone()).or_default())
     }
 
-    /// Header to send up front. Basic is only ever attached to `https` requests.
-    pub(crate) fn prepare(&self, url: &Url) -> Result<Attached> {
+    /// Header to send up front: Negotiate for hosts where it already worked, else Basic (only
+    /// ever attached to `https` requests).
+    pub(crate) async fn prepare(
+        &self,
+        url: &Url,
+        channel_binding: Option<Arc<[u8]>>,
+        cancel: &CancelToken,
+    ) -> Result<Attached> {
         let key = HostKey::from_url(url)?;
+        if let Some(provider) = &self.negotiate
+            && key.scheme == "https"
+            && lock(&self.negotiate_ok).contains(&key)
+        {
+            match self
+                .start_negotiate(provider, &key, channel_binding, true, cancel)
+                .await
+            {
+                Ok(next) => return Ok(next),
+                Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
+                Err(e) => {
+                    // Let the server's challenge decide what happens next.
+                    tracing::debug!(error = %e.message, "preemptive Negotiate failed");
+                    lock(&self.negotiate_ok).remove(&key);
+                }
+            }
+        }
         let Some(origin) = lock(&self.hosts).get(&key).cloned() else {
             return Ok(Attached::default());
         };
@@ -137,16 +277,101 @@ impl AuthManager {
             header,
             origin: Some(origin),
             generation: state.generation,
+            ..Attached::default()
         })
     }
 
     /// Records that the server accepted the credentials carried by `sent`.
-    pub(crate) fn on_success(&self, sent: &Attached) {
+    ///
+    /// For Negotiate, the server's final token (if any) must pass mutual authentication;
+    /// otherwise the response is not trusted and `NegotiateFailed` is returned.
+    pub(crate) async fn on_success(
+        &self,
+        url: &Url,
+        sent: &Attached,
+        headers: &reqwest::header::HeaderMap,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        if let Some(pending) = &sent.negotiate {
+            let key = HostKey::from_url(url)?;
+            match negotiate::finish(pending, headers, cancel).await {
+                Ok(verified) => {
+                    // Without a final token mutual authentication is unavailable; the token we
+                    // sent was still checked to be Kerberos, and only over https.
+                    if !verified {
+                        tracing::debug!("server sent no Negotiate mutual-authentication token");
+                    }
+                    lock(&self.negotiate_failed).remove(&key);
+                    lock(&self.negotiate_ok).insert(key);
+                }
+                Err(e) => {
+                    if e.code != ErrorCode::Cancelled {
+                        self.mark_negotiate_failed(&key, &e.message);
+                    }
+                    return Err(e);
+                }
+            }
+            return Ok(());
+        }
         if let (Some(origin), Some(_)) = (&sent.origin, &sent.header) {
             let flight = self.flight(origin);
             let mut state = lock(&flight.state);
             if state.generation == sent.generation {
                 state.failures = 0;
+            }
+        }
+        Ok(())
+    }
+
+    /// Tries Negotiate for a 401 that offers it. `Ok(Some)` is the request to retry with;
+    /// `Ok(None)` means Negotiate is unusable for this host and the caller falls back.
+    async fn try_negotiate(
+        &self,
+        key: &HostKey,
+        challenges: &Challenges,
+        sent: &Attached,
+        channel_binding: Option<Arc<[u8]>>,
+        cancel: &CancelToken,
+    ) -> Result<Option<Attached>> {
+        if !challenges.negotiate {
+            return Ok(None);
+        }
+        if key.scheme != "https" {
+            // A Kerberos authenticator in clear text can be captured and relayed within the
+            // clock-skew window, and nothing authenticates the response. Never send one.
+            return Err(negotiate::negotiate_failed(
+                "single sign-on (Negotiate/Kerberos) is only used over https; use an https:// URL \
+                 for this repository",
+            ));
+        }
+        if sent.negotiate.is_some() {
+            lock(&self.negotiate_ok).remove(key);
+            if !sent.proactive {
+                // Our token was rejected, or the server asked for another leg (NTLM-style),
+                // which cannot be done without pinning the connection.
+                tracing::debug!("server rejected the Negotiate token");
+                self.mark_negotiate_failed(key, "the server rejected the Kerberos ticket");
+                return Ok(None);
+            }
+            // An up-front token was rejected (clock skew, expired ticket, replay cache): answer
+            // the challenge once with a fresh context before giving up on the host.
+            tracing::debug!("server rejected the up-front Negotiate token; retrying once");
+        } else if self.recent_negotiate_failure(key).is_some() {
+            return Ok(None);
+        }
+        let Some(provider) = &self.negotiate else {
+            return Ok(None);
+        };
+        match self
+            .start_negotiate(provider, key, channel_binding, false, cancel)
+            .await
+        {
+            Ok(next) => Ok(Some(next)),
+            Err(e) if e.code == ErrorCode::Cancelled => Err(e),
+            Err(e) => {
+                tracing::debug!(error = %e.message, "cannot start Negotiate");
+                self.mark_negotiate_failed(key, &e.message);
+                Ok(None)
             }
         }
     }
@@ -157,24 +382,39 @@ impl AuthManager {
         url: &Url,
         challenges: &Challenges,
         sent: &Attached,
+        channel_binding: Option<Arc<[u8]>>,
         cancel: &CancelToken,
     ) -> Result<Attached> {
         let key = HostKey::from_url(url)?;
+        if let Some(next) = self
+            .try_negotiate(&key, challenges, sent, channel_binding, cancel)
+            .await?
+        {
+            return Ok(next);
+        }
         let Some(realm) = challenges.basic_realm.as_deref() else {
+            if challenges.negotiate {
+                let err = negotiate_failure(self.negotiate.is_some());
+                return Err(match self.recent_negotiate_failure(&key) {
+                    Some(reason) => err.with_child(negotiate::negotiate_failed(reason)),
+                    None => err,
+                });
+            }
             return Err(SvnError::new(
                 ErrorCode::AuthRequired,
                 format!(
-                    "server offers no supported authentication scheme (offered: {}); \
-                     Negotiate is not available yet",
+                    "server offers no supported authentication scheme (offered: {})",
                     challenges.describe()
                 ),
             ));
         };
         if key.scheme != "https" {
-            return Err(SvnError::new(
-                ErrorCode::AuthRequired,
-                "refusing to send Basic credentials over plain http; use an https URL",
-            ));
+            let msg = "refusing to send Basic credentials over plain http; use an https URL";
+            if challenges.negotiate {
+                return Err(negotiate_failure(self.negotiate.is_some())
+                    .with_child(SvnError::new(ErrorCode::AuthRequired, msg)));
+            }
+            return Err(SvnError::new(ErrorCode::AuthRequired, msg));
         }
         let origin = key.origin(realm);
         let flight = self.flight(&origin);
@@ -200,6 +440,7 @@ impl AuthManager {
                         header: Some(header),
                         origin: Some(origin),
                         generation: state.generation,
+                        ..Attached::default()
                     });
                 }
                 if state.denied {
@@ -225,7 +466,10 @@ impl AuthManager {
 
         let offered = challenges.offered_methods();
         // A cancelled prompt leaves the flight untouched so other requests can still ask.
-        let reason = if attempt == 0 {
+        // Reaching the prompt while Negotiate is offered means it failed or is unavailable.
+        let reason = if attempt == 0 && challenges.negotiate {
+            PromptReason::NegotiateFailed
+        } else if attempt == 0 {
             PromptReason::Initial
         } else {
             PromptReason::Rejected
@@ -239,10 +483,9 @@ impl AuthManager {
             return Err(auth_refused("authentication was cancelled"));
         };
         if creds.method != AuthMethod::Basic {
+            // Negotiate already failed for this host; there is nothing else to retry with.
             state.denied = true;
-            return Err(auth_refused(
-                "Negotiate authentication is not available yet; choose Basic",
-            ));
+            return Err(negotiate_failure(self.negotiate.is_some()));
         }
         let header = basic_header(&creds.username, &creds.password)?;
         state.credentials = Some(Credential {
@@ -254,6 +497,7 @@ impl AuthManager {
             header: Some(header),
             origin: Some(origin),
             generation: state.generation,
+            ..Attached::default()
         })
     }
 }
@@ -271,6 +515,16 @@ pub(crate) async fn or_cancel<T>(
             .unwrap_or_else(|| SvnError::new(ErrorCode::Cancelled, "operation cancelled"))),
         v = fut => Ok(v),
     }
+}
+
+/// Error for a server that wants Negotiate when it cannot be used.
+fn negotiate_failure(available: bool) -> SvnError {
+    negotiate::negotiate_failed(if available {
+        "single sign-on (Negotiate/Kerberos) failed: check that you have a Kerberos ticket and \
+         that the repository URL uses the server's full host name"
+    } else {
+        "the server requires single sign-on (Negotiate/Kerberos), which this build does not support"
+    })
 }
 
 fn auth_refused(msg: &str) -> SvnError {

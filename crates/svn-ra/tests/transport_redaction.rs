@@ -72,6 +72,17 @@ fn redacts_known_shapes() {
             "p%40ss",
         ),
         ("GET https://alice@svn.test.local/repo", "alice"),
+        ("<D:href>opaquelocktoken:abcd-1234</D:href>", "abcd-1234"),
+        (
+            "<D:locktoken><D:href>opaquelocktoken:f81d4fae</D:href></D:locktoken>",
+            "f81d4fae",
+        ),
+        ("login failed password=hunter2 for alice", "hunter2"),
+        (
+            r#"{"password": "s3cr3t-value", "user": "a"}"#,
+            "s3cr3t-value",
+        ),
+        ("POST /x?user=a&passwd=zzz999&x=1", "zzz999"),
     ];
     for (input, secret) in cases {
         let out = redact_text(input);
