@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-delete-paths"
+description = "Enables the delete_paths command without any pre-configured scope."
+commands.allow = ["delete_paths"]
+
+[[permission]]
+identifier = "deny-delete-paths"
+description = "Denies the delete_paths command without any pre-configured scope."
+commands.deny = ["delete_paths"]

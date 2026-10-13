@@ -1,0 +1,30 @@
+[package]
+name = "opensvn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+default-run = "opensvn"
+description = "OpenSVN desktop app (Tauri 2)"
+
+[lints]
+workspace = true
+
+[lib]
+name = "opensvn_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+opensvn-ipc = { path = "../../../crates/opensvn-ipc" }
+tauri.workspace = true
+tauri-specta = { workspace = true, features = ["derive", "typescript"] }
+specta.workspace = true
+specta-typescript.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

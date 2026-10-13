@@ -36,6 +36,37 @@ fn rejects_admin_directory() {
 }
 
 #[test]
+fn rejects_admin_directory_aliases() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for alias in [
+        ".\u{017F}vn/wc.db",
+        "x/.\u{FF53}vn",
+        "SVN~1/wc.db",
+        "a/svn~2",
+        ".s\u{200C}vn",
+        ".svn.",
+    ] {
+        let err = safe_join(dir.path(), &rel(alias)).expect_err(alias);
+        assert_eq!(err.code, ErrorCode::UnsafePath, "{alias:?}");
+    }
+    assert!(safe_join(dir.path(), &rel(".svnignore")).is_ok());
+}
+
+#[test]
+fn result_always_stays_under_the_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for r in ["a", "a/b/c", "x y/z"] {
+        let joined = safe_join(dir.path(), &rel(r)).expect(r);
+        assert!(joined.starts_with(dir.path()));
+        assert!(
+            joined
+                .components()
+                .all(|c| !matches!(c, std::path::Component::ParentDir))
+        );
+    }
+}
+
+#[test]
 fn rejects_file_in_the_middle_of_the_path() {
     let dir = tempfile::tempdir().expect("tempdir");
     fs::write(dir.path().join("f"), b"x").expect("write");
