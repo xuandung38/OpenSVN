@@ -216,7 +216,7 @@ and 1.10 servers once the compat images exist; no behaviour was verified against
   `&#1;`), `<` inside attribute values, a declaration that is not first.
 * Lock tokens are read only from `activelock/locktoken/href` and must be
   `opaquelocktoken:` + printable characters (no whitespace, controls, `<>`, max 256 bytes).
-* `REPOS_HOOK_FAILURE` (165001) maps to `Internal` until the contract adds a hook-failure code.
+* `REPOS_HOOK_FAILURE` (165001) maps to `HookFailed`; 301/302/307/308 and errcode 175011 map to `RepositoryMoved` (the validated `Location` is in the message).
 
 ## Update drive order (parser is the gate)
 
@@ -243,12 +243,10 @@ stream (usable as a debug assertion in the driver and as the fuzz oracle).
 
 ## Contract notes
 
-* Log and lock paths are `RepoDisplayPath` values (private field, no `Deref`, no `AsRef<Path>`,
-  no conversion to `RelPath`): structurally validated only, so a repo containing `aux.c` can still
-  be logged. `LogItem::changed_paths` and `RepoLock` carry them; `LogItem::entry.changed_paths` is
-  left empty on purpose. `into_log_entry()` / `into_lock_info()` produce the shared contract types,
-  whose `path` fields are plain `String`s: call them only at that boundary. A file system path
-  requires an explicit `RelPath::from_server(display.as_str().trim_start_matches('/'))`.
+* Log and lock paths are `svn_types::RepoDisplayPath` values (private field, no `Deref`, no
+  `AsRef<Path>`, no conversion to `RelPath`), used directly by `ChangedPath` and `LockInfo`:
+  structurally validated only, so a repo containing `aux.c` or `a:b` can still be logged. A file
+  system path requires an explicit `RelPath::from_server(display.as_str().trim_start_matches('/'))`.
   Node names that may become working-copy paths (`DirEntry.name`, `accept_href`) always go
   through `RelPath::from_server`.
 * A listing never drops entries silently: names that fail validation come back as
