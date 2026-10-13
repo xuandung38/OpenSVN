@@ -5,8 +5,19 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Sans-IO Subversion HTTPv2 (WebDAV) request builders and streaming response parsers"
 
 [lints]
 workspace = true
 
+# Sans-IO: no async runtime, no HTTP client. A test asserts this on the normal dependency tree.
 [dependencies]
+base64.workspace = true
+bytes.workspace = true
+quick-xml.workspace = true
+svn-types.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+proptest.workspace = true
