@@ -340,7 +340,11 @@ impl WcTxn<'_> {
     ///
     /// Like svn's `db_extend_parent_delete`, nothing is written when `path` already has a
     /// working row at `op_depth` or below it: a user's addition or a deeper layer is never
-    /// overwritten.
+    /// overwritten. This matters when a directory is replaced by a copy: the copied children
+    /// sit at the copy's op_depth, the same one the shadowed update drive passes here, and a
+    /// server add of a child the copy already has must leave the copied row alone. (A plain
+    /// `svn add` below a replaced directory puts children deeper, so they are never at risk.)
+    /// Pinned by `incoming_add_into_copy_replaced_dir_keeps_copied_rows_vs_svn` in svn-client.
     pub fn mark_base_deleted_at(
         &self,
         path: &RelPath,

@@ -217,7 +217,7 @@ async fn negotiate_only_challenge_does_not_fall_back_to_basic() {
         .send(get(srv.url("/")), &CancelToken::new())
         .await
         .expect_err("unsupported");
-    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert_eq!(err.code, ErrorCode::NegotiateFailed);
     assert!(err.message.contains("Negotiate"), "{}", err.message);
     assert_eq!(prompter.credential_prompts(), 0);
     assert!(
@@ -248,6 +248,11 @@ async fn negotiate_plus_basic_is_offered_to_the_prompter_explicitly() {
     assert_eq!(r.status().as_u16(), 200);
     let calls = prompter.credential_calls.lock().unwrap().clone();
     assert_eq!(calls[0].2, vec![AuthMethod::Negotiate, AuthMethod::Basic]);
+    // Negotiate is unavailable in this transport, so the prompt says so.
+    assert_eq!(
+        prompter.reasons.lock().unwrap()[0],
+        svn_ra_api::PromptReason::NegotiateFailed
+    );
 }
 
 #[tokio::test]

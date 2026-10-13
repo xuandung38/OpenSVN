@@ -102,6 +102,7 @@ fn counting_ctx() -> (OpContext, std::sync::Arc<std::sync::Mutex<Vec<String>>>) 
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let s = seen.clone();
     let ctx = OpContext {
+        interactive: true,
         cancel: svn_types::CancelToken::new(),
         progress: ProgressReporter::new(move |u| s.lock().unwrap().push(u.phase)),
     };
