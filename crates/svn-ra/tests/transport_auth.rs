@@ -126,6 +126,13 @@ async fn wrong_then_right_credentials_reports_attempt_numbers() {
         .map(|c| c.1)
         .collect();
     assert_eq!(attempts, vec![0, 1]);
+    assert_eq!(
+        *prompter.reasons.lock().unwrap(),
+        vec![
+            svn_ra_api::PromptReason::Initial,
+            svn_ra_api::PromptReason::Rejected
+        ]
+    );
 }
 
 #[tokio::test]

@@ -35,6 +35,7 @@ pub struct ScriptedPrompter {
     /// Used when the queue is empty.
     pub default_credentials: Mutex<Option<(String, String)>>,
     pub credential_calls: Mutex<Vec<(OriginKey, u8, Vec<AuthMethod>)>>,
+    pub reasons: Mutex<Vec<svn_ra_api::PromptReason>>,
     pub cert_decision: Mutex<Option<CertDecision>>,
     pub cert_calls: Mutex<Vec<CertInfo>>,
     pub delay: Mutex<Duration>,
@@ -73,18 +74,15 @@ impl ScriptedPrompter {
 
 #[async_trait]
 impl AuthPrompter for ScriptedPrompter {
-    async fn credentials(
-        &self,
-        origin: &OriginKey,
-        attempt: u8,
-        offered: &[AuthMethod],
-    ) -> Option<Credentials> {
+    async fn credentials(&self, req: &svn_ra_api::CredentialRequest) -> Option<Credentials> {
+        let (origin, attempt, offered) = (&req.origin, req.attempt as u8, &req.offered);
+        self.reasons.lock().unwrap().push(req.reason);
         let now = self.concurrent.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_concurrent.fetch_max(now, Ordering::SeqCst);
         self.credential_calls
             .lock()
             .unwrap()
-            .push((origin.clone(), attempt, offered.to_vec()));
+            .push((origin.clone(), attempt, offered.clone()));
         let delay = *self.delay.lock().unwrap();
         tokio::time::sleep(delay).await;
         let answer = {

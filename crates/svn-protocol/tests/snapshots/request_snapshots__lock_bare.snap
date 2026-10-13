@@ -1,0 +1,11 @@
+---
+source: crates/svn-protocol/tests/request_snapshots.rs
+expression: "render(&lock_request(&u, &p, &LockOptions::default()).unwrap())"
+---
+LOCK http://svn.test.local/svn/repo/trunk/a.txt
+Content-Type: text/xml
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+
+<?xml version="1.0" encoding="utf-8"?><lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>

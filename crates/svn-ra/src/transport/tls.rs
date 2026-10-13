@@ -107,7 +107,12 @@ impl CertProblem {
                     format!("certificate of {target} is signed by an unknown issuer")
                 }
                 CertFailure::SelfSigned => format!("certificate of {target} is self-signed"),
+                CertFailure::Changed { .. } => {
+                    format!("the certificate of {target} changed since it was trusted")
+                }
                 CertFailure::Other(m) => format!("certificate of {target} rejected: {m}"),
+                // `CertFailure` is non-exhaustive: unknown kinds are rejected, never offered.
+                _ => format!("certificate of {target} was rejected"),
             }
         };
         SvnError::new(ErrorCode::TlsUntrusted, msg)

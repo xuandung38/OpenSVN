@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use reqwest::header::HeaderValue;
 use secrecy::SecretString;
-use svn_ra_api::{AuthMethod, AuthPrompter};
+use svn_ra_api::{AuthMethod, AuthPrompter, CredentialRequest, PromptReason};
 use svn_types::{CancelToken, ErrorCode, OriginKey, Result, SvnError};
 use url::Url;
 
@@ -225,11 +225,13 @@ impl AuthManager {
 
         let offered = challenges.offered_methods();
         // A cancelled prompt leaves the flight untouched so other requests can still ask.
-        let answer = or_cancel(
-            cancel,
-            self.prompter.credentials(&origin, attempt, &offered),
-        )
-        .await?;
+        let reason = if attempt == 0 {
+            PromptReason::Initial
+        } else {
+            PromptReason::Rejected
+        };
+        let request = CredentialRequest::new(origin.clone(), u32::from(attempt), offered, reason);
+        let answer = or_cancel(cancel, self.prompter.credentials(&request)).await?;
         let mut state = lock(&flight.state);
         state.generation += 1;
         let Some(creds) = answer else {
