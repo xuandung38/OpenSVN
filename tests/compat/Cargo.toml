@@ -1,0 +1,29 @@
+[package]
+name = "opensvn-compat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Compat harness: runs scenarios against pinned svn 1.14/1.15 containers and compares results"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "compat-run"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+rusqlite.workspace = true
+# YAML scenario files; not in [workspace.dependencies], exact pin kept local to the harness.
+serde_yaml_ng = "=0.10.0"
+
+[dev-dependencies]
+tempfile.workspace = true
