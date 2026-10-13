@@ -4,7 +4,7 @@
 //! [`WcDb::run_work_queue`] that wire them up.
 //!
 //! Every method is safe to repeat after a crash, as the work queue contract requires.
-//! `$Date$` keywords are expanded in UTC (this crate carries no time-zone database).
+//! `$Date$` keywords are expanded in the system time zone, like svn.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -23,7 +23,7 @@ use crate::pristine::{
 };
 use crate::skel::Skel;
 use crate::translate::flags::SyncInput;
-use crate::translate::utc_offset_zero;
+use crate::translate::utc_offset_local;
 use crate::workqueue::{
     FileInfoRecord, NodeInstallInfo, RunnerConfig, WorkQueueError, WorkQueueRunner, WorkQueueStore,
     WorkingCopyOps,
@@ -421,7 +421,7 @@ impl WcDb {
         let store = self.pristine_store();
         let config = RunnerConfig {
             wc_root: PathBuf::from(self.wcroot()),
-            tz: &utc_offset_zero,
+            tz: &utc_offset_local,
             cancelled,
         };
         WorkQueueRunner::new(config, ops, &store)

@@ -24,6 +24,7 @@ sha1.workspace = true
 md-5.workspace = true
 tracing.workspace = true
 tempfile.workspace = true
+jiff.workspace = true
 fail = { workspace = true, optional = true }
 
 [dev-dependencies]

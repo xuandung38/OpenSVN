@@ -245,6 +245,13 @@ impl UpdateEditor {
         })
     }
 
+    /// A `not-present` BASE row at the target revision: the node does not exist there.
+    pub(super) fn not_present_node(&self, kind: NodeKind, repos: &str) -> Result<BaseNode> {
+        let mut node = self.base_node_for(kind, Presence::NotPresent, repos, None, None)?;
+        node.properties = None;
+        Ok(node)
+    }
+
     /// What the disk holds at `wc`.
     fn disk_kind(&self, wc: &RelPath) -> Result<Option<NodeKind>> {
         let path = wc::abs_path(&self.s.db, wc)?;
@@ -257,31 +264,27 @@ impl UpdateEditor {
         })
     }
 
-    fn open_dir_state(
-        &mut self,
-        wc: RelPath,
-        parent: Option<(String, bool, bool, Depth)>,
-    ) -> Result<(u32, bool)> {
+    fn open_dir_state(&mut self, wc: RelPath, parent: Option<ParentInfo>) -> Result<(u32, bool)> {
         let base = self.s.db.read_base(&wc)?;
         let cur = self.s.db.read_node(&wc)?;
         let base = base
             .filter(|n| n.kind == NodeKind::Dir && n.presence.is_present())
             .ok_or_else(|| corrupt(format!("directory '{wc}' is not in the working copy base")))?;
         let is_switch_root = self.s.switch_relpath.is_some() && wc == self.target_wc;
-        let (p_repos, p_reloc, p_skipped, p_depth) = parent.unwrap_or_default_parent();
-        let relocating = is_switch_root || p_reloc;
+        let p = parent.unwrap_or_else(ParentInfo::anchor);
+        let relocating = is_switch_root || p.relocating;
         let name = wc.file_name().unwrap_or("");
         let new_repos = if is_switch_root {
             self.s.switch_relpath.clone().unwrap_or_default()
         } else if relocating {
-            repos_child(&p_repos, name)
+            repos_child(&p.repos, name)
         } else {
             base.repos_relpath
                 .clone()
-                .unwrap_or_else(|| repos_child(&p_repos, name))
+                .unwrap_or_else(|| repos_child(&p.repos, name))
         };
         let in_target = wc.starts_with(&self.target_wc);
-        let mut skipped = p_skipped;
+        let mut skipped = p.skipped;
         let mut tree_conflict = None;
         if !skipped && in_target {
             if self.s.db.conflict(&wc)?.is_some() {
@@ -303,14 +306,21 @@ impl UpdateEditor {
                 skipped = true;
             }
         }
-        let depth = if wc == self.target_wc && self.s.depth != Depth::Unknown {
-            self.s.depth
+        let depth = base
+            .depth
+            .filter(|d| *d != Depth::Unknown)
+            .unwrap_or(Depth::Infinity);
+        // What the drive may touch below: the requested depth at the target, one level less
+        // below an `immediates` parent, and never more than the depth already recorded.
+        let requested = if wc == self.target_wc {
+            concrete(self.s.depth)
+        } else if in_target && p.limit == Depth::Immediates {
+            Depth::Empty
         } else {
-            base.depth
-                .filter(|d| *d != Depth::Unknown)
-                .unwrap_or(Depth::Infinity)
+            Depth::Infinity
         };
-        let _ = p_depth;
+        let limit = narrower(requested, depth);
+        let not_present_on_drop = rank(requested) < rank(depth);
         if in_target && !skipped {
             let rev = self.rev()?;
             let reloc = relocating.then_some(new_repos.as_str());
@@ -328,6 +338,9 @@ impl UpdateEditor {
                 relocating,
                 base: Some(base),
                 depth,
+                limit,
+                not_present_on_drop,
+                shadow: None,
                 prop_changes: Vec::new(),
                 entry: EntryProps::default(),
                 tree_conflict,
@@ -336,19 +349,128 @@ impl UpdateEditor {
         Ok((id, skipped))
     }
 
-    fn parent_info(&self, parent: DirId) -> Result<(String, bool, bool, Depth)> {
+    fn parent_info(&self, parent: DirId) -> Result<ParentInfo> {
         let p = self.dir(parent)?;
-        Ok((p.new_repos.clone(), p.relocating, p.skipped, p.depth))
+        Ok(ParentInfo {
+            repos: p.new_repos.clone(),
+            relocating: p.relocating,
+            skipped: p.skipped,
+            depth: p.depth,
+            limit: if p.in_target {
+                p.limit
+            } else {
+                Depth::Infinity
+            },
+            not_present_on_drop: p.in_target && p.not_present_on_drop,
+            shadow: p.shadow,
+        })
+    }
+
+    /// A directory the drive leaves alone (outside the requested depth): everything below it
+    /// is ignored and nothing is recorded.
+    fn dropped_dir(&mut self, wc: RelPath) -> DirId {
+        let id = self.alloc();
+        self.dirs.insert(
+            id,
+            DirState {
+                wc,
+                added: false,
+                in_target: true,
+                skipped: true,
+                new_repos: String::new(),
+                relocating: false,
+                base: None,
+                depth: Depth::Empty,
+                limit: Depth::Empty,
+                not_present_on_drop: false,
+                shadow: None,
+                prop_changes: Vec::new(),
+                entry: EntryProps::default(),
+                tree_conflict: None,
+            },
+        );
+        DirId(id)
+    }
+
+    /// Records a `not-present` row for a child the server adds outside the requested depth, so
+    /// the parent at the new revision does not claim to have it (svn issue #3569).
+    fn add_dropped(&self, wc: &RelPath, p: &ParentInfo, kind: NodeKind) -> Result<()> {
+        if !p.not_present_on_drop || self.s.db.read_base(wc)?.is_some() {
+            return Ok(());
+        }
+        let repos = repos_child(&p.repos, wc.file_name().unwrap_or(""));
+        let node = self.not_present_node(kind, &repos)?;
+        self.s.db.with_txn(|t| t.base_add(wc, &node))
     }
 }
 
-trait DefaultParent {
-    fn unwrap_or_default_parent(self) -> (String, bool, bool, Depth);
+/// What a child needs from its open parent directory.
+#[derive(Debug, Clone)]
+pub(super) struct ParentInfo {
+    repos: String,
+    relocating: bool,
+    skipped: bool,
+    depth: Depth,
+    limit: Depth,
+    not_present_on_drop: bool,
+    shadow: Option<u32>,
 }
 
-impl DefaultParent for Option<(String, bool, bool, Depth)> {
-    fn unwrap_or_default_parent(self) -> (String, bool, bool, Depth) {
-        self.unwrap_or((String::new(), false, false, Depth::Infinity))
+impl ParentInfo {
+    /// Stand-in for the parent of the anchor.
+    fn anchor() -> Self {
+        Self {
+            repos: String::new(),
+            relocating: false,
+            skipped: false,
+            depth: Depth::Infinity,
+            limit: Depth::Infinity,
+            not_present_on_drop: false,
+            shadow: None,
+        }
+    }
+
+    /// The drive applies to a child of `kind` below this directory.
+    fn admits(&self, kind: NodeKind) -> bool {
+        match self.limit {
+            Depth::Empty => false,
+            Depth::Files => kind != NodeKind::Dir,
+            _ => true,
+        }
+    }
+}
+
+/// `op_depth` of a working layer rooted at `p` (number of path components).
+fn relpath_depth(p: &RelPath) -> u32 {
+    if p.is_root() {
+        0
+    } else {
+        u32::try_from(p.as_str().split('/').count()).unwrap_or(u32::MAX)
+    }
+}
+
+/// `Unknown` (and the meaningless `Exclude`) as the full depth.
+fn concrete(d: Depth) -> Depth {
+    match d {
+        Depth::Unknown | Depth::Exclude => Depth::Infinity,
+        d => d,
+    }
+}
+
+fn rank(d: Depth) -> u8 {
+    match concrete(d) {
+        Depth::Empty => 0,
+        Depth::Files => 1,
+        Depth::Immediates => 2,
+        _ => 3,
+    }
+}
+
+fn narrower(a: Depth, b: Depth) -> Depth {
+    if rank(a) <= rank(b) {
+        concrete(a)
+    } else {
+        concrete(b)
     }
 }
 
@@ -384,10 +506,15 @@ impl DeltaEditor for UpdateEditor {
 
     fn delete_entry(&mut self, path: &RelPath, _rev: Option<Revnum>, parent: DirId) -> Result<()> {
         self.s.cancel.check()?;
-        if self.dir(parent)?.skipped {
+        let p = self.parent_info(parent)?;
+        if p.skipped {
             return Ok(());
         }
         let wc = self.wc_path(path)?;
+        let kind = self.s.db.read_base(&wc)?.map_or(NodeKind::File, |b| b.kind);
+        if !p.admits(kind) {
+            return Ok(());
+        }
         self.delete_node(&wc, parent)
     }
 
@@ -399,20 +526,26 @@ impl DeltaEditor for UpdateEditor {
     ) -> Result<DirId> {
         self.s.cancel.check()?;
         let wc = self.wc_path(path)?;
-        let (p_repos, p_reloc, p_skipped, p_depth) = self.parent_info(parent)?;
+        let p = self.parent_info(parent)?;
+        if !p.skipped && !p.admits(NodeKind::Dir) {
+            self.add_dropped(&wc, &p, NodeKind::Dir)?;
+            return Ok(self.dropped_dir(wc));
+        }
         let name = wc.file_name().unwrap_or("").to_owned();
-        let new_repos = repos_child(&p_repos, &name);
-        let depth = if p_depth == Depth::Immediates {
+        let new_repos = repos_child(&p.repos, &name);
+        // Below an `immediates` level a new directory starts out empty, as in svn.
+        let depth = if p.limit == Depth::Immediates || p.depth == Depth::Immediates {
             Depth::Empty
         } else {
             Depth::Infinity
         };
-        let rev = self.rev()?;
-        let mut skipped = p_skipped;
+        let mut skipped = p.skipped;
         let mut was_incomplete = false;
+        let mut shadow = p.shadow;
+        let mut tree_conflict = None;
         let existing = self.s.db.read_node(&wc)?;
         let base = self.s.db.read_base(&wc)?;
-        if !skipped {
+        if !skipped && shadow.is_none() {
             let disk = self.disk_kind(&wc)?;
             match (&existing, &base) {
                 (_, Some(b)) if b.kind == NodeKind::Dir && b.presence.is_present() => {
@@ -443,6 +576,16 @@ impl DeltaEditor for UpdateEditor {
                     )?;
                     skipped = true;
                 }
+                _ if disk == Some(NodeKind::Dir) && !self.s.allow_unversioned_obstructions => {
+                    // An unversioned directory in the way: the server's tree goes into BASE
+                    // under a `base-deleted` layer and the disk stays as it is, with a tree
+                    // conflict "local dir unversioned, incoming dir add" (svn without --force).
+                    shadow = Some(relpath_depth(&wc));
+                    tree_conflict = Some(PendingTreeConflict {
+                        reason: TreeReason::Unversioned,
+                        action: TreeAction::Add,
+                    });
+                }
                 _ => {}
             }
         }
@@ -454,20 +597,28 @@ impl DeltaEditor for UpdateEditor {
                 base.as_ref(),
                 Some(depth),
             )?;
-            let work = [WorkItem::DirInstall {
-                relpath: wc.as_str().to_owned(),
-            }
-            .to_skel()];
+            let work = if shadow.is_some() {
+                Vec::new()
+            } else {
+                vec![
+                    WorkItem::DirInstall {
+                        relpath: wc.as_str().to_owned(),
+                    }
+                    .to_skel(),
+                ]
+            };
             self.s.db.with_txn(|t| {
                 t.base_add(&wc, &node)?;
+                if let Some(op_depth) = shadow {
+                    t.mark_base_deleted_at(&wc, NodeKind::Dir, op_depth)?;
+                }
                 t.queue_work(&work)
             })?;
             self.run_queue()?;
-            if !was_incomplete {
+            if !was_incomplete && shadow.is_none() {
                 self.emit(&wc, NodeKind::Dir, UpdateAction::Add);
             }
         }
-        let _ = rev;
         let id = self.alloc();
         self.dirs.insert(
             id,
@@ -477,12 +628,15 @@ impl DeltaEditor for UpdateEditor {
                 in_target: true,
                 skipped,
                 new_repos,
-                relocating: p_reloc,
+                relocating: p.relocating,
                 base,
                 depth,
+                limit: depth,
+                not_present_on_drop: false,
+                shadow,
                 prop_changes: Vec::new(),
                 entry: EntryProps::default(),
-                tree_conflict: None,
+                tree_conflict,
             },
         );
         Ok(DirId(id))
@@ -497,6 +651,9 @@ impl DeltaEditor for UpdateEditor {
         self.s.cancel.check()?;
         let wc = self.wc_path(path)?;
         let info = self.parent_info(parent)?;
+        if !info.skipped && !info.admits(NodeKind::Dir) {
+            return Ok(self.dropped_dir(wc));
+        }
         let (id, _) = self.open_dir_state(wc, Some(info))?;
         Ok(DirId(id))
     }
@@ -641,19 +798,27 @@ impl DeltaEditor for UpdateEditor {
 
 impl UpdateEditor {
     fn absent(&mut self, path: &RelPath, parent: DirId, kind: NodeKind) -> Result<()> {
-        if self.dir(parent)?.skipped {
+        let p = self.parent_info(parent)?;
+        if p.skipped || !p.admits(kind) || p.shadow.is_some() {
             return Ok(());
         }
         let wc = self.wc_path(path)?;
-        let (p_repos, ..) = self.parent_info(parent)?;
-        let new_repos = repos_child(&p_repos, wc.file_name().unwrap_or(""));
+        let new_repos = repos_child(&p.repos, wc.file_name().unwrap_or(""));
         let node = self.base_node_for(kind, Presence::ServerExcluded, &new_repos, None, None)?;
         self.s.db.with_txn(|t| t.base_add(&wc, &node))?;
         Ok(())
     }
 
     fn begin_file(&mut self, wc: RelPath, parent: DirId, add: bool) -> Result<u32> {
-        let (p_repos, p_reloc, p_skipped, _) = self.parent_info(parent)?;
+        let p = self.parent_info(parent)?;
+        let (p_repos, p_reloc) = (p.repos.clone(), p.relocating);
+        let mut skipped = p.skipped;
+        if !skipped && !p.admits(NodeKind::File) {
+            if add {
+                self.add_dropped(&wc, &p, NodeKind::File)?;
+            }
+            skipped = true;
+        }
         let name = wc.file_name().unwrap_or("").to_owned();
         let base = self
             .s
@@ -667,7 +832,6 @@ impl UpdateEditor {
                 .and_then(|b| b.repos_relpath.clone())
                 .unwrap_or_else(|| repos_child(&p_repos, &name))
         };
-        let mut skipped = p_skipped;
         let mut tree_conflict = None;
         let mut adopt_existing = false;
         if !skipped && self.s.db.conflict(&wc)?.is_some() {
@@ -675,7 +839,7 @@ impl UpdateEditor {
             self.skipped.push(wc.clone());
             self.emit(&wc, NodeKind::File, UpdateAction::Skipped);
         }
-        if !skipped {
+        if !skipped && p.shadow.is_none() {
             let cur = self.s.db.read_node(&wc)?;
             match (&base, add) {
                 (Some(b), _) if b.kind != NodeKind::File => {
@@ -747,6 +911,7 @@ impl UpdateEditor {
                 entry: EntryProps::default(),
                 text: Arc::new(Mutex::new(None)),
                 tree_conflict,
+                shadow: if skipped { None } else { p.shadow },
             },
         );
         Ok(id)

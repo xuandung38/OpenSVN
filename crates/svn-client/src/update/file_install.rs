@@ -23,7 +23,8 @@ use super::state::{FileState, NewText, tmp_dir};
 use crate::ctx::UpdateAction;
 use crate::wc::inspect;
 
-/// Files above this size are not merged in memory; they become a conflict instead.
+/// Files above this size are not merged in memory; they become a conflict instead (svn would
+/// merge them). Known limitation: such files need manual resolution after an update.
 const MAX_MERGE_BYTES: u64 = 64 * 1024 * 1024;
 
 fn corrupt(msg: impl Into<String>) -> SvnError {
@@ -95,7 +96,15 @@ impl UpdateEditor {
             .as_ref()
             .and_then(|b| b.properties.clone())
             .unwrap_or_default();
-        let actual: Props = if old.is_some() {
+        // A node deleted locally is shadowed: only BASE moves on, its working properties do not
+        // exist and nothing is merged into ACTUAL (svn records just the tree conflict).
+        let shadowed = f
+            .tree_conflict
+            .as_ref()
+            .is_some_and(|t| t.reason == TreeReason::Deleted);
+        let actual: Props = if shadowed {
+            old_pristine.clone()
+        } else if old.is_some() {
             db.actual_props(&wc)?
         } else {
             Vec::new()
@@ -136,12 +145,14 @@ impl UpdateEditor {
         };
         let mut conflicts: Vec<NewConflict> = Vec::new();
         let mut keep_fileinfo = true;
+        // Merge results the queued work installs; deleted again unless the transaction commits.
+        let mut merge_tmp: Vec<tempfile::TempPath> = Vec::new();
         // Local delete versus edit, or an unversioned file in the way of an add: BASE moves
         // forward and the working tree stays as it is.
-        let keep_working_tree = f
-            .tree_conflict
-            .as_ref()
-            .is_some_and(|t| matches!(t.reason, TreeReason::Deleted | TreeReason::Unversioned));
+        let keep_working_tree = f.shadow.is_some()
+            || f.tree_conflict
+                .as_ref()
+                .is_some_and(|t| matches!(t.reason, TreeReason::Deleted | TreeReason::Unversioned));
         let obstructed = f
             .tree_conflict
             .as_ref()
@@ -221,8 +232,7 @@ impl UpdateEditor {
                     TextMerge::Merged(tmp) => {
                         action = UpdateAction::Merged;
                         work.extend(install_merged(&rel_str, &tmp, false)?);
-                        // Keep the file until the queue consumed it.
-                        let _ = tmp.keep();
+                        merge_tmp.push(tmp);
                     }
                     TextMerge::Conflict {
                         markers,
@@ -233,7 +243,7 @@ impl UpdateEditor {
                         work.extend(marker_items.iter().map(WorkItem::to_skel));
                         if let Some(tmp) = merged {
                             work.extend(install_merged(&rel_str, &tmp, true)?);
-                            let _ = tmp.keep();
+                            merge_tmp.push(tmp);
                         }
                         conflicts.push(NewConflict::Text(markers));
                     }
@@ -290,12 +300,13 @@ impl UpdateEditor {
         }
 
         // 4. One transaction.
-        let (keep_size, keep_mtime) = if keep_fileinfo && !text_changed && work.is_empty() {
-            old.as_ref()
-                .map_or((None, None), |b| (b.translated_size, b.last_mod_time))
-        } else {
-            (None, None)
-        };
+        let (keep_size, keep_mtime) =
+            if keep_fileinfo && !keep_working_tree && !text_changed && work.is_empty() {
+                old.as_ref()
+                    .map_or((None, None), |b| (b.translated_size, b.last_mod_time))
+            } else {
+                (None, None)
+            };
         let node = BaseNode {
             kind: NodeKind::File,
             presence: Presence::Normal,
@@ -341,10 +352,12 @@ impl UpdateEditor {
         failpoint!("update.after_merge3_before_txn");
         db.with_txn(|t| {
             t.base_add(&wc, &node)?;
-            if obstructed {
+            if let Some(op_depth) = f.shadow {
+                t.mark_base_deleted_at(&wc, NodeKind::File, op_depth)?;
+            } else if obstructed {
                 t.mark_base_deleted(&wc, NodeKind::File)?;
             }
-            if old.is_some() || overlay.is_some() {
+            if !shadowed && (old.is_some() || overlay.is_some()) {
                 t.set_actual_props(&wc, overlay.as_ref())?;
             }
             if !conflicts.is_empty() {
@@ -352,8 +365,16 @@ impl UpdateEditor {
             }
             t.queue_work(&work)
         })?;
+        // Committed: the queue owns the merge results now (it removes them after installing).
+        for tmp in merge_tmp {
+            let _ = tmp.keep();
+        }
         failpoint!("update.after_txn_before_queue");
         self.run_queue()?;
+        if f.shadow.is_some() {
+            // Shadowed by an obstruction: only BASE changed, nothing to report.
+            return Ok(());
+        }
         self.emit(&wc, NodeKind::File, action);
         if matches!(
             action,

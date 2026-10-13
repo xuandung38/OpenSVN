@@ -48,8 +48,22 @@ impl UpdateEditor {
         let Some(base) = db.read_base(wc)? else {
             return Ok(());
         };
+        // An update target deleted on the server stays as a `not-present` marker at the new
+        // revision (svn's `deleting_target`), so the parent still knows the node is gone.
+        let marker = if *wc == self.target_wc && !wc.is_root() {
+            let repos = base.repos_relpath.clone().unwrap_or_default();
+            Some(self.not_present_node(base.kind, &repos)?)
+        } else {
+            None
+        };
         if !base.presence.is_present() {
-            db.base_remove(wc, &[])?;
+            db.with_txn(|t| {
+                t.base_remove(wc)?;
+                if let Some(m) = &marker {
+                    t.base_add(wc, m)?;
+                }
+                Ok(())
+            })?;
             return Ok(());
         }
         let kind = base.kind;
@@ -58,29 +72,56 @@ impl UpdateEditor {
             self.emit(wc, kind, UpdateAction::Skipped);
             return Ok(());
         }
-        if inspect::subtree_has_local_changes(&db, wc)? {
-            let replaced = db
-                .read_node(wc)?
-                .is_some_and(|c| c.op_depth > 0 && c.presence != Presence::BaseDeleted);
-            let reason = if replaced {
-                TreeReason::Replaced
-            } else {
-                TreeReason::Edited
-            };
+        let shadowing = db.read_node(wc)?.filter(|c| c.op_depth > 0);
+        let reason = match &shadowing {
+            Some(c) if c.presence == Presence::BaseDeleted => Some(TreeReason::Deleted),
+            Some(_) => Some(TreeReason::Replaced),
+            None if inspect::subtree_has_local_changes(&db, wc)? => Some(TreeReason::Edited),
+            None => None,
+        };
+        if let Some(reason) = reason {
+            // Only local edits are kept as a copy of the old BASE (svn's `keep_as_working`). A
+            // node that is already deleted or replaced locally just loses its BASE; the working
+            // rows and the disk stay as they are.
+            let keep_as_working = reason == TreeReason::Edited;
             let repos = base.repos_relpath.clone().unwrap_or_default();
-            return self.record_tree_conflict(
-                wc,
-                Some(&base),
-                &repos,
-                NodeKind::None,
-                reason,
-                TreeAction::Delete,
-                true,
+            let (old, new) = self.side(Some(&base), &repos, NodeKind::None);
+            let info = conflict_record::operation_info(
+                self.s.switch_relpath.is_some(),
+                &self.s.repos_root,
+                &self.s.uuid,
+                old.as_ref(),
+                new.as_ref(),
             );
+            db.with_txn(|t| {
+                if keep_as_working {
+                    t.convert_base_to_copy(wc)?;
+                } else {
+                    t.base_remove(wc)?;
+                }
+                if let Some(m) = &marker {
+                    t.base_add(wc, m)?;
+                }
+                conflict_record::record(
+                    t,
+                    wc,
+                    &info,
+                    vec![NewConflict::Tree(reason, TreeAction::Delete)],
+                )
+            })?;
+            self.skipped.push(wc.clone());
+            self.emit(wc, NodeKind::None, UpdateAction::TreeConflicted);
+            return Ok(());
         }
         let mut items = Vec::new();
         removal_items(&db, wc, &mut items)?;
-        db.base_remove(wc, &items)?;
+        db.with_txn(|t| {
+            t.base_remove(wc)?;
+            if let Some(m) = &marker {
+                t.base_add(wc, m)?;
+            }
+            t.queue_work(&items)
+        })?;
         failpoint!("update.after_delete_txn");
         self.run_queue()?;
         self.emit(wc, kind, UpdateAction::Delete);
@@ -118,6 +159,7 @@ impl UpdateEditor {
             db.actual_props(&d.wc)?
         };
         let pm = merge_props(&old_pristine, &d.prop_changes, &actual);
+        let shadowed = d.shadow.is_some();
         let mut work: Vec<Skel> = Vec::new();
         let mut conflicts = Vec::new();
         let mut action = None;
@@ -174,6 +216,7 @@ impl UpdateEditor {
         );
         if let Some(tc) = &d.tree_conflict {
             conflicts.push(NewConflict::Tree(tc.reason.clone(), tc.action.clone()));
+            action = Some(UpdateAction::TreeConflicted);
         }
         db.with_txn(|t| {
             t.base_add(&d.wc, &node)?;
@@ -186,7 +229,9 @@ impl UpdateEditor {
             t.queue_work(&work)
         })?;
         self.run_queue()?;
-        if let Some(a) = action {
+        if let Some(a) = action
+            && (!shadowed || d.tree_conflict.is_some())
+        {
             self.emit(&d.wc, NodeKind::Dir, a);
         }
         Ok(())
@@ -205,11 +250,12 @@ impl UpdateEditor {
             _ => None,
         };
         let skipped = self.skipped.clone();
+        let depth = self.s.depth;
         db.with_txn(|t| {
             if let Some((old, new)) = &relocation {
                 t.relocate_subtree(&target, old, new)?;
             }
-            t.bump_revisions(&target, rev, &skipped)
+            t.bump_revisions_post_update(&target, rev, depth, &skipped)
         })
         .map_err(|e: SvnError| e)?;
         self.mark_finished();
