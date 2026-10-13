@@ -4,6 +4,9 @@
 //! read bits, read-only clears write bits that have a matching read bit, and making a file
 //! writable only touches the owner bits. On Windows only the read-only attribute is used and
 //! the executable flag is ignored. Symlinks are never modified.
+//!
+//! Unverified on Windows: there is no Windows CI, so the `not(unix)` branches below
+//! (read-only attribute handling) are covered by a `#[cfg(windows)]` test that has never run.
 
 use std::fs;
 use std::path::Path;

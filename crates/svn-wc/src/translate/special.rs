@@ -54,7 +54,7 @@ pub fn read_repo_normal(path: &Path) -> Result<Vec<u8>, TranslateError> {
 /// `path` must already have been vetted with `svn_types::safe_join`; this function does not
 /// check ancestor directories. Symlinks become real symlinks on Unix. Elsewhere, and for
 /// unknown special types, the full repo-normal content is written to a regular file, as svn
-/// does when symlinks are unsupported.
+/// does when symlinks are unsupported (unverified on Windows: no Windows CI).
 pub fn install(path: &Path, content: &[u8]) -> Result<(), TranslateError> {
     #[cfg(unix)]
     if let SpecialContent::Link(target) = parse(content) {
