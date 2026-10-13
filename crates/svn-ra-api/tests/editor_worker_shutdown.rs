@@ -6,7 +6,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use svn_ra_api::EditorWorker;
 use svn_ra_api::fake::RecordingEditor;
-use svn_types::{ErrorCode, RelPath, TxDeltaWindow};
+use svn_types::{ErrorCode, PropChange, RelPath, TxDeltaWindow};
 
 const LIMIT: Duration = Duration::from_secs(5);
 
@@ -74,4 +74,69 @@ async fn failure_with_a_live_window_sender_does_not_leak_the_worker() {
         .expect_err("poisoned");
     assert_eq!(err.code, ErrorCode::Internal);
     assert!(sender.send(None).await.is_err());
+}
+
+/// The reply channel of the panicking command is dropped while the worker unwinds; the handle
+/// must still see `Internal`, never a "finished" `Cancelled`, however the threads interleave.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn editor_panic_is_always_internal_never_cancelled() {
+    for i in 0..1000 {
+        let (editor, _log) = RecordingEditor::new();
+        let editor = editor.on_call(|n| {
+            if n == 2 {
+                panic!("boom");
+            }
+        });
+        let handle = EditorWorker::spawn(Box::new(editor), 4);
+        let root = handle.open_root(None).await.expect("root");
+        let err = handle
+            .add_directory(&p("d"), root, None)
+            .await
+            .expect_err("panicked");
+        assert_eq!(
+            err.code,
+            ErrorCode::Internal,
+            "iteration {i}: {}",
+            err.message
+        );
+        let err = handle.close_edit().await.expect_err("poisoned");
+        assert_eq!(
+            err.code,
+            ErrorCode::Internal,
+            "iteration {i} (close): {}",
+            err.message
+        );
+    }
+}
+
+/// Same race for commands that carry no reply: the failure must be visible to the next call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn panic_in_a_queued_command_surfaces_as_internal_on_the_next_call() {
+    for i in 0..500 {
+        let (editor, _log) = RecordingEditor::new();
+        let editor = editor.on_call(|n| {
+            if n == 2 {
+                panic!("boom");
+            }
+        });
+        let handle = EditorWorker::spawn(Box::new(editor), 4);
+        let root = handle.open_root(None).await.expect("root");
+        // Queued without a reply; the worker panics while executing it.
+        let _ = handle
+            .change_dir_prop(
+                root,
+                PropChange {
+                    name: "x".into(),
+                    value: None,
+                },
+            )
+            .await;
+        let err = handle.close_edit().await.expect_err("panicked");
+        assert_eq!(
+            err.code,
+            ErrorCode::Internal,
+            "iteration {i}: {}",
+            err.message
+        );
+    }
 }
