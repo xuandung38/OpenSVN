@@ -3545,6 +3545,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "dunce",
  "futures-util",
  "md-5",
  "notify",
@@ -5128,6 +5129,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libgssapi",
+ "md-5",
  "proptest",
  "rcgen",
  "reqwest",
@@ -5135,6 +5137,7 @@ dependencies = [
  "rustls-platform-verifier",
  "secrecy",
  "sha2 0.11.0",
+ "svn-delta",
  "svn-protocol",
  "svn-ra-api",
  "svn-types",
@@ -5155,6 +5158,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "md-5",
  "secrecy",
  "svn-ra-api",
  "svn-types",

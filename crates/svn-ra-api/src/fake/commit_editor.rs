@@ -36,6 +36,8 @@ pub(super) struct FakeCommitEditor {
     pub touched: Vec<RelPath>,
     /// Repository root URL, to resolve copy sources.
     pub root: RepoUrl,
+    /// Whether copies are accepted (see `FakeRaSession::without_copies`).
+    pub copies: bool,
 }
 
 fn guard(state: &Mutex<RepoState>) -> MutexGuard<'_, RepoState> {
@@ -145,6 +147,12 @@ impl FakeCommitEditor {
     /// the copy root is new in this revision, the copied children keep their last-changed
     /// revisions (they share the source's node revisions, as in FSFS).
     fn copy(&mut self, path: &RelPath, from: &str, rev: Revnum, kind: NodeKind) -> Result<()> {
+        if !self.copies {
+            return Err(err(
+                ErrorCode::ServerUnsupported,
+                "repository does not support copies",
+            ));
+        }
         let new_rev = Revnum(self.base_head.0 + 1);
         let (src, nodes) = {
             let st = guard(&self.state);

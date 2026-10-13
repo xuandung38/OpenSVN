@@ -17,7 +17,8 @@ export function MainWindow({
 }: {
   toolbar: ReactNode;
   banner?: ReactNode;
-  sidebar: ReactNode;
+  /** Left column; `undefined` hides it (View > Toggle sidebar). */
+  sidebar?: ReactNode;
   main: ReactNode;
   activity?: ReactNode;
   statusBar: ReactNode;
@@ -28,7 +29,7 @@ export function MainWindow({
       {toolbar}
       {banner}
       <div className="flex min-h-0 flex-1">
-        <ResizableSidebar>{sidebar}</ResizableSidebar>
+        {sidebar !== undefined && <ResizableSidebar>{sidebar}</ResizableSidebar>}
         <main className="min-w-0 flex-1 overflow-auto">{main}</main>
       </div>
       {activity}

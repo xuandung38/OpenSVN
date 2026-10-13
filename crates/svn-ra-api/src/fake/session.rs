@@ -8,8 +8,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use secrecy::ExposeSecret;
 use svn_types::{
-    CancelToken, DeltaEditor, Depth, DirEntry, ErrorCode, LockInfo, LogEntry, NodeKind, OriginKey,
-    PropChange, RelPath, RepoDisplayPath, RepoUrl, Result, Revnum, SvnError, TxDeltaWindow,
+    CancelToken, Checksum, DeltaEditor, Depth, DirEntry, ErrorCode, LockInfo, LogEntry, NodeKind,
+    OriginKey, PropChange, RelPath, RepoDisplayPath, RepoUrl, Result, Revnum, SvnError,
+    TxDeltaWindow,
 };
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -44,6 +45,7 @@ pub struct FakeRaSession {
     cert_check: Option<(CertInfo, Arc<dyn AuthPrompter>)>,
     authenticated: Arc<AtomicBool>,
     lock_counter: Arc<AtomicU64>,
+    copies: bool,
 }
 
 impl FakeRaSession {
@@ -59,6 +61,7 @@ impl FakeRaSession {
             cert_check: None,
             authenticated: Arc::new(AtomicBool::new(false)),
             lock_counter: Arc::new(AtomicU64::new(1)),
+            copies: true,
         })
     }
 
@@ -66,6 +69,14 @@ impl FakeRaSession {
     #[must_use]
     pub fn with_max_open_files(mut self, n: usize) -> Self {
         self.max_open_files = n;
+        self
+    }
+
+    /// Makes commit editors from this session refuse copies with `ServerUnsupported`, like a
+    /// server without copy support.
+    #[must_use]
+    pub fn without_copies(mut self) -> Self {
+        self.copies = false;
         self
     }
 
@@ -316,7 +327,17 @@ impl RaSession for FakeRaSession {
         sink.write_all(&content)
             .await
             .map_err(|e| SvnError::from_io("write file content", &e))?;
-        Ok(FileMeta { rev, props })
+        let md5 = {
+            use md5::Digest as _;
+            Checksum::Md5(md5::Md5::digest(&content).into())
+        };
+        // The fake's own store is authoritative: its content is verified by construction.
+        Ok(FileMeta {
+            rev,
+            props,
+            md5,
+            verified: true,
+        })
     }
 
     async fn log(
@@ -600,6 +621,7 @@ impl RaSession for FakeRaSession {
             next_id: 0,
             touched: Vec::new(),
             root: self.root.clone(),
+            copies: self.copies,
         }))
     }
 

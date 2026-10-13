@@ -95,9 +95,10 @@ test("paths and commands are display-only: no editable path/command inputs", asy
   const dialog = await screen.findByRole("dialog", { name: "Settings", hidden: true });
   const root = await within(dialog).findByDisplayValue(mockSettings["general.checkoutRoot"]);
   expect((root as HTMLInputElement).readOnly).toBe(true);
-  expect(
-    (within(dialog).getByRole("button", { name: "Change…" }) as HTMLButtonElement).disabled,
-  ).toBe(true);
+  // The default checkout folder is chosen in the native dialog by Rust; no path is sent.
+  await userEvent.click(within(dialog).getByRole("button", { name: "Change…" }));
+  expect(await within(dialog).findByDisplayValue("/Users/dev/projects")).toBeTruthy();
+  expect(mockCalls.filter((c) => c.name === "checkoutRootChoose").at(-1)?.args).toEqual([]);
   await userEvent.click(within(dialog).getByRole("button", { name: "Diff & Merge" }));
   expect(
     ((await within(dialog).findByDisplayValue("None configured")) as HTMLInputElement).readOnly,

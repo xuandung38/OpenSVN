@@ -76,6 +76,27 @@ pub struct WorkingCopy {
     pub last_checked_at: Option<String>,
 }
 
+/// One row of the repository manager (`wc_entries`): every registered working copy, including
+/// ones that can no longer be read (folder moved or deleted), which `wc_list` leaves out.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WcEntry {
+    pub id: WcId,
+    /// Display name (app database only; renaming never touches the folder).
+    pub name: String,
+    pub root_path: String,
+    pub repo_root_url: String,
+    pub repo_uuid: String,
+    /// URL the working copy points at; `None` when it cannot be read.
+    pub url: Option<String>,
+    pub added_at: String,
+    pub last_opened_at: Option<String>,
+    /// The folder is gone, moved or no longer a working copy. The UI offers "Locate…" and "Remove".
+    pub missing: bool,
+    /// Why the working copy cannot be read (only when `missing`).
+    pub problem: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeStatus {

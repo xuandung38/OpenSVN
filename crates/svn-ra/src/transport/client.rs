@@ -75,6 +75,13 @@ impl From<SvnError> for AttemptError {
     }
 }
 
+/// Whether a send may ask the [`AuthPrompter`] for credentials or a certificate decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interaction {
+    Allowed,
+    Forbidden,
+}
+
 /// HTTP/1.1 transport with a bounded connection pool per origin.
 pub struct HttpTransport {
     config: TransportConfig,
@@ -131,13 +138,39 @@ impl HttpTransport {
     /// Handles 401 challenges (prompting through the `AuthPrompter`), transient failures of
     /// idempotent methods, TLS exceptions and same-origin redirects. Statuses other than those
     /// are returned for the caller to interpret; see [`super::classify_status`].
-    pub async fn send(&self, mut req: HttpRequest, cancel: &CancelToken) -> Result<HttpResponse> {
+    pub async fn send(&self, req: HttpRequest, cancel: &CancelToken) -> Result<HttpResponse> {
+        self.send_mode(req, cancel, Interaction::Allowed).await
+    }
+
+    /// Like [`Self::send`], but never asks the [`AuthPrompter`]: only credentials already cached
+    /// for the origin and certificates already accepted are used. A 401 that the cached
+    /// credentials do not satisfy fails with `AuthRequired`, and a certificate that would need a
+    /// decision fails with its TLS error.
+    ///
+    /// Meant for best-effort background work (such as deleting an abandoned commit
+    /// transaction) that must not pop up a prompt after the user has moved on.
+    pub async fn send_unattended(
+        &self,
+        req: HttpRequest,
+        cancel: &CancelToken,
+    ) -> Result<HttpResponse> {
+        self.send_mode(req, cancel, Interaction::Forbidden).await
+    }
+
+    async fn send_mode(
+        &self,
+        mut req: HttpRequest,
+        cancel: &CancelToken,
+        interaction: Interaction,
+    ) -> Result<HttpResponse> {
         validate_url(&req.url)?;
         req.headers.remove(AUTHORIZATION);
         let mut redirects = 0u8;
         loop {
             let origin = self.origin_client(&req.url)?;
-            let resp = self.send_authenticated(&origin, &mut req, cancel).await?;
+            let resp = self
+                .send_authenticated(&origin, &mut req, cancel, interaction)
+                .await?;
             if !is_redirect(resp.status) {
                 return Ok(resp);
             }
@@ -240,6 +273,7 @@ impl HttpTransport {
         origin: &Arc<OriginClient>,
         req: &mut HttpRequest,
         cancel: &CancelToken,
+        interaction: Interaction,
     ) -> Result<HttpResponse> {
         let mut sent = self
             .auth
@@ -277,6 +311,13 @@ impl HttpTransport {
                              authenticate with a small request first",
                         ));
                     }
+                    if interaction == Interaction::Forbidden {
+                        return Err(SvnError::new(
+                            ErrorCode::AuthRequired,
+                            "server requested authentication for an unattended request; \
+                             not prompting",
+                        ));
+                    }
                     sent = self
                         .auth
                         .on_unauthorized(
@@ -297,7 +338,10 @@ impl HttpTransport {
                 }
                 Err(AttemptError::Tls(problem)) => {
                     tls_rounds += 1;
-                    if tls_rounds > MAX_TLS_ROUNDS || !req.body.is_replayable() {
+                    if tls_rounds > MAX_TLS_ROUNDS
+                        || !req.body.is_replayable()
+                        || interaction == Interaction::Forbidden
+                    {
                         return Err(problem.to_error());
                     }
                     self.resolve_certificate(origin, *problem, cancel).await?;

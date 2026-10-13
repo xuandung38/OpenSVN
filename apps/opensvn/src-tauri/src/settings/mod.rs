@@ -126,6 +126,17 @@ impl SettingsService {
         self.change(changes)
     }
 
+    /// Stores the default checkout folder. Callers must have obtained the folder from a native
+    /// dialog: like program settings, it is not writable through a patch.
+    pub fn set_checkout_root(&self, path: &str) -> Result<Settings, AppError> {
+        let mut changes = Map::new();
+        changes.insert(
+            "general.checkoutRoot".to_owned(),
+            Value::String(path.to_owned()),
+        );
+        self.change(changes)
+    }
+
     /// Validates `changes` against the current settings, persists them and notifies subscribers.
     fn change(&self, changes: Map<String, Value>) -> Result<Settings, AppError> {
         let _guard = self

@@ -298,6 +298,18 @@ async fn settings_set_over_ipc_refuses_program_keys() {
         err["detail"].as_str().unwrap().contains("unknown field"),
         "{err}"
     );
+    // the default checkout folder changes only through the native folder dialog
+    let err = invoke(
+        &main,
+        "settings_set",
+        serde_json::json!({"patch": {"general.checkoutRoot": "/etc"}}),
+    )
+    .unwrap_err();
+    assert_eq!(err["code"], "invalid-argument", "{err}");
+    assert!(
+        err["detail"].as_str().unwrap().contains("unknown field"),
+        "{err}"
+    );
     let ok = invoke(
         &main,
         "settings_set",

@@ -68,7 +68,8 @@ pub trait CommitObserver: Send + Sync {
 pub trait CommitEditor: Send {
     /// Opens the root directory at `base_rev`.
     async fn open_root(&mut self, base_rev: Option<Revnum>) -> Result<DirId>;
-    /// Adds a directory, optionally copied from `(path, revision)`.
+    /// Adds a directory, optionally copied from `(URL, revision)` (the source's full URL, as
+    /// svn's RA layer takes it).
     async fn add_directory(
         &mut self,
         path: &RelPath,
@@ -82,7 +83,7 @@ pub trait CommitEditor: Send {
         parent: DirId,
         base_rev: Option<Revnum>,
     ) -> Result<DirId>;
-    /// Adds a file, optionally copied.
+    /// Adds a file, optionally copied from `(URL, revision)`.
     async fn add_file(
         &mut self,
         path: &RelPath,
