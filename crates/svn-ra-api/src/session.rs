@@ -84,6 +84,12 @@ pub struct FileRev {
 /// Receives `file_revs` results.
 pub trait FileRevHandler: Send {
     /// Called per revision; return a sink to receive its text delta, or `None` to skip it.
+    ///
+    /// The delta of a revision is complete only once the sink received the closing
+    /// `window(None)`. A revision that did not change the text (only properties) may deliver no
+    /// window at all, not even the closing one, before the next `revision` call or the end of
+    /// the report; the handler must then keep the previous text unchanged. An empty text is
+    /// sent as a closing `window(None)` without data windows.
     fn revision(&mut self, rev: FileRev) -> Result<Option<Box<dyn WindowSink>>>;
 }
 

@@ -1,0 +1,17 @@
+HTTP/1.1 200 OK
+Date: Mon, 01 Jan 2024 00:00:00 GMT
+Server: Apache
+Content-Type: text/xml; charset="utf-8"
+Content-Length: 290
+
+<?xml version="1.0" encoding="utf-8"?>
+<S:inherited-props-report xmlns:S="svn:" xmlns:D="DAV:">
+<S:iprop-item>
+<S:iprop-path>trunk</S:iprop-path>
+<S:iprop-propname>svn:ignore</S:iprop-propname>
+<S:iprop-propval>*.o
+build
+*.tmp
+</S:iprop-propval>
+</S:iprop-item>
+</S:inherited-props-report>

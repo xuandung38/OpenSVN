@@ -4,6 +4,10 @@
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS compile
 ARG SVN_VERSION
 ARG SVN_SHA512
+# Version-dependent configure flags (1.10+ bundles lz4; 1.8/1.9 have neither switch and need the
+# Python-binding format probe pre-answered because it cannot run against APR 1.7).
+ARG SVN_CONFIGURE_EXTRA="--with-lz4=internal --with-utf8proc=internal"
+ARG SVN_MAKE_JOBS=2
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential ca-certificates curl bzip2 pkg-config \
@@ -14,9 +18,9 @@ RUN curl -fsSL -o svn.tar.bz2 "https://archive.apache.org/dist/subversion/subver
     && echo "${SVN_SHA512}  svn.tar.bz2" | sha512sum -c - \
     && tar -xjf svn.tar.bz2 --strip-components=1 && rm svn.tar.bz2
 RUN ./configure --prefix=/usr/local --with-serf --without-apxs \
-      --with-lz4=internal --with-utf8proc=internal \
+      ${SVN_CONFIGURE_EXTRA} \
       --without-berkeley-db --without-swig --disable-nls \
-    && make -j"$(nproc)" && make install DESTDIR=/out
+    && make -j"${SVN_MAKE_JOBS}" && make install DESTDIR=/out
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 ENV DEBIAN_FRONTEND=noninteractive
