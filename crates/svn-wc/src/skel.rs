@@ -23,8 +23,8 @@
 
 use svn_types::{ErrorCode, Result, SvnError};
 
-/// Maximum list nesting accepted by the parser (svn imposes none; real skels nest < 10).
-pub const MAX_DEPTH: usize = 512;
+/// Maximum list nesting accepted by the parser (svn imposes none; real skels nest < 10, conflict skels about 6).
+pub const MAX_DEPTH: usize = 64;
 
 /// Atoms of this length or longer always use the explicit-length form.
 const IMPLICIT_MAX_LEN: usize = 100;

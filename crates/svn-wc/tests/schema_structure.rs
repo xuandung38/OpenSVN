@@ -32,8 +32,12 @@ fn created_schema_matches_svn_checkout() {
     assert_eq!(db.format(), 31);
     drop(db);
 
-    let want = structure(&open_ro(&svn_wc));
+    let want = structure_of_svn_wc(&open_ro(&svn_wc));
     let got = structure(&open_ro(&ours));
+    assert!(
+        !got.contains_key("table:sqlite_stat4"),
+        "OpenSVN must drop stat4"
+    );
     assert_eq!(
         want.get("pragma:user_version").map(String::as_str),
         Some("31")
@@ -124,7 +128,7 @@ fn created_schema_matches_svn_1_14_5_in_docker() {
     let ours = work.join("ours");
     std::fs::create_dir(&ours).expect("mkdir");
     drop(WcDb::create(&ours, &new_wc()).expect("create"));
-    let want = structure(&open_ro(&work.join("wc")));
+    let want = structure_of_svn_wc(&open_ro(&work.join("wc")));
     assert_eq!(
         want.get("pragma:user_version").map(String::as_str),
         Some("31")
