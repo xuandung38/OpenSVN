@@ -14,6 +14,24 @@ struct Fake {
     boot: Mutex<String>,
 }
 
+/// Like the real probe on Linux: exact boot ids and exact tick stamps.
+struct ExactBoot(Arc<Fake>);
+
+impl ProcessProbe for ExactBoot {
+    fn start_time(&self, pid: u32) -> Option<u64> {
+        self.0.start_time(pid)
+    }
+    fn same_process(&self, recorded: u64, current: u64) -> bool {
+        recorded == current
+    }
+    fn same_boot(&self, recorded: &str) -> bool {
+        self.0.same_boot(recorded)
+    }
+    fn rebooted_since(&self, recorded: &str) -> bool {
+        alive_probe::definitely_other_boot(recorded, &self.0.boot.lock().unwrap())
+    }
+}
+
 impl Fake {
     fn new(boot: &str) -> Arc<Self> {
         Arc::new(Self {
@@ -210,4 +228,50 @@ fn real_probe_end_to_end_for_the_current_process() {
     s.record(root, &dir("old"), u32::MAX - 3, current_boot_id())
         .unwrap();
     assert_eq!(s.owned_by_dead_process(root).unwrap(), vec![dir("old")]);
+}
+
+#[test]
+fn linux_clock_step_keeps_a_live_owner_alive_because_ticks_ignore_btime() {
+    // The stamp is ticks since boot, so a wall-clock step (which moves btime) changes nothing:
+    // same boot id, same ticks, still alive and still blocking.
+    let fake = Fake::new("linux:boot-a");
+    fake.spawn(7, 123_456);
+    let s = SqliteLockOwnership::new(
+        AppDb::open_in_memory().unwrap(),
+        Arc::new(ExactBoot(fake.clone())),
+    );
+    s.record(Path::new(ROOT), &dir("a"), 7, "linux:boot-a")
+        .unwrap();
+    assert!(s.owned_by_dead_process(Path::new(ROOT)).unwrap().is_empty());
+    let err = s
+        .record(Path::new(ROOT), &dir("a"), 8, "linux:boot-a")
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::WcBusy);
+    // A single tick of difference is a different process (exact comparison).
+    fake.exit(7);
+    fake.spawn(7, 123_457);
+    assert_eq!(
+        s.owned_by_dead_process(Path::new(ROOT)).unwrap(),
+        vec![dir("a")]
+    );
+}
+
+#[test]
+fn after_a_reboot_with_exact_boot_ids_the_owner_is_dead_even_if_its_pid_and_ticks_reappear() {
+    let fake = Fake::new("linux:boot-a");
+    fake.spawn(7, 500);
+    let s = SqliteLockOwnership::new(
+        AppDb::open_in_memory().unwrap(),
+        Arc::new(ExactBoot(fake.clone())),
+    );
+    s.record(Path::new(ROOT), &dir("a"), 7, "linux:boot-a")
+        .unwrap();
+    // Reboot: ticks restart at zero, so an unrelated process may get pid 7 at tick 500 again.
+    fake.set_boot("linux:boot-b");
+    assert_eq!(
+        s.owned_by_dead_process(Path::new(ROOT)).unwrap(),
+        vec![dir("a")]
+    );
+    s.record(Path::new(ROOT), &dir("a"), 9, "linux:boot-b")
+        .unwrap();
 }

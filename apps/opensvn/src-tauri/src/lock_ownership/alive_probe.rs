@@ -60,6 +60,15 @@ pub fn same_boot(recorded: &str, current: &str) -> bool {
     }
 }
 
+/// Whether `recorded` and `current` are both exact boot session ids (Linux `boot_id`, macOS
+/// `kern.bootsessionuuid`) and differ: then the machine has certainly rebooted since `recorded`,
+/// and no process from that boot can still be alive. Derived boot times (`boot-time:`) move with
+/// the clock, so they never prove a reboot.
+pub fn definitely_other_boot(recorded: &str, current: &str) -> bool {
+    let exact = |id: &str| id.starts_with("linux:") || id.starts_with("macos:");
+    exact(recorded) && exact(current) && recorded != current
+}
+
 /// What the lock ownership store needs to know about processes.
 pub trait ProcessProbe: Send + Sync {
     /// Opaque start stamp of the live, non-zombie process `pid`; `None` when no such process
@@ -70,6 +79,13 @@ pub trait ProcessProbe: Send + Sync {
     fn same_process(&self, recorded: u64, current: u64) -> bool;
     /// Whether `recorded` names the boot session the machine is in now.
     fn same_boot(&self, recorded: &str) -> bool;
+    /// Whether `recorded` certainly names an earlier boot (see [`definitely_other_boot`]). Start
+    /// stamps from another boot are meaningless (Linux ticks restart at zero), so the owner is dead
+    /// whatever process now has its pid.
+    fn rebooted_since(&self, recorded: &str) -> bool {
+        let _ = recorded;
+        false
+    }
 }
 
 /// Tolerance for stamps that are wall-clock seconds (macOS, Windows).
@@ -87,9 +103,14 @@ pub fn parse_proc_stat(content: &str) -> Option<(char, u64)> {
     Some((state, start))
 }
 
-/// Start stamp on Linux: ticks since boot from `/proc`. Unlike a wall-clock start time it cannot
-/// move when the system clock is set or NTP steps it, so a live owner never looks dead because
-/// of a clock jump.
+/// Start stamp on Linux: `starttime` of `/proc/<pid>/stat`, clock ticks since boot. Unlike a
+/// wall-clock start time it cannot move when the system clock is set or NTP steps it, so a live
+/// owner never looks dead because of a clock jump.
+///
+/// `btime` (`/proc/stat`) is deliberately not added: the kernel shifts it whenever the wall clock
+/// is stepped, which is exactly how sysinfo's `start_time() = starttime / HZ + btime` drifts. The
+/// boot is identified separately by the exact `boot_id`, so ticks only ever get compared within
+/// one boot. Converting to wall-clock seconds (`starttime / CLK_TCK + btime`) is for display only.
 #[cfg(target_os = "linux")]
 fn linux_start_stamp(pid: u32) -> Option<u64> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -128,6 +149,10 @@ impl ProcessProbe for OsProcessProbe {
 
     fn same_boot(&self, recorded: &str) -> bool {
         same_boot(recorded, current_boot_id())
+    }
+
+    fn rebooted_since(&self, recorded: &str) -> bool {
+        definitely_other_boot(recorded, current_boot_id())
     }
 }
 
@@ -173,6 +198,44 @@ mod tests {
         );
         // ticks since boot are far smaller than any epoch-based stamp
         assert!(a < 1_000_000_000_000, "{a}");
+    }
+
+    #[test]
+    fn only_two_different_exact_boot_ids_prove_a_reboot() {
+        assert!(definitely_other_boot("linux:a", "linux:b"));
+        assert!(definitely_other_boot("macos:a", "macos:b"));
+        assert!(!definitely_other_boot("linux:a", "linux:a"));
+        assert!(!definitely_other_boot("boot-time:1", "boot-time:9999"));
+        assert!(!definitely_other_boot("boot-time:1", "linux:a"));
+        assert!(!definitely_other_boot("linux:a", "boot-time:1"));
+        let probe = OsProcessProbe;
+        assert!(!probe.rebooted_since(current_boot_id()));
+    }
+
+    /// `starttime / CLK_TCK` (since boot) agrees with sysinfo's wall-clock start minus its boot
+    /// time, so field 22 is the right field and the unit is ticks. Skipped without `getconf`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_ticks_agree_with_wall_clock_start_minus_btime() {
+        let Ok(out) = std::process::Command::new("getconf")
+            .arg("CLK_TCK")
+            .output()
+        else {
+            return;
+        };
+        let Ok(hz) = String::from_utf8_lossy(&out.stdout).trim().parse::<u64>() else {
+            return;
+        };
+        let ticks = OsProcessProbe.start_time(std::process::id()).unwrap();
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        let mut sys = System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        let wall = sys.process(pid).unwrap().start_time();
+        let since_boot = wall.saturating_sub(System::boot_time());
+        assert!(
+            (ticks / hz).abs_diff(since_boot) <= 2,
+            "ticks {ticks} / {hz} vs {since_boot}"
+        );
     }
 
     #[test]

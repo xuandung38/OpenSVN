@@ -3,6 +3,8 @@
 //! holder from a stale row left by a crashed process.
 //!
 //! A row stores the owner's pid, the boot session and the process start time. Classification:
+//! * the recorded boot id is exact (Linux `boot_id`, macOS boot session UUID) and differs from the
+//!   current one: the machine rebooted, **dead**;
 //! * no live process with that pid: **dead**;
 //! * the pid is alive but its start stamp differs from the recorded one: the pid was recycled,
 //!   **dead** (on Linux the stamp is ticks since boot, so a clock change never moves it);
@@ -70,6 +72,9 @@ impl SqliteLockOwnership {
     }
 
     fn classify(&self, pid: u32, boot_id: &str, recorded_start: Option<u64>) -> Liveness {
+        if self.probe.rebooted_since(boot_id) {
+            return Liveness::Dead; // nothing survives a reboot, whoever has the pid now
+        }
         let Some(now_start) = self.probe.start_time(pid) else {
             return Liveness::Dead;
         };
