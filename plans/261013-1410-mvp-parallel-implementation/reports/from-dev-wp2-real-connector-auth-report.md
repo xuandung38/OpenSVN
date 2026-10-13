@@ -1,6 +1,9 @@
 # WP2: real connector, auth broker and trust store
 
-Branch `feat/wp2-real-connector-auth` (from `origin/main` 793c6f6, which includes WP0 #91). Plan:
+Branch `feat/wp2-real-connector-auth` (from `origin/main` 793c6f6, which includes WP0 #91). It has
+origin/main a3e9f2e (WP1, WP3, WP4) and `origin/fix/wp0-followups` (PR #96) merged in.
+
+**Depends on PR #96:** merge #96 before or together with this PR. Plan:
 `real-engine-wiring-plan.md`, decisions A, B, C and work package WP2.
 
 ## What changed
@@ -50,14 +53,13 @@ Branch `feat/wp2-real-connector-auth` (from `origin/main` 793c6f6, which include
   - `forget_certificate` handles the `certs_remove` command: it removes the row and the
     in-memory pin, then invalidates.
   - `trust_store()` and `invalidations()` are exposed for the connector.
-  - **Rejected stored credentials:** `stored_credentials_rejected(origin)` withholds the saved
-    password until the user saves new credentials for that origin. Today it is triggered by
-    inference: a saved password was handed out, and the next call for that origin is a
-    `Rejected` prompt. That covers interactive mode only. There is a
-    `TODO(fix/wp0-followups)` to call it from the explicit `AuthPrompter` hook. That branch
-    was not on origin when I finished.
-  - The withholding is in memory only. After a restart, a stale saved password is offered once
-    again.
+  - **Rejected stored credentials:** the broker implements
+    `AuthPrompter::stored_credentials_rejected`, the hook added by PR #96
+    (`fix/wp0-followups`, merged into this branch because #96 is not on main yet). After a 401
+    to a saved password, in interactive or unattended mode, that password is withheld for its
+    host, port and realm until the user saves new credentials. Later transports therefore do
+    not submit it again either. The withholding is in memory only: after a restart, a stale
+    saved password is offered once more.
 - **Decision C**
   - `AppDeps.engine` is now `EngineSource::{Ready(Arc<dyn EngineFacade>), Build(Box<dyn FnOnce(EngineServices) -> Result<..>>)}`.
   - `EngineServices { auth, db, data_dir, settings }`.
@@ -91,6 +93,8 @@ fixture.
   background and interactive work run without a prompt.
 - accept-always: after a restart, even an unattended connect works without a prompt.
 - sign-out and network setting changes reopen the session; an unrelated setting does not.
+- a rejected saved password is tried once. A rebuilt transport does not submit it again. Once the
+  user saves the right password, it is used silently again.
 - authz deny `/` / allow `/trunk`: `svn_client::checkout` of trunk works, then
   `RealEngine::ensure_authenticated` on the WC, then a background `svn_client::update`. The
   root is never sent an `OPTIONS`.
@@ -99,20 +103,28 @@ fixture.
 
 - saved credentials across brokers
 - unsaved answers store nothing
-- a rejected saved password is withheld until new credentials are saved
+- a rejected saved password (reported through the hook) is withheld until new credentials are
+  saved
 - sign-out purges secrets and invalidates
 - `forget_certificate`
 - `AppDbTrustStore` persist and replace
 
 ## Gates
 
-See the PR description for final counts. FE: `pnpm lint`, `typecheck` and `test` all pass
-(199/199).
+After merging origin/main a3e9f2e and origin/fix/wp0-followups 6655769:
+
+- `cargo fmt --all --check`: pass
+- `cargo clippy --workspace --all-targets -- -D warnings`: pass
+- `cargo clippy -p opensvn --features real-engine --all-targets -- -D warnings`: pass
+- `cargo test --workspace --locked --no-fail-fast`: 1259 passed, 0 failed, 21 ignored
+- `cargo test -p opensvn --features opensvn/real-engine --no-fail-fast`: 364 passed, 0 failed
+- `pnpm gen:ipc`: no drift after the merge (`bindings.ts` regenerated for `network.negotiate`)
+- FE `pnpm lint` / `typecheck` / `test`: pass (208/208)
+- Not run: the `negotiate-gssapi` feature build (no krb5 headers in this environment), and
+  any real server (VisualSVN or Apache).
 
 ## Remaining
 
-- Call `stored_credentials_rejected` from the `fix/wp0-followups` trait hook once it is
-  merged. That also covers unattended mode.
 - WP7: build `RealEngine` with `HttpConnector::from_services` through `EngineSource::Build`,
   and turn `negotiate-gssapi` on for macOS/Linux release builds.
 - Saved passwords are written when the user answers the prompt, before the server has
