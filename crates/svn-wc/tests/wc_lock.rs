@@ -190,7 +190,7 @@ fn foreign_rows_block_and_are_never_removed_without_steal() {
     db.wc_lock_release(&rp("c")).expect("release");
 
     assert!(
-        db.wc_cleanup_locks().expect("cleanup").is_empty(),
+        db.wc_cleanup_locks().expect("cleanup").recovered.is_empty(),
         "cleanup leaves foreign rows"
     );
     assert_eq!(
@@ -227,7 +227,7 @@ fn crashed_app_process_locks_are_recovered_but_live_ones_are_not() {
         LockState::HeldByOther
     );
     assert!(
-        db.wc_cleanup_locks().expect("cleanup").is_empty(),
+        db.wc_cleanup_locks().expect("cleanup").recovered.is_empty(),
         "owner 111 is still alive"
     );
     assert_eq!(
@@ -239,14 +239,17 @@ fn crashed_app_process_locks_are_recovered_but_live_ones_are_not() {
 
     dead.store(true, std::sync::atomic::Ordering::SeqCst);
     // The refused attempt above must not have clobbered the record of the dead owner.
-    assert_eq!(db.wc_cleanup_locks().expect("cleanup"), vec![rp("a")]);
+    assert_eq!(
+        db.wc_cleanup_locks().expect("cleanup").recovered,
+        vec![rp("a")]
+    );
     assert_eq!(db.wc_lock_held(&rp("a")).expect("held"), LockState::Free);
     db.wc_lock_obtain(&rp("a"), -1, ObtainMode::Normal)
         .expect("lock after recovery");
 }
 
 #[test]
-fn orphan_lock_rows_for_unversioned_directories_are_dropped() {
+fn rows_of_unversioned_directories_without_our_traces_are_left_alone() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db = wc(tmp.path());
     let store = Arc::new(MemoryLockOwnership::for_current_process("boot"));
@@ -257,12 +260,137 @@ fn orphan_lock_rows_for_unversioned_directories_are_dropped() {
         Ok(())
     })
     .expect("rows");
-    assert_eq!(db.wc_cleanup_locks().expect("cleanup"), vec![rp("gone")]);
+    let report = db.wc_cleanup_locks().expect("cleanup");
+    assert_eq!(report, svn_wc::db::LockCleanup::default());
+    for d in ["gone", "c"] {
+        assert_eq!(
+            db.wc_lock_held(&rp(d)).expect("held"),
+            LockState::HeldByOther,
+            "{d}"
+        );
+    }
+}
+
+/// Simulates what `svn cleanup` does to our traces (marker files vanish, rows are cleared) and a
+/// later svn operation that locks the same directory: the dead record alone must not be enough
+/// to delete that lock.
+#[test]
+fn dead_record_without_marker_never_deletes_a_row() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe_dead = dead.clone();
+    let store = Arc::new(MemoryLockOwnership::new(Arc::new(
+        move |pid: u32, _: &str| {
+            !(pid == 111 && probe_dead.load(std::sync::atomic::Ordering::SeqCst))
+        },
+    )));
+    {
+        let crashing = wc(tmp.path());
+        crashing.set_lock_owner(owner(&store, 111));
+        crashing
+            .wc_lock_obtain(&RelPath::root(), -1, ObtainMode::Normal)
+            .expect("lock");
+    }
+    // `svn cleanup`: marker files and rows are gone ...
+    for entry in std::fs::read_dir(tmp.path().join(".svn/tmp")).expect("tmp") {
+        std::fs::remove_file(entry.expect("entry").path()).expect("rm");
+    }
+    let db = WcDb::open(tmp.path()).expect("reopen");
+    db.with_write(|tx| {
+        tx.execute("DELETE FROM wc_lock", []).map_err(sql_err)?;
+        // ... and a new svn operation takes the very same row.
+        tx.execute(
+            "INSERT INTO wc_lock (wc_id, local_dir_relpath, locked_levels) VALUES (1, '', -1)",
+            [],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    })
+    .expect("svn lock");
+    db.set_lock_owner(owner(&store, 222));
+    dead.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let report = db.wc_cleanup_locks().expect("cleanup");
+    assert!(report.recovered.is_empty());
+    assert_eq!(report.needs_user_action, vec![RelPath::root()]);
     assert_eq!(
-        db.wc_lock_held(&rp("c")).expect("held"),
-        LockState::HeldByOther,
-        "versioned dir keeps its row"
+        db.wc_lock_held(&RelPath::root()).expect("held"),
+        LockState::HeldByOther
     );
+    let err = db
+        .wc_lock_obtain(&RelPath::root(), -1, ObtainMode::Normal)
+        .expect_err("busy");
+    assert_eq!(err.code, ErrorCode::WcBusy);
+    assert!(err.message.contains("cleanup"), "{}", err.message);
+    // Only an explicit decision removes it.
+    assert!(db.wc_lock_steal(&RelPath::root()).expect("steal"));
+}
+
+#[test]
+fn open_and_recover_clears_locks_of_dead_owners() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe_dead = dead.clone();
+    let store = Arc::new(MemoryLockOwnership::new(Arc::new(
+        move |pid: u32, _: &str| {
+            !(pid == 111 && probe_dead.load(std::sync::atomic::Ordering::SeqCst))
+        },
+    )));
+    {
+        let crashing = wc(tmp.path());
+        crashing.set_lock_owner(owner(&store, 111));
+        crashing
+            .wc_lock_obtain(&rp("a"), -1, ObtainMode::Normal)
+            .expect("lock");
+    }
+    dead.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (db, report) = WcDb::open_and_recover(tmp.path(), owner(&store, 222)).expect("open");
+    assert_eq!(report.recovered, vec![rp("a")]);
+    assert_eq!(db.wc_lock_held(&rp("a")).expect("held"), LockState::Free);
+    let markers = std::fs::read_dir(tmp.path().join(".svn/tmp"))
+        .expect("tmp")
+        .count();
+    assert_eq!(markers, 0, "markers of recovered locks are removed");
+}
+
+#[test]
+fn racing_obtains_keep_the_winners_ownership_intact() {
+    for _ in 0..10 {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe_dead = dead.clone();
+        let store = Arc::new(MemoryLockOwnership::new(Arc::new(
+            move |pid: u32, _: &str| {
+                !(pid == 111 && probe_dead.load(std::sync::atomic::Ordering::SeqCst))
+            },
+        )));
+        {
+            let racing = wc(tmp.path());
+            racing.set_lock_owner(owner(&store, 111));
+            let results: Vec<_> = std::thread::scope(|s| {
+                let handles: Vec<_> = (0..4)
+                    .map(|_| s.spawn(|| racing.wc_lock_obtain(&rp("a"), -1, ObtainMode::Normal)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("thread"))
+                    .collect()
+            });
+            assert_eq!(
+                results.iter().filter(|r| r.is_ok()).count(),
+                1,
+                "{results:?}"
+            );
+            // Handle dropped: crash with the winner holding the lock.
+        }
+        dead.store(true, std::sync::atomic::Ordering::SeqCst);
+        let db = WcDb::open(tmp.path()).expect("reopen");
+        db.set_lock_owner(owner(&store, 222));
+        assert_eq!(
+            db.wc_cleanup_locks().expect("cleanup").recovered,
+            vec![rp("a")]
+        );
+    }
 }
 
 #[test]
@@ -362,7 +490,7 @@ fn engine_detects_and_respects_a_lock_held_by_a_running_svn() {
         .expect_err("svn holds it");
     assert_eq!(err.code, ErrorCode::WcBusy);
     assert!(
-        db.wc_cleanup_locks().expect("cleanup").is_empty(),
+        db.wc_cleanup_locks().expect("cleanup").recovered.is_empty(),
         "svn's lock must survive cleanup"
     );
     assert_eq!(
@@ -380,4 +508,63 @@ fn engine_detects_and_respects_a_lock_held_by_a_running_svn() {
     );
     db.wc_lock_obtain(&RelPath::root(), -1, ObtainMode::Normal)
         .expect("free after svn finished");
+}
+
+/// The race the marker closes: app crash, then `svn cleanup`, then a new svn operation locks the
+/// same directory; our recovery must leave that lock alone.
+#[cfg(unix)]
+#[test]
+fn svn_cleanup_after_a_crash_then_a_new_svn_lock_is_never_taken_over() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    if skip_without_svn() {
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let base = tmp.path().canonicalize().expect("canon");
+    let url = create_repo(&base);
+    let hook = base.join("repo/hooks/pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\nsleep 4\nexit 0\n").expect("hook");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let w = checkout(&base, &url, "w", &[]);
+    std::fs::write(w.join("f.txt"), "x\n").expect("write");
+    svn(&w, &["add", "-q", "f.txt"]);
+
+    let dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe_dead = dead.clone();
+    let store = Arc::new(MemoryLockOwnership::new(Arc::new(
+        move |pid: u32, _: &str| {
+            !(pid == 111 && probe_dead.load(std::sync::atomic::Ordering::SeqCst))
+        },
+    )));
+    {
+        let crashing = WcDb::open(&w).expect("open");
+        crashing.set_lock_owner(owner(&store, 111));
+        crashing
+            .wc_lock_obtain(&RelPath::root(), -1, ObtainMode::Normal)
+            .expect("lock");
+    }
+    dead.store(true, std::sync::atomic::Ordering::SeqCst);
+    svn(&w, &["cleanup"]); // clears the row and (we rely on it) .svn/tmp
+
+    let mut child = std::process::Command::new("svn")
+        .args(["commit", "-q", "-m", "slow"])
+        .current_dir(&w)
+        .spawn()
+        .expect("spawn svn");
+    let db = WcDb::open(&w).expect("open");
+    db.set_lock_owner(owner(&store, 222));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while db.wc_lock_held(&RelPath::root()).expect("held") == LockState::Free {
+        assert!(Instant::now() < deadline, "svn never took its lock");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let report = db.wc_cleanup_locks().expect("cleanup");
+    assert!(report.recovered.is_empty(), "{report:?}");
+    assert_eq!(
+        db.wc_lock_held(&RelPath::root()).expect("held"),
+        LockState::HeldByOther
+    );
+    assert!(child.wait().expect("wait").success());
 }
