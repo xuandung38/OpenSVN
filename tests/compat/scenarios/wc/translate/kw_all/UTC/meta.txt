@@ -1,0 +1,9 @@
+svn_version=1.15.0
+prop.svn:keywords=Id Rev Revision LastChangedRevision Date LastChangedDate Author LastChangedBy HeadURL URL Header
+rev=14
+author=hxd
+date_micros=1791881712339510
+utc_offset_secs=0
+url=file:///var/folders/0n/5d8bqg7d2s381g6g71yx_5lr0000gn/T/svn-translate-golden-vemn4wiw/repo/kw_all
+root=file:///var/folders/0n/5d8bqg7d2s381g6g71yx_5lr0000gn/T/svn-translate-golden-vemn4wiw/repo
+tz=UTC

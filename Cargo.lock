@@ -779,6 +779,7 @@ name = "svn-wc"
 version = "0.0.0"
 dependencies = [
  "md-5",
+ "proptest",
  "rusqlite",
  "sha1",
  "svn-types",
