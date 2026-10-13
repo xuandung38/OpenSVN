@@ -101,6 +101,8 @@ Fast per-crate tests that only need a local `svn`/`svnadmin` (file:// repositori
 standalone crate `tests/svn-oracle` (`opensvn-svn-oracle`, no engine dependencies) as a
 dev-dependency instead of calling `Command::new("svn")`; see its crate docs for the API and the
 `OPENSVN_SVN_BIN`, `OPENSVN_SVNADMIN_BIN` and `OPENSVN_REQUIRE_SVN` contract.
+`OPENSVN_REQUIRE_SVN=1` makes only a *missing* svn fatal; an svn older than the test's
+`MinVersion` always skips with a message (Windows only has SlikSVN 1.14.5).
 
 ### Engine steps
 
