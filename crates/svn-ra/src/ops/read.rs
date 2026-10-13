@@ -6,14 +6,16 @@
 //! commits land in between. Like libsvn_ra_serf's `get_dir`, listings use `Depth: 1` PROPFIND,
 //! which every mod_dav_svn from 1.8 on answers with complete entries.
 
+use std::collections::HashSet;
+
 use md5::{Digest, Md5};
 use svn_protocol::propfind::{self, MultiStatusParser, PropfindEntry};
 use svn_protocol::xml::Ns;
 use svn_protocol::{ResponseParser, errors::codes, get, options_request, parse_chunked};
 use svn_ra_api::FileMeta;
 use svn_types::{
-    CancelToken, Depth, DirEntry, ErrorCode, NodeKind, PropChange, RelPath, Result, Revnum,
-    SvnError,
+    CancelToken, Checksum, Depth, DirEntry, ErrorCode, NodeKind, PropChange, RelPath, Result,
+    Revnum, SvnError,
 };
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -104,6 +106,31 @@ pub(crate) async fn stat(
     Ok(Some(entry))
 }
 
+/// Caps for a recursive (`Depth::Infinity`) listing, which costs one request per directory. A
+/// listing that would go beyond either cap fails instead of returning a partial result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListLimits {
+    /// Most entries a listing may return.
+    pub max_entries: usize,
+    /// Deepest level below the listed directory that may be visited (1 = its children).
+    pub max_depth: usize,
+}
+
+impl Default for ListLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: 1_000_000,
+            max_depth: 512,
+        }
+    }
+}
+
+fn limit_exceeded(what: &str, max: usize) -> SvnError {
+    corrupt(format!(
+        "recursive listing exceeds the limit of {max} {what}; list a smaller subtree"
+    ))
+}
+
 /// One `Depth: 1` listing: the directory's own entry and its children with their repository
 /// paths. Children the protocol layer refuses (other origin, unsafe names) are skipped with a
 /// warning rather than failing the whole listing.
@@ -117,11 +144,19 @@ async fn list_one(
     let resp = wire.send_ok(req, cancel).await?;
     let mut own = None;
     let mut children = Vec::new();
+    // A repeated entry would make a recursive listing walk its subtree again at every level.
+    let mut seen = HashSet::new();
     let mut parser = MultiStatusParser::new();
     stream_items(resp, &mut parser, cancel, |e: PropfindEntry| {
         match propfind::dir_entry_from(wire.urls(), &e) {
             Ok((p, entry)) if &p == dir => own = Some(entry),
-            Ok((p, entry)) if p.parent().as_ref() == Some(dir) => children.push((p, entry)),
+            Ok((p, entry)) if p.parent().as_ref() == Some(dir) => {
+                if seen.insert(p.clone()) {
+                    children.push((p, entry));
+                } else {
+                    tracing::warn!("skipping a repeated listing entry");
+                }
+            }
             Ok((p, _)) => {
                 return Err(corrupt(format!(
                     "listing of {dir} contains unrelated path {p}"
@@ -140,6 +175,9 @@ async fn list_one(
 
 /// Lists the directory `path` at `rev`. `Files` keeps only files, `Immediates` all children,
 /// `Infinity` the whole subtree (names below the first level are paths relative to `path`).
+///
+/// An `Infinity` listing is bounded by the wire's [`ListLimits`] and fails with `Corrupt` when
+/// it would exceed them. Repeated entries in an answer are listed once.
 pub(crate) async fn list(
     wire: &RaWire,
     path: &RelPath,
@@ -174,15 +212,23 @@ pub(crate) async fn list(
         Depth::Infinity => {
             // Depth-first, one PROPFIND per directory, like `svn ls -R` against servers
             // without `list-report`.
-            let mut stack: Vec<(RelPath, DirEntry)> = children.into_iter().rev().collect();
-            while let Some((p, mut e)) = stack.pop() {
+            let limits = wire.list_limits();
+            let mut stack: Vec<(RelPath, DirEntry, usize)> =
+                children.into_iter().rev().map(|(p, e)| (p, e, 1)).collect();
+            while let Some((p, mut e, level)) = stack.pop() {
                 cancel.check()?;
+                if level > limits.max_depth {
+                    return Err(limit_exceeded("levels", limits.max_depth));
+                }
+                if out.len() >= limits.max_entries {
+                    return Err(limit_exceeded("entries", limits.max_entries));
+                }
                 e.name = relative_name(&repo, &p)?;
                 let is_dir = e.kind == NodeKind::Dir;
                 out.push(e);
                 if is_dir {
                     let (_, below) = list_one(wire, rev, &p, cancel).await?;
-                    stack.extend(below.into_iter().rev());
+                    stack.extend(below.into_iter().rev().map(|(c, e)| (c, e, level + 1)));
                 }
             }
         }
@@ -218,7 +264,14 @@ fn parse_md5(text: &str) -> Option<[u8; 16]> {
 }
 
 /// Streams the content of the file `path` at `rev` into `sink` and returns its versioned
-/// properties. The content is checked against the MD5 the server reports for the node.
+/// properties and the MD5 of the streamed bytes.
+///
+/// The content is checked against the MD5 the server reports for the node (mod_dav_svn always
+/// reports one for files); a mismatch is `Corrupt`. If the server reports none, the MD5 is
+/// still computed and returned with `verified: false`.
+///
+/// On any error the sink may hold partial, or complete but unverified, content: the caller
+/// must discard it.
 pub(crate) async fn get_file(
     wire: &RaWire,
     path: &RelPath,
@@ -273,15 +326,23 @@ pub(crate) async fn get_file(
     sink.flush()
         .await
         .map_err(|e| SvnError::from_io("cannot write file content", &e))?;
-    if let Some(expected) = expected {
-        let digest: [u8; 16] = hasher.finalize().into();
-        if digest != expected {
-            return Err(corrupt(format!(
-                "content of {path} at {rev} does not match the server's checksum"
-            )));
-        }
+    let digest: [u8; 16] = hasher.finalize().into();
+    if let Some(expected) = expected
+        && digest != expected
+    {
+        return Err(corrupt(format!(
+            "content of {path} at {rev} does not match the server's checksum"
+        )));
     }
-    Ok(FileMeta { rev, props })
+    if expected.is_none() {
+        tracing::debug!("server reported no checksum for a file; its content is unverified");
+    }
+    Ok(FileMeta {
+        rev,
+        props,
+        md5: Checksum::Md5(digest),
+        verified: expected.is_some(),
+    })
 }
 
 #[cfg(test)]

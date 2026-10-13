@@ -5153,6 +5153,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "md-5",
  "secrecy",
  "svn-ra-api",
  "svn-types",

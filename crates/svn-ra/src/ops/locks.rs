@@ -32,7 +32,22 @@ fn lock_error(status: u16, mut e: SvnError) -> SvnError {
     e
 }
 
-/// Locks at or below `path` (session-relative) up to `depth`.
+/// Whether a lock reported for the repository path `lock_path` (`/trunk/a`) is within `depth`
+/// of the repository path `scope`. Locks outside the scope are not returned, whatever the
+/// server sends.
+fn in_scope(scope: &RelPath, depth: Depth, lock_path: &str) -> bool {
+    let Ok(p) = RelPath::new(lock_path.strip_prefix('/').unwrap_or(lock_path)) else {
+        return false;
+    };
+    match depth {
+        Depth::Empty => p == *scope,
+        Depth::Files | Depth::Immediates => p == *scope || p.parent().as_ref() == Some(scope),
+        Depth::Infinity | Depth::Exclude | Depth::Unknown => p.starts_with(scope),
+    }
+}
+
+/// Locks at or below `path` (session-relative) up to `depth`. Locks the server reports outside
+/// that scope are dropped.
 pub(crate) async fn get_locks(
     wire: &RaWire,
     path: &RelPath,
@@ -49,8 +64,12 @@ pub(crate) async fn get_locks(
     let resp = RaWire::require_success(resp, cancel).await?;
     let mut locks = Vec::new();
     let mut parser = GetLocksParser::new();
-    stream_items(resp, &mut parser, cancel, |l| {
-        locks.push(l);
+    stream_items(resp, &mut parser, cancel, |l: LockInfo| {
+        if in_scope(&repo, depth, l.path.as_str()) {
+            locks.push(l);
+        } else {
+            tracing::warn!("skipping a lock outside the requested scope");
+        }
         Ok(())
     })
     .await?;
@@ -145,5 +164,28 @@ mod tests {
         assert_eq!(e(403), ErrorCode::Forbidden);
         let kept = lock_error(423, SvnError::new(ErrorCode::HookFailed, "hook"));
         assert_eq!(kept.code, ErrorCode::HookFailed);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn locks_are_filtered_to_the_requested_scope() {
+        let trunk = RelPath::new("trunk").unwrap();
+        let root = RelPath::root();
+        assert!(in_scope(&trunk, Depth::Empty, "/trunk"));
+        assert!(!in_scope(&trunk, Depth::Empty, "/trunk/a"));
+        assert!(in_scope(&trunk, Depth::Files, "/trunk/a"));
+        assert!(in_scope(&trunk, Depth::Immediates, "/trunk/a"));
+        assert!(!in_scope(&trunk, Depth::Immediates, "/trunk/d/b"));
+        assert!(in_scope(&trunk, Depth::Infinity, "/trunk/d/b"));
+        assert!(!in_scope(&trunk, Depth::Infinity, "/trunk2/a"));
+        assert!(!in_scope(&trunk, Depth::Infinity, "/branches/a"));
+        assert!(in_scope(&root, Depth::Infinity, "/branches/a"));
+        assert!(in_scope(&root, Depth::Immediates, "/a"));
+        assert!(!in_scope(&root, Depth::Immediates, "/d/a"));
     }
 }

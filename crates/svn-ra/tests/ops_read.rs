@@ -8,15 +8,18 @@ use std::io::{Cursor, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use md5::Digest as _;
+
 use ra_write_support::{
-    Bulk, FixedPrompter, ROOT, fixture, requests, server, session_url, transport,
+    Bulk, FixedPrompter, ROOT, fixture, requests, server, session_url, transport, wire,
 };
 use svn_delta::WindowApplier;
 use svn_ra::ops::HttpRaSession;
+use svn_ra::ops::read::ListLimits;
 use svn_ra_api::{FileRev, FileRevHandler, LogRequest, RaSession};
 use svn_types::{
-    CancelToken, Depth, ErrorCode, LogEntry, NodeKind, RelPath, Result, Revnum, TxDeltaWindow,
-    WindowSink,
+    CancelToken, Checksum, Depth, ErrorCode, LogEntry, NodeKind, RelPath, Result, Revnum,
+    TxDeltaWindow, WindowSink,
 };
 use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -768,4 +771,229 @@ async fn reverse_file_revs_needs_the_capability() {
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::ServerUnsupported);
     assert!(requests(&srv).await.iter().all(|(m, _)| m != "REPORT"));
+}
+
+#[tokio::test]
+async fn get_file_returns_the_md5_and_whether_it_was_verified() {
+    let srv = server(Bulk::Prefer).await;
+    let content = fixture("get/file.resp");
+    mount_file(&srv, &content).await;
+    let s = session(&srv).await;
+    let mut out = Vec::new();
+    let meta = s
+        .get_file(&p("a.txt"), None, &mut out, &CancelToken::new())
+        .await
+        .unwrap();
+    let md5: [u8; 16] = md5::Md5::digest(&content).into();
+    assert_eq!(meta.md5, Checksum::Md5(md5));
+    assert!(meta.verified);
+}
+
+#[tokio::test]
+async fn get_file_without_a_server_checksum_still_returns_one() {
+    let srv = server(Bulk::Prefer).await;
+    let props = String::from_utf8(fixture("propfind/allprop-file.resp"))
+        .unwrap()
+        .replace(
+            "<lp2:md5-checksum>3e079718d4006e9d757934ce54439418</lp2:md5-checksum>",
+            "",
+        );
+    assert!(!props.contains("md5-checksum"));
+    mount(
+        &srv,
+        "PROPFIND",
+        "/svn/repo/!svn/rvr/5/trunk/a.txt",
+        xml(207, props),
+    )
+    .await;
+    mount(
+        &srv,
+        "GET",
+        "/svn/repo/!svn/rvr/5/trunk/a.txt",
+        ResponseTemplate::new(200).set_body_bytes(b"anything\n".to_vec()),
+    )
+    .await;
+    let s = session(&srv).await;
+    let mut out = Vec::new();
+    let meta = s
+        .get_file(&p("a.txt"), None, &mut out, &CancelToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, b"anything\n");
+    let md5: [u8; 16] = md5::Md5::digest(b"anything\n").into();
+    assert_eq!(meta.md5, Checksum::Md5(md5));
+    assert!(!meta.verified);
+}
+
+/// Mounts the `Depth: 1` listing of `dir` at r7 with `children` as `(name, is_dir)`; a name
+/// may repeat.
+async fn mount_listing(srv: &MockServer, dir: &str, children: &[(&str, bool)]) {
+    let rvr = "/svn/repo/!svn/rvr/7";
+    let mut rs = vec![response(&format!("{rvr}/{dir}/"), true, 7)];
+    for (name, is_dir) in children {
+        let slash = if *is_dir { "/" } else { "" };
+        rs.push(response(&format!("{rvr}/{dir}/{name}{slash}"), *is_dir, 7));
+    }
+    mount(
+        srv,
+        "PROPFIND",
+        &format!("{rvr}/{dir}"),
+        xml(207, multistatus(&rs)),
+    )
+    .await;
+}
+
+async fn session_with_limits(srv: &MockServer, limits: ListLimits) -> HttpRaSession {
+    HttpRaSession::from_wire(wire(srv, 4).await.with_list_limits(limits)).unwrap()
+}
+
+#[tokio::test]
+async fn list_infinity_ignores_repeated_entries() {
+    let srv = server(Bulk::Prefer).await;
+    // Every level repeats its subdirectory three times: without de-duplication the walk would
+    // visit 3^depth directories.
+    let dirs = [
+        "trunk",
+        "trunk/d",
+        "trunk/d/d",
+        "trunk/d/d/d",
+        "trunk/d/d/d/d",
+    ];
+    for (i, dir) in dirs.iter().enumerate() {
+        let last = i + 1 == dirs.len();
+        let children: Vec<(&str, bool)> = if last {
+            vec![("f", false), ("f", false)]
+        } else {
+            vec![("d", true), ("d", true), ("d", true), ("f", false)]
+        };
+        mount_listing(&srv, dir, &children).await;
+    }
+    let s = session(&srv).await;
+    let entries = s
+        .list(
+            &RelPath::root(),
+            Some(Revnum(7)),
+            Depth::Infinity,
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap();
+    let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "d",
+            "d/d",
+            "d/d/d",
+            "d/d/d/d",
+            "d/d/d/d/f",
+            "d/d/d/f",
+            "d/d/f",
+            "d/f",
+            "f"
+        ]
+    );
+    let propfinds = requests(&srv)
+        .await
+        .iter()
+        .filter(|(m, _)| m == "PROPFIND")
+        .count();
+    assert_eq!(propfinds, dirs.len());
+}
+
+#[tokio::test]
+async fn list_infinity_enforces_the_limits() {
+    let srv = server(Bulk::Prefer).await;
+    mount_listing(&srv, "trunk", &[("a", true), ("x", false), ("y", false)]).await;
+    mount_listing(&srv, "trunk/a", &[("b", true)]).await;
+    mount_listing(&srv, "trunk/a/b", &[("c", false)]).await;
+    let list = |s: HttpRaSession| async move {
+        s.list(
+            &RelPath::root(),
+            Some(Revnum(7)),
+            Depth::Infinity,
+            &CancelToken::new(),
+        )
+        .await
+    };
+
+    let all = list(session_with_limits(&srv, ListLimits::default()).await)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 5);
+    let exact = ListLimits {
+        max_entries: 5,
+        max_depth: 3,
+    };
+    assert_eq!(
+        list(session_with_limits(&srv, exact).await)
+            .await
+            .unwrap()
+            .len(),
+        5
+    );
+
+    let few = ListLimits {
+        max_entries: 4,
+        ..ListLimits::default()
+    };
+    let err = list(session_with_limits(&srv, few).await)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Corrupt);
+    assert!(err.message.contains("4 entries"), "{}", err.message);
+
+    let shallow = ListLimits {
+        max_depth: 2,
+        ..ListLimits::default()
+    };
+    let err = list(session_with_limits(&srv, shallow).await)
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("2 levels"), "{}", err.message);
+}
+
+#[tokio::test]
+async fn get_locks_drops_locks_outside_the_requested_scope() {
+    let srv = server(Bulk::Prefer).await;
+    let lock = |path: &str| {
+        format!(
+            "<S:lock><S:path>{path}</S:path>\
+             <S:token>opaquelocktoken:a51c8c59-0dda-4d35-bb7f-b4ab1f3d2ee9</S:token>\
+             <S:creationdate>2026-10-13T09:45:12.389643Z</S:creationdate>\
+             <S:owner>alice</S:owner></S:lock>"
+        )
+    };
+    let body = format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+         <S:get-locks-report xmlns:S=\"svn:\" xmlns:D=\"DAV:\">{}</S:get-locks-report>",
+        [
+            "/trunk/d/a.txt",
+            "/trunk/d/sub/b.txt",
+            "/trunk/other.txt",
+            "/branches/x.txt",
+            "/trunk/d2/c.txt",
+        ]
+        .map(lock)
+        .concat()
+    );
+    mount(&srv, "REPORT", "/svn/repo/trunk/d", xml(200, body)).await;
+    let s = session(&srv).await;
+    let cancel = CancelToken::new();
+    let paths = |locks: Vec<svn_types::LockInfo>| {
+        locks
+            .into_iter()
+            .map(|l| l.path.as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let all = s
+        .get_locks(&p("d"), Depth::Infinity, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(paths(all), ["/trunk/d/a.txt", "/trunk/d/sub/b.txt"]);
+    let near = s
+        .get_locks(&p("d"), Depth::Immediates, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(paths(near), ["/trunk/d/a.txt"]);
 }
