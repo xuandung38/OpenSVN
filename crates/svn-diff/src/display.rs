@@ -7,6 +7,15 @@ use crate::control::{Ctl, DiffError};
 use crate::diff_core::{ChunkKind, diff2};
 use crate::tokens::{DiffOptions, split_lines};
 
+/// Recommended `DiffOptions::max_cost` for interactive display (about 1e7 LCS steps).
+///
+/// Ordinary edits of 20k-line files stay far below it (see the tests), while a worst case such
+/// as a fully reversed 20k-line file is cut off in well under 300 ms.  UI callers should set
+/// `DisplayOptions.diff.max_cost = Some(DISPLAY_MAX_COST)` and, on
+/// [`DiffError::TooComplex`], show "diff too complex - open in external tool" instead of
+/// retrying.
+pub const DISPLAY_MAX_COST: u64 = 10_000_000;
+
 /// Options for [`diff`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayOptions {
