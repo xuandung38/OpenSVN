@@ -764,6 +764,11 @@ fn to_i64(v: u64) -> Result<i64> {
 
 /// Folds a committed path into BASE. Parents must be processed before children. A committed
 /// delete leaves a `not-present` BASE row at the new revision (like svn) and removes the subtree.
+///
+/// Idempotent for children the commit of a replaced/copied root already converted: svn gathers a
+/// commit item for every changed node, including `e/f2` deleted inside the copy `e`, but committing
+/// `e` turned `e/f2` into a `not-present` BASE row at the new revision, so committing it again is a
+/// no-op.
 pub(crate) fn commit_node(
     conn: &Connection,
     wc_id: i64,
@@ -773,6 +778,12 @@ pub(crate) fn commit_node(
     let cur = require_current(conn, wc_id, path)?;
     let d = relpath_depth(path);
     let new_rev = to_i64(info.new_rev)?;
+    if cur.op_depth == 0
+        && cur.presence == Presence::NotPresent
+        && cur.revision == Some(info.new_rev)
+    {
+        return Ok(());
+    }
     if cur.presence == Presence::BaseDeleted {
         if cur.op_depth != d {
             return Err(SvnError::new(

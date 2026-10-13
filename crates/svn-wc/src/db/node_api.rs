@@ -193,7 +193,10 @@ impl WcDb {
 
     /// Post-commit processing of every committed path in ONE transaction (`bump_revisions`): a
     /// crash can never leave the working copy half-committed. Order the batch parents before
-    /// children; for a committed delete pass only the root of the deletion.
+    /// children; for a committed delete pass only the root of the deletion. Committing a path
+    /// that an earlier entry of the same batch (or an earlier call) already folded into BASE as
+    /// `not-present` at `new_rev` is a no-op, so the batch can list every item svn gathers, e.g.
+    /// `[e, e/f2]` for a replaced directory whose child was deleted inside the copy.
     pub fn commit_nodes(&self, batch: &[(RelPath, CommitInfo)], work: &[Skel]) -> Result<()> {
         self.write_with_work(work, |c| {
             for (path, info) in batch {
