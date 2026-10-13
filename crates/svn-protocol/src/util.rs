@@ -39,26 +39,6 @@ pub(crate) fn parse_revnum(s: &str) -> Result<Revnum, SvnError> {
         .map_err(|_| corrupt(format!("invalid revision number {s:?}")))
 }
 
-/// Validates a repository-absolute path (`/trunk/a.txt`) received from the server and returns it
-/// unchanged. Used only for display-only values: structure rules only (absolute, no empty, `.` or
-/// `..` segment, no NUL or other control character), so names such as `aux.c` or `a:b` that are
-/// legal in a repository can still be shown.
-pub(crate) fn validate_display_path(path: &str) -> Result<String, SvnError> {
-    let rel = path
-        .strip_prefix('/')
-        .ok_or_else(|| corrupt(format!("repository path is not absolute: {path:?}")))?;
-    let bad = !rel.is_empty()
-        && (rel.chars().any(char::is_control)
-            || rel.split('/').any(|s| matches!(s, "" | "." | "..")));
-    if bad {
-        return Err(SvnError::new(
-            ErrorCode::UnsafePath,
-            format!("unsafe repository path from server: {path:?}"),
-        ));
-    }
-    Ok(path.to_owned())
-}
-
 /// Decodes a text value that the server may have base64-encoded (`encoding="base64"`, sent when
 /// `S:encode-binary-props` is requested and the value is not XML-safe). The result must be UTF-8.
 pub(crate) fn decode_text_field(text: String, encoding: Option<&str>) -> Result<String, SvnError> {
@@ -227,12 +207,5 @@ mod tests {
         assert!(percent_decode("%zz").is_err());
         assert!(percent_decode("%ff").is_err());
         assert!(percent_decode("%4").is_err());
-    }
-
-    #[test]
-    fn display_paths() {
-        assert!(validate_display_path("/trunk/aux.c").is_ok());
-        assert!(validate_display_path("trunk").is_err());
-        assert!(validate_display_path("/trunk/../x").is_err());
     }
 }

@@ -259,7 +259,12 @@ fn display_paths_are_lenient_but_stay_out_of_the_contract_until_asked() {
     let n = item.changed_paths.len();
     let entry = item.into_log_entry();
     assert_eq!(entry.changed_paths.len(), n);
-    assert!(entry.changed_paths.iter().all(|p| p.path.starts_with('/')));
+    assert!(
+        entry
+            .changed_paths
+            .iter()
+            .all(|p| p.path.as_str().starts_with('/'))
+    );
     // Windows-reserved and colon names display fine, and need an explicit step to become a RelPath.
     let p = RepoDisplayPath::parse("/trunk/aux.c:stream").unwrap();
     assert!(svn_types::RelPath::from_server(p.as_str().trim_start_matches('/')).is_err());
