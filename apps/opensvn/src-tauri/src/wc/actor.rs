@@ -10,7 +10,7 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures_util::FutureExt;
@@ -19,6 +19,10 @@ use svn_types::CancelToken;
 use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::boundary::panic_to_error;
+
+const PENDING: u8 = 0;
+const STARTED: u8 = 1;
+const ABANDONED: u8 = 2;
 
 type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -123,8 +127,10 @@ impl WcActor {
         }
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let shared = Arc::clone(&self.shared);
-        let started = Arc::new(AtomicBool::new(false));
-        let (job_started, job_cancel) = (Arc::clone(&started), cancel.clone());
+        // One-way state: Pending -> Started (the wrapper runs the job) or Pending -> Abandoned (the
+        // caller gave up first). Whoever wins the compare-exchange decides; the other side sees it.
+        let state = Arc::new(AtomicU8::new(PENDING));
+        let (job_state, job_cancel) = (Arc::clone(&state), cancel.clone());
         shared.pending_writes.fetch_add(1, Ordering::SeqCst);
         let wrapped: Job = Box::pin(async move {
             let result = async {
@@ -132,10 +138,20 @@ impl WcActor {
                     return Err(cancelled());
                 }
                 let _exclusive = tokio::select! {
-                    guard = shared.gate.write() => guard,
+                    biased;
                     () = job_cancel.cancelled() => return Err(cancelled()),
+                    guard = shared.gate.write() => guard,
                 };
-                job_started.store(true, Ordering::SeqCst);
+                // The token may have fired while the gate was being acquired.
+                if job_cancel.is_cancelled() {
+                    return Err(cancelled());
+                }
+                if job_state
+                    .compare_exchange(PENDING, STARTED, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_err()
+                {
+                    return Err(cancelled()); // the caller already abandoned this job
+                }
                 match AssertUnwindSafe(job).catch_unwind().await {
                     Ok(r) => r,
                     Err(p) => Err(panic_to_error(p.as_ref())),
@@ -151,10 +167,15 @@ impl WcActor {
         }
         loop {
             tokio::select! {
+                biased;
                 reply = &mut reply_rx => return reply.map_err(|_| actor_gone())?,
-                () = cancel.cancelled(), if !started.load(Ordering::SeqCst) => {
-                    // Not started: the wrapper drops the job when it reaches it.
-                    if !started.load(Ordering::SeqCst) {
+                () = cancel.cancelled(), if state.load(Ordering::SeqCst) == PENDING => {
+                    // Not started: abandon it for good. If the wrapper won the race to start, keep
+                    // waiting for the job's real result instead.
+                    if state
+                        .compare_exchange(PENDING, ABANDONED, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
                         return Err(cancelled());
                     }
                 }

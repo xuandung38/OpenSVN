@@ -181,6 +181,11 @@ async fn deceptive_characters_are_refused_in_arguments() {
         "\u{7f}",
         "\u{85}",
         "\u{2066}x",
+        "a\u{2028}b",
+        "a\u{2029}b",
+        "a\u{061C}b",
+        "a\u{180E}b",
+        "a\u{00AD}b",
     ] {
         assert!(
             svc.choose(ProgramKind::Editor, vec![bad.into()])
