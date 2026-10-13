@@ -369,8 +369,15 @@ pub trait EngineFacade: Send + Sync {
     ) -> EngineResult<()>;
     /// Applies server-side edits in one commit; returns the new revision.
     async fn remote_edit(&self, plan: &RemoteEditPlan, ctx: &OpContext) -> EngineResult<Rev>;
-    /// Copies in the repository (branch, tag); returns the new revision.
-    async fn copy_location(&self, req: &CopyLocationRequest, ctx: &OpContext) -> EngineResult<Rev>;
+    /// Copies in the repository (branch, tag); returns the new revision. With `from_wc` the
+    /// source is that working copy including its local changes (`req.from_url` and `req.from_rev`
+    /// are ignored). The engine reads the working copy with the usual busy-retry.
+    async fn copy_location(
+        &self,
+        req: &CopyLocationRequest,
+        from_wc: Option<&WcRef>,
+        ctx: &OpContext,
+    ) -> EngineResult<Rev>;
     /// Branch tree of a repository for `layout`.
     async fn branches_list(
         &self,

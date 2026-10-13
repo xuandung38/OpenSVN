@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use opensvn_ipc::{Account, AccountMethod, Layout};
+use opensvn_ipc::{Account, AccountMethod, Layout, TrustedCert, TrustedCertKey};
 use rusqlite::{OptionalExtension, params};
 
 use super::migrations::APP_MIGRATIONS;
@@ -260,6 +260,39 @@ impl AppDb {
             )
             .optional()?
             .is_some())
+        })
+    }
+
+    /// Permanently trusted certificates, newest first.
+    pub fn certs_list(&self) -> Result<Vec<TrustedCert>, DbError> {
+        self.db.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT host, port, sha256, subject, expires_at, trusted_at FROM trusted_cert
+                 ORDER BY trusted_at DESC, host, port",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(TrustedCert {
+                        host: r.get(0)?,
+                        port: r.get(1)?,
+                        sha256: r.get(2)?,
+                        subject: r.get(3)?,
+                        expires_at: r.get(4)?,
+                        trusted_at: r.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Stops trusting a certificate; returns whether it was trusted.
+    pub fn certs_remove(&self, key: &TrustedCertKey) -> Result<bool, DbError> {
+        self.db.with(|c| {
+            Ok(c.execute(
+                "DELETE FROM trusted_cert WHERE host = ?1 AND port = ?2 AND sha256 = ?3",
+                params![key.host, key.port, key.sha256],
+            )? > 0)
         })
     }
 

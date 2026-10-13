@@ -191,6 +191,7 @@ async fn remote_edit_copy_and_url_locks() {
             to_url: url("tags/v2.0"),
             message: "Tag 2.0".into(),
             switch_wc_id: None,
+            from_wc: None,
         },
     )
     .await
@@ -454,5 +455,49 @@ async fn layout_detect_finds_the_demo_layout_and_the_current_branch() {
         )
         .await
         .is_err()
+    );
+}
+
+#[tokio::test]
+async fn copy_from_a_working_copy_includes_local_changes() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    let h = commands::copy_location(
+        f.state(),
+        CopyLocationRequest {
+            from_url: String::new(),
+            from_rev: None,
+            to_url: url("branches/from-wc"),
+            message: "Branch from working copy".into(),
+            switch_wc_id: None,
+            from_wc: Some(wc.id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.wait_op(&h).await.unwrap(),
+        OpResult::NewRev { new_rev: Rev(11) }
+    );
+    // the modified README (local change) and the added file are in the copy; the missing file is not
+    let readme = commands::repo_cat(f.state(), url("branches/from-wc/README.md"), None)
+        .await
+        .unwrap();
+    assert!(readme.content.contains("--release"));
+    assert!(
+        commands::repo_cat(f.state(), url("branches/from-wc/src/util.rs"), None)
+            .await
+            .is_ok()
+    );
+    assert!(
+        commands::repo_cat(f.state(), url("branches/from-wc/docs/guide.md"), None)
+            .await
+            .is_err()
+    );
+    assert!(
+        commands::repo_cat(f.state(), url("branches/from-wc/notes.txt"), None)
+            .await
+            .is_err(),
+        "unversioned files stay out"
     );
 }

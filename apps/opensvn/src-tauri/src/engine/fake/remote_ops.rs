@@ -14,7 +14,7 @@ use svn_ra_api::{LogRequest, RaSession};
 use svn_types::{ErrorCode, NodeKind, RelPath, Revnum, SvnError};
 
 use super::FakeEngine;
-use super::state::rel;
+use super::state::{Sched, rel};
 use super::text::{is_binary, match_lines, text_side};
 use crate::engine::context::{OpContext, ProgressUpdate};
 use crate::engine::facade::{DiffOptions, EditOp, LockScope, LogScope, RemoteEditPlan, WcRef};
@@ -646,10 +646,16 @@ impl FakeEngine {
     pub(super) async fn do_copy_location(
         &self,
         req: &CopyLocationRequest,
+        from_wc: Option<&WcRef>,
         ctx: &OpContext,
     ) -> Result<Rev, SvnError> {
-        let (session, from) = self.locate(&req.from_url)?;
         let (to_session, to) = self.locate(&req.to_url)?;
+        if let Some(wc) = from_wc {
+            return self
+                .copy_working_copy(wc, &to_session, &to, &req.message, &req.to_url, ctx)
+                .await;
+        }
+        let (session, from) = self.locate(&req.from_url)?;
         if session.uuid() != to_session.uuid() {
             return Err(internal("cannot copy between repositories"));
         }
@@ -662,6 +668,47 @@ impl FakeEngine {
             .await?;
         self.commit_remote(&session, &req.message, changes, ctx)
             .await
+    }
+
+    /// Copies a working copy, local changes included, to a new repository location.
+    async fn copy_working_copy(
+        &self,
+        wc: &WcRef,
+        session: &FakeRaSession,
+        to: &RelPath,
+        message: &str,
+        to_url: &str,
+        ctx: &OpContext,
+    ) -> Result<Rev, SvnError> {
+        let (root, nodes) = self.with_wc(&wc.root, |w| {
+            Ok((
+                w.repo_root_url.clone(),
+                w.nodes
+                    .iter()
+                    .filter(|(p, n)| {
+                        !p.is_root() && matches!(n.sched, Sched::Normal | Sched::Added)
+                    })
+                    .map(|(p, n)| (p.clone(), n.kind, n.work.clone()))
+                    .collect::<Vec<_>>(),
+            ))
+        })?;
+        if self.repo_by_root(&root)?.uuid() != session.uuid() {
+            return Err(internal("cannot copy between repositories"));
+        }
+        session.ensure_authenticated(&ctx.cancel).await?;
+        if session.check_path(to, None, &ctx.cancel).await? != NodeKind::None {
+            return Err(internal(format!("{to_url} already exists")));
+        }
+        let mut changes = vec![FakeChange::PutDir(to.clone())];
+        for (path, kind, work) in nodes {
+            let target = RelPath::new(&format!("{to}/{path}"))?;
+            match (kind, work) {
+                (opensvn_ipc::FileKind::Dir, _) => changes.push(FakeChange::PutDir(target)),
+                (_, Some(content)) => changes.push(FakeChange::PutFile(target, content)),
+                _ => {} // a file missing from disk has no content to copy
+            }
+        }
+        self.commit_remote(session, message, changes, ctx).await
     }
 
     pub(super) async fn do_branches_list(

@@ -2,7 +2,7 @@
 
 use opensvn_ipc::{
     Account, AppError, AuthResponse, OpId, OpenWith, OperationHandle, PathGrantInfo, PickRequest,
-    ProgramKind, Settings, SettingsPatch, WcId,
+    ProgramKind, Settings, SettingsPatch, TrustedCert, TrustedCertKey, WcId,
 };
 use tauri::State;
 
@@ -101,6 +101,56 @@ pub async fn path_pick(
                 .grants
                 .mint(path, kind, crate::path_grants::MAIN_WINDOW)
         }))
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn certs_list(state: State<'_, AppState>) -> Result<Vec<TrustedCert>, AppError> {
+    guard(async { Ok(state.db.certs_list()?) }).await
+}
+
+/// Stops trusting a certificate; the next connection asks again.
+#[tauri::command]
+#[specta::specta]
+pub async fn certs_remove(state: State<'_, AppState>, key: TrustedCertKey) -> Result<(), AppError> {
+    guard(async {
+        if state.db.certs_remove(&key)? {
+            Ok(())
+        } else {
+            Err(crate::errors::invalid_argument(
+                "This certificate is not in the list.",
+            ))
+        }
+    })
+    .await
+}
+
+/// Lets the user pick the default checkout folder in a native dialog and stores it.
+#[tauri::command]
+#[specta::specta]
+pub async fn checkout_root_choose(state: State<'_, AppState>) -> Result<Settings, AppError> {
+    guard(async {
+        let Ok(_open) = state.path_dialog_open.try_lock() else {
+            return Err(crate::errors::invalid_argument(
+                "A file picker is already open.",
+            ));
+        };
+        let Some((path, _)) = state
+            .path_picker
+            .pick(&PickRequest::Folder {
+                title: Some("Default checkout folder".to_owned()),
+            })
+            .await
+        else {
+            return Ok(state.settings.get());
+        };
+        let patch = SettingsPatch {
+            general_checkout_root: Some(path.to_string_lossy().into_owned()),
+            ..SettingsPatch::default()
+        };
+        state.settings.apply_patch(&patch)
     })
     .await
 }
