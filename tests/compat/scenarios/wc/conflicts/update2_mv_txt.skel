@@ -1,0 +1,1 @@
+((update ((subversion file:///tmp/opensvn-golden-conflicts/repo 36 94f6253a-7b20-480a-8721-e0ec1b48d6aa mv.txt 1 4 file) (subversion file:///tmp/opensvn-golden-conflicts/repo 36 94f6253a-7b20-480a-8721-e0ec1b48d6aa mv.txt 1 6 file))) ((tree () moved-away edited mv.txt moved.txt)))
