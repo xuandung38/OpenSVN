@@ -17,6 +17,12 @@ use svn_ra_api::{CommitInfo, CommitObserver};
 use svn_types::{ErrorCode, Result, SvnError, write_file_replacing};
 
 /// Current journal file format.
+///
+/// Any change to what is written ([`JournalRecord`], [`JournalPhase`], their serde attributes or
+/// field meaning) MUST bump this. [`JournalStore::load`] relies on it: a file with another version
+/// is left untouched for the app version that wrote it, while a file of this version that fails to
+/// parse is treated as corrupt and set aside. Without a bump, a journal from a newer build would be
+/// misread as corruption and quarantined, losing the interrupted commit's recovery state.
 const VERSION: u32 = 1;
 /// Directory below the state directory that holds the journals.
 const DIR: &str = "commit-journal";
@@ -202,28 +208,29 @@ impl JournalStore {
     /// On failure the journal stays where it is.
     pub fn quarantine(&self, wc_root: &Path) -> Result<PathBuf> {
         let path = self.file_for(wc_root);
-        let aside = (0..QUARANTINE_SLOTS)
-            .map(|n| match n {
+        for n in 0..QUARANTINE_SLOTS {
+            let aside = match n {
                 0 => path.with_extension("json.corrupt"),
                 n => path.with_extension(format!("json.corrupt.{n}")),
-            })
-            .find(|p| is_free(p))
-            .ok_or_else(|| {
-                SvnError::new(
-                    ErrorCode::WcNeedsCleanup,
-                    format!(
-                        "no free name to set the commit journal {} aside; remove old *.json.corrupt* files",
-                        path.display()
-                    ),
-                )
-            })?;
-        std::fs::rename(&path, &aside).map_err(|e| {
-            SvnError::from_io(
-                format!("move {} to {}", path.display(), aside.display()),
-                &e,
-            )
-        })?;
-        Ok(aside)
+            };
+            match move_no_replace(&path, &aside) {
+                Ok(()) => return Ok(aside),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(SvnError::from_io(
+                        format!("move {} to {}", path.display(), aside.display()),
+                        &e,
+                    ));
+                }
+            }
+        }
+        Err(SvnError::new(
+            ErrorCode::WcNeedsCleanup,
+            format!(
+                "no free name to set the commit journal {} aside; remove old *.json.corrupt* files",
+                path.display()
+            ),
+        ))
     }
 
     /// Removes the journal of `wc_root` (no error when there is none).
@@ -237,9 +244,40 @@ impl JournalStore {
     }
 }
 
-/// Whether nothing (not even a dangling link) exists at `path`.
-fn is_free(path: &Path) -> bool {
-    matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+/// Moves `from` to `to` without ever replacing an existing `to`: fails with
+/// [`std::io::ErrorKind::AlreadyExists`] when something is there, even if it appeared after the
+/// caller looked. `std::fs::rename` cannot be used for this: it silently replaces the target on
+/// Unix and (with `MOVEFILE_REPLACE_EXISTING`) on Windows.
+///
+/// A hard link is created first (`link(2)` / `CreateHardLinkW` both refuse an existing target
+/// atomically), then the original is removed. On file systems without hard links (FAT, some
+/// network shares) the contents are copied into a file opened with `create_new` (`O_EXCL` /
+/// `CREATE_NEW`), which is just as exclusive. If the original cannot be removed afterwards the
+/// new name is removed again, so on any error `from` is left as it was.
+fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(from, to) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e),
+        Err(_) => {
+            use std::io::Write as _;
+            let data = std::fs::read(from)?;
+            let mut out = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(to)?;
+            if let Err(e) = out.write_all(&data).and_then(|()| out.sync_all()) {
+                drop(out);
+                let _ = std::fs::remove_file(to);
+                return Err(e);
+            }
+        }
+    }
+    if let Err(e) = std::fs::remove_file(from) {
+        let _ = std::fs::remove_file(to);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Canonical form of a working copy root; the path as given when it cannot be resolved (the
@@ -302,5 +340,41 @@ impl CommitObserver for CommitJournal {
         self.advance(JournalPhase::Merged {
             rev: info.revision.0,
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::move_no_replace;
+
+    #[test]
+    fn move_no_replace_moves_but_never_replaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (from, to) = (tmp.path().join("a"), tmp.path().join("b"));
+        std::fs::write(&from, b"journal").unwrap();
+        std::fs::write(&to, b"older").unwrap();
+        let err = move_no_replace(&from, &to).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&from).unwrap(),
+            b"journal",
+            "source untouched"
+        );
+        assert_eq!(std::fs::read(&to).unwrap(), b"older", "target untouched");
+
+        #[cfg(unix)]
+        {
+            let dangling = tmp.path().join("c");
+            std::os::unix::fs::symlink(tmp.path().join("missing"), &dangling).unwrap();
+            let err = move_no_replace(&from, &dangling).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+            assert!(std::fs::symlink_metadata(&dangling).unwrap().is_symlink());
+        }
+
+        let free = tmp.path().join("d");
+        move_no_replace(&from, &free).unwrap();
+        assert!(!from.exists());
+        assert_eq!(std::fs::read(&free).unwrap(), b"journal");
     }
 }

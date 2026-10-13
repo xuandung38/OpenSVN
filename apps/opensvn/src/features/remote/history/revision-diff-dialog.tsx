@@ -1,9 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { SafeText } from "../../../components/ui/safe-text";
 import { Sheet } from "../../../components/ui/sheet";
 import type { FileDiff } from "../../../ipc/bindings";
-import { ipc, unwrap } from "../../../ipc/client";
+import { ipc, toAppError, unwrap } from "../../../ipc/client";
 import { cn } from "../../../lib/cn";
 import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
@@ -62,16 +63,24 @@ export function RevisionDiffDialog({
             {q.error.message}
           </p>
         )}
-        {q.data && <DiffBody diff={q.data} />}
+        {q.data && <DiffBody diff={q.data} url={url} rev={rev} />}
       </div>
     </Sheet>
   );
 }
 
-function DiffBody({ diff }: { diff: FileDiff }) {
+function DiffBody({ diff, url, rev }: { diff: FileDiff; url: string; rev: number }) {
   const t = useT(historyStrings);
   if (diff.binary) return <p className="m-0">{t("diffBinary")}</p>;
-  if (diff.tooLarge) return <p className="m-0">{t("diffTooLarge")}</p>;
+  if (diff.tooComplex || diff.tooLarge) {
+    return (
+      <ExternalHandOff
+        message={t(diff.tooComplex ? "diffTooComplex" : "diffTooLarge")}
+        url={url}
+        rev={rev}
+      />
+    );
+  }
   if (diff.hunks && diff.hunks.length > 0) {
     return (
       <pre className="m-0 font-mono text-[12px] leading-[1.6]">
@@ -113,4 +122,31 @@ function DiffBody({ diff }: { diff: FileDiff }) {
     );
   }
   return <p className="m-0">{t("diffEmpty")}</p>;
+}
+
+/** A diff the backend will not show: explain why and offer the external diff tool. */
+function ExternalHandOff({ message, url, rev }: { message: string; url: string; rev: number }) {
+  const t = useT(historyStrings);
+  const [error, setError] = useState<string | null>(null);
+  const open = async () => {
+    setError(null);
+    try {
+      await unwrap(ipc().commands.diffExternal({ kind: "rev", url, rev }));
+    } catch (e) {
+      setError(toAppError(e).message);
+    }
+  };
+  return (
+    <div className="flex flex-col items-start gap-2">
+      <p className="m-0">{message}</p>
+      <Button small onClick={() => void open()}>
+        {t("openExternalTool")}
+      </Button>
+      {error && (
+        <p className="m-0 text-bad-text" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
 }
