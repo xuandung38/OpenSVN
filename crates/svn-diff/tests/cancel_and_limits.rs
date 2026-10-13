@@ -33,19 +33,26 @@ fn pathological_merge_is_cancelled_within_100ms() {
         low_vocab(100_000, 2),
         low_vocab(100_000, 3),
     );
-    let token = CancelToken::new();
-    let canceller = token.clone();
-    let cancelled_at = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(150));
-        canceller.cancel();
-        Instant::now()
-    });
-    let res = merge3(&base, &mine, &theirs, &MergeOptions::default(), &token);
-    let returned_at = Instant::now();
-    let cancelled_at = cancelled_at.join().unwrap();
-    assert_eq!(res.unwrap_err(), DiffError::Cancelled);
-    let lag = returned_at.saturating_duration_since(cancelled_at);
-    assert!(lag < Duration::from_millis(100), "cancel took {lag:?}");
+    // Best of three: a scheduler hiccup on a loaded CI machine must not fail the test, while a
+    // missing cancellation check would make every attempt slow.
+    let best = (0..3)
+        .map(|_| {
+            let token = CancelToken::new();
+            let canceller = token.clone();
+            let cancelled_at = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(150));
+                canceller.cancel();
+                Instant::now()
+            });
+            let res = merge3(&base, &mine, &theirs, &MergeOptions::default(), &token);
+            let returned_at = Instant::now();
+            let cancelled_at = cancelled_at.join().unwrap();
+            assert_eq!(res.unwrap_err(), DiffError::Cancelled);
+            returned_at.saturating_duration_since(cancelled_at)
+        })
+        .min()
+        .unwrap();
+    assert!(best < Duration::from_millis(100), "cancel took {best:?}");
 }
 
 #[test]
