@@ -118,6 +118,9 @@ async fn checkout_waits_for_sign_in_through_the_prompt_events() {
         events: f.events.clone(),
         picker: f.picker.clone(),
         path_picker: f.paths.clone(),
+        opener: f.opener.clone(),
+        notifier: f.notifier.clone(),
+        menu: f.menu.clone(),
         status_timing: Default::default(),
     })
     .unwrap();

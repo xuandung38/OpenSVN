@@ -90,6 +90,11 @@ impl WcRegistry {
             .unwrap_or_default()
     }
 
+    /// Revisions known to be waiting on the server for a working copy.
+    pub fn incoming_of(&self, id: &WcId) -> u32 {
+        self.live(&id.0).incoming
+    }
+
     /// Records the result of a remote check (incoming revisions and when it ran).
     pub fn set_incoming(&self, id: &WcId, count: u32) {
         let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);

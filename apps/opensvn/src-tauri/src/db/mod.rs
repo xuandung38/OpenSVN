@@ -18,7 +18,7 @@ use rusqlite::Connection;
 pub use app_db::{AccountRecord, AppDb};
 pub use cache_db::CacheDb;
 pub use clock::now_iso;
-pub use data_dir::current_data_dir;
+pub use data_dir::{Os, current_data_dir};
 pub use wc_rows::WcRow;
 
 /// Storage failure.

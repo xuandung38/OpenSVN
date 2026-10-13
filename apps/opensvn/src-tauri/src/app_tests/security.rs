@@ -193,6 +193,9 @@ fn ipc_app(f: &Fixture) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRu
         picker: f.picker.clone(),
         status_timing: crate::status::StatusTiming::default(),
         path_picker: f.paths.clone(),
+        opener: f.opener.clone(),
+        notifier: f.notifier.clone(),
+        menu: f.menu.clone(),
     })
     .unwrap();
     app.manage(state);

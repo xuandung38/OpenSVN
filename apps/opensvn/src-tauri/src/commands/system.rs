@@ -155,7 +155,51 @@ pub async fn checkout_root_choose(state: State<'_, AppState>) -> Result<Settings
     .await
 }
 
-stub!(reveal_in_os(wc_id: WcId, path: String) -> ());
-stub!(open_external(wc_id: WcId, path: String, open_with: OpenWith) -> ());
+/// Shows an item of a working copy in the file manager.
+#[tauri::command]
+#[specta::specta]
+pub async fn reveal_in_os(
+    state: State<'_, AppState>,
+    wc_id: WcId,
+    path: String,
+) -> Result<(), AppError> {
+    guard(async {
+        let wc = state.wcs.resolve(&wc_id)?;
+        crate::os_integration::reveal_in_os(state.opener.as_ref(), &wc.wc.root, &path)
+    })
+    .await
+}
+
+/// Opens an item of a working copy with the default app, the editor or the terminal.
+#[tauri::command]
+#[specta::specta]
+pub async fn open_external(
+    state: State<'_, AppState>,
+    wc_id: WcId,
+    path: String,
+    open_with: OpenWith,
+) -> Result<(), AppError> {
+    guard(async {
+        let wc = state.wcs.resolve(&wc_id)?;
+        let settings = state.settings.get();
+        crate::os_integration::open_external(
+            state.opener.as_ref(),
+            &wc.wc.root,
+            &path,
+            open_with,
+            settings.tools_editor.as_ref(),
+            settings.tools_terminal.as_ref(),
+        )
+    })
+    .await
+}
+
+/// Switches the native menu between the Branch and the Location variant.
+#[tauri::command]
+#[specta::specta]
+pub async fn menu_set_layout(state: State<'_, AppState>, has_layout: bool) -> Result<(), AppError> {
+    guard(async { state.menu.set_layout_mode(has_layout) }).await
+}
+
 // Returns the path of the created diagnostics zip.
 stub!(diagnostics_export() -> String);

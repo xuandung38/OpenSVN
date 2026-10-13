@@ -194,7 +194,11 @@ pub enum AuthResponse {
 pub enum CertDecision {
     Reject,
     AcceptOnce,
+    /// Trust permanently. Valid only for self-signed or unknown-issuer failures.
     AcceptAlways,
+    /// Replace the pinned certificate of this host and port with the one now presented. Valid
+    /// only when the failure is `changed`.
+    ReplacePin,
 }
 
 /// Credential metadata only; never contains a password.

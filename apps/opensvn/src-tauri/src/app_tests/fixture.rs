@@ -16,10 +16,71 @@ use tauri::test::MockRuntime;
 use crate::app_state::{AppDeps, AppState};
 use crate::engine::FakeEngine;
 use crate::engine::fake::demo_wc_root;
+use crate::menu::MenuControl;
+use crate::notify::Notifier;
 use crate::ops::events::{Recorded, RecordingEvents};
+use crate::os_integration::OsOpener;
 use crate::path_grants::{MAIN_WINDOW, PathPicker};
 use crate::programs::ProgramPicker;
 use crate::status::StatusTiming;
+
+/// Records launcher calls.
+#[derive(Default)]
+pub struct RecordingOpener {
+    pub calls: Mutex<Vec<String>>,
+}
+
+impl OsOpener for RecordingOpener {
+    fn reveal(&self, path: &std::path::Path) -> Result<(), AppError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("reveal {}", path.display()));
+        Ok(())
+    }
+    fn open_default(&self, path: &std::path::Path) -> Result<(), AppError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("open {}", path.display()));
+        Ok(())
+    }
+    fn run(&self, program: &str, args: &[String], cwd: &std::path::Path) -> Result<(), AppError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("run {program} {args:?} in {}", cwd.display()));
+        Ok(())
+    }
+}
+
+/// Records notifications.
+#[derive(Default)]
+pub struct RecordingNotifier {
+    pub shown: Mutex<Vec<(String, String)>>,
+}
+
+impl Notifier for RecordingNotifier {
+    fn notify(&self, title: &str, body: &str) {
+        self.shown
+            .lock()
+            .unwrap()
+            .push((title.to_owned(), body.to_owned()));
+    }
+}
+
+/// Records menu layout switches.
+#[derive(Default)]
+pub struct RecordingMenu {
+    pub modes: Mutex<Vec<bool>>,
+}
+
+impl MenuControl for RecordingMenu {
+    fn set_layout_mode(&self, has_layout: bool) -> Result<(), AppError> {
+        self.modes.lock().unwrap().push(has_layout);
+        Ok(())
+    }
+}
 
 /// File dialog double: returns the scripted choice.
 #[derive(Default)]
@@ -61,6 +122,9 @@ pub struct Fixture {
     pub events: Arc<RecordingEvents>,
     pub picker: Arc<Scripted>,
     pub paths: Arc<ScriptedPaths>,
+    pub opener: Arc<RecordingOpener>,
+    pub notifier: Arc<RecordingNotifier>,
+    pub menu: Arc<RecordingMenu>,
     pub engine: Arc<FakeEngine>,
     _dir: tempfile::TempDir,
 }
@@ -78,6 +142,9 @@ impl Fixture {
         let events = Arc::new(RecordingEvents::default());
         let picker = Arc::new(Scripted::default());
         let paths = Arc::new(ScriptedPaths::default());
+        let opener = Arc::new(RecordingOpener::default());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let menu = Arc::new(RecordingMenu::default());
         let state = AppState::build(AppDeps {
             data_dir: dir.path().to_path_buf(),
             engine: engine.clone(),
@@ -85,6 +152,9 @@ impl Fixture {
             picker: picker.clone(),
             status_timing,
             path_picker: paths.clone(),
+            opener: opener.clone(),
+            notifier: notifier.clone(),
+            menu: menu.clone(),
         })
         .unwrap();
         let app = tauri::test::mock_app();
@@ -94,6 +164,9 @@ impl Fixture {
             events,
             picker,
             paths,
+            opener,
+            notifier,
+            menu,
             engine,
             _dir: dir,
         }
