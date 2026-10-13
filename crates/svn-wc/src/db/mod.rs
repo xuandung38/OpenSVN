@@ -4,8 +4,21 @@
 //! working copy from this process are serialized through it, and cross-process contention is
 //! absorbed by the 10 s busy timeout svn uses. Write transactions are `BEGIN IMMEDIATE` and must
 //! stay short: never hold [`WcDb::with_write`] across network I/O.
+//!
+//! Durability: unlike svn (`synchronous=OFF`) our write connection runs `synchronous=FULL`, so a
+//! committed transaction survives power loss; the rollback-journal mode (`TRUNCATE`, never WAL),
+//! locking mode and 10 s busy timeout stay identical to svn so svn/TortoiseSVN keep sharing the
+//! file.
+//!
+//! Failpoints (feature `failpoints`): `wc.txn.before_commit` fires after the closure succeeded and
+//! before COMMIT (the transaction rolls back), `wc.txn.after_commit` fires after COMMIT but before
+//! the caller learns about it; both turn the configured `return` action into an error.
 
+mod actual;
 mod connection;
+mod node_api;
+mod nodes;
+mod ops;
 mod schema;
 
 use std::fs;
@@ -15,7 +28,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use svn_types::{Depth, ErrorCode, Result, SvnError};
 
+pub use actual::{ConflictRecord, ConflictTexts};
 pub use connection::{BUSY_TIMEOUT, OpenMode, open_connection, open_existing, sql_err};
+pub use nodes::{Node, Presence, Props};
+pub use ops::{BaseNode, CommitInfo};
 pub use schema::{FORMAT_MAX_READ, FORMAT_WRITE, check_supported_format, read_user_version};
 
 /// Name of the administrative directory.
@@ -41,7 +57,26 @@ pub struct NewWc {
     pub depth: Depth,
 }
 
+/// Evaluates a failpoint that injects an `Err` into the enclosing `Result` function; compiled
+/// out unless the `failpoints` feature is enabled.
+#[cfg(feature = "failpoints")]
+macro_rules! failpoint {
+    ($name:literal) => {
+        fail::fail_point!($name, |_| Err(SvnError::new(
+            ErrorCode::Internal,
+            concat!("failpoint ", $name)
+        )));
+    };
+}
+
+#[cfg(not(feature = "failpoints"))]
+macro_rules! failpoint {
+    ($name:literal) => {};
+}
+
 /// Handle to one working copy's `wc.db`.
+///
+/// The write connection uses `synchronous=FULL` (svn uses OFF); see the module documentation.
 #[derive(Debug)]
 pub struct WcDb {
     wcroot: PathBuf,
@@ -335,7 +370,9 @@ impl WcDb {
             ));
         }
         let value = f(&tx)?;
+        failpoint!("wc.txn.before_commit");
         tx.commit().map_err(sql_err)?;
+        failpoint!("wc.txn.after_commit");
         Ok(value)
     }
 }
