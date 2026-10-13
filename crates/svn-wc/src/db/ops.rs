@@ -13,7 +13,7 @@ use super::actual;
 use super::connection::sql_err;
 use super::nodes::{
     self, Node, Presence, Props, depth_word, encode_props, kind_word, parent_text, read_base,
-    read_current, relpath_depth, strict_descendant, subtree_current,
+    read_current, relpath_depth, strict_descendant,
 };
 use crate::skel::{self, InheritedProps, Skel};
 
@@ -24,8 +24,13 @@ fn not_versioned(path: &RelPath) -> SvnError {
     )
 }
 
+/// A working copy shape this version deliberately does not handle yet. It is a user-facing
+/// condition (not an engine bug), so it carries [`ErrorCode::WcFormatUnsupported`].
 fn unsupported(msg: String) -> SvnError {
-    SvnError::new(ErrorCode::Internal, format!("not supported yet: {msg}"))
+    SvnError::new(
+        ErrorCode::WcFormatUnsupported,
+        format!("not supported yet: {msg}"),
+    )
 }
 
 fn require_current(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<Node> {
@@ -365,7 +370,13 @@ pub(crate) fn op_delete(conn: &Connection, wc_id: i64, path: &RelPath) -> Result
     actual::drop_orphans(conn, wc_id, path)
 }
 
-/// Copies the current subtree at `src` to `dst` as a working layer rooted at `dst`.
+/// Copies the subtree at `src` to `dst` as a working layer rooted at `dst`, the way svn does:
+/// the copy takes the BASE-like row of every path (the highest row at or below the source's own
+/// operation depth) and re-creates the delete layers that the source subtree carries, re-based to
+/// the destination depth (so a locally deleted child is deleted in the copy too).
+///
+/// Not supported yet (explicit [`ErrorCode::WcFormatUnsupported`]): locally added/copied nodes
+/// inside the source, incomplete / not-present / excluded children, mixed-revision sources.
 pub(crate) fn op_copy(
     conn: &Connection,
     wc_id: i64,
@@ -395,36 +406,87 @@ pub(crate) fn op_copy(
             format!("'{src}' is not copyable ({})", root.presence.as_str()),
         ));
     }
+    let src_depth = relpath_depth(src);
     let dst_depth = relpath_depth(dst);
-    for node in subtree_current(conn, wc_id, src)? {
-        if !node.presence.is_present() {
-            continue; // deleted / excluded children are not part of the copy
+    // Plan first, write afterwards: an unsupported shape must not leave a partial copy.
+    struct Planned {
+        target: RelPath,
+        base: Node,
+        carried_deletes: Vec<Node>,
+    }
+    let mut plan: Vec<Planned> = Vec::new();
+    let mut group: Vec<Node> = Vec::new();
+    let all = nodes::subtree_rows(conn, wc_id, src)?;
+    let flush = |group: &mut Vec<Node>, plan: &mut Vec<Planned>| -> Result<()> {
+        if group.is_empty() {
+            return Ok(());
         }
-        if node.presence == Presence::Incomplete {
-            return Err(unsupported(format!(
-                "copying incomplete node '{}'",
-                node.relpath
-            )));
-        }
-        let (Some(repos_id), Some(repos_path), Some(revision)) =
-            (node.repos_id, node.repos_relpath.as_deref(), node.revision)
-        else {
-            return Err(unsupported(format!(
-                "copying locally added node '{}'",
-                node.relpath
-            )));
+        let path = group[0].relpath.clone();
+        let rows = std::mem::take(group);
+        let Some(base) = rows.iter().rev().find(|r| r.op_depth <= src_depth).cloned() else {
+            return Err(unsupported(format!("copying locally added node '{path}'")));
         };
-        let suffix = node
-            .relpath
+        match base.presence {
+            Presence::Normal => {}
+            Presence::BaseDeleted => return Ok(()), // deleted together with the source itself
+            other => {
+                return Err(unsupported(format!(
+                    "copying '{path}' which is {} in the source",
+                    other.as_str()
+                )));
+            }
+        }
+        let mut carried_deletes = Vec::new();
+        for r in rows.iter().filter(|r| r.op_depth > src_depth) {
+            if r.presence != Presence::BaseDeleted {
+                return Err(unsupported(format!("copying locally added node '{path}'")));
+            }
+            carried_deletes.push(r.clone());
+        }
+        let suffix = path
             .as_str()
             .strip_prefix(src.as_str())
-            .unwrap_or("");
-        let suffix = suffix.trim_start_matches('/');
+            .unwrap_or("")
+            .trim_start_matches('/');
         let target = if suffix.is_empty() {
             dst.clone()
         } else {
             RelPath::new(format!("{}/{}", dst.as_str(), suffix).trim_start_matches('/'))?
         };
+        plan.push(Planned {
+            target,
+            base,
+            carried_deletes,
+        });
+        Ok(())
+    };
+    for row in all {
+        if group.first().is_some_and(|g| g.relpath != row.relpath) {
+            flush(&mut group, &mut plan)?;
+        }
+        group.push(row);
+    }
+    flush(&mut group, &mut plan)?;
+    let root_revision = plan.first().and_then(|p| p.base.revision);
+    for p in &plan {
+        if p.base.repos_id.is_none() || p.base.repos_relpath.is_none() || p.base.revision.is_none()
+        {
+            return Err(unsupported(format!(
+                "copying locally added node '{}'",
+                p.base.relpath
+            )));
+        }
+        if p.base.revision != root_revision {
+            return Err(unsupported(format!(
+                "copying a mixed-revision tree ('{}' is at r{}, '{src}' at r{})",
+                p.base.relpath,
+                p.base.revision.unwrap_or(0),
+                root_revision.unwrap_or(0)
+            )));
+        }
+    }
+    for p in plan {
+        let node = &p.base;
         conn.execute(
             "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, repos_id, \
              repos_path, revision, presence, depth, kind, changed_revision, changed_date, \
@@ -432,12 +494,12 @@ pub(crate) fn op_copy(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'normal', ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 wc_id,
-                target.as_str(),
+                p.target.as_str(),
                 dst_depth,
-                parent_text(&target),
-                repos_id,
-                repos_path,
-                i64::try_from(revision).unwrap_or(i64::MAX),
+                parent_text(&p.target),
+                node.repos_id,
+                node.repos_relpath,
+                node.revision.and_then(|v| i64::try_from(v).ok()),
                 node.depth.map(depth_word),
                 kind_word(node.kind),
                 node.changed_rev.and_then(|v| i64::try_from(v).ok()),
@@ -450,30 +512,58 @@ pub(crate) fn op_copy(
             ],
         )
         .map_err(sql_err)?;
+        for del in &p.carried_deletes {
+            let shifted = del.op_depth - src_depth + dst_depth;
+            conn.execute(
+                "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, presence, kind, changed_date) \
+                 VALUES (?1, ?2, ?3, ?4, 'base-deleted', ?5, 0)",
+                params![wc_id, p.target.as_str(), shifted, parent_text(&p.target), kind_word(del.kind)],
+            )
+            .map_err(sql_err)?;
+        }
         // Local property edits of the source travel as local edits of the copy.
-        if let Some(local) = actual::read_props(conn, wc_id, &node.relpath)? {
-            actual::write_props(conn, wc_id, &target, Some(&local))?;
+        if let Some(local) = actual::read_props(conn, wc_id, &node.relpath)?
+            && p.carried_deletes.is_empty()
+        {
+            actual::write_props(conn, wc_id, &p.target, Some(&local))?;
         }
     }
     Ok(())
 }
 
-/// `svn move` bookkeeping: copy with `moved_here`, delete the source and point its delete layer
-/// at the destination.
+/// `svn move` bookkeeping: copy, delete the source and point its delete layer at the
+/// destination. Only a source that has something below its working layer (a BASE node or a lower
+/// layer) leaves a delete layer behind, so only then is the destination "moved here"; moving a
+/// plain local copy is a copy of it plus removal, like svn.
 pub(crate) fn op_move(conn: &Connection, wc_id: i64, src: &RelPath, dst: &RelPath) -> Result<()> {
-    op_copy(conn, wc_id, src, dst, true)?;
+    let d = relpath_depth(src);
+    let has_lower: bool = conn
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+             AND op_depth < ?3 AND presence IN ('normal', 'incomplete'))",
+            params![wc_id, src.as_str(), d],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+    op_copy(conn, wc_id, src, dst, has_lower)?;
     op_delete(conn, wc_id, src)?;
     conn.execute(
         "UPDATE nodes SET moved_to = ?3 WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = ?4 \
          AND presence = 'base-deleted'",
-        params![wc_id, src.as_str(), dst.as_str(), relpath_depth(src)],
+        params![wc_id, src.as_str(), dst.as_str(), d],
     )
     .map_err(sql_err)?;
     Ok(())
 }
 
-/// Reverts local changes at `path`: working layers rooted there (add, copy, replace, delete) and
-/// property/conflict edits. Reverting a layer root removes the whole layer, children included.
+/// Reverts local changes at `path`, like `svn_wc__db_op_revert`.
+///
+/// * `recursive`: every working layer inside the subtree is removed (adds, deletes, copies on
+///   descendants too) and local property/conflict state is cleared; changelists stay.
+/// * not recursive: only the node's own layer (when `path` is an operation root, children of that
+///   same operation included) or its own property/conflict state. An operation root that still
+///   has separate operations below it is refused with svn's E155038 instead of reverting them
+///   silently.
 pub(crate) fn op_revert(
     conn: &Connection,
     wc_id: i64,
@@ -482,6 +572,8 @@ pub(crate) fn op_revert(
 ) -> Result<()> {
     let cur = require_current(conn, wc_id, path)?;
     let d = relpath_depth(path);
+    let scope = scope_sql();
+    let sub = strict_descendant("local_relpath", "?2");
     if cur.op_depth > 0 {
         if cur.op_depth != d {
             return Err(SvnError::new(
@@ -489,7 +581,24 @@ pub(crate) fn op_revert(
                 format!("'{path}' is part of a larger change; revert its root instead"),
             ));
         }
-        let scope = scope_sql();
+        if !recursive {
+            let nested: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT EXISTS (SELECT 1 FROM nodes WHERE wc_id = ?1 AND {sub} AND op_depth > ?3)"
+                    ),
+                    params![wc_id, path.as_str(), d],
+                    |r| r.get(0),
+                )
+                .map_err(sql_err)?;
+            if nested {
+                return Err(SvnError::new(
+                    ErrorCode::Internal,
+                    format!("can't revert '{path}' without reverting children"),
+                )
+                .with_svn_code(155_038));
+            }
+        }
         detach_moves(conn, wc_id, path, d)?;
         conn.execute(
             &format!("DELETE FROM nodes WHERE wc_id = ?1 AND {scope} AND op_depth >= ?3"),
@@ -498,6 +607,17 @@ pub(crate) fn op_revert(
         .map_err(sql_err)?;
         actual::clear_modifications(conn, wc_id, path, true)?;
         return actual::drop_orphans(conn, wc_id, path);
+    }
+    if recursive {
+        // The node itself is unchanged BASE; every working layer below it belongs to an
+        // operation rooted inside the subtree.
+        detach_moves(conn, wc_id, path, 1)?;
+        conn.execute(
+            &format!("DELETE FROM nodes WHERE wc_id = ?1 AND {scope} AND op_depth > 0"),
+            params![wc_id, path.as_str()],
+        )
+        .map_err(sql_err)?;
+        actual::drop_orphans(conn, wc_id, path)?;
     }
     actual::clear_modifications(conn, wc_id, path, recursive)
 }
@@ -688,6 +808,28 @@ pub(crate) fn commit_node(
         } else {
             format!("{proot}/{name}")
         };
+        // Committing a replacement: the old BASE subtree and the delete layers that recorded its
+        // removal are gone in the repository; separate pending adds below (higher layers) stay
+        // for their own commit.
+        if read_base(conn, wc_id, path)?.is_some() {
+            detach_moves(conn, wc_id, path, 0)?;
+            conn.execute(
+                &format!(
+                    "DELETE FROM nodes WHERE wc_id = ?1 AND {} AND op_depth = 0",
+                    scope_sql()
+                ),
+                params![wc_id, path.as_str()],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                &format!(
+                    "DELETE FROM nodes WHERE wc_id = ?1 AND {} AND presence = 'base-deleted' AND op_depth >= ?3",
+                    scope_sql()
+                ),
+                params![wc_id, path.as_str(), cur.op_depth],
+            )
+            .map_err(sql_err)?;
+        }
         // Root of the layer first, then the rest of the same layer.
         let layer: Vec<Node> = layer_nodes(conn, wc_id, path, cur.op_depth)?;
         for node in &layer {
