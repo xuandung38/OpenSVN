@@ -27,7 +27,12 @@ impl UpdateMode {
         let want_bulk = match preference {
             BulkPreference::Bulk => true,
             BulkPreference::Skelta => false,
-            BulkPreference::Auto => caps.bulk_updates == Some(crate::caps::BulkUpdates::Prefer),
+            BulkPreference::Auto => {
+                caps.bulk_updates == Some(crate::caps::BulkUpdates::Prefer)
+                    // Like serf: a server that sends neither the switch nor inline properties
+                    // is asked for send-all, skelta would cost a request per node.
+                    || (caps.bulk_updates.is_none() && !caps.dav.inline_props)
+            }
         };
         if want_bulk && caps.bulk_updates_allowed() {
             UpdateMode::SendAll

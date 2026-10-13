@@ -106,7 +106,7 @@ impl GetLocksParser {
                         && let Some((name, _)) = &self.field
                     {
                         self.text.push_str(&t);
-                        let max = if *name == "comment" {
+                        let max = if matches!(*name, "comment" | "owner") {
                             self.limits.max_text_bytes
                         } else {
                             self.limits.max_href_bytes

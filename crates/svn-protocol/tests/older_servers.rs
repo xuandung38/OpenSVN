@@ -82,7 +82,12 @@ fn urls_for(c: &Capabilities) -> UrlBuilder {
 fn the_current_server_uses_the_newer_paths() {
     let c = caps_of(&load("caps/options-200"));
     assert_eq!(c.list_strategy(), ListStrategy::ListReport);
-    assert_eq!(c.svndiff_version(), 2);
+    assert_eq!(
+        c.svndiff_version(false),
+        1,
+        "serf prefers svndiff1 unless latency is low"
+    );
+    assert_eq!(c.svndiff_version(true), 2);
     assert!(c.verifies_put_result_checksum());
 }
 
@@ -243,8 +248,13 @@ fn update_mode_follows_the_servers_wishes() {
         UpdateMode::select(&old, BulkPreference::Bulk),
         UpdateMode::SendAll
     );
+    // Like serf: no switch and no inline properties means send-all, skelta would be too chatty.
     assert_eq!(
         UpdateMode::select(&old, BulkPreference::Auto),
+        UpdateMode::SendAll
+    );
+    assert_eq!(
+        UpdateMode::select(&old, BulkPreference::Skelta),
         UpdateMode::Skelta {
             include_props: false
         }
@@ -326,28 +336,31 @@ fn ephemeral_txn_props_need_the_capability() {
 fn put_result_checksum_and_svndiff_version_follow_capabilities() {
     let md5 = "0123456789abcdef0123456789abcdef";
     let old = caps_minimal_v2();
-    assert_eq!(old.svndiff_version(), 0);
+    assert_eq!(
+        (old.svndiff_version(false), old.svndiff_version(true)),
+        (0, 0)
+    );
     let opts = PutOptions::default().with_result_md5(&old, md5);
     assert_eq!(opts.result_md5, None);
     let req = put_request(
         &urls_for(&old),
         "1-a",
         &RelPath::new("f").unwrap(),
-        bytes::Bytes::new(),
+        svn_protocol::Body::Empty,
         &opts,
     )
     .unwrap();
     assert!(req.headers.get("X-SVN-Result-Fulltext-MD5").is_none());
 
     let mid = caps_1_8_to_1_9();
-    assert_eq!(mid.svndiff_version(), 0);
+    assert_eq!(mid.svndiff_version(true), 0);
     assert!(mid.verifies_put_result_checksum());
     let opts = PutOptions::default().with_result_md5(&mid, md5);
     let req = put_request(
         &urls_for(&mid),
         "1-a",
         &RelPath::new("f").unwrap(),
-        bytes::Bytes::new(),
+        svn_protocol::Body::Empty,
         &opts,
     )
     .unwrap();
@@ -355,7 +368,10 @@ fn put_result_checksum_and_svndiff_version_follow_capabilities() {
 
     let mut only1 = mid.clone();
     only1.dav.svndiff1 = true;
-    assert_eq!(only1.svndiff_version(), 1);
+    assert_eq!(
+        (only1.svndiff_version(false), only1.svndiff_version(true)),
+        (1, 1)
+    );
 }
 
 #[test]

@@ -35,9 +35,10 @@ fn coalesce(events: Vec<UpdateEvent>) -> Vec<UpdateEvent> {
 /// Opens and closes balance, in order, and the stream starts with the target revision.
 fn assert_well_formed(evs: &[UpdateEvent]) {
     assert!(
-        matches!(evs.first(), Some(UpdateEvent::TargetRevision(_))),
+        matches!(evs.first(), Some(UpdateEvent::ReportStart { .. }))
+            && matches!(evs.get(1), Some(UpdateEvent::TargetRevision(_))),
         "{:?}",
-        evs.first()
+        evs.get(..2)
     );
     let mut stack: Vec<(RelPath, bool)> = Vec::new();
     for e in evs {
@@ -96,14 +97,21 @@ fn every_recorded_report_is_well_formed() {
 #[test]
 fn send_all_checkout_carries_text_deltas() {
     let evs = events("update/checkout-send-all");
-    assert_eq!(evs[0], UpdateEvent::TargetRevision(Revnum(5)));
+    assert_eq!(
+        evs[0],
+        UpdateEvent::ReportStart {
+            send_all: true,
+            inline_props: true
+        }
+    );
+    assert_eq!(evs[1], UpdateEvent::TargetRevision(Revnum(5)));
     let UpdateEvent::OpenDir {
         path,
         base_rev,
         checked_in,
-    } = &evs[1]
+    } = &evs[2]
     else {
-        panic!("{:?}", evs[1])
+        panic!("{:?}", evs[2])
     };
     assert!(path.is_root());
     assert_eq!(*base_rev, Some(Revnum(5)));
@@ -177,6 +185,7 @@ fn skelta_has_no_inline_text_and_gives_urls_to_fetch() {
             path,
             checked_in,
             sha1,
+            ..
         } = e
         {
             let href = checked_in
@@ -210,11 +219,9 @@ fn update_with_changed_file_has_base_checksum() {
 #[test]
 fn deletions_props_and_copies_in_a_rich_update() {
     let evs = events("update/update-rich");
-    assert!(
-        evs.iter().any(
-            |e| matches!(e, UpdateEvent::DeleteEntry { path } if path.as_str() == "src/b.txt")
-        )
-    );
+    assert!(evs.iter().any(
+        |e| matches!(e, UpdateEvent::DeleteEntry { path, .. } if path.as_str() == "src/b.txt")
+    ));
     assert!(evs.iter().any(|e| matches!(e, UpdateEvent::SetProp { name, value, .. } if name == "svn:eol-style" && value.as_ref() == b"native")));
     assert!(evs.iter().any(|e| matches!(e, UpdateEvent::SetProp { name, value, .. } if name == "custom:note" && value.as_ref() == b"x<y")));
     assert!(added_files(&evs).iter().any(|f| f == "copy.txt"));
@@ -225,11 +232,9 @@ fn deletions_props_and_copies_in_a_rich_update() {
 #[test]
 fn rich_update_in_skelta_mode_matches_the_tree_changes() {
     let evs = events("update/update-rich-skelta");
-    assert!(
-        evs.iter().any(
-            |e| matches!(e, UpdateEvent::DeleteEntry { path } if path.as_str() == "src/b.txt")
-        )
-    );
+    assert!(evs.iter().any(
+        |e| matches!(e, UpdateEvent::DeleteEntry { path, .. } if path.as_str() == "src/b.txt")
+    ));
     assert!(
         !evs.iter()
             .any(|e| matches!(e, UpdateEvent::TxDeltaChunk { .. }))

@@ -2,6 +2,7 @@
 
 use svn_types::{ErrorCode, Result, Revnum, SvnError, Timestamp};
 
+use crate::caps::TxnName;
 use crate::errors::error_from_response;
 use crate::errors::sanitize_message;
 use crate::http::{ResponseHead, ResponseParser, parse_chunked};
@@ -12,14 +13,18 @@ use crate::xml::{Ns, XmlEvent, XmlReader};
 /// Reads the transaction name from the answer to `POST !svn/me`.
 ///
 /// The name is validated like any transaction name before it is used to build URLs.
-pub fn parse_create_txn_response(head: &ResponseHead, body: &[u8]) -> Result<String> {
+pub fn parse_create_txn_response(head: &ResponseHead, body: &[u8]) -> Result<TxnName> {
     if !(200..300).contains(&head.status) {
         return Err(error_from_response(head.status, &head.headers, body));
     }
-    let name = head
-        .headers
-        .get("SVN-Txn-Name")
-        .or_else(|| head.headers.get("SVN-VTxn-Name"))
+    let (name, virtual_) = match (
+        head.headers.get("SVN-Txn-Name"),
+        head.headers.get("SVN-VTxn-Name"),
+    ) {
+        (Some(n), _) => (Some(n), false),
+        (None, v) => (v, true),
+    };
+    let name = name
         .map(str::trim)
         .filter(|n| !n.is_empty())
         .ok_or_else(|| corrupt("create-txn answered without SVN-Txn-Name"))?;
@@ -33,7 +38,10 @@ pub fn parse_create_txn_response(head: &ResponseHead, body: &[u8]) -> Result<Str
             format!("invalid transaction name {name:?}"),
         ));
     }
-    Ok(name.to_owned())
+    Ok(TxnName {
+        name: name.to_owned(),
+        virtual_,
+    })
 }
 
 /// Outcome of a successful `MERGE`.

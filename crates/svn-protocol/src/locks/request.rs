@@ -1,6 +1,6 @@
 //! `LOCK`, `UNLOCK` and get-lock request builders. All three address the public URL.
 
-use svn_types::{ErrorCode, RelPath, Result, Revnum, SvnError};
+use svn_types::{RelPath, Result, Revnum};
 
 use crate::caps::{UrlBuilder, advertise_caps};
 use crate::http::{HttpRequest, Method};
@@ -44,20 +44,11 @@ pub fn lock_request(urls: &UrlBuilder, path: &RelPath, opts: &LockOptions) -> Re
     Ok(advertise_caps(req))
 }
 
-/// Accepts `opaquelocktoken:...` with or without angle brackets and returns it bracketed.
+/// Accepts `opaquelocktoken:...` with or without angle brackets and returns it bracketed. The
+/// same validation as for tokens read from the server.
 pub(crate) fn bracketed_token(token: &str) -> Result<String> {
     let inner = token.trim().trim_start_matches('<').trim_end_matches('>');
-    if inner.is_empty()
-        || inner
-            .chars()
-            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '<' | '>'))
-    {
-        return Err(SvnError::new(
-            ErrorCode::LockTokenInvalid,
-            "lock token is empty or contains illegal characters",
-        ));
-    }
-    Ok(format!("<{inner}>"))
+    Ok(format!("<{}>", crate::util::validate_lock_token(inner)?))
 }
 
 /// Builds `UNLOCK` for `path` with the lock `token`; `break_lock` adds `X-SVN-Options: lock-break`.

@@ -77,8 +77,21 @@ pub fn parse_lock_response(path: &RelPath, head: &ResponseHead, body: &[u8]) -> 
                 text.clear();
             }
             XmlEvent::Text(t) => {
-                text.push_str(&t);
-                ParserLimits::check(text.len(), limits.max_href_bytes, "lock field")?;
+                let below = stack.get(2..).map(|s| s.join("/")).unwrap_or_default();
+                if below == OWNER_PATH {
+                    // The server has already taken the lock: an oversized comment is cut,
+                    // never turned into a failure.
+                    if text.len() < limits.max_text_bytes {
+                        let room = limits.max_text_bytes - text.len();
+                        let cut = (0..=room.min(t.len()))
+                            .rev()
+                            .find(|i| t.is_char_boundary(*i));
+                        text.push_str(&t[..cut.unwrap_or(0)]);
+                    }
+                } else {
+                    text.push_str(&t);
+                    ParserLimits::check(text.len(), limits.max_href_bytes, "lock field")?;
+                }
             }
             XmlEvent::End(_) => {
                 // Path below `D:prop/D:lockdiscovery`.

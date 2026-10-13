@@ -16,7 +16,8 @@ fn create_txn_answer_names_the_transaction() {
     let f = load("commit/full-create-txn");
     assert_eq!(f.status, 201);
     let name = parse_create_txn_response(&f.head(), &f.resp_body).unwrap();
-    assert_eq!(name, f.resp_headers.get("SVN-Txn-Name").unwrap());
+    assert_eq!(name.name, f.resp_headers.get("SVN-Txn-Name").unwrap());
+    assert!(!name.virtual_);
 }
 
 #[test]
@@ -31,7 +32,10 @@ fn create_txn_answer_is_validated() {
         ErrorCode::Corrupt
     );
     let virt = ResponseHead::new(201, Headers::from_pairs([("SVN-VTxn-Name", "ab-12")]));
-    assert_eq!(parse_create_txn_response(&virt, b"").unwrap(), "ab-12");
+    assert_eq!(
+        parse_create_txn_response(&virt, b"").unwrap(),
+        svn_protocol::TxnName::virtual_txn("ab-12")
+    );
 }
 
 #[test]

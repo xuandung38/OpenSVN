@@ -113,7 +113,17 @@ fn edits() {
     );
     insta::assert_snapshot!(
         "copy",
-        render(&copy_request(&u, Revnum(7), &rel("trunk/a b"), t, &rel("branches/c")).unwrap())
+        render(
+            &copy_request(
+                &u,
+                Revnum(7),
+                &rel("trunk/a b"),
+                svn_types::NodeKind::File,
+                t,
+                &rel("branches/c")
+            )
+            .unwrap()
+        )
     );
     let opts = PutOptions {
         base_rev: Some(Revnum(7)),
@@ -128,7 +138,7 @@ fn edits() {
                 &u,
                 t,
                 &rel("trunk/a.txt"),
-                Bytes::from_static(b"SVN\0"),
+                svn_protocol::Body::Bytes(Bytes::from_static(b"SVN\0")),
                 &opts
             )
             .unwrap()
@@ -139,7 +149,7 @@ fn edits() {
             &u,
             t,
             &rel("a"),
-            Bytes::new(),
+            svn_protocol::Body::Empty,
             &PutOptions {
                 base_md5: Some("zz"),
                 ..PutOptions::default()
