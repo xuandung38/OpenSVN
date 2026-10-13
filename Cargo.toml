@@ -89,6 +89,8 @@ specta = "=2.0.0-rc.25"
 specta-typescript = "=0.0.12"
 serde_json = "=1.0.154"
 time = { version = "=0.3.55", default-features = false }
+# Local UTC offset for `$Date$` (system zoneinfo, pure Rust).
+jiff = { version = "=0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 
 # test
 proptest = "=1.12.0"

@@ -314,6 +314,17 @@ impl Planner<'_> {
                 );
             }
         }
+        if !empty_base {
+            // Children reported at their own revision (mixed-revision working copies) exist in
+            // the working copy even when the parent's base revision does not have them.
+            names.extend(
+                self.input
+                    .entries
+                    .iter()
+                    .filter(|e| !e.deleted && e.path.parent().as_ref() == Some(dir))
+                    .filter_map(|e| e.path.file_name().map(str::to_owned)),
+            );
+        }
         let tdir = remap(dir, &self.input.anchor_target, &self.input.tree_target)?;
         names.extend(
             super::repo::children(self.input.target_tree, &tdir)

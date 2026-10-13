@@ -15,7 +15,7 @@ use super::{RealEngine, wc_read};
 use crate::engine::context::{OpContext, ProgressUpdate};
 use crate::engine::facade::{DiffOptions, EngineResult, LogScope};
 use crate::engine::mapping::{self, entry_kind, revnum};
-use crate::engine::text::{is_binary, text_side};
+use crate::engine::text::{file_diff, text_side};
 
 /// Largest file `repo_cat` and revision diffs return inline.
 pub(super) const CAT_LIMIT: usize = 5 * 1024 * 1024;
@@ -237,7 +237,7 @@ impl RealEngine {
         url: &str,
         from: Option<Rev>,
         to: Rev,
-        _opts: DiffOptions,
+        opts: DiffOptions,
         ctx: &OpContext,
     ) -> EngineResult<FileDiff> {
         let (session, path) = self.locate(url, ctx).await?;
@@ -267,21 +267,10 @@ impl RealEngine {
         };
         let left = read(from).await?.map(|d| (d, format!("{name}@r{from}")));
         let right = read(to.0).await?.map(|d| (d, format!("{name}@r{}", to.0)));
-        let binary = [&left, &right]
-            .iter()
-            .any(|s| s.as_ref().is_some_and(|(d, _)| is_binary(d)));
-        let side = |s: Option<(Vec<u8>, String)>| s.map(|(d, label)| text_side(&d, label));
-        Ok(FileDiff {
-            path: name,
-            binary,
-            mime: binary.then(|| "application/octet-stream".to_owned()),
-            left: if binary { None } else { side(left) },
-            right: if binary { None } else { side(right) },
-            hunks: None,
-            prop_changes: Vec::new(),
-            image: None,
-            too_large: None,
-        })
+        // Same `svn_diff` display budget as the fake engine: over it, the sides are dropped and
+        // `too_complex` is set unless the caller asked for full text (`diff_external`).
+        // Bounded by `CAT_LIMIT` per side and the cost budget, so it runs inline like the fake.
+        file_diff(&name, left, right, opts, ctx)
     }
 
     pub(super) async fn do_log(
