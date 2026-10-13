@@ -3710,6 +3710,15 @@ version = "0.0.0"
 [[package]]
 name = "svn-protocol"
 version = "0.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "insta",
+ "proptest",
+ "quick-xml",
+ "svn-types",
+ "url",
+]
 
 [[package]]
 name = "svn-ra"

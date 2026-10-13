@@ -1,0 +1,12 @@
+REQUEST LOCK /svn/repo/trunk/a.txt
+> User-Agent: SVN/1.15.0 (aarch64-apple-darwin27.0.0) serf/1.3.10
+> Content-Type: text/xml
+> DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+> DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+> DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+> X-SVN-Version-Name: 9
+RESPONSE 200
+< X-SVN-Creation-Date: 2026-10-13T09:05:45.451000Z
+< X-SVN-Lock-Owner: alice
+< Lock-Token: <opaquelocktoken:7529f6f5-d3a2-4520-97f8-87d435ba67a0>
+< Content-Type: text/xml; charset="utf-8"
