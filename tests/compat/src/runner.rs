@@ -199,12 +199,11 @@ impl<'a> Runner<'a> {
                         .run(step, &wc_host, &args)
                         .with_context(|| format!("step {i} (engine)"))?;
                 }
-                Actor::Svn14 | Actor::Svn15 => {
-                    let version = if step.on == Actor::Svn14 {
-                        SvnVersion::V14
-                    } else {
-                        SvnVersion::V15
-                    };
+                Actor::Svn18 | Actor::Svn19 | Actor::Svn110 | Actor::Svn14 | Actor::Svn15 => {
+                    let version = step
+                        .on
+                        .svn_version()
+                        .ok_or_else(|| anyhow!("step {i}: actor has no svn version"))?;
                     let argv = if let Some(svn) = &step.svn {
                         let mut v = vec!["svn".to_string()];
                         v.extend(svn.iter().map(|a| subst(a)));

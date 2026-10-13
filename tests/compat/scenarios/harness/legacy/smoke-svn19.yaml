@@ -1,0 +1,26 @@
+# Smoke subset for Subversion 1.9.12: checkout, update, commit, status, log, lock, and a working
+# copy created by svn 1.15 that the svn19 client must be able to read and update.
+name: smoke-svn19
+description: svn19 server and client round trip plus cross-read of an svn15 working copy
+server: svn19
+repo: basic
+fresh_repo: true
+steps:
+  - { on: svn19, wc: a, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn19, wc: b, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: c, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn19, wc: a, sh: "echo changed >> README.txt && printf 'new\\n' > added.txt" }
+  - { on: svn19, wc: a, svn: [add, added.txt] }
+  - { on: svn19, wc: a, svn: [status, -u] }
+  - { on: svn19, wc: a, svn: [commit, -m, "smoke change"] }
+  - { on: svn19, wc: a, svn: [log, -l, "3", -v] }
+  - { on: svn19, wc: a, svn: [lock, locked.txt, -m, smoke] }
+  - { on: svn19, wc: a, svn: [unlock, locked.txt] }
+  - { on: svn19, wc: a, svn: [update] }
+  - { on: svn19, wc: b, svn: [update] }
+  # The old client reads and updates a working copy made by svn 1.15.
+  - { on: svn19, wc: c, svn: [status] }
+  - { on: svn19, wc: c, svn: [update] }
+compare:
+  - { left: a, right: b, checks: [tree, status, info, wcdb], reader: svn19 }
+  - { left: a, right: c, checks: [tree, status], reader: svn19 }
