@@ -262,6 +262,7 @@ pub fn merge(local: Vec<WcStatus>, info: &RemoteInfo) -> Vec<WcStatus> {
                 remote_lock: info.locks.get(path).cloned(),
             }),
             switched: false,
+            file_external: false,
             depth: Depth::Unknown,
             base_rev: None,
         });

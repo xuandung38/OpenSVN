@@ -12,6 +12,7 @@ use svn_wc::conflicts::ConflictSkel;
 use svn_wc::db::{Node, Presence, WcDb};
 
 use super::StatusOptions;
+use super::externals::ExternalPaths;
 use super::ignore::{DEFAULT_GLOBAL_IGNORES, is_ignored, split_global, split_property};
 use crate::wc::{abs_path, inspect, join_rel};
 
@@ -113,7 +114,9 @@ fn node_status(db: &WcDb, rel: &RelPath, cur: &Node) -> Result<Option<WcStatus>>
         Some(p) => db.read_base(&p)?.and_then(|n| n.repos_relpath),
         None => None,
     };
+    // File externals point anywhere by definition and are reported as such, not as switched.
     let switched = cur.op_depth == 0
+        && !cur.file_external
         && parent_repos.is_some_and(|p| {
             let name = rel.file_name().unwrap_or("");
             let expected = if p.is_empty() {
@@ -154,6 +157,7 @@ fn node_status(db: &WcDb, rel: &RelPath, cur: &Node) -> Result<Option<WcStatus>>
         },
         remote: None,
         switched,
+        file_external: cur.file_external,
         depth: cur.depth.unwrap_or(Depth::Unknown),
         base_rev: base
             .as_ref()
@@ -169,6 +173,7 @@ fn is_interesting(s: &WcStatus) -> bool {
         || !matches!(s.props, PropStatus::None | PropStatus::Normal)
         || s.tree_conflict
         || s.switched
+        || s.file_external
         || s.lock.is_some()
         || s.changelist.is_some()
 }
@@ -178,13 +183,15 @@ struct Walker<'a> {
     opts: &'a StatusOptions,
     cancel: &'a CancelToken,
     global: Vec<String>,
+    externals: ExternalPaths,
     out: Vec<WcStatus>,
 }
 
 impl Walker<'_> {
-    fn unversioned(&mut self, rel: &RelPath, ignored: bool) -> Result<()> {
+    /// Reports an unversioned item as `text` (`Unversioned`, `Ignored` or `External`).
+    fn unversioned(&mut self, rel: &RelPath, text: NodeStatus) -> Result<()> {
         let (kind, size) = disk_kind(self.db, rel)?;
-        let wanted = if ignored {
+        let wanted = if text == NodeStatus::Ignored {
             self.opts.include_ignored
         } else {
             self.opts.include_unversioned
@@ -195,11 +202,7 @@ impl Walker<'_> {
         self.out.push(WcStatus {
             path: rel.clone(),
             kind: kind.unwrap_or(NodeKind::Unknown),
-            text: if ignored {
-                NodeStatus::Ignored
-            } else {
-                NodeStatus::Unversioned
-            },
+            text,
             props: PropStatus::None,
             tree_conflict: false,
             moved_from: None,
@@ -212,6 +215,7 @@ impl Walker<'_> {
             size,
             remote: None,
             switched: false,
+            file_external: false,
             depth: Depth::Unknown,
             base_rev: None,
         });
@@ -243,6 +247,8 @@ impl Walker<'_> {
         {
             return Ok(());
         }
+        // Externals defined here may live anywhere below.
+        self.externals.add_defined_in(self.db, rel)?;
         // Names of versioned children and of whatever is on disk.
         let mut names: BTreeSet<String> = BTreeSet::new();
         for c in self.db.children(rel)? {
@@ -276,6 +282,10 @@ impl Walker<'_> {
                     Depth::Empty
                 };
                 self.walk(&child, next)?;
+            } else if self.externals.covers(&child) {
+                // An external's directory (or one leading to it) is reported as such, never as
+                // ignored, and not descended into (`svn status --ignore-externals`).
+                self.unversioned(&child, NodeStatus::External)?;
             } else if self.opts.include_unversioned || self.opts.include_ignored {
                 let ignores = local_ignores.get_or_insert_with(|| {
                     let mut p = self.global.clone();
@@ -286,8 +296,12 @@ impl Walker<'_> {
                     }
                     p
                 });
-                let ignored = is_ignored(ignores, &name);
-                self.unversioned(&child, ignored)?;
+                let text = if is_ignored(ignores, &name) {
+                    NodeStatus::Ignored
+                } else {
+                    NodeStatus::Unversioned
+                };
+                self.unversioned(&child, text)?;
             }
         }
         Ok(())
@@ -295,6 +309,13 @@ impl Walker<'_> {
 }
 
 /// Local status of `rel` and, depending on `opts.depth`, what is below it.
+///
+/// Externals are reported like `svn status --ignore-externals`: the directory of a directory
+/// external (and any unversioned directory leading to one) is one [`NodeStatus::External`] item
+/// and is not descended into; file externals are versioned items with `file_external` set.
+/// A separate working copy checked out inside this one is reported as an unversioned directory,
+/// as svn does; [`is_wc_root_dir`](super::is_wc_root_dir) tells callers that must not treat it as
+/// disposable.
 pub fn local_status(
     db: &WcDb,
     rel: &RelPath,
@@ -316,6 +337,7 @@ pub fn local_status(
         opts,
         cancel,
         global,
+        externals: ExternalPaths::for_path(db, rel)?,
         out: Vec::new(),
     };
     let depth = if opts.depth == Depth::Unknown {

@@ -248,3 +248,132 @@ async fn status_depth_matches_svn_status_depth() {
         );
     }
 }
+
+/// Working copy of `trunk` checked out by svn with a directory external (`ext`), an old-format
+/// external with a space in its name, an external two unversioned directories deep
+/// (`deep/x/ext`), two file externals (`fext` modified, `fext2` not) and a separate checkout
+/// nested inside it (`nested`); local edits inside the externals and the nested checkout.
+fn externals_wc(repo: &Repo) -> std::path::PathBuf {
+    let seed = repo.checkout("seed");
+    write(&seed.join("lib/a.txt"), "a\n");
+    write(&seed.join("lib/sub/b.txt"), "b\n");
+    write(&seed.join("trunk/keep.txt"), "k\n");
+    repo.svn(&seed, &["add", "-q", "lib", "trunk"]);
+    repo.svn(&seed, &["commit", "-q", "-m", "r1"]);
+    let defs = repo.base().join("externals.txt");
+    write(
+        &defs,
+        &format!(
+            "^/lib ext\n\"old style\" -r1 {}/lib\n-r 1 ^/lib deep/x/ext\n^/lib/a.txt fext\n\
+             ^/lib/sub/b.txt fext2\n",
+            repo.url
+        ),
+    );
+    repo.svn(
+        &seed,
+        &[
+            "propset",
+            "-q",
+            "svn:externals",
+            "-F",
+            defs.to_str().expect("utf8"),
+            "trunk",
+        ],
+    );
+    repo.svn(&seed, &["commit", "-q", "-m", "r2"]);
+    let wc = repo.base().join("wc");
+    repo.svn(
+        &repo.base(),
+        &["checkout", "-q", &format!("{}/trunk", repo.url), "wc"],
+    );
+    repo.svn(
+        &wc,
+        &["checkout", "-q", &format!("{}/lib", repo.url), "nested"],
+    );
+    write(&wc.join("ext/a.txt"), "edited inside the external\n");
+    write(
+        &wc.join("nested/a.txt"),
+        "edited inside the nested checkout\n",
+    );
+    write(&wc.join("fext"), "edited file external\n");
+    write(
+        &wc.join("deep/stray.txt"),
+        "inside a directory leading to an external\n",
+    );
+    write(&wc.join("junk.txt"), "unversioned\n");
+    wc
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_reports_externals_and_nested_checkouts_like_svn() {
+    let Some(oracle) = oracle() else { return };
+    let repo = Repo::new(&oracle);
+    let wc = externals_wc(&repo);
+    // Text, property, switched/file-external and tree-conflict columns plus the path.
+    let mut theirs: Vec<String> = svn_status(&oracle, &wc, &["--ignore-externals"])
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let c: Vec<char> = l.chars().collect();
+            format!("{}{}{}{} {}", c[0], c[1], c[4], c[6], &l[8..])
+        })
+        .collect();
+    theirs.sort();
+    let mut ours: Vec<String> = status(&ctx(), &wc, &StatusOptions::default(), &CancelToken::new())
+        .await
+        .expect("status")
+        .iter()
+        .filter(|s| !s.path.is_root() || s.text != NodeStatus::Normal)
+        .map(|s| {
+            let c0 = match s.text {
+                NodeStatus::External => 'X',
+                NodeStatus::Unversioned => '?',
+                NodeStatus::Modified => 'M',
+                _ => ' ',
+            };
+            let c1 = if s.props == PropStatus::Modified {
+                'M'
+            } else {
+                ' '
+            };
+            let c4 = if s.file_external {
+                'X'
+            } else if s.switched {
+                'S'
+            } else {
+                ' '
+            };
+            let c6 = if s.tree_conflict { 'C' } else { ' ' };
+            format!("{c0}{c1}{c4}{c6} {}", s.path)
+        })
+        .collect();
+    ours.sort();
+    assert_eq!(ours, theirs);
+    assert_eq!(
+        theirs,
+        [
+            "  X  fext2",
+            "M X  fext",
+            "?    junk.txt",
+            "?    nested",
+            "X    deep",
+            "X    ext",
+            "X    old style",
+        ]
+        .map(str::to_owned)
+        .to_vec()
+        .tap_sorted(),
+        "the fixture covers every case"
+    );
+}
+
+trait TapSorted {
+    fn tap_sorted(self) -> Self;
+}
+
+impl TapSorted for Vec<String> {
+    fn tap_sorted(mut self) -> Self {
+        self.sort();
+        self
+    }
+}

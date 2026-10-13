@@ -47,3 +47,31 @@ schedule/move/revert, metadata and conflict-theirs on WCs made and checked by sv
   on RealEngine (WP8a).
 - Issue #90: svn-client support for mark_move and format upgrade.
 - No progress events for local ops (short calls).
+
+## Review round 1 fix (blocking: externals / nested WCs deleted by remove_unversioned)
+- Root cause fixed in `svn-client` status: new `status/externals.rs` parses `svn:externals` (svn 1.5+
+  `[-r N] URL[@PEG] PATH` and pre-1.5 `PATH [-r N] URL`, quotes and backslash escapes, comments) and
+  combines the definitions (pristine + local, on the target's ancestors and every walked directory) with
+  the wc.db `EXTERNALS` rows. The walker reports a directory external, and any unversioned directory
+  leading to one (svn's `is_external_path`), as the new `NodeStatus::External` (`X`), not descended into
+  (= `svn status --ignore-externals`). File externals: new `WcStatus::file_external`, no longer reported
+  as switched, always listed (svn column 5 `X`). `opensvn-ipc` maps `External` -> IPC `External`
+  (WP3/PR #93 gets this for free through `file_status_from_wc`).
+- A separate checkout nested inside the WC stays `?` in status, exactly as svn 1.15 shows it.
+  `svn_client::status::is_wc_root_dir` lets callers recognise it.
+- `local_util::unversioned_items` never returns externals (or their leading dirs) nor nested WC roots,
+  also when they are named directly as revert targets. `remove_items` removes an unversioned directory
+  except any WC nested inside it, tries every item and reports all failures in one error (first failure
+  as cause); cancellation still stops at once. Windows dir symlinks/junctions fall back to `remove_dir`.
+- Deliberate divergence from svn 1.15: `svn cleanup --remove-unversioned` deletes a nested checkout; the
+  app keeps it (documented on `unversioned_items`). The property-based detection can also mark a defined
+  but never-fetched external directory as `X` where svn (no EXTERNALS row) shows `?` - errs on the side
+  of not deleting.
+- Tests: svn-client oracle `status_reports_externals_and_nested_checkouts_like_svn` (dir external,
+  old-format external with a space, external two unversioned dirs deep, modified and unmodified file
+  externals, nested checkout; compared with `svn status --ignore-externals` on columns 1,2,5,7), parser
+  unit tests; engine: status/cleanup/revert with property-defined externals + nested checkouts (always
+  run), oracle cleanup(remove_unversioned+remove_ignored) and revert(remove_unversioned) on svn-fetched
+  externals with local edits, and remove_items continuing past a failure.
+- Still open (non-blocking): `set_subversion_config_dir` wiring is WP7; fake engine `Mine` semantics
+  differ from real (real = svn mine-full).

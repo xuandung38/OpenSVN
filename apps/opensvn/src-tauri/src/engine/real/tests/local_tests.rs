@@ -280,6 +280,131 @@ async fn revert_can_remove_unversioned_items_but_keeps_reverted_additions() {
     assert_eq!(text_of(&st, "src/added.rs"), Some(NodeStatus::Unversioned));
 }
 
+/// Working copy whose root defines `ext` (and `deep/x/ext`) with `svn:externals`, both present
+/// as separate working copies with a local edit, plus a separate checkout `nested`, an
+/// unversioned directory hiding another checkout (`junk/inner`), and plain unversioned and
+/// ignored items.
+async fn wc_with_externals(e: &Env, name: &str) -> WcRef {
+    let wc = e.checkout(name).await;
+    e.engine()
+        .props_set(
+            &wc,
+            "",
+            "svn:externals",
+            Some("^/src ext\n-r1 ^/src deep/x/ext\n"),
+            &ctx(),
+        )
+        .await
+        .expect("propset");
+    for sub in ["ext", "deep/x/ext", "nested", "junk/inner"] {
+        e.checkout(&format!("{name}/{sub}")).await;
+        write(&wc.root, &format!("{sub}/README.md"), "local edit\n");
+    }
+    write(&wc.root, "junk/scratch.txt", "x\n");
+    write(&wc.root, "scratch.txt", "x\n");
+    write(&wc.root, "debug.o", "x\n");
+    wc
+}
+
+/// The externals and the nested checkouts are where they were, local edits included.
+fn assert_working_copies_kept(wc: &WcRef) {
+    for sub in ["ext", "deep/x/ext", "nested", "junk/inner"] {
+        assert_eq!(
+            std::fs::read_to_string(wc.root.join(sub).join("README.md")).unwrap(),
+            "local edit\n",
+            "{sub} kept with its local edit"
+        );
+        assert!(
+            wc.root.join(sub).join(".svn/wc.db").exists(),
+            "{sub} still a working copy"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_reports_externals_and_nested_checkouts() {
+    let e = env();
+    let wc = wc_with_externals(&e, "ext-status").await;
+    let st = e.status(&wc).await;
+    assert_eq!(text_of(&st, "ext"), Some(NodeStatus::External));
+    assert_eq!(text_of(&st, "deep"), Some(NodeStatus::External));
+    assert_eq!(
+        text_of(&st, "nested"),
+        Some(NodeStatus::Unversioned),
+        "as svn shows it"
+    );
+    assert_eq!(text_of(&st, "junk"), Some(NodeStatus::Unversioned));
+    assert!(
+        find(&st, "ext/README.md").is_none(),
+        "externals are not descended into"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cleanup_removing_unversioned_and_ignored_keeps_externals_and_nested_checkouts() {
+    let e = env();
+    let wc = wc_with_externals(&e, "ext-cleanup").await;
+    e.engine()
+        .cleanup(&wc, &cleanup_req(&wc, true, true), &ctx())
+        .await
+        .expect("cleanup");
+    assert_working_copies_kept(&wc);
+    assert!(!wc.root.join("scratch.txt").exists());
+    assert!(!wc.root.join("debug.o").exists());
+    assert!(
+        !wc.root.join("junk/scratch.txt").exists(),
+        "the rest of a directory hiding a checkout goes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revert_removing_unversioned_keeps_externals_and_nested_checkouts() {
+    let e = env();
+    let wc = wc_with_externals(&e, "ext-revert").await;
+    e.engine()
+        .revert(&wc, &revert_req(&wc, &[""], Some(true)), &ctx())
+        .await
+        .expect("revert root");
+    // Named directly as targets they are kept too.
+    e.engine()
+        .revert(
+            &wc,
+            &revert_req(&wc, &["ext", "deep", "nested", "junk/inner"], Some(true)),
+            &ctx(),
+        )
+        .await
+        .expect("revert named");
+    assert_working_copies_kept(&wc);
+    assert!(!wc.root.join("scratch.txt").exists());
+    assert!(wc.root.join("debug.o").exists(), "ignored items stay");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_unversioned_items_continues_past_failures_and_reports_them() {
+    let e = env();
+    let wc = e.checkout("remove-failures").await;
+    write(&wc.root, "a.txt", "x\n");
+    write(&wc.root, "z.txt", "x\n");
+    write(&wc.root, "real/inside.txt", "x\n");
+    std::os::unix::fs::symlink(wc.root.join("real"), wc.root.join("link")).unwrap();
+    let db = crate::engine::real::wc_read::open_db(&wc.root).unwrap();
+    let rels: Vec<RelPath> = ["a.txt", "link/inside.txt", "z.txt"]
+        .iter()
+        .map(|p| RelPath::new(p).unwrap())
+        .collect();
+    let err = crate::engine::real::local_util::remove_items(&db, &CancelToken::new(), &rels)
+        .expect_err("the path through a symlink is refused");
+    assert!(err.message.contains("1 of 3"), "{}", err.message);
+    assert!(err.message.contains("link/inside.txt"), "{}", err.message);
+    assert!(!wc.root.join("a.txt").exists());
+    assert!(
+        !wc.root.join("z.txt").exists(),
+        "items after the failure are removed"
+    );
+    assert!(wc.root.join("real/inside.txt").exists());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn working_copy_metadata_operations() {
     let e = env();
@@ -899,6 +1024,95 @@ mod oracle {
             std::fs::read_to_string(b.root.join("src/main.rs")).unwrap(),
             "fn main() { a(); }\n"
         );
+    }
+
+    /// Checkout of trunk with a directory external `ext` and a file external `fext` fetched by
+    /// svn, a separate checkout `nested`, local edits in all three and unversioned and ignored
+    /// items.
+    fn externals_wc(r: &Repo, name: &str) -> WcRef {
+        let wc = r.checkout(name);
+        let defs = r.base.join(format!("{name}-externals.txt"));
+        std::fs::write(&defs, "^/trunk/src ext\n^/trunk/README.md fext\n").unwrap();
+        r.svn(
+            &wc.root,
+            &[
+                "propset",
+                "-q",
+                "svn:externals",
+                "-F",
+                defs.to_str().unwrap(),
+                ".",
+            ],
+        );
+        r.svn(&wc.root, &["commit", "-q", "-m", "externals"]);
+        r.svn(&wc.root, &["update", "-q"]);
+        r.svn(
+            &wc.root,
+            &["checkout", "-q", &format!("{}/trunk", r.url), "nested"],
+        );
+        write(&wc.root, "ext/main.rs", "edited in the external\n");
+        write(
+            &wc.root,
+            "nested/README.md",
+            "edited in the nested checkout\n",
+        );
+        write(&wc.root, "fext", "edited file external\n");
+        write(&wc.root, "scratch.txt", "x\n");
+        write(&wc.root, "debug.o", "x\n");
+        wc
+    }
+
+    fn assert_externals_kept(r: &Repo, wc: &WcRef) {
+        let st = r.status(wc);
+        for line in ["X       ext", "M       ext/main.rs", "?       nested"] {
+            assert!(st.iter().any(|l| l == line), "{line:?} in {st:?}");
+        }
+        assert!(!st.iter().any(|l| l.contains("scratch.txt")), "{st:?}");
+        assert_eq!(
+            std::fs::read_to_string(wc.root.join("ext/main.rs")).unwrap(),
+            "edited in the external\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wc.root.join("nested/README.md")).unwrap(),
+            "edited in the nested checkout\n"
+        );
+        let nested = r.svn(&wc.root.join("nested"), &["status", "--ignore-externals"]);
+        assert!(
+            nested.lines().any(|l| l == "M       README.md"),
+            "nested checkout intact: {nested}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cleanup_removing_unversioned_keeps_svn_externals_and_nested_checkouts() {
+        let Some(r) = Repo::new() else { return };
+        let f = engine();
+        let eng: &dyn EngineFacade = &f.engine;
+        let wc = externals_wc(&r, "ext-cleanup");
+        eng.cleanup(&wc, &cleanup_req(&wc, true, true), &ctx())
+            .await
+            .expect("cleanup");
+        assert_externals_kept(&r, &wc);
+        assert!(!wc.root.join("debug.o").exists());
+        assert!(
+            r.status(&wc).iter().any(|l| l == "M   X   fext"),
+            "file external kept: {:?}",
+            r.status(&wc)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revert_removing_unversioned_keeps_svn_externals_and_nested_checkouts() {
+        let Some(r) = Repo::new() else { return };
+        let f = engine();
+        let eng: &dyn EngineFacade = &f.engine;
+        let wc = externals_wc(&r, "ext-revert");
+        eng.revert(&wc, &revert_req(&wc, &[""], Some(true)), &ctx())
+            .await
+            .expect("revert");
+        assert_externals_kept(&r, &wc);
+        assert!(wc.root.join("debug.o").exists(), "ignored items stay");
+        assert!(wc.root.join("fext").exists(), "file external kept");
     }
 
     trait TapSort {

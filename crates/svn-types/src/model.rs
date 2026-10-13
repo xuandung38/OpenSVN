@@ -171,6 +171,10 @@ pub enum NodeStatus {
     Incomplete,
     /// Excluded by sparse depth.
     Excluded,
+    /// Unversioned directory that holds an `svn:externals` working copy, or one of the
+    /// unversioned directories leading to one (`svn status` prints `X`). Never removable as an
+    /// unversioned item.
+    External,
 }
 
 /// Property status.
@@ -230,6 +234,8 @@ pub struct WcStatus {
     pub remote: Option<RemoteStatus>,
     /// Node is switched relative to its parent.
     pub switched: bool,
+    /// Node is a file external (`svn status` prints `X` in the switched column).
+    pub file_external: bool,
     /// Recorded depth.
     pub depth: Depth,
     /// Base revision.

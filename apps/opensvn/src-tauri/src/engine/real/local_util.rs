@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{PoisonError, RwLock};
 
 use svn_client::local::AddConfig;
-use svn_client::status::local_status;
+use svn_client::status::{ExternalPaths, is_wc_root_dir, local_status};
 use svn_client::{ClientCtx, StatusOptions};
 use svn_types::{
     CancelToken, Depth, ErrorCode, NodeStatus, RelPath, SvnError, WcStatus, safe_join,
@@ -200,6 +200,11 @@ pub(super) fn checked_ignore_pattern(pattern: &str) -> EngineResult<&str> {
 /// Unversioned (and, with `ignored`, ignored) items at or below `rel`, as status reports them:
 /// an unversioned directory is one item. An unversioned `rel` is reported as itself when it
 /// exists on disk.
+///
+/// Never returns what is not disposable: externals and the unversioned directories leading to
+/// them (status reports those as [`NodeStatus::External`]) and separate working copies checked
+/// out inside this one. svn's own `cleanup --remove-unversioned` deletes such a nested checkout;
+/// the app deliberately keeps it, since it may hold local edits nothing else knows about.
 pub(super) fn unversioned_items(
     db: &WcDb,
     env: &LocalEnv,
@@ -209,7 +214,11 @@ pub(super) fn unversioned_items(
 ) -> EngineResult<Vec<RelPath>> {
     if db.read_node(rel)?.is_none() {
         let abs = safe_join(db.wcroot(), rel)?;
-        return Ok(if unversioned && abs.symlink_metadata().is_ok() {
+        let disposable = unversioned
+            && abs.symlink_metadata().is_ok()
+            && !is_wc_root_dir(&abs)
+            && !ExternalPaths::for_path(db, rel)?.covers(rel);
+        return Ok(if disposable {
             vec![rel.clone()]
         } else {
             Vec::new()
@@ -223,40 +232,124 @@ pub(super) fn unversioned_items(
     };
     let found: Vec<WcStatus> =
         local_status(db, rel, &opts, Some(env.global_ignores()), &env.cancel)?;
-    Ok(found
-        .into_iter()
-        .filter(|s| {
-            (unversioned && s.text == NodeStatus::Unversioned)
-                || (ignored && s.text == NodeStatus::Ignored)
+    let mut out = Vec::new();
+    for s in found {
+        let wanted = (unversioned && s.text == NodeStatus::Unversioned)
+            || (ignored && s.text == NodeStatus::Ignored);
+        if wanted && !is_wc_root_dir(&safe_join(db.wcroot(), &s.path)?) {
+            out.push(s.path);
+        }
+    }
+    Ok(out)
+}
+
+/// Removes `dir` and its content except the working copies nested anywhere inside it (a
+/// directory holding an administrative directory is kept with all it contains, and so are the
+/// directories leading to it). Symlinks are removed, never followed. Returns true when something
+/// was kept.
+fn remove_dir_keeping_wcs(dir: &Path, cancel: &CancelToken) -> EngineResult<bool> {
+    cancel.check()?;
+    if is_wc_root_dir(dir) {
+        return Ok(true);
+    }
+    let mut kept = false;
+    let entries = fs::read_dir(dir)
+        .map_err(|e| SvnError::from_io(format!("read '{}'", dir.display()), &e))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| SvnError::from_io(format!("read '{}'", dir.display()), &e))?;
+        let path = entry.path();
+        let meta = match path.symlink_metadata() {
+            Ok(m) => m,
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) => return Err(SvnError::from_io(format!("'{}'", path.display()), &e)),
+        };
+        if meta.is_dir() {
+            kept |= remove_dir_keeping_wcs(&path, cancel)?;
+        } else {
+            remove_entry(&path, false)?;
+        }
+    }
+    if !kept {
+        remove_entry(dir, true)?;
+    }
+    Ok(kept)
+}
+
+/// Removes one file, symlink or (empty) directory; an entry that is already gone is fine.
+fn remove_entry(path: &Path, dir: bool) -> EngineResult<()> {
+    let removed = if dir {
+        fs::remove_dir(path)
+    } else {
+        // On Windows a directory symlink or junction is not a directory for `symlink_metadata`
+        // but must be removed with `remove_dir` (which never touches its target).
+        fs::remove_file(path).or_else(|e| {
+            if cfg!(windows) && e.kind() != ErrorKind::NotFound {
+                fs::remove_dir(path).map_err(|_| e)
+            } else {
+                Err(e)
+            }
         })
-        .map(|s| s.path)
-        .collect())
+    };
+    match removed {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(SvnError::from_io(
+            format!("remove '{}'", path.display()),
+            &e,
+        )),
+    }
 }
 
 /// Deletes the unversioned items `rels` from disk. Symlinks are removed, never followed; a
-/// directory is removed with its content. Items that are already gone are skipped.
+/// directory is removed with its content, except working copies nested inside it, which are
+/// kept. Items that are already gone are skipped.
+///
+/// One item that cannot be removed does not stop the others: every item is tried and the
+/// failures are reported together afterwards (the first one as the cause). Cancellation stops
+/// at once.
 pub(super) fn remove_items(db: &WcDb, cancel: &CancelToken, rels: &[RelPath]) -> EngineResult<()> {
+    let mut failures: Vec<(RelPath, SvnError)> = Vec::new();
     for rel in rels {
         cancel.check()?;
         if rel.is_root() {
             continue;
         }
-        let abs = safe_join(db.wcroot(), rel)?;
-        let meta = match abs.symlink_metadata() {
-            Ok(m) => m,
-            Err(e) if e.kind() == ErrorKind::NotFound => continue,
-            Err(e) => return Err(SvnError::from_io(format!("'{}'", abs.display()), &e)),
-        };
-        let removed = if meta.is_dir() {
-            fs::remove_dir_all(&abs)
-        } else {
-            fs::remove_file(&abs)
-        };
-        match removed {
+        match remove_item(db, cancel, rel) {
             Ok(()) => {}
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(SvnError::from_io(format!("remove '{}'", abs.display()), &e)),
+            Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
+            Err(e) => failures.push((rel.clone(), e)),
         }
     }
-    Ok(())
+    let Some((_, first)) = failures.first() else {
+        return Ok(());
+    };
+    let list: Vec<String> = failures
+        .iter()
+        .map(|(rel, e)| format!("'{rel}': {}", e.message))
+        .collect();
+    Err(SvnError::new(
+        first.code,
+        format!(
+            "{} of {} unversioned items could not be removed: {}",
+            failures.len(),
+            rels.len(),
+            list.join("; ")
+        ),
+    )
+    .with_child(first.clone()))
+}
+
+fn remove_item(db: &WcDb, cancel: &CancelToken, rel: &RelPath) -> EngineResult<()> {
+    let abs = safe_join(db.wcroot(), rel)?;
+    let meta = match abs.symlink_metadata() {
+        Ok(m) => m,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(SvnError::from_io(format!("'{}'", abs.display()), &e)),
+    };
+    if meta.is_dir() {
+        remove_dir_keeping_wcs(&abs, cancel).map(|_| ())
+    } else {
+        remove_entry(&abs, false)
+    }
 }
