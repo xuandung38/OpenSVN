@@ -20,7 +20,7 @@ use svn_types::{ErrorCode, NodeKind, RelPath, Result, SvnError, write_file_repla
 use svn_wc::WcDb;
 use svn_wc::db::{DbWorkingCopyOps, Presence};
 use svn_wc::pristine::Sha1Digest;
-use svn_wc::translate::{self, utc_offset_zero};
+use svn_wc::translate::{self, utc_offset_local};
 use svn_wc::workqueue::WorkingCopyOps;
 
 use crate::local::content::{detranslate_digest, stat_cache, translate_info};
@@ -52,7 +52,7 @@ pub fn file_commit_fixup(db: &WcDb, path: &RelPath) -> Result<()> {
         let current = fs::read(&abs)
             .map_err(|e| SvnError::from_io(format!("read '{}'", abs.display()), &e))?;
         let translated =
-            translate::to_working(&tinfo, &current, &info.keyword_context(), &utc_offset_zero)?;
+            translate::to_working(&tinfo, &current, &info.keyword_context(), &utc_offset_local)?;
         if let Cow::Owned(bytes) = translated
             && bytes != current
         {
