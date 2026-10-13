@@ -218,6 +218,14 @@ impl Walker<'_> {
         Ok(())
     }
 
+    /// The child is a directory: by its working node when versioned, else on disk.
+    fn child_is_dir(&self, child: &RelPath, versioned: bool) -> Result<bool> {
+        if versioned && let Some(n) = self.db.read_node(child)? {
+            return Ok(n.kind == NodeKind::Dir);
+        }
+        Ok(fs::symlink_metadata(abs_path(self.db, child)?).is_ok_and(|m| m.is_dir()))
+    }
+
     fn walk(&mut self, rel: &RelPath, depth: Depth) -> Result<()> {
         self.cancel.check()?;
         let Some(cur) = self.db.read_node(rel)? else {
@@ -256,6 +264,10 @@ impl Walker<'_> {
         let mut local_ignores: Option<Vec<String>> = None;
         for name in names {
             let child = join_rel(rel, &RelPath::new(&name)?)?;
+            if depth == Depth::Files && self.child_is_dir(&child, versioned.contains(&name))? {
+                // `--depth files`: subdirectories are not part of the status.
+                continue;
+            }
             if versioned.contains(&name) {
                 // Below `infinity` the children are listed but not descended into.
                 let next = if depth == Depth::Infinity {

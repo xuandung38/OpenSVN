@@ -40,7 +40,11 @@ fn letters(s: &WcStatus) -> String {
 
 /// `svn status` lines reduced to text, property and tree-conflict columns plus the path.
 fn svn_letters(oracle: &opensvn_svn_oracle::Oracle, wc: &Path) -> Vec<String> {
-    let mut v: Vec<String> = svn_status(oracle, wc, &[])
+    svn_letters_with(oracle, wc, &[])
+}
+
+fn svn_letters_with(oracle: &opensvn_svn_oracle::Oracle, wc: &Path, extra: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = svn_status(oracle, wc, extra)
         .lines()
         .filter(|l| {
             // Tree-conflict detail lines, the summary, and the changelist group headers
@@ -61,7 +65,15 @@ fn svn_letters(oracle: &opensvn_svn_oracle::Oracle, wc: &Path) -> Vec<String> {
 }
 
 async fn our_letters(wc: &Path) -> Vec<String> {
-    let mut v: Vec<String> = status(&ctx(), wc, &StatusOptions::default(), &CancelToken::new())
+    our_letters_at(wc, Depth::Infinity).await
+}
+
+async fn our_letters_at(wc: &Path, depth: Depth) -> Vec<String> {
+    let opts = StatusOptions {
+        depth,
+        ..StatusOptions::default()
+    };
+    let mut v: Vec<String> = status(&ctx(), wc, &opts, &CancelToken::new())
         .await
         .expect("status")
         .iter()
@@ -215,4 +227,24 @@ async fn status_and_diff_after_conflicting_update_match_svn() {
         .await
         .expect("diff");
     assert_eq!(String::from_utf8_lossy(&got), expected);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_depth_matches_svn_status_depth() {
+    let Some((oracle, _repo, _sb, ours)) = local_changes().await else {
+        return;
+    };
+    write(&ours.join("newdir/inner.txt"), "unversioned dir\n");
+    for (depth, word) in [
+        (Depth::Empty, "empty"),
+        (Depth::Files, "files"),
+        (Depth::Immediates, "immediates"),
+        (Depth::Infinity, "infinity"),
+    ] {
+        assert_eq!(
+            our_letters_at(&ours, depth).await,
+            svn_letters_with(&oracle, &ours, &["--depth", word]),
+            "--depth {word}"
+        );
+    }
 }

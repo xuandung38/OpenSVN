@@ -10,11 +10,11 @@
 //! Keep the closure short and free of network I/O, like any [`WcDb::with_write`] closure.
 
 use rusqlite::{Connection, params};
-use svn_types::{ErrorCode, NodeKind, RelPath, Result, SvnError};
+use svn_types::{Depth, ErrorCode, NodeKind, RelPath, Result, SvnError};
 
 use super::actual;
 use super::misc::LockInfo;
-use super::nodes::{self, Node, Props, kind_word, parent_text, relpath_depth};
+use super::nodes::{self, Node, Presence, Props, kind_word, parent_text, relpath_depth};
 use super::ops::{self, BaseNode, CommitInfo, scope_sql};
 use super::{WcDb, sql_err};
 use crate::conflicts::{Conflict, ConflictSkel, OperationInfo};
@@ -124,46 +124,81 @@ impl WcTxn<'_> {
         Ok(())
     }
 
-    /// Sets the BASE revision of the subtree at `root` to `rev` (`bump_revisions_post_update`),
-    /// except inside the `skipped` subtrees, which keep their revisions.
+    /// [`WcTxn::bump_revisions_post_update`] at depth infinity.
     pub fn bump_revisions(&self, root: &RelPath, rev: u64, skipped: &[RelPath]) -> Result<()> {
-        let scope = scope_sql();
-        let mut kept: Vec<(String, i64)> = Vec::new();
-        for s in skipped {
-            let mut stmt = self
-                .conn
-                .prepare(&format!(
-                    "SELECT local_relpath, revision FROM nodes WHERE wc_id = ?1 AND op_depth = 0 \
-                     AND revision IS NOT NULL AND {scope}"
-                ))
-                .map_err(sql_err)?;
-            let rows = stmt
-                .query_map(params![self.wc_id, s.as_str()], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })
-                .map_err(sql_err)?;
-            for row in rows {
-                kept.push(row.map_err(sql_err)?);
-            }
+        self.bump_revisions_post_update(root, rev, Depth::Infinity, skipped)
+    }
+
+    /// Moves the BASE tree at `root` to `rev` after an update drive, like svn's
+    /// `bump_revisions_post_update`: nodes within `depth` of `root` get the new revision, except
+    /// the `skipped` subtrees (tree conflicts), which keep theirs. Below the root, a
+    /// `not-present` node that the drive did not re-add is gone at `rev` and its row is removed,
+    /// as is a `server-excluded` node at another revision. The root itself keeps such a row (an
+    /// update target deleted on the server stays a `not-present` marker).
+    pub fn bump_revisions_post_update(
+        &self,
+        root: &RelPath,
+        rev: u64,
+        depth: Depth,
+        skipped: &[RelPath],
+    ) -> Result<()> {
+        let depth = match depth {
+            Depth::Unknown | Depth::Exclude => Depth::Infinity,
+            d => d,
+        };
+        self.bump_node(root, to_i64(rev)?, depth, skipped, true, false)
+    }
+
+    fn bump_node(
+        &self,
+        path: &RelPath,
+        rev: i64,
+        depth: Depth,
+        skipped: &[RelPath],
+        is_root: bool,
+        skip_when_dir: bool,
+    ) -> Result<()> {
+        if skipped.contains(path) {
+            return Ok(());
         }
-        self.conn
-            .execute(
-                &format!(
-                    "UPDATE nodes SET revision = ?3 WHERE wc_id = ?1 AND op_depth = 0 \
-                     AND presence IN ('normal', 'incomplete', 'not-present') \
-                     AND revision IS NOT NULL AND revision != ?3 AND {scope}"
-                ),
-                params![self.wc_id, root.as_str(), to_i64(rev)?],
-            )
-            .map_err(sql_err)?;
-        for (path, old) in kept {
+        let Some(node) = self.read_base(path)? else {
+            return Ok(());
+        };
+        if skip_when_dir && node.kind == NodeKind::Dir {
+            return Ok(());
+        }
+        let old_rev = node.revision.and_then(|r| i64::try_from(r).ok());
+        if !is_root
+            && (node.presence == Presence::NotPresent
+                || (node.presence == Presence::ServerExcluded && old_rev != Some(rev)))
+        {
+            return ops::base_remove(self.conn, self.wc_id, path);
+        }
+        if old_rev.is_some() && old_rev != Some(rev) {
             self.conn
                 .execute(
                     "UPDATE nodes SET revision = ?3 WHERE wc_id = ?1 AND local_relpath = ?2 \
                      AND op_depth = 0",
-                    params![self.wc_id, path, old],
+                    params![self.wc_id, path.as_str(), rev],
                 )
                 .map_err(sql_err)?;
+        }
+        if depth == Depth::Empty
+            || node.kind != NodeKind::Dir
+            || matches!(
+                node.presence,
+                Presence::ServerExcluded | Presence::Excluded | Presence::NotPresent
+            )
+        {
+            return Ok(());
+        }
+        let below = if matches!(depth, Depth::Immediates | Depth::Files) {
+            Depth::Empty
+        } else {
+            depth
+        };
+        for child in self.base_children(path)? {
+            self.bump_node(&child, rev, below, skipped, false, depth == Depth::Files)?;
         }
         Ok(())
     }
@@ -220,14 +255,54 @@ impl WcTxn<'_> {
         Ok(())
     }
 
+    /// Paths of the BASE children of `path`.
+    fn base_children(&self, path: &RelPath) -> Result<Vec<RelPath>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT local_relpath FROM nodes WHERE wc_id = ?1 AND parent_relpath = ?2 \
+                 AND op_depth = 0 ORDER BY local_relpath",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![self.wc_id, path.as_str()], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(RelPath::new(&row.map_err(sql_err)?)?);
+        }
+        Ok(out)
+    }
+
     // ---- working layers -----------------------------------------------------------------
 
     /// Turns the BASE subtree at `path` into a local copy of itself (a working layer at the
     /// depth of `path`), as svn does when an incoming delete meets local modifications: the
     /// content stays versioned as an addition with history and the tree conflict decides what
     /// happens next.
+    ///
+    /// Fails without changing anything when a working row already exists at that depth in the
+    /// subtree (a local replacement must never be overwritten).
     pub fn convert_base_to_copy(&self, path: &RelPath) -> Result<()> {
         let scope = scope_sql();
+        let taken: i64 = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM nodes WHERE wc_id = ?1 AND op_depth = ?3 AND {scope}"
+                ),
+                params![self.wc_id, path.as_str(), relpath_depth(path)],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+        if taken > 0 {
+            return Err(SvnError::new(
+                ErrorCode::Internal,
+                format!("cannot keep '{path}' as a local copy: a working layer already exists"),
+            ));
+        }
         self.conn
             .execute(
                 &format!(
@@ -256,6 +331,17 @@ impl WcTxn<'_> {
     /// Adds a `base-deleted` working row over the BASE node at `path`: the node exists in the
     /// repository, but what is on disk is not part of it (an obstruction).
     pub fn mark_base_deleted(&self, path: &RelPath, kind: NodeKind) -> Result<()> {
+        self.mark_base_deleted_at(path, kind, relpath_depth(path))
+    }
+
+    /// Like [`WcTxn::mark_base_deleted`], with the working row at `op_depth`: the nodes below
+    /// an obstructed directory are shadowed by a layer rooted at that directory.
+    pub fn mark_base_deleted_at(
+        &self,
+        path: &RelPath,
+        kind: NodeKind,
+        op_depth: u32,
+    ) -> Result<()> {
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
@@ -263,7 +349,7 @@ impl WcTxn<'_> {
                 params![
                     self.wc_id,
                     path.as_str(),
-                    relpath_depth(path),
+                    op_depth,
                     parent_text(path),
                     kind_word(kind)
                 ],
