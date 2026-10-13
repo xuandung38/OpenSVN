@@ -29,14 +29,23 @@ pub struct External {
     pub def_local_relpath: RelPath,
     /// Repository relative path as written in the definition.
     pub def_repos_relpath: String,
-    /// Operational (peg) revision text when the definition pins one.
-    pub def_operational_revision: Option<String>,
-    /// Node revision text when the definition pins one.
-    pub def_revision: Option<String>,
+    /// Operational (peg) revision when the definition pins one.
+    pub def_operational_revision: Option<u64>,
+    /// Node revision when the definition pins one.
+    pub def_revision: Option<u64>,
 }
 
 const COLUMNS: &str = "e.local_relpath, e.parent_relpath, r.root, r.uuid, e.presence, e.kind, \
     e.def_local_relpath, e.def_repos_relpath, e.def_operational_revision, e.def_revision";
+
+/// Parses a stored revision (svn writes the decimal text of the revision number).
+fn revision(text: Option<String>) -> Result<Option<u64>> {
+    text.map(|t| {
+        t.parse::<u64>()
+            .map_err(|_| corrupt(format!("external revision {t:?} is not a number")))
+    })
+    .transpose()
+}
 
 fn from_row(r: &Row<'_>) -> Result<External> {
     let g = sql_err;
@@ -47,6 +56,9 @@ fn from_row(r: &Row<'_>) -> Result<External> {
     let kind = match r.get::<_, String>(5).map_err(g)?.as_str() {
         "file" => NodeKind::File,
         "dir" => NodeKind::Dir,
+        // Written by the 1.6 -> 1.7 upgrade and by `svn_wc__db_external_add_symlink`.
+        "symlink" => NodeKind::Symlink,
+        "unknown" => NodeKind::Unknown,
         other => return Err(corrupt(format!("unknown external kind {other:?}"))),
     };
     Ok(External {
@@ -58,8 +70,8 @@ fn from_row(r: &Row<'_>) -> Result<External> {
         kind,
         def_local_relpath: rel(r.get(6).map_err(g)?)?,
         def_repos_relpath: r.get(7).map_err(g)?,
-        def_operational_revision: r.get(8).map_err(g)?,
-        def_revision: r.get(9).map_err(g)?,
+        def_operational_revision: revision(r.get(8).map_err(g)?)?,
+        def_revision: revision(r.get(9).map_err(g)?)?,
     })
 }
 
