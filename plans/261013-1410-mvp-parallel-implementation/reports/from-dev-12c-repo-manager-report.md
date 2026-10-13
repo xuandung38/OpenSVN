@@ -131,3 +131,28 @@ Date: 2026-10-13 · Branch `feat/12c-repo-manager` (from `feat/12b-fe-wc-m1`, PR
 | `pnpm build` + check-dist | pass |
 
 Not verified: Windows junctions or symlinks on a real Windows machine. The canonical `starts_with` check covers them in principle, but the tests are Unix-only.
+
+## Round 3: merge of origin/main (#62 P08 M2, #69, #82, #80)
+
+Two merge commits (main at `9129c5f`, then `437bbdc`). Both sides' behavior is kept; overlapping pieces are unified:
+
+- **Menu.** One native menu: main's spec-driven `menu.rs`. The PR's own menu builder is gone. Added `file.switch-repo` ("Switch repository…", Mod+T). Only ids of the spec emit `menu://<id>` (`event_for`), so native items and unknown ids emit nothing (the PR's rule). A failed install is logged, not fatal (the PR's rule). The UI's `MENU_EVENTS` / `MENU_ACTIONS` now use the spec ids (`file.checkout`, `file.add-wc`, `file.switch-repo`, `app.settings`, `wc.update`, ...) and keep the menu/keydown echo suppression. A Rust test reads `src/ipc/events.ts` and fails if the UI subscribes to an id that the menu does not have.
+- **Invisible/bidi characters.** One rule: `display_text::is_deceptive`. It is used for program confirmation, checkout folder names, picked names and notifications. `programs::is_deceptive` is gone. Added U+0600–0605, U+06DD, U+070F, U+08E2, U+110BD, U+110CD, U+13430–1343F and U+1D173–1D17A. U+2028/2029 and the Hangul fillers U+115F, U+1160, U+3164 and U+FFA0 were already in main's set. The FE `FORMAT_CHARS` mirrors the same set.
+- **Reveal.** One path: `os_integration::reveal_in_os` → `reveal_target`. It refuses a symlink in any component, checks canonical containment, passes the canonical path to the file manager, and returns `path-not-found` for a missing item. The `os_shell` module, `FolderRevealer` and the `revealer` field of `AppState`/`AppDeps` are removed. `SystemOpener::reveal` now uses `tauri_plugin_opener::reveal_item_in_dir` instead of `open -R` / `explorer /select,` / `xdg-open`.
+- **AppState.** Main's `opener`, `notifier`, `menu`, `updates` and `secrets` are kept. There is no separate revealer.
+- **`checkout_root_choose`.** Both sides added it. The PR's version is kept, because `general.checkoutRoot` is not patchable. Main's duplicate command, registration and capability entry are dropped. Main's test for it passes against the PR's version.
+- **Folder names refused by `RelPath::from_server`.** The backend message is now "the name cannot be used for a folder on every supported system". It no longer says "reserved by Windows".
+- **Main breakage fixed on the way:** `engine/real/tests/remote_tests.rs` from #80 had an unbiased `tokio::select!`, which #82's `every_select_in_the_app_is_biased` check refuses. Added `biased;`.
+
+### Gates (round 3)
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo clippy -p opensvn --features real-engine -- -D warnings` | **fails on main itself**: `RealEngine` lacks `ensure_authenticated` (from #69) and has the old `copy_location` arity. Neither file was touched by this PR or the merge |
+| `cargo test -p opensvn -p opensvn-ipc -p svn-types` | 317 pass, 0 fail (opensvn lib 244) |
+| `cargo test -p opensvn --features real-engine` | not run (does not compile on main, see above) |
+| `pnpm gen:ipc` | no drift |
+| `pnpm lint` / `typecheck` / `lint:safety` | pass / pass / pass |
+| `pnpm test` | 194/194 pass (26 files) |
+| `pnpm build` + check-dist | pass |
