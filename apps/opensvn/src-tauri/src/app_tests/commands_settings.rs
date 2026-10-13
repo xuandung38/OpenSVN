@@ -122,6 +122,8 @@ async fn checkout_waits_for_sign_in_through_the_prompt_events() {
         opener: f.opener.clone(),
         notifier: f.notifier.clone(),
         menu: f.menu.clone(),
+        updates: f.updates.clone(),
+        secrets: f.secrets.clone(),
         status_timing: Default::default(),
     })
     .unwrap();
@@ -270,4 +272,53 @@ async fn diagnostics_preview_then_export_through_a_native_save_dialog() {
             .is_err(),
         "single use"
     );
+}
+
+#[tokio::test]
+async fn updater_token_is_write_only_and_only_sent_to_the_update_check() {
+    let f = Fixture::new(Duration::ZERO).await;
+    assert!(!commands::updater_token_status(f.state()).await.unwrap());
+    for bad in ["", "   ", "line\nbreak", &"x".repeat(600)] {
+        assert!(
+            commands::updater_token_set(f.state(), bad.to_owned().into())
+                .await
+                .is_err(),
+            "{bad:?}"
+        );
+    }
+    commands::updater_token_set(f.state(), " ghp_secret123 ".to_owned().into())
+        .await
+        .unwrap();
+    assert!(commands::updater_token_status(f.state()).await.unwrap());
+    // the token is not part of the settings the UI can read
+    let settings =
+        serde_json::to_string(&commands::settings_get(f.state()).await.unwrap()).unwrap();
+    assert!(!settings.contains("ghp_secret123"));
+
+    *f.updates.available.lock().unwrap() = Some(crate::updater::UpdateInfo {
+        version: "1.2.3".into(),
+        notes: None,
+    });
+    let found = commands::update_check(f.state()).await.unwrap().unwrap();
+    assert_eq!(found.version, "1.2.3");
+    assert_eq!(
+        f.updates.tokens.lock().unwrap().clone(),
+        vec![Some("ghp_secret123".to_owned())]
+    );
+
+    commands::updater_token_clear(f.state()).await.unwrap();
+    assert!(!commands::updater_token_status(f.state()).await.unwrap());
+    commands::update_check(f.state()).await.unwrap();
+    assert_eq!(f.updates.tokens.lock().unwrap().last().unwrap(), &None);
+}
+
+#[tokio::test]
+async fn install_requires_a_prior_check() {
+    let f = Fixture::new(Duration::ZERO).await;
+    assert!(commands::update_install(f.state()).await.is_err());
+    *f.updates.available.lock().unwrap() = Some(crate::updater::UpdateInfo {
+        version: "2.0.0".into(),
+        notes: None,
+    });
+    commands::update_install(f.state()).await.unwrap();
 }

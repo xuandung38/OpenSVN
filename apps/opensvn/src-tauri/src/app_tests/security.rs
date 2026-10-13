@@ -196,6 +196,8 @@ fn ipc_app(f: &Fixture) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRu
         opener: f.opener.clone(),
         notifier: f.notifier.clone(),
         menu: f.menu.clone(),
+        updates: f.updates.clone(),
+        secrets: f.secrets.clone(),
     })
     .unwrap();
     app.manage(state);
@@ -243,6 +245,9 @@ async fn ipc_allows_listed_commands_and_rejects_everything_else() {
     // plugin commands that were never registered
     for cmd in [
         "plugin:shell|execute",
+        "plugin:updater|check",
+        "plugin:updater|download_and_install",
+        "plugin:notification|notify",
         "plugin:fs|read_file",
         "plugin:opener|open_path",
     ] {

@@ -83,6 +83,21 @@ export const commands = {
 	displayName: string,
 	kind: GrantKind,
 } | null, AppError>(__TAURI_INVOKE("path_pick", { request })),
+	/**  Stores the GitHub read token used for app updates (write-only: it is never returned). */
+	updaterTokenSet: (token: SecretText) => typedError<null, AppError>(__TAURI_INVOKE("updater_token_set", { token })),
+	/**  Removes the stored update token. */
+	updaterTokenClear: () => typedError<null, AppError>(__TAURI_INVOKE("updater_token_clear")),
+	/**  Whether an update token is stored (the value itself is never readable). */
+	updaterTokenStatus: () => typedError<boolean, AppError>(__TAURI_INVOKE("updater_token_status")),
+	/**  Looks for a newer app version. User initiated; there is no background check. */
+	updateCheck: () => typedError<{
+	/**  Version string. */
+	version: string,
+	/**  Release notes, if any. */
+	notes: string | null,
+} | null, AppError>(__TAURI_INVOKE("update_check")),
+	/**  Installs the update found by `update_check` and restarts the app. */
+	updateInstall: () => typedError<null, AppError>(__TAURI_INVOKE("update_install")),
 	/**
 	 *  Builds the diagnostics bundle in memory and returns every file's text for review. Nothing is
 	 *  written yet.
@@ -798,6 +813,14 @@ export type TrustedCertKey = {
 export type UnlockRequest = {
 	targets: LockTargets,
 	breakLock: boolean | null,
+};
+
+/**  A newer version found by a check. */
+export type UpdateInfo = {
+	/**  Version string. */
+	version: string,
+	/**  Release notes, if any. */
+	notes: string | null,
 };
 
 export type UpdateRequest = {

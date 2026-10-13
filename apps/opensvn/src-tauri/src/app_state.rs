@@ -19,6 +19,7 @@ use crate::path_grants::{PathGrants, PathPicker};
 use crate::programs::{ProgramPicker, ProgramService};
 use crate::settings::{SettingsService, system_locale};
 use crate::status::{IncomingPoller, PollerDeps, StatusPublisher, StatusService, StatusTiming};
+use crate::updater::{SecretStore, UpdateControl};
 use crate::wc::{ResolvedWc, WcRegistry};
 
 /// Everything needed to build the state; tests substitute the engine, events and dialogs.
@@ -41,6 +42,10 @@ pub struct AppDeps {
     pub notifier: Arc<dyn Notifier>,
     /// Native menu control.
     pub menu: Arc<dyn MenuControl>,
+    /// App updates.
+    pub updates: Arc<dyn UpdateControl>,
+    /// Credential store (updater token).
+    pub secrets: Arc<dyn SecretStore>,
 }
 
 /// Services shared by all commands. Managed by Tauri and injected as `State<AppState>`.
@@ -79,6 +84,10 @@ pub struct AppState {
     pub notifier: Arc<dyn Notifier>,
     /// Native menu control.
     pub menu: Arc<dyn MenuControl>,
+    /// App updates.
+    pub updates: Arc<dyn UpdateControl>,
+    /// Credential store (updater token).
+    pub secrets: Arc<dyn SecretStore>,
     /// Serializes native dialogs (a second request cannot stack dialogs).
     pub path_dialog_open: tokio::sync::Mutex<()>,
     /// Program settings (native pick and confirm).
@@ -112,6 +121,8 @@ impl AppState {
             opener: deps.opener,
             notifier: deps.notifier,
             menu: deps.menu,
+            updates: deps.updates,
+            secrets: deps.secrets,
             poller: Mutex::new(None),
             auth,
             watchers,
