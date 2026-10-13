@@ -1,0 +1,10 @@
+---
+source: crates/svn-protocol/tests/request_snapshots.rs
+expression: "render(&unlock_request(&u, &p, \"<opaquelocktoken:1234>\", true).unwrap())"
+---
+UNLOCK http://svn.test.local/svn/repo/trunk/a.txt
+Lock-Token: <opaquelocktoken:1234>
+X-SVN-Options: lock-break
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
