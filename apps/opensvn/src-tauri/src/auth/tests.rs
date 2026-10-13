@@ -211,6 +211,16 @@ async fn decisions_that_do_not_fit_the_failure_are_rejected_server_side() {
         (CertFailure::UnknownIssuer, IpcDecision::ReplacePin),
         (CertFailure::SelfSigned, IpcDecision::ReplacePin),
         (CertFailure::Expired, IpcDecision::ReplacePin),
+        (CertFailure::Expired, IpcDecision::AcceptOnce),
+        (CertFailure::HostnameMismatch, IpcDecision::AcceptOnce),
+        (CertFailure::Revoked, IpcDecision::AcceptOnce),
+        (
+            CertFailure::Changed {
+                old_sha256: [1; 32],
+                new_sha256: [0xab; 32],
+            },
+            IpcDecision::AcceptOnce,
+        ),
     ];
     for (asked, (failure, decision)) in cases.into_iter().enumerate() {
         let b = broker.clone();
@@ -279,8 +289,8 @@ async fn replace_pin_swaps_the_pinned_fingerprint_for_a_changed_certificate_only
         .unwrap();
     assert_eq!(
         task.await.unwrap(),
-        CertDecision::AcceptOnce,
-        "this connection proceeds once"
+        CertDecision::ReplacePin,
+        "the transport receives ReplacePin, the only decision it accepts for a changed certificate"
     );
     assert!(
         db.cert_is_trusted("svn.test.local", 8443, &"ab".repeat(32))
@@ -368,4 +378,55 @@ async fn offered_methods_reach_the_prompt_and_sso_needs_negotiate_to_be_offered(
         .respond(&prompt.request_id, AuthResponse::Negotiate)
         .unwrap();
     assert!(task.await.unwrap().is_none());
+}
+
+#[test]
+fn ipc_cert_decisions_map_to_transport_decisions_the_transport_accepts() {
+    use super::broker::map_cert_decision;
+    let changed = CertFailure::Changed {
+        old_sha256: [1; 32],
+        new_sha256: [2; 32],
+    };
+    let failures = [
+        CertFailure::UnknownIssuer,
+        CertFailure::SelfSigned,
+        CertFailure::Expired,
+        CertFailure::NotYetValid,
+        CertFailure::HostnameMismatch,
+        CertFailure::Revoked,
+        CertFailure::Other("x".into()),
+        changed.clone(),
+    ];
+    let all = [
+        IpcDecision::Reject,
+        IpcDecision::AcceptOnce,
+        IpcDecision::AcceptAlways,
+        IpcDecision::ReplacePin,
+    ];
+    for f in &failures {
+        for d in all {
+            let mapped = map_cert_decision(d, f);
+            assert!(mapped.is_valid_for(f), "{d:?} on {f:?} gave {mapped:?}");
+        }
+    }
+    assert_eq!(
+        map_cert_decision(IpcDecision::ReplacePin, &changed),
+        CertDecision::ReplacePin
+    );
+    assert_eq!(
+        map_cert_decision(IpcDecision::AcceptOnce, &CertFailure::SelfSigned),
+        CertDecision::AcceptOnce
+    );
+    assert_eq!(
+        map_cert_decision(IpcDecision::AcceptAlways, &CertFailure::UnknownIssuer),
+        CertDecision::AcceptAlways
+    );
+    assert_eq!(
+        map_cert_decision(IpcDecision::AcceptOnce, &changed),
+        CertDecision::Reject
+    );
+    assert_eq!(
+        map_cert_decision(IpcDecision::ReplacePin, &CertFailure::SelfSigned),
+        CertDecision::Reject
+    );
 }
