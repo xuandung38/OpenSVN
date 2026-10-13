@@ -4699,10 +4699,12 @@ dependencies = [
  "proptest",
  "rusqlite",
  "sha1",
+ "svn-diff",
  "svn-types",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]
