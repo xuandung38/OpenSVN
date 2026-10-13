@@ -3,6 +3,7 @@
 
 mod admin_name;
 mod cancel;
+mod display_path;
 mod editor;
 mod error;
 mod ids;
@@ -12,6 +13,7 @@ mod rel_path;
 mod safe_join;
 
 pub use cancel::{CancelToken, Cancelled};
+pub use display_path::RepoDisplayPath;
 pub use editor::{DeltaEditor, Reporter, TxDeltaOp, TxDeltaWindow, WindowSink};
 pub use error::{ErrorCode, Result, SvnError};
 pub use ids::{DirId, FileId, OriginKey, RepoUrl, Revnum, Timestamp};

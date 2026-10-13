@@ -126,3 +126,19 @@ test("string / unknown rejections become AppError internal with a non-empty mess
     unwrap(Promise.resolve({ status: "error" as const, error: app as never })),
   ).rejects.toMatchObject({ appError: app });
 });
+
+test("read-only operations do not refetch repository views, writing ones do", async () => {
+  const qc = new QueryClient();
+  const bus = createEventBus(mockAdapter, qc);
+  await bus.start();
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  mockEmit("op://started", { opId: "b1", kind: "blame", wcId: null, title: "Blame" });
+  mockEmit("op://finished", { opId: "b1", result: { kind: "done" } });
+  expect(invalidate).not.toHaveBeenCalledWith({ queryKey: queryKeys.repoRoot });
+  expect(invalidate).not.toHaveBeenCalledWith({ queryKey: queryKeys.logRoot });
+  mockEmit("op://started", { opId: "e1", kind: "remote-edit", wcId: null, title: "Edit" });
+  mockEmit("op://finished", { opId: "e1", result: { kind: "done" } });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.repoRoot });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.logRoot });
+  bus.stop();
+});

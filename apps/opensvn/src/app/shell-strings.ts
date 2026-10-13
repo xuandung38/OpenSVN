@@ -1,0 +1,25 @@
+import { defineStrings } from "../lib/i18n/i18n";
+
+/** Strings of the main-window tab bar (the rest of the shell is localised in the i18n pass). */
+export const shellStrings = defineStrings({
+  en: {
+    views: "Views",
+    changes: "Changes",
+    history: "History",
+    browse: "Browse",
+    selectFile: "Select a file",
+    selectFileHint: "Pick a changed file in the sidebar to see its diff here.",
+    noWorkingCopy: "No working copy",
+    noWorkingCopyHint: "Add a working copy to see its history and browse the repository.",
+  },
+  vi: {
+    views: "Chế độ xem",
+    changes: "Thay đổi",
+    history: "Lịch sử",
+    browse: "Duyệt",
+    selectFile: "Chọn một file",
+    selectFileHint: "Chọn file đã thay đổi ở thanh bên để xem diff tại đây.",
+    noWorkingCopy: "Chưa có working copy",
+    noWorkingCopyHint: "Thêm working copy để xem lịch sử và duyệt repository.",
+  },
+});
