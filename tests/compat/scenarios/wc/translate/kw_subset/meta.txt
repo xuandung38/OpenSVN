@@ -1,0 +1,10 @@
+svn_version=1.15.0
+prop.svn:keywords=Rev Author
+rev=16
+author=alice
+date_micros=1791884708222729
+utc_offset_secs=0
+url=file:///tmp/opensvn-golden/repo/kw_subset
+root=file:///tmp/opensvn-golden/repo
+tz=UTC
+path=kw_subset

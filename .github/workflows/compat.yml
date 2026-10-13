@@ -1,0 +1,93 @@
+name: compat
+
+# Builds the pinned svn 1.14.5 / 1.15.0 server and client images, loads fixtures, and runs the
+# harness self-check scenarios (svn vs svn). Engine scenarios from other work packages are
+# added to tests/compat/scenarios/ and picked up by `cargo xtask compat run` once they exist.
+on:
+  pull_request:
+    paths:
+      - "docker/**"
+      - "fixtures/**"
+      - "xtask/**"
+      - "tests/compat/**"
+      - "crates/svn-protocol/**"
+      - "crates/svn-ra/**"
+      - "crates/svn-wc/**"
+      - "crates/svn-client/**"
+      - ".github/workflows/compat.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - "fixtures/**"
+      - "xtask/**"
+      - "tests/compat/**"
+      - "crates/svn-protocol/**"
+      - "crates/svn-ra/**"
+      - "crates/svn-wc/**"
+      - "crates/svn-client/**"
+      - ".github/workflows/compat.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compat:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fixtures contain no real hosts or credentials
+        run: fixtures/check-no-real-hosts.sh
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Layer cache in the GitHub Actions cache (no secrets needed). A local `source` makes bake
+      # run from docker/ (like `cd docker && docker buildx bake -f compose.yml`), so the compose
+      # contexts `./svn-server` / `./svn-client` resolve there; the default git context does not.
+      # Pull requests only read the cache; main refreshes it. A cache outage never fails the job.
+      - name: Build images
+        uses: docker/bake-action@018cb6412ab401ebaa809aa5f85966b74628600f # v7.4.0
+        with:
+          source: ./docker
+          files: ./compose.yml
+          load: true
+          set: |
+            *.cache-from=type=gha,scope=compat-images
+            ${{ github.event_name == 'push' && '*.cache-to=type=gha,scope=compat-images,mode=max,ignore-error=true' || '' }}
+
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Unit tests (no Docker)
+        run: cargo test -p opensvn-compat -p xtask --locked
+
+      - name: Start compat environment
+        run: cargo xtask compat up --no-build
+
+      - name: Create fixture repos (verifies pinned dump hashes)
+        run: cargo xtask compat fixtures
+
+      - name: Harness self-check (svn15 vs svn15, svn14 vs svn15)
+        run: cargo xtask compat run
+
+      - name: Docker-backed tests
+        run: cargo test -p opensvn-compat --locked -- --ignored
+
+      - name: Server logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker/compose.yml -p opensvn-compat ps -a
+          docker compose -f docker/compose.yml -p opensvn-compat logs --no-color --tail 200 || true
+
+      - name: Tear down
+        if: always()
+        run: cargo xtask compat down
