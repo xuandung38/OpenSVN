@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-repo-cat"
+description = "Enables the repo_cat command without any pre-configured scope."
+commands.allow = ["repo_cat"]
+
+[[permission]]
+identifier = "deny-repo-cat"
+description = "Denies the repo_cat command without any pre-configured scope."
+commands.deny = ["repo_cat"]
