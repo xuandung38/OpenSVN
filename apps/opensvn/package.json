@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build && node scripts/check-dist.mjs",
+    "lint": "biome check .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "tauri": "tauri",

@@ -1,0 +1,91 @@
+import { createContext, type ReactNode, useContext, useMemo, useState } from "react";
+import type { FileStatus, WorkingCopy } from "../../ipc/bindings";
+
+/** Dialogs and panes the working-copy screens can open. Paths are working-copy relative. */
+export type WcDialog =
+  | { kind: "checkout" }
+  | { kind: "discard"; paths: string[]; all: boolean }
+  | { kind: "ignore"; path: string }
+  | { kind: "rename"; path: string }
+  | { kind: "delete"; paths: string[] }
+  | { kind: "lock"; mode: "lock" | "unlock"; paths: string[] }
+  | { kind: "changelist"; paths: string[] }
+  | { kind: "update-rev" }
+  | { kind: "switch" }
+  | { kind: "cleanup" }
+  | { kind: "resolver"; path: string | null };
+
+export interface WcLinks {
+  /** Show the history of a working-copy path (History tab). */
+  showLog?: (path: string) => void;
+  /** Show blame of a working-copy path at its base revision (Browse tab). */
+  blame?: (path: string) => void;
+}
+
+export interface WcSession {
+  wc: WorkingCopy | null;
+  /** Every status entry of the working copy (including `normal` ones). */
+  files: readonly FileStatus[];
+  selected: string | null;
+  setSelected: (path: string | null) => void;
+  /** Paths ticked for the next commit. */
+  checked: ReadonlySet<string>;
+  setChecked: (next: ReadonlySet<string>) => void;
+  dialog: WcDialog | null;
+  openDialog: (d: WcDialog) => void;
+  closeDialog: () => void;
+  links: WcLinks;
+}
+
+const SessionContext = createContext<WcSession | null>(null);
+
+/**
+ * Selection, commit ticks and the open dialog of the current working copy. They reset when the
+ * working copy changes (without remounting the children, so the rest of the window keeps its state).
+ */
+export function WcSessionProvider({
+  wc,
+  files,
+  links = {},
+  children,
+}: {
+  wc: WorkingCopy | null;
+  files: readonly FileStatus[];
+  links?: WcLinks;
+  children: ReactNode;
+}) {
+  const wcId = wc?.id ?? null;
+  const [scope, setScope] = useState(wcId);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
+  const [dialog, setDialog] = useState<WcDialog | null>(null);
+  if (scope !== wcId) {
+    // Adjusting state while rendering is the supported way to reset on a prop change.
+    setScope(wcId);
+    setSelected(null);
+    setChecked(new Set());
+    setDialog((d) => (d?.kind === "checkout" ? d : null));
+  }
+  const value = useMemo<WcSession>(
+    () => ({
+      wc,
+      files,
+      selected,
+      setSelected,
+      checked,
+      setChecked,
+      dialog,
+      openDialog: setDialog,
+      closeDialog: () => setDialog(null),
+      links,
+    }),
+    [wc, files, selected, checked, dialog, links],
+  );
+  return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
+}
+
+export function useWcSession(): WcSession {
+  const ctx = useContext(SessionContext);
+  if (!ctx) throw new Error("useWcSession must be used inside <WcSessionProvider>");
+  return ctx;
+}
