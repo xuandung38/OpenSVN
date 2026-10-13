@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use opensvn_ipc::{EntryKind, Layout, LogGetRequest, LogTarget, Rev, WcFormat, WcId};
+use opensvn_ipc::{EntryKind, Layout, LogGetRequest, LogTarget, Rev, WcId};
 use svn_ra_api::fake::FakeChange;
 use svn_types::{ErrorCode, RelPath, SvnError};
 
@@ -12,9 +12,7 @@ use super::support::{
 };
 use crate::engine::conformance::{self, Harness, PlantedOwner};
 use crate::engine::real::RealEngine;
-use crate::engine::{
-    CheckoutPlan, DiffOptions, EngineFacade, LockScope, LogScope, OpContext, WcRef,
-};
+use crate::engine::{DiffOptions, EngineFacade, LockScope, LogScope, OpContext, WcRef};
 
 /// Harness that runs the shared suite against the real engine.
 ///
@@ -26,7 +24,8 @@ use crate::engine::{
 /// `switch_to_a_branch`, `open_recovers_dead_locks_and_reports_foreign_ones` (its recovery part
 /// runs below through `plant_lock` on a `svn-wc` working copy). `remote_edit_and_copy` is skipped
 /// because the in-memory repository's commit editor refuses copy-from; copy driving is covered
-/// in `edit_tests`.
+/// in `edit_tests`. Status, working copy diff and remote status are wired; their parts of the
+/// skipped groups run in `wc_status_tests` on working copies checked out by `svn-client`.
 struct RealHarness {
     fixture: super::support::Fixture,
     scratch: tempfile::TempDir,
@@ -104,24 +103,6 @@ async fn shared_recovery_scenario_with_planted_locks() {
         assert!(opened.recovery.recovered.is_empty());
         assert_eq!(opened.recovery.needs_user_action, vec!["src".to_owned()]);
     }
-}
-
-#[tokio::test]
-async fn working_copy_operations_report_that_they_are_not_wired() {
-    let f = fixture();
-    let plan = CheckoutPlan {
-        url: format!("{URL}/trunk"),
-        path: PathBuf::from("/nowhere"),
-        rev: None,
-        depth: opensvn_ipc::Depth::Infinity,
-        sparse: None,
-        format: WcFormat::V31,
-        store_pristine: true,
-        ignore_externals: false,
-    };
-    let err = f.engine.checkout(&plan, &ctx()).await.unwrap_err();
-    assert_eq!(err.code, ErrorCode::Internal);
-    assert!(err.message.starts_with("not wired"), "{}", err.message);
 }
 
 #[tokio::test]

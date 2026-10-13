@@ -74,6 +74,9 @@ pub struct WorkingCopy {
     /// Number of new revisions not yet updated.
     pub incoming: u32,
     pub last_checked_at: Option<String>,
+    /// A checkout or update stopped before it finished (cancelled, connection lost): some folders
+    /// are recorded as incomplete. Updating the working copy finishes it.
+    pub incomplete: bool,
 }
 
 /// One row of the repository manager (`wc_entries`): every registered working copy, including
@@ -95,6 +98,20 @@ pub struct WcEntry {
     pub missing: bool,
     /// Why the working copy cannot be read (only when `missing`).
     pub problem: Option<String>,
+    /// A checkout or update stopped before it finished; the UI shows "Incomplete — Update to
+    /// finish". Always `false` when `missing`.
+    pub incomplete: bool,
+}
+
+/// What the running engine supports, so the UI can hide or explain options it would ignore
+/// (`engine_capabilities`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineCapabilities {
+    /// Checkout, update and switch fetch `svn:externals`. When `false` they behave like
+    /// `svn --ignore-externals` whatever `CheckoutRequest.ignore_externals` says
+    /// (https://github.com/xuandung38/OpenSVN/issues/97).
+    pub externals: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -136,6 +153,7 @@ pub struct LockInfo {
     pub owner: String,
     pub comment: Option<String>,
     pub created_at: String,
+    /// Always `None` over IPC: engines keep lock tokens to themselves (ownership is `mine`).
     pub token: Option<String>,
     pub mine: bool,
 }
@@ -313,11 +331,15 @@ pub struct FileDiff {
     pub mime: Option<String>,
     pub left: Option<TextSide>,
     pub right: Option<TextSide>,
-    /// Only hunks are sent when the file is too large.
+    /// Optional, only with `too_large`: an engine may send the changed hunks of a file too large
+    /// to send in full, or nothing (the real engine does not read a side over 5 MB at all). The
+    /// UI shows the large-file banner (load full / external tool) whenever `too_large` is set and
+    /// there are no text sides, with or without hunks.
     pub hunks: Option<Vec<Hunk>>,
     pub prop_changes: Vec<PropChange>,
     pub image: Option<ImageSides>,
-    /// Text larger than 5 MB: ask before loading.
+    /// Text larger than 5 MB: ask before loading (`force_large`). `left`/`right` are omitted;
+    /// property rows are still sent.
     pub too_large: Option<bool>,
     /// The two sides differ too much to diff within the display budget
     /// (`svn_diff::DISPLAY_MAX_COST`). `left`/`right` are then omitted and the UI offers the

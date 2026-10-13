@@ -4,9 +4,11 @@
 //!   (`remote`, `blame`, `layout`, `remote_edit`, `locks`).
 //! * Opening a working copy reads `wc.db` through `svn-wc` and runs crash recovery (`wc_read`,
 //!   `recovery`, `journal`).
-//! * Operations that need the `svn-client` working copy layer (checkout, status, diff, update,
+//! * Status, working copy diff and remote status run through `svn-client` (`wc_status`, with the
+//!   type mapping in `wc_map`).
+//! * Operations that need the rest of the `svn-client` working copy layer (checkout, update,
 //!   switch, commit, revert, add/delete/move, cleanup, depth, format upgrade, resolve, ignore,
-//!   properties, changelists, remote status) are not wired yet and fail with
+//!   properties, changelists) are not wired yet and fail with
 //!   [`ErrorCode::Internal`] carrying a `not wired` message. Each one delegates to a `do_*` method
 //!   in its own file (`wc_status`, `sync`, `commit`, `local`), so wiring one area later touches
 //!   only that file.
@@ -19,9 +21,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use opensvn_ipc::{
-    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth, FileDiff,
-    FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage, RepoEntry, RepoInfo,
-    ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
+    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
+    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage,
+    RepoEntry, RepoInfo, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
 };
 use svn_ra_api::RaSession;
 use svn_types::{CancelToken, ErrorCode, LockOwnershipStore, RelPath, RepoUrl, SvnError};
@@ -39,11 +41,13 @@ mod journal;
 mod layout;
 mod local;
 mod locks;
+mod progress;
 mod recovery;
 mod remote;
 mod remote_edit;
 mod sync;
 mod text;
+mod wc_map;
 mod wc_status;
 
 use crate::engine::text::percent_decode;
@@ -76,6 +80,10 @@ pub trait SessionConnector: Send + Sync {
     /// The default ignores `options` and calls [`SessionConnector::connect`], so the session is
     /// rooted at the repository root; connectors that can anchor a session at `url` or open it
     /// without prompting override this.
+    ///
+    /// Real connectors MUST override it: the default cannot honor `options.interactive`, so a
+    /// background call (`interactive == false`) on a connector that keeps the default may still
+    /// prompt for credentials. Only in-memory test connectors may rely on the default.
     async fn connect_with(
         &self,
         url: &RepoUrl,
@@ -162,7 +170,7 @@ impl RealEngine {
 
     /// Context for `svn-client` operations: working copy locks are recorded as owned by this
     /// process, with default client configuration and no progress sink.
-    pub fn client_ctx(&self, ctx: &OpContext) -> svn_client::ClientCtx {
+    pub(crate) fn client_ctx(&self, ctx: &OpContext) -> svn_client::ClientCtx {
         let _ = ctx; // progress and configuration are mapped by the packages that wire operations
         svn_client::ClientCtx::new(self.lock_owner())
     }
@@ -245,6 +253,12 @@ fn not_wired(op: &str) -> SvnError {
 
 #[async_trait]
 impl EngineFacade for RealEngine {
+    fn capabilities(&self) -> EngineCapabilities {
+        // `svn-client` does not fetch `svn:externals` yet (issue #97): checkout, update and switch
+        // behave like `svn --ignore-externals`.
+        EngineCapabilities { externals: false }
+    }
+
     async fn wc_info(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcInfo> {
         wc_read::wc_info(root, ctx).await
     }
