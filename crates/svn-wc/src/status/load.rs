@@ -10,6 +10,7 @@ use rusqlite::{Connection, params};
 use svn_types::{ErrorCode, NodeKind, RelPath, Result, SvnError};
 
 use crate::conflicts::ConflictSkel;
+use crate::db::decode_props;
 use crate::db::sql_err;
 use crate::pristine::Sha1Digest;
 
@@ -230,7 +231,13 @@ pub(crate) fn load_nodes(
     let mut out = HashMap::new();
     let mut group: Vec<Row> = Vec::new();
     while let Some(r) = rows.next().map_err(sql_err)? {
-        let props: Option<Vec<u8>> = r.get(16).map_err(sql_err)?;
+        // Decode the property skel: a raw byte search would also match `svn:special` inside a
+        // property value or a longer property name.
+        let props = match r.get_ref(16).map_err(sql_err)?.as_blob_or_null() {
+            Ok(Some(blob)) => decode_props(blob)?,
+            Ok(None) => Vec::new(),
+            Err(e) => return Err(sql_err(e.into())),
+        };
         let relpath: String = r.get(0).map_err(sql_err)?;
         let presence: String = r.get(2).map_err(sql_err)?;
         let kind: String = r.get(3).map_err(sql_err)?;
@@ -258,12 +265,10 @@ pub(crate) fn load_nodes(
                 .get::<_, Option<i64>>(15)
                 .map_err(sql_err)?
                 .is_some_and(|v| v != 0),
-            had_props: props
-                .as_deref()
-                .is_some_and(|p| !p.is_empty() && p != b"()"),
+            had_props: !props.is_empty(),
             special: props
-                .as_deref()
-                .is_some_and(|p| p.windows(11).any(|w| w == b"svn:special")),
+                .iter()
+                .any(|(name, _)| name.as_slice() == b"svn:special"),
             relpath,
         };
         if group.first().is_some_and(|g| g.relpath != row.relpath) {
