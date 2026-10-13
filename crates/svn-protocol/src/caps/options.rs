@@ -147,13 +147,14 @@ fn single(head: &ResponseHead, name: &str) -> Option<String> {
 /// absolute path without trailing slash.
 fn stub_path(session: &Url, name: &str, value: &str) -> Result<String> {
     // The URL parser collapses dot segments (`/svn/repo/..` becomes `/svn`); a server never
-    // needs them, so refuse the raw text instead of trusting what it normalises to.
+    // needs them, so refuse the raw text instead of trusting what it normalises to. For http(s)
+    // the parser also treats `\` as `/`, so `/svn/repo\..` collapses the same way.
     let raw = match value.split_once("://") {
         Some((_, rest)) => rest.find('/').map_or("", |i| &rest[i..]),
         None => value,
     };
     let raw = raw.split(['?', '#']).next().unwrap_or("");
-    for seg in raw.split('/') {
+    for seg in raw.split(['/', '\\']) {
         let decoded =
             percent_decode(seg).map_err(|_| corrupt(format!("{name} header has a bad escape")))?;
         if decoded == "." || decoded == ".." {

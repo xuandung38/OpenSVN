@@ -117,6 +117,9 @@ struct FlightState {
     denied: bool,
     /// Stored credentials were already offered for this origin (they are offered once).
     stored_used: bool,
+    /// The cached `credentials` came from `AuthPrompter::stored_credentials` and their
+    /// rejection has not been reported yet.
+    from_stored: bool,
 }
 
 #[derive(Default)]
@@ -434,6 +437,7 @@ impl AuthManager {
         // been sent at any earlier generation, so only the carried case is compared.
         let _gate = or_cancel(cancel, flight.gate.lock()).await?;
 
+        let mut stored_rejected = false;
         let attempt = {
             let mut state = lock(&flight.state);
             let resolved_elsewhere = match sent_generation {
@@ -459,6 +463,7 @@ impl AuthManager {
                 // The credentials we sent were rejected.
                 state.failures += 1;
                 state.credentials = None;
+                stored_rejected = std::mem::take(&mut state.from_stored);
             }
             if state.failures >= MAX_ATTEMPTS {
                 state.failures = 0;
@@ -483,6 +488,10 @@ impl AuthManager {
             PromptReason::Rejected
         };
         let request = CredentialRequest::new(origin.clone(), u32::from(attempt), offered, reason);
+        if stored_rejected {
+            // Lets the app stop offering a password the server refused (lockout protection).
+            or_cancel(cancel, self.prompter.stored_credentials_rejected(&request)).await?;
+        }
         let try_stored = attempt == 0 && !lock(&flight.state).stored_used;
         if try_stored
             && let Some(creds) = or_cancel(cancel, self.prompter.stored_credentials(&request))
@@ -492,6 +501,7 @@ impl AuthManager {
             let header = basic_header(&creds.username, &creds.password)?;
             let mut state = lock(&flight.state);
             state.stored_used = true;
+            state.from_stored = true;
             state.generation += 1;
             state.credentials = Some(Credential {
                 username: creds.username,
@@ -524,6 +534,7 @@ impl AuthManager {
             return Err(negotiate_failure(self.negotiate.is_some()));
         }
         let header = basic_header(&creds.username, &creds.password)?;
+        state.from_stored = false;
         state.credentials = Some(Credential {
             username: creds.username,
             password: creds.password,
