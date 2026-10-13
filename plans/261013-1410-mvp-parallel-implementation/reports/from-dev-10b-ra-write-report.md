@@ -4,7 +4,10 @@ Branch `feat/10b-ra-write-m1`. Refs #14.
 
 ## What changed in this round
 
-- Merged `origin/main` (7e418f6) into the branch with a merge commit. The merge had no conflicts.
+- Merged `origin/main` into the branch twice, each time with a merge commit. The first merge
+  (7e418f6) had no conflicts. The second (7b1a7f0, which brings #71 and #72) conflicted in
+  `crates/svn-ra/Cargo.toml` and `Cargo.lock`. Resolution: `svn-protocol` stays a normal
+  dependency, the `svn-ra-api` fake stays a dev-dependency, and the lockfile was regenerated.
 - Fix: deleting a directory now presents every lock at or below it. Before the fix, the DELETE
   sent only the lock on the exact path. When the committer held locks on files inside the
   directory, mod_dav_svn answered 423. The DELETE now carries an `If:` header that lists
@@ -43,10 +46,9 @@ Not done, or follow-ups:
 | Gate | Result |
 |---|---|
 | `cargo fmt --all --check` | pass |
-| `cargo clippy --workspace --all-targets -- -D warnings` | pass (whole workspace, Tauri app included) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass (whole workspace, Tauri app included, after the second merge) |
 | `cargo test -p svn-ra` | 95 passed, 0 failed, 3 ignored (compat_write needs Docker) |
-| `cargo test --workspace --exclude opensvn --no-fail-fast` | 725 passed, 0 failed, 11 ignored (final run) |
-| `cargo test -p opensvn` (Tauri app) | 127 passed, 0 failed |
+| `cargo test --workspace --no-fail-fast` (after the second merge, Tauri app included) | 891 passed, 0 failed, 12 ignored |
 
 - An earlier workspace run had 1 failure: `transport_auth::cancel_interrupts_a_request_queued_behind_a_prompt`.
   The test comes from main (P04) and relies on 200 ms sleeps, so it is timing-flaky under load.
