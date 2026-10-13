@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use bytes::Bytes;
 use svn_types::{
     ChangeAction, ChangedPath, DirEntry, ErrorCode, LockInfo, NodeKind, PropChange, RelPath,
-    Result, Revnum, SvnError, Timestamp,
+    RepoDisplayPath, Result, Revnum, SvnError, Timestamp,
 };
 
 /// Node content of one revision snapshot.
@@ -206,7 +206,7 @@ fn ensure_parents(tree: &mut Tree, path: &RelPath, rev: Revnum, changed: &mut Ve
 
 fn changed_path(path: &RelPath, action: ChangeAction, kind: NodeKind) -> ChangedPath {
     ChangedPath {
-        path: format!("/{path}"),
+        path: RepoDisplayPath::from_rel(path),
         action,
         kind,
         copy_from: None,
