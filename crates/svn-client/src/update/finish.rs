@@ -68,7 +68,15 @@ impl UpdateEditor {
                 TreeReason::Edited
             };
             let repos = base.repos_relpath.clone().unwrap_or_default();
-            return self.record_tree_conflict(wc, Some(&base), &repos, NodeKind::None, reason, TreeAction::Delete);
+            return self.record_tree_conflict(
+                wc,
+                Some(&base),
+                &repos,
+                NodeKind::None,
+                reason,
+                TreeAction::Delete,
+                true,
+            );
         }
         let mut items = Vec::new();
         removal_items(&db, wc, &mut items)?;
@@ -90,6 +98,7 @@ impl UpdateEditor {
                     NodeKind::Dir,
                     tc.reason,
                     tc.action,
+                    false,
                 )?;
             }
             return Ok(());

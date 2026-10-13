@@ -336,7 +336,7 @@ impl WorkingCopyOps for DbOps<'_> {
     }
 }
 
-/// Text of a `.prej` file for a property conflict, in the shape svn writes.
+/// Text of a `.prej` file for a property conflict, byte-compatible with what svn 1.15 writes.
 fn reject_text(p: &svn_wc::conflicts::PropConflict) -> String {
     let find = |set: &Option<Vec<(Vec<u8>, Vec<u8>)>>, name: &str| {
         set.as_ref().and_then(|s| {
@@ -350,24 +350,24 @@ fn reject_text(p: &svn_wc::conflicts::PropConflict) -> String {
         let old = find(&p.old_props, name);
         let mine = find(&p.mine_props, name);
         let theirs = find(&p.their_props, name);
-        match (&old, &theirs) {
-            (None, Some(t)) => {
-                out.push_str(&format!("Trying to add new property '{name}' with value '{t}',\n"));
-            }
-            (Some(o), None) => {
-                out.push_str(&format!("Trying to delete property '{name}' with value '{o}',\n"));
-            }
-            (Some(o), Some(t)) => {
-                out.push_str(&format!(
-                    "Trying to change property '{name}' from '{o}' to '{t}',\n"
-                ));
-            }
-            (None, None) => out.push_str(&format!("Trying to change property '{name}',\n")),
-        }
-        match mine {
-            Some(m) => out.push_str(&format!("but the property has been locally changed to '{m}'.\n")),
-            None => out.push_str("but the property has been locally deleted.\n"),
-        }
+        let (verb, why) = match (&old, &theirs, &mine) {
+            (_, None, _) => ("delete property", "has been locally modified"),
+            (None, Some(_), _) => ("add new property", "already exists"),
+            (Some(_), Some(_), None) => ("change property", "has been locally deleted"),
+            (Some(_), Some(_), Some(_)) => (
+                "change property",
+                "has already been locally changed to a different value",
+            ),
+        };
+        out.push_str(&format!(
+            "Trying to {verb} '{name}'\nbut the property {why}.\n<<<<<<< (local property value)\n"
+        ));
+        out.push_str(mine.as_deref().unwrap_or(""));
+        out.push_str("||||||| (incoming 'changed from' value)\n");
+        out.push_str(old.as_deref().unwrap_or(""));
+        out.push_str("=======\n");
+        out.push_str(theirs.as_deref().unwrap_or(""));
+        out.push_str(">>>>>>> (incoming 'changed to' value)\n");
     }
     out
 }

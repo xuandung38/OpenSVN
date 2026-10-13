@@ -286,3 +286,55 @@ pub fn set_depth(tx: &Transaction<'_>, wc_id: i64, path: &RelPath, depth: svn_ty
     .map_err(sql_err)?;
     Ok(())
 }
+
+/// Number of path segments, the `op_depth` of an operation rooted at `path`.
+fn path_depth(path: &RelPath) -> i64 {
+    if path.is_root() {
+        0
+    } else {
+        i64::try_from(path.components().count()).unwrap_or(i64::MAX)
+    }
+}
+
+/// Turns the BASE subtree at `path` into a local copy of itself (working layer at the depth of
+/// `path`), as svn does when an incoming delete meets local modifications: the content stays,
+/// versioned as an addition with history, and the conflict decides what happens next.
+pub fn convert_base_to_copy(tx: &Transaction<'_>, wc_id: i64, path: &RelPath) -> Result<()> {
+    let sql = format!(
+        "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, repos_id, \
+         repos_path, revision, presence, kind, checksum, symlink_target, properties, \
+         translated_size, last_mod_time, changed_revision, changed_date, changed_author, depth) \
+         SELECT wc_id, local_relpath, ?3, parent_relpath, repos_id, repos_path, revision, \
+         presence, kind, checksum, symlink_target, properties, translated_size, last_mod_time, \
+         changed_revision, changed_date, changed_author, depth FROM nodes \
+         WHERE wc_id = ?1 AND op_depth = 0 AND presence = 'normal' AND {SCOPE}"
+    );
+    tx.execute(&sql, params![wc_id, path.as_str(), path_depth(path)])
+        .map_err(sql_err)?;
+    let del = format!("DELETE FROM nodes WHERE wc_id = ?1 AND op_depth = 0 AND {SCOPE}");
+    tx.execute(&del, params![wc_id, path.as_str()]).map_err(sql_err)?;
+    Ok(())
+}
+
+/// Adds a working layer that records "deleted" over the BASE node at `path`: the node exists in
+/// the repository, but whatever is on disk is not part of it (an obstruction).
+pub fn mark_base_deleted(
+    tx: &Transaction<'_>,
+    wc_id: i64,
+    path: &RelPath,
+    kind: svn_types::NodeKind,
+) -> Result<()> {
+    tx.execute(
+        "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, presence, \
+         kind) VALUES (?1, ?2, ?3, ?4, 'base-deleted', ?5)",
+        params![
+            wc_id,
+            path.as_str(),
+            path_depth(path),
+            parent_text(path),
+            kind_word(kind)
+        ],
+    )
+    .map_err(sql_err)?;
+    Ok(())
+}
