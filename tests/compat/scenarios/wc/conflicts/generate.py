@@ -21,6 +21,47 @@ def blobs(wc):
     db = sqlite3.connect(os.path.join(wc, ".svn", "wc.db"))
     return {rel: bytes(b) for rel, b in db.execute("select local_relpath, conflict_data from actual_node where conflict_data is not null")}
 
+def extra_cases(url, a, b, out):
+    """Props absent on one side, several property names, a local move, and a switch."""
+    # Property added on both sides (no common ancestor value) plus two conflicting names.
+    open(f"{a}/p.txt", "w").write("p\n")
+    open(f"{a}/mv.txt", "w").write("mv\n")
+    svn("add", "-q", f"{a}/p.txt", f"{a}/mv.txt")
+    svn("propset", "-q", "one", "1", f"{a}/p.txt")
+    svn("propset", "-q", "two", "2", f"{a}/p.txt")
+    svn("commit", "-q", "--username", "alice", "-m", "p", a)
+    svn("update", "-q", b)
+    svn("propset", "-q", "one", "mine1", f"{b}/p.txt")
+    svn("propset", "-q", "two", "mine2", f"{b}/p.txt")
+    svn("propset", "-q", "added", "mine", f"{b}/p.txt")
+    svn("propset", "-q", "one", "theirs1", f"{a}/p.txt")
+    svn("propset", "-q", "two", "theirs2", f"{a}/p.txt")
+    svn("propset", "-q", "added", "theirs", f"{a}/p.txt")
+    svn("commit", "-q", "--username", "alice", "-m", "p2", a)
+    # Local move in b, incoming edit in a: tree conflict on the move source.
+    svn("move", "-q", f"{b}/mv.txt", f"{b}/moved.txt")
+    open(f"{a}/mv.txt", "w").write("mv edited\n")
+    svn("commit", "-q", "--username", "alice", "-m", "edit mv", a)
+    svn("update", "-q", "--accept", "postpone", b)
+    for rel, blob in blobs(b).items():
+        if rel in ("p.txt", "mv.txt"):
+            out["update2_" + rel.replace(".", "_")] = (rel, blob)
+    # Switch with a text conflict: the branch copy differs from the locally edited trunk file.
+    open(f"{a}/s.txt", "w").write("s1\ns2\ns3\n")
+    svn("add", "-q", f"{a}/s.txt")
+    svn("commit", "-q", "--username", "alice", "-m", "s", a)
+    svn("mkdir", "-q", "--username", "alice", "-m", "branches", url + "/br")
+    svn("copy", "-q", "--username", "alice", "-m", "branch", url + "/s.txt", url + "/br/s.txt")
+    svn("update", "-q", a)
+    open(f"{a}/br/s.txt", "w").write("s1\nBRANCH\ns3\n")
+    svn("commit", "-q", "--username", "alice", "-m", "branch change", a)
+    svn("update", "-q", b)
+    open(f"{b}/s.txt", "w").write("s1\nLOCAL\ns3\n")
+    svn("switch", "-q", "--accept", "postpone", url + "/br/s.txt", f"{b}/s.txt")
+    for rel, blob in blobs(b).items():
+        if rel == "s.txt":
+            out["switch_s_txt"] = (rel, blob)
+
 def main():
     shutil.rmtree(WORK, ignore_errors=True)
     os.makedirs(WORK)
@@ -55,6 +96,7 @@ def main():
     for rel, blob in blobs(b).items():
         if rel == "m.txt":
             out["merge_m_txt"] = (rel, blob)
+    extra_cases(url, a, b, out)
     for case, (rel, blob) in sorted(out.items()):
         open(os.path.join(HERE, case + ".skel"), "wb").write(blob)
         print(case, rel, blob[:100])

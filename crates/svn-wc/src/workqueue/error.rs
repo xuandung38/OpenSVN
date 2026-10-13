@@ -15,7 +15,9 @@ const SVN_ERR_WC_BAD_ADM_LOG: u32 = 155_009;
 pub enum WorkQueueError {
     /// The queue holds an operation this client does not implement; nothing was changed.
     /// The user must complete the operation with `svn cleanup`.
-    #[error("unrecognized work item '{0}' in the queue; run 'svn cleanup'")]
+    #[error(
+        "unrecognized work item '{0}' in the queue; finish the interrupted operation with 'svn cleanup', using the Subversion client that created this working copy"
+    )]
     UnknownItem(String),
     /// The item has the wrong shape (arity, atom/list mix, non-numeric integer).
     #[error("malformed work item '{op}': {why}")]

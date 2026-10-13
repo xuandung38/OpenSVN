@@ -15,7 +15,14 @@ fn fixture(name: &str) -> Vec<u8> {
 
 #[test]
 fn svn_written_skels_roundtrip_byte_for_byte() {
-    for name in ["update_t_txt", "update_d_txt", "merge_m_txt"] {
+    for name in [
+        "update_t_txt",
+        "update_d_txt",
+        "merge_m_txt",
+        "update2_mv_txt",
+        "update2_p_txt",
+        "switch_s_txt",
+    ] {
         let bytes = fixture(name);
         let parsed = ConflictSkel::decode(&bytes).unwrap();
         assert!(parsed.is_complete(), "{name}");
@@ -209,4 +216,78 @@ fn malformed_skels_are_rejected() {
             String::from_utf8_lossy(bad)
         );
     }
+}
+
+#[test]
+fn moved_away_tree_conflict_carries_the_move_roots() {
+    let c = ConflictSkel::decode(&fixture("update2_mv_txt")).unwrap();
+    let t = c.tree().unwrap();
+    assert_eq!(
+        (&t.reason, &t.action),
+        (&TreeReason::MovedAway, &TreeAction::Edit)
+    );
+    assert_eq!(t.move_src_op_root.as_deref(), Some("mv.txt"));
+    assert_eq!(t.move_dst_op_root.as_deref(), Some("moved.txt"));
+}
+
+#[test]
+fn prop_conflict_with_several_names_and_a_property_missing_on_one_side() {
+    let c = ConflictSkel::decode(&fixture("update2_p_txt")).unwrap();
+    let p = c.prop().unwrap();
+    let mut names = p.names.clone();
+    names.sort();
+    assert_eq!(names, ["added", "one", "two"]);
+    let has = |props: &Option<Vec<PropPair>>, name: &str| {
+        props
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|(n, _)| n == name.as_bytes())
+    };
+    // `added` did not exist in the common ancestor but was added on both sides.
+    assert!(!has(&p.old_props, "added"));
+    assert!(has(&p.mine_props, "added") && has(&p.their_props, "added"));
+    assert!(has(&p.old_props, "one") && has(&p.old_props, "two"));
+}
+
+#[test]
+fn switch_conflict_origins_name_both_branches() {
+    let c = ConflictSkel::decode(&fixture("switch_s_txt")).unwrap();
+    let op = c.operation.as_ref().unwrap();
+    assert_eq!(op.operation, Operation::Switch);
+    let (Origin::Subversion(from), Origin::Subversion(to)) = (&op.left, &op.right) else {
+        panic!()
+    };
+    assert_eq!(
+        (from.repos_relpath.as_str(), to.repos_relpath.as_str()),
+        ("s.txt", "br/s.txt")
+    );
+    // Numbered marker names show the unique-name rule in the wild.
+    let t = c.text().unwrap();
+    assert_eq!(t.their.as_deref(), Some("s.txt.2.r10"));
+}
+
+#[test]
+fn absent_property_sides_are_recorded_as_empty_atoms() {
+    let p = PropConflict {
+        markers: vec![],
+        names: vec!["k".into()],
+        old_props: None,
+        mine_props: Some(vec![(b"k".to_vec(), b"v".to_vec())]),
+        their_props: None,
+    };
+    let skel = ConflictSkel {
+        operation: Some(OperationInfo {
+            operation: Operation::Update,
+            left: Origin::Unset,
+            right: Origin::Unset,
+        }),
+        conflicts: vec![Conflict::Prop(p.clone())],
+    };
+    let bytes = skel.encode();
+    assert_eq!(
+        String::from_utf8(bytes.clone()).unwrap(),
+        "((update (() ())) ((prop () (k) 0  (k v) 0 )))"
+    );
+    assert_eq!(ConflictSkel::decode(&bytes).unwrap().prop().unwrap(), &p);
 }
