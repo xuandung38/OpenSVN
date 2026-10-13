@@ -17,7 +17,6 @@ import { fileMenuEntries } from "../changes/file-menu";
 import { dialogStrings } from "../dialogs/dialog-strings";
 import { matchShortcut } from "../shortcuts";
 import { useWcActions } from "../use-wc-actions";
-import { isTooComplex } from "../wc-model";
 import { useWcSession } from "../wc-session";
 import { wcStrings } from "../wc-strings";
 import { ImageSides, PropChanges } from "./diff-parts";
@@ -140,7 +139,7 @@ function FileDiffPane({
             mode={effMode}
             path={path}
             onLoadFull={() => setForce(true)}
-            onOpenExternal={() => void actions.openWith(path, "editor")}
+            onOpenExternal={() => void actions.openExternalDiff(path)}
             onOpenDefault={() => void actions.openWith(path, "default")}
           />
         )}
@@ -192,6 +191,9 @@ function DiffBody({
         <div className="flex items-center gap-2 border-b border-line bg-warn-soft px-3 py-2">
           <b className="text-warn-text">{d("tooLarge")}</b>
           <span className="flex-1">{d("tooLargeHint")}</span>
+          <Button small onClick={onOpenExternal}>
+            {d("openExternalTool")}
+          </Button>
           <Button small onClick={onLoadFull}>
             {d("loadFull")}
           </Button>
@@ -199,8 +201,8 @@ function DiffBody({
         <HunkLines hunks={diff.hunks} />
       </div>
     );
-  } else if (hasText && isTooComplex(diff.left, diff.right)) {
-    // The backend stops at DISPLAY_MAX_COST; so does the UI, and it never retries.
+  } else if (diff.tooComplex) {
+    // The backend gave up at its display budget and sent no sides; never retry, hand off instead.
     content = (
       <EmptyState
         title={d("tooComplex")}

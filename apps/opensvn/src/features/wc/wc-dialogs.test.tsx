@@ -1,10 +1,9 @@
 import { act, configure, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { beforeAll, beforeEach, expect, test, vi } from "vitest";
 import { AppShell } from "../../app/app-shell";
 import { mockAdapter, mockCalls, mockEmit, setMockOpDuration } from "../../ipc/mock/adapter";
 import { resetWcMock } from "../../ipc/mock/wc-mock-commands";
-import { renderApp, setupMockIpc, stubLayout } from "../../test-utils";
+import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../test-utils";
 import { WcSessionProvider } from "./wc-session";
 import { WelcomeScreen } from "./welcome/welcome-screen";
 
@@ -12,8 +11,11 @@ vi.mock("./diff/diff-merge-editor", () => ({
   DiffMergeEditor: () => <div data-testid="editor" />,
 }));
 
-// Each test boots the whole window in jsdom: allow for slow CI machines.
-vi.setConfig({ testTimeout: 40_000 });
+// Each test boots the whole window in jsdom (10-20 s of CPU). With the fake clock below, waits no
+// longer depend on wall-clock time; this timeout is only a hang guard, sized for a starved machine.
+vi.setConfig({ testTimeout: 120_000 });
+// Fake clock: waits count simulated time, so a loaded machine cannot make them run out.
+const { user } = installFakeClock();
 configure({ asyncUtilTimeout: 8_000 });
 
 beforeAll(async () => {
@@ -34,24 +36,24 @@ const lastCall = (name: string) => mockCalls.filter((c) => c.name === name).at(-
 test("checkout: URL is validated, the folder comes from a native pick as a grant, never a path", async () => {
   renderApp(<AppShell />);
   await option(/renderer\.ts/);
-  await userEvent.keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
+  await user().keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
   const dlg = await dialog("Checkout repository");
   const submit = within(dlg).getByRole("button", { name: "Checkout" }) as HTMLButtonElement;
   expect(submit.disabled).toBe(true);
 
-  await userEvent.type(within(dlg).getByRole("textbox", { name: "Repository URL" }), "ftp://nope");
+  await user().type(within(dlg).getByRole("textbox", { name: "Repository URL" }), "ftp://nope");
   expect(within(dlg).getByRole("alert").textContent).toContain("http(s), svn or file URL");
-  await userEvent.clear(within(dlg).getByRole("textbox", { name: "Repository URL" }));
-  await userEvent.type(
+  await user().clear(within(dlg).getByRole("textbox", { name: "Repository URL" }));
+  await user().type(
     within(dlg).getByRole("textbox", { name: "Repository URL" }),
     "https://svn.example.com/repos/game/branches/feature-x",
   );
   expect(submit.disabled).toBe(true); // still no destination
 
-  await userEvent.click(within(dlg).getByRole("button", { name: "Choose folder…" }));
+  await user().click(within(dlg).getByRole("button", { name: "Choose folder…" }));
   await waitFor(() => expect(submit.disabled).toBe(false));
-  await userEvent.selectOptions(within(dlg).getByRole("combobox", { name: "Scope" }), "immediates");
-  await userEvent.click(submit);
+  await user().selectOptions(within(dlg).getByRole("combobox", { name: "Scope" }), "immediates");
+  await user().click(submit);
 
   await waitFor(() => expect(lastCall("checkout")).toBeTruthy());
   const req = lastCall("checkout")?.args[0] as Record<string, unknown>;
@@ -70,18 +72,18 @@ test("checkout: URL is validated, the folder comes from a native pick as a grant
 test("checkout: a consumed grant is dropped and the user must choose the folder again", async () => {
   renderApp(<AppShell />);
   await option(/renderer\.ts/);
-  await userEvent.keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
+  await user().keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
   const dlg = await dialog("Checkout repository");
-  await userEvent.type(
+  await user().type(
     within(dlg).getByRole("textbox", { name: "Repository URL" }),
     "https://svn.example.com/repos/game/trunk",
   );
-  await userEvent.click(within(dlg).getByRole("button", { name: "Choose folder…" }));
+  await user().click(within(dlg).getByRole("button", { name: "Choose folder…" }));
   const submit = within(dlg).getByRole("button", { name: "Checkout" }) as HTMLButtonElement;
   await waitFor(() => expect(submit.disabled).toBe(false));
   // Someone else uses up the single-use grant (the first grant after a reset is grant-1).
   await mockAdapter.commands.wcAddExisting("grant-1");
-  await userEvent.click(submit);
+  await user().click(submit);
   expect(
     await within(dlg).findByText("The folder choice expired. Choose the folder again."),
   ).toBeTruthy();
@@ -95,7 +97,7 @@ test("welcome: adding an existing working copy goes through path_pick and the gr
       <WelcomeScreen />
     </WcSessionProvider>,
   );
-  await userEvent.click(await screen.findByRole("button", { name: "Add existing working copy…" }));
+  await user().click(await screen.findByRole("button", { name: "Add existing working copy…" }));
   expect(await screen.findByText("Added working copy game-assets")).toBeTruthy();
   const add = lastCall("wcAddExisting");
   expect(String(add?.args[0])).toMatch(/^grant-/);
@@ -120,7 +122,7 @@ test("fs://dropped: a dropped folder is added by its grant, a dropped file is re
 
 test("conflicts: banner opens the resolver; text conflict resolves with theirs, tree conflict explains", async () => {
   renderApp(<AppShell />);
-  await userEvent.click(await screen.findByRole("button", { name: "Resolve…" }));
+  await user().click(await screen.findByRole("button", { name: "Resolve…" }));
   const dlg = await dialog("Conflicts (2)");
   expect(within(dlg).getByText("Text conflict")).toBeTruthy();
   expect(await within(dlg).findByText(/<<<<<<< \.mine/)).toBeTruthy();
@@ -131,8 +133,8 @@ test("conflicts: banner opens the resolver; text conflict resolves with theirs, 
       within(dlg).queryByRole("radio", { name: new RegExp(`^${label.split(" ")[0]}`) }),
     ).toBeTruthy();
   }
-  await userEvent.click(within(dlg).getByRole("radio", { name: /^Theirs/ }));
-  await userEvent.click(resolve);
+  await user().click(within(dlg).getByRole("radio", { name: /^Theirs/ }));
+  await user().click(resolve);
   await waitFor(() => expect(lastCall("resolve")).toBeTruthy());
   expect((lastCall("resolve")?.args[0] as { choice: string } | undefined)?.choice).toBe("theirs");
   // The remaining conflict is the directory with a tree conflict.
@@ -145,16 +147,16 @@ test("conflicts: banner opens the resolver; text conflict resolves with theirs, 
 
 test("lock: a lock held by someone else can only be stolen after an explicit confirmation", async () => {
   renderApp(<AppShell />);
-  await userEvent.click(await option(/crate\.fbx/));
-  await userEvent.keyboard("{Control>}l{/Control}");
+  await user().click(await option(/crate\.fbx/));
+  await user().keyboard("{Control>}l{/Control}");
   const dlg = await dialog("Lock to edit");
   expect(within(dlg).getByText("Locked by an")).toBeTruthy();
-  await userEvent.click(within(dlg).getByRole("checkbox", { name: /Steal the lock held by an/ }));
+  await user().click(within(dlg).getByRole("checkbox", { name: /Steal the lock held by an/ }));
   const steal = within(dlg).getByRole("button", { name: "Steal lock" }) as HTMLButtonElement;
   expect(steal.disabled).toBe(true);
-  await userEvent.click(within(dlg).getByRole("checkbox", { name: /I understand/ }));
+  await user().click(within(dlg).getByRole("checkbox", { name: /I understand/ }));
   expect(steal.disabled).toBe(false);
-  await userEvent.click(steal);
+  await user().click(steal);
   await waitFor(() => expect(lastCall("lock")).toBeTruthy());
   const req = lastCall("lock")?.args[0] as {
     steal: boolean;
@@ -172,21 +174,21 @@ test("lock: a lock held by someone else can only be stolen after an explicit con
 
 test("lock: without the steal option the server refusal is shown and the dialog stays open", async () => {
   renderApp(<AppShell />);
-  await userEvent.click(await option(/crate\.fbx/));
-  await userEvent.keyboard("{Control>}l{/Control}");
+  await user().click(await option(/crate\.fbx/));
+  await user().keyboard("{Control>}l{/Control}");
   const dlg = await dialog("Lock to edit");
-  await userEvent.click(within(dlg).getByRole("button", { name: "Lock" }));
+  await user().click(within(dlg).getByRole("button", { name: "Lock" }));
   expect((await within(dlg).findByRole("alert")).textContent).toContain("Locked by an");
   expect(screen.getByRole("dialog", { name: "Lock to edit", hidden: true })).toBeTruthy();
 });
 
 test("discard: confirmation names the consequence and reverts only the selection", async () => {
   renderApp(<AppShell />);
-  await userEvent.click(await option(/renderer\.ts/));
-  await userEvent.keyboard("{Control>}{Shift>}{Backspace}{/Shift}{/Control}");
+  await user().click(await option(/renderer\.ts/));
+  await user().keyboard("{Control>}{Shift>}{Backspace}{/Shift}{/Control}");
   const dlg = await dialog("Discard changes");
   expect(within(dlg).getByText(/discard the changes of 1 file/)).toBeTruthy();
-  await userEvent.click(within(dlg).getByRole("button", { name: "Discard" }));
+  await user().click(within(dlg).getByRole("button", { name: "Discard" }));
   await waitFor(() => expect(lastCall("revert")).toBeTruthy());
   const req = lastCall("revert")?.args[0] as { paths: string[]; removeUnversioned: boolean };
   expect(req.paths).toEqual(["src/engine/renderer.ts"]);
@@ -196,12 +198,12 @@ test("discard: confirmation names the consequence and reverts only the selection
 
 test("ignore: file actions menu adds a rule for the unversioned file and hides it", async () => {
   renderApp(<AppShell />);
-  await userEvent.click(await option(/notes\/todo\.txt/));
-  await userEvent.click(await screen.findByRole("button", { name: "File actions" }));
-  await userEvent.click(await screen.findByRole("menuitem", { name: "Ignore…" }));
+  await user().click(await option(/notes\/todo\.txt/));
+  await user().click(await screen.findByRole("button", { name: "File actions" }));
+  await user().click(await screen.findByRole("menuitem", { name: "Ignore…" }));
   const dlg = await dialog("Ignore");
   expect(within(dlg).getByRole("radio", { name: /All \*\.txt files/ })).toBeTruthy();
-  await userEvent.click(within(dlg).getByRole("button", { name: "Ignore" }));
+  await user().click(within(dlg).getByRole("button", { name: "Ignore" }));
   await waitFor(() => expect(lastCall("ignoreAdd")).toBeTruthy());
   expect(lastCall("ignoreAdd")?.args[0]).toMatchObject({
     pattern: "todo.txt",
@@ -215,20 +217,20 @@ test("ignore: file actions menu adds a rule for the unversioned file and hides i
 
 test("rename: paths that leave the working copy are refused before any command runs", async () => {
   renderApp(<AppShell />);
-  await userEvent.click(await option(/renderer\.ts/));
-  await userEvent.click(await screen.findByRole("button", { name: "File actions" }));
-  await userEvent.click(await screen.findByRole("menuitem", { name: "Rename / Move…" }));
+  await user().click(await option(/renderer\.ts/));
+  await user().click(await screen.findByRole("button", { name: "File actions" }));
+  await user().click(await screen.findByRole("menuitem", { name: "Rename / Move…" }));
   const dlg = await dialog("Rename or move");
   const input = within(dlg).getByRole("textbox", { name: /New path/ });
-  await userEvent.clear(input);
-  await userEvent.type(input, "../outside.ts");
+  await user().clear(input);
+  await user().type(input, "../outside.ts");
   expect(within(dlg).getByRole("alert").textContent).toContain("inside the working copy");
   expect((within(dlg).getByRole("button", { name: "Rename" }) as HTMLButtonElement).disabled).toBe(
     true,
   );
-  await userEvent.clear(input);
-  await userEvent.type(input, "src/engine/renderer-v2.ts");
-  await userEvent.click(within(dlg).getByRole("button", { name: "Rename" }));
+  await user().clear(input);
+  await user().type(input, "src/engine/renderer-v2.ts");
+  await user().click(within(dlg).getByRole("button", { name: "Rename" }));
   await waitFor(() => expect(lastCall("movePath")).toBeTruthy());
   expect(lastCall("movePath")?.args.slice(1)).toEqual([
     "src/engine/renderer.ts",
@@ -238,12 +240,12 @@ test("rename: paths that leave the working copy are refused before any command r
 
 test("changelist: files can be grouped, and the group header appears", async () => {
   renderApp(<AppShell />);
-  await userEvent.click(await option(/renderer\.ts/));
-  await userEvent.click(await screen.findByRole("button", { name: "File actions" }));
-  await userEvent.click(await screen.findByRole("menuitem", { name: "Changelist…" }));
+  await user().click(await option(/renderer\.ts/));
+  await user().click(await screen.findByRole("button", { name: "File actions" }));
+  await user().click(await screen.findByRole("menuitem", { name: "Changelist…" }));
   const dlg = await dialog("Changelist");
-  await userEvent.type(within(dlg).getByRole("combobox", { name: "Changelist name" }), "refactor");
-  await userEvent.click(within(dlg).getByRole("button", { name: "Apply" }));
+  await user().type(within(dlg).getByRole("combobox", { name: "Changelist name" }), "refactor");
+  await user().click(within(dlg).getByRole("button", { name: "Apply" }));
   expect(await screen.findByRole("option", { name: "Changelist: refactor (1)" })).toBeTruthy();
 });
 
@@ -251,9 +253,9 @@ test("activity: a running operation can be cancelled and is reported as cancelle
   setMockOpDuration(5000);
   renderApp(<AppShell />);
   await option(/renderer\.ts/);
-  await userEvent.keyboard("{Control>}{Shift>}u{/Shift}{/Control}");
+  await user().keyboard("{Control>}{Shift>}u{/Shift}{/Control}");
   const activity = await screen.findByRole("region", { name: "Activity" });
-  await userEvent.click(await within(activity).findByRole("button", { name: "Cancel" }));
+  await user().click(await within(activity).findByRole("button", { name: "Cancel" }));
   await waitFor(() => expect(lastCall("opCancel")).toBeTruthy());
   expect(await screen.findByText("Cancel requested")).toBeTruthy();
   await waitFor(() =>

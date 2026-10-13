@@ -208,5 +208,6 @@ export function mockRevDiff(path: string): FileDiff {
     propChanges: [],
     image: null,
     tooLarge: false,
+    tooComplex: null,
   };
 }

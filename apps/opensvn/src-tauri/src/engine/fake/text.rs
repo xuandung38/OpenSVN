@@ -1,6 +1,9 @@
 //! Text helpers of the fake engine: percent decoding, text sides, line diff attribution.
 
 use opensvn_ipc::{Eol, TextSide};
+use svn_types::{ErrorCode, SvnError};
+
+use crate::engine::context::OpContext;
 
 /// Decodes `%XX` escapes (invalid escapes stay literal).
 pub fn percent_decode(s: &str) -> String {
@@ -76,6 +79,36 @@ pub fn match_lines(old: &[&str], new: &[&str]) -> Vec<Option<usize>> {
         }
     }
     out
+}
+
+/// True when diffing `old` and `new` for display would exceed `svn_diff::DISPLAY_MAX_COST`, the
+/// budget the real engine applies before giving up with `TooComplex`.
+///
+/// # Errors
+/// `Cancelled` when `ctx` is cancelled while diffing.
+pub fn exceeds_display_budget(
+    old: &[u8],
+    new: &[u8],
+    ignore_whitespace: bool,
+    ctx: &OpContext,
+) -> Result<bool, SvnError> {
+    let opts = svn_diff::DisplayOptions {
+        diff: svn_diff::DiffOptions {
+            ignore_space: if ignore_whitespace {
+                svn_diff::IgnoreSpace::All
+            } else {
+                svn_diff::IgnoreSpace::None
+            },
+            ignore_eol_style: false,
+            max_cost: Some(svn_diff::DISPLAY_MAX_COST),
+        },
+        context: 0,
+    };
+    match svn_diff::diff(old, new, &opts, &ctx.cancel) {
+        Ok(_) => Ok(false),
+        Err(svn_diff::DiffError::TooComplex) => Ok(true),
+        Err(e) => Err(SvnError::new(ErrorCode::Cancelled, e.to_string())),
+    }
 }
 
 #[cfg(test)]

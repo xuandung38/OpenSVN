@@ -3257,6 +3257,7 @@ dependencies = [
  "serde_json",
  "specta",
  "specta-typescript",
+ "svn-diff",
  "svn-ra-api",
  "svn-types",
  "sysinfo",

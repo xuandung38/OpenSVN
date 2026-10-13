@@ -7,7 +7,9 @@ import type {
   OperationHandle,
   OperationKind,
   OpResult,
+  ProgramKind,
   RemoteEditRequest,
+  Settings,
   SettingsPatch_Deserialize,
   UnlockRequest,
 } from "../bindings";
@@ -120,6 +122,13 @@ const {
   emit: mockEmit,
 });
 
+const PROGRAM_KEYS = {
+  "diff-tool": "diff.externalTool",
+  "merge-tool": "diff.mergeTool",
+  editor: "tools.editor",
+  terminal: "tools.terminal",
+} as const satisfies Record<ProgramKind, keyof Settings>;
+
 const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>> = {
   ...wcCommands,
   opCancel: (opId: string) => {
@@ -224,6 +233,17 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     }
     mockAuthResponses.push({ requestId, response });
     return ok(null);
+  },
+  // The real backend shows a native file picker and a confirmation; the mock pretends the user
+  // picked a diff tool and confirmed.
+  programChoose: (kind: ProgramKind, args: string[]) => {
+    const key = PROGRAM_KEYS[kind];
+    Object.assign(mockSettings, { [key]: { path: "/usr/bin/meld", args } });
+    return ok({ ...mockSettings });
+  },
+  programClear: (kind: ProgramKind) => {
+    Object.assign(mockSettings, { [PROGRAM_KEYS[kind]]: null });
+    return ok({ ...mockSettings });
   },
   settingsSet: (patch: SettingsPatch_Deserialize) => {
     Object.assign(mockSettings, patch);
