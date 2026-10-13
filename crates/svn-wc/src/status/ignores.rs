@@ -39,5 +39,7 @@ pub(crate) fn split_patterns(value: &[u8]) -> impl Iterator<Item = String> + '_ 
 
 /// `svn_wc_match_ignore_list`.
 pub(crate) fn is_ignored(name: &str, patterns: &[String]) -> bool {
-    patterns.iter().any(|p| glob_match(p.as_bytes(), name.as_bytes()))
+    patterns
+        .iter()
+        .any(|p| glob_match(p.as_bytes(), name.as_bytes()))
 }
