@@ -516,6 +516,37 @@ async fn rejected_stored_credentials_lead_to_a_rejected_prompt() {
     assert_eq!(prompter.stored_rejections(), 1);
 }
 
+/// A cancel that lands while the rejection hook runs must not lose the report (the transport
+/// has already cleared its "came from the store" flag, so it would never repeat it).
+#[tokio::test]
+async fn cancel_during_the_rejection_hook_keeps_the_report() {
+    for unattended in [false, true] {
+        let (ca, srv) = server(basic_auth_handler("r", "alice", "new")).await;
+        let prompter = ScriptedPrompter::with_stored("alice", "stale");
+        *prompter.default_credentials.lock().unwrap() = Some(("alice".into(), "new".into()));
+        let cancel = CancelToken::new();
+        *prompter.cancel_in_rejected_hook.lock().unwrap() = Some(cancel.clone());
+        let t = transport_trusting(&ca, prompter.clone(), |_| {});
+        let r = if unattended {
+            t.send_unattended(get(srv.url("/a")), &cancel).await
+        } else {
+            t.send(get(srv.url("/a")), &cancel).await
+        };
+        let err = r.expect_err("cancelled");
+        assert_eq!(err.code, ErrorCode::Cancelled, "unattended={unattended}");
+        assert_eq!(
+            prompter.stored_rejections(),
+            1,
+            "unattended={unattended}: the report survived the cancel"
+        );
+        assert_eq!(
+            prompter.credential_prompts(),
+            0,
+            "no prompt after the cancel"
+        );
+    }
+}
+
 #[tokio::test]
 async fn unattended_send_uses_stored_credentials_but_never_prompts() {
     let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;

@@ -74,7 +74,8 @@ async fn redirects_off_origin_are_refused() {
                 [
                     "different origin",
                     "credentials in the URL",
-                    "only http and https"
+                    "only http and https",
+                    "forbidden character"
                 ]
                 .iter()
                 .any(|w| err.message.contains(w)),
@@ -84,7 +85,10 @@ async fn redirects_off_origin_are_refused() {
             assert!(
                 matches!(
                     err.code,
-                    ErrorCode::Network | ErrorCode::ServerUnsupported | ErrorCode::Internal
+                    ErrorCode::Network
+                        | ErrorCode::ServerUnsupported
+                        | ErrorCode::Internal
+                        | ErrorCode::UnsafePath
                 ),
                 "{m} {target}: {err:?}"
             );
@@ -98,6 +102,46 @@ async fn redirects_off_origin_are_refused() {
         other.requests().is_empty(),
         "the other origin was contacted"
     );
+}
+
+/// A same-origin `Location` the URL parser would rewrite (tab deleted, `\\` read as `/`) or
+/// that carries an encoded control character or backslash is refused, not normalised and
+/// followed.
+#[tokio::test]
+async fn redirects_with_parser_rewritten_locations_are_refused() {
+    let ca = TestCa::new();
+    for target in [
+        "/start/.\t./steal",
+        "/a\\..\\steal",
+        "/a/%2e%09%2e/steal",
+        "/a%5C..%5Csteal",
+        "/a/%0D%0Asteal",
+    ] {
+        let server = TlsServer::start(
+            &ca.leaf(&["localhost"], false),
+            Arc::new(move |seen: &common::Seen| {
+                if seen.path == "/start" {
+                    Reply::status(302).header("location", target)
+                } else {
+                    Reply::ok("stolen")
+                }
+            }),
+        )
+        .await;
+        let prompter = ScriptedPrompter::with_credentials("tester", "tester-pass");
+        let t = common::transport_trusting(&ca, prompter, |c| c.retry = RetryPolicy::none());
+        let req = HttpRequest::new(Method::GET, server.url("/start"));
+        let err = t
+            .send(req, &CancelToken::new())
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("redirect to {target:?} was followed"));
+        assert_eq!(err.code, ErrorCode::UnsafePath, "{target:?}: {err:?}");
+        assert!(
+            server.requests().iter().all(|s| s.path == "/start"),
+            "{target:?}: the rewritten target was requested"
+        );
+    }
 }
 
 /// A body far larger than the caller's limit fails fast with `Corrupt` instead of buffering.
