@@ -111,6 +111,7 @@ export const mockSettings: Settings = {
   "network.maxConnections": 4,
   "network.timeoutSec": 60,
   "network.proxy": { mode: "system" },
+  "network.negotiate": true,
   "wc.defaultFormat": 32,
   "wc.readSubversionConfig": false,
   "cache.maxSizeGb": 2,

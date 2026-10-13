@@ -2,7 +2,9 @@
 //! created by `svn-wc`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod connector_tests;
 mod edit_tests;
+mod https_svn;
 mod recovery_tests;
 mod remote_tests;
 mod scaffold_tests;

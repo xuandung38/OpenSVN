@@ -84,6 +84,11 @@ rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }
 [features]
 # Registers `engine::real::RealEngine`, the `EngineFacade` backed by the Subversion crates.
 real-engine = ["dep:svn-wc", "dep:svn-client", "dep:svn-delta", "dep:md-5", "dep:sha1"]
+# Kerberos single sign-on on macOS/Linux through the system GSSAPI library (needs the krb5
+# development headers and libclang to build). Off by default so CI builds without them; release
+# builds for macOS and Linux turn it on. Windows always has SSPI. Users can switch Negotiate off in
+# the network settings either way.
+negotiate-gssapi = ["svn-ra/negotiate-gssapi"]
 # Exposes `engine::conformance`, the engine-independent test suite every `EngineFacade` must pass.
 engine-conformance = []
 
@@ -93,3 +98,10 @@ tokio = { workspace = true, features = ["test-util"] }
 tauri = { workspace = true, features = ["test"] }
 tempfile.workspace = true
 proptest.workspace = true
+# Scripted HTTPS Subversion server for the connector and broker acceptance tests.
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+http-body-util.workspace = true
+rcgen.workspace = true
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
+tokio-rustls = { workspace = true, features = ["ring", "tls12"] }

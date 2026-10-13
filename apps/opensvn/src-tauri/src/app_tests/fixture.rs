@@ -196,7 +196,8 @@ impl Fixture {
         let launcher = Arc::new(RecordingLauncher::default());
         let state = AppState::build(AppDeps {
             data_dir: dir.path().to_path_buf(),
-            engine: engine.clone(),
+            engine: crate::app_state::EngineSource::Ready(engine.clone()),
+            credentials: Arc::new(secure_store::MemoryStore::new()),
             events: events.clone(),
             picker: picker.clone(),
             status_timing,

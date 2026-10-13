@@ -751,6 +751,11 @@ export type Settings = {
 	"network.maxConnections": number,
 	"network.timeoutSec": number,
 	"network.proxy": ProxySetting,
+	/**
+	 *  Kerberos single sign-on (Negotiate) when the server offers it; off falls back to a
+	 *  user name and password.
+	 */
+	"network.negotiate": boolean,
 	"wc.defaultFormat": WcFormat,
 	"wc.readSubversionConfig": boolean,
 	"cache.maxSizeGb": number,
@@ -795,6 +800,11 @@ export type SettingsPatch_Deserialize = {
 	"network.maxConnections"?: number | null,
 	"network.timeoutSec"?: number | null,
 	"network.proxy"?: ProxySetting | null,
+	/**
+	 *  Kerberos single sign-on (Negotiate) when the server offers it; off falls back to a
+	 *  user name and password.
+	 */
+	"network.negotiate"?: boolean | null,
 	"wc.defaultFormat"?: WcFormat | null,
 	"wc.readSubversionConfig"?: boolean | null,
 	"cache.maxSizeGb"?: number | null,
@@ -818,6 +828,11 @@ export type SettingsPatch_Serialize = {
 	"network.maxConnections"?: number | null,
 	"network.timeoutSec"?: number | null,
 	"network.proxy"?: ProxySetting | null,
+	/**
+	 *  Kerberos single sign-on (Negotiate) when the server offers it; off falls back to a
+	 *  user name and password.
+	 */
+	"network.negotiate"?: boolean | null,
 	"wc.defaultFormat"?: WcFormat | null,
 	"wc.readSubversionConfig"?: boolean | null,
 	"cache.maxSizeGb"?: number | null,

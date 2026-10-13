@@ -149,7 +149,7 @@ pub async fn certs_list(state: State<'_, AppState>) -> Result<Vec<TrustedCert>, 
 #[specta::specta]
 pub async fn certs_remove(state: State<'_, AppState>, key: TrustedCertKey) -> Result<(), AppError> {
     guard(async {
-        if state.db.certs_remove(&key)? {
+        if state.auth.forget_certificate(&key)? {
             Ok(())
         } else {
             Err(crate::errors::invalid_argument(
