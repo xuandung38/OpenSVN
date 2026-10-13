@@ -22,8 +22,8 @@ Doc 03 §3.5: the certificate decision rules, `path_pick` validation, and the up
 ## Gates (local, Linux)
 - `cargo fmt --all --check`: pass
 - `cargo clippy -p opensvn -p opensvn-ipc -p secure-store --all-targets -- -D warnings`: pass. This is scoped: the workspace run was not done because the disk is shared and near full.
-- `cargo test -p opensvn` (+ `-p opensvn-ipc`): see the PR comment for the counts
-- `pnpm lint` pass, `pnpm typecheck` pass, `pnpm test`: see the PR comment
+- `cargo test -p opensvn -p opensvn-ipc --locked`: 206 app tests and 26 ipc tests pass, 0 fail
+- `pnpm lint` passes and `pnpm typecheck` passes. `pnpm test` (vitest, default 5 s timeout): between 1 and 3 of 144 tests time out in `features/remote/*`, and which ones changes from run to run. Load average was about 27 on 4 cores because other agents were building at the same time. With `--testTimeout=30000`, all 144 tests in 21 files pass. Each failing file also passes when run on its own. One real failure (the branch test expected no `fromWc`) was fixed.
 - `pnpm gen:ipc`: no drift
 
 ## Not done / caveats
