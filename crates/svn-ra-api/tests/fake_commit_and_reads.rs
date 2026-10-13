@@ -45,14 +45,16 @@ fn session() -> FakeRaSession {
 struct Recorder(Mutex<Vec<String>>);
 
 impl CommitObserver for Recorder {
-    fn on_txn_created(&self, txn: &str) {
+    fn on_txn_created(&self, txn: &str) -> Result<()> {
         self.0.lock().unwrap().push(format!("txn:{txn}"));
+        Ok(())
     }
-    fn on_merged(&self, info: &CommitInfo) {
+    fn on_merged(&self, info: &CommitInfo) -> Result<()> {
         self.0
             .lock()
             .unwrap()
             .push(format!("merged:{}", info.revision));
+        Ok(())
     }
 }
 
@@ -80,7 +82,14 @@ async fn commit_creates_a_new_revision() {
     let tmp = tempfile::tempdir().expect("tmp");
     let obs = Arc::new(Recorder::default());
     let mut ed = s
-        .commit_editor("update files", &[], &[], false, obs.clone())
+        .commit_editor(
+            "update files",
+            &[],
+            &[],
+            false,
+            obs.clone(),
+            &CancelToken::new(),
+        )
         .await
         .expect("editor");
 
@@ -205,7 +214,14 @@ async fn commit_creates_a_new_revision() {
 async fn abort_removes_the_transaction_and_keeps_the_head() {
     let s = session();
     let ed = s
-        .commit_editor("m", &[], &[], false, Arc::new(Recorder::default()))
+        .commit_editor(
+            "m",
+            &[],
+            &[],
+            false,
+            Arc::new(Recorder::default()),
+            &CancelToken::new(),
+        )
         .await
         .expect("editor");
     assert_eq!(s.open_txns().len(), 1);
@@ -218,7 +234,14 @@ async fn abort_removes_the_transaction_and_keeps_the_head() {
 
     // A leaked transaction can be cleaned up by name, repeatedly.
     let _leaked = s
-        .commit_editor("m", &[], &[], false, Arc::new(Recorder::default()))
+        .commit_editor(
+            "m",
+            &[],
+            &[],
+            false,
+            Arc::new(Recorder::default()),
+            &CancelToken::new(),
+        )
         .await
         .expect("editor");
     let name = s.open_txns().remove(0);
@@ -231,7 +254,14 @@ async fn abort_removes_the_transaction_and_keeps_the_head() {
 async fn out_of_date_edits_are_rejected() {
     let s = session();
     let mut ed = s
-        .commit_editor("m", &[], &[], false, Arc::new(Recorder::default()))
+        .commit_editor(
+            "m",
+            &[],
+            &[],
+            false,
+            Arc::new(Recorder::default()),
+            &CancelToken::new(),
+        )
         .await
         .expect("editor");
     let root = ed.open_root(Some(Revnum(2))).await.expect("root");
@@ -260,7 +290,14 @@ async fn out_of_date_edits_are_rejected() {
 async fn racing_commit_is_refused_at_merge() {
     let s = session();
     let ed = s
-        .commit_editor("m", &[], &[], false, Arc::new(Recorder::default()))
+        .commit_editor(
+            "m",
+            &[],
+            &[],
+            false,
+            Arc::new(Recorder::default()),
+            &CancelToken::new(),
+        )
         .await
         .expect("editor");
     s.seed("carol", "meanwhile", &[put("other.txt", "x")])
@@ -301,7 +338,14 @@ async fn locks_gate_commits_and_are_released_on_merge() {
 
     // Without the token the file cannot be opened for edit.
     let mut ed = s
-        .commit_editor("m", &[], &[], false, Arc::new(Recorder::default()))
+        .commit_editor(
+            "m",
+            &[],
+            &[],
+            false,
+            Arc::new(Recorder::default()),
+            &CancelToken::new(),
+        )
         .await
         .expect("editor");
     let root = ed.open_root(None).await.expect("root");
@@ -315,7 +359,14 @@ async fn locks_gate_commits_and_are_released_on_merge() {
     // Wrong token.
     let bad = vec![("trunk/a.txt".to_owned(), "opaquelocktoken:bad".to_owned())];
     let mut ed = s
-        .commit_editor("m", &[], &bad, false, Arc::new(Recorder::default()))
+        .commit_editor(
+            "m",
+            &[],
+            &bad,
+            false,
+            Arc::new(Recorder::default()),
+            &CancelToken::new(),
+        )
         .await
         .expect("editor");
     let root = ed.open_root(None).await.expect("root");
@@ -332,7 +383,14 @@ async fn locks_gate_commits_and_are_released_on_merge() {
     let tokens = vec![("trunk/a.txt".to_owned(), lock.token.clone())];
     let tmp = tempfile::tempdir().expect("tmp");
     let mut ed = s
-        .commit_editor("m", &[], &tokens, false, Arc::new(Recorder::default()))
+        .commit_editor(
+            "m",
+            &[],
+            &tokens,
+            false,
+            Arc::new(Recorder::default()),
+            &CancelToken::new(),
+        )
         .await
         .expect("editor");
     let root = ed.open_root(None).await.expect("root");
@@ -401,7 +459,14 @@ async fn keep_locks_and_steal_and_unlock() {
         .expect("lock");
     let tokens = vec![("trunk/a.txt".to_owned(), l.token.clone())];
     let mut ed = s
-        .commit_editor("m", &[], &tokens, true, Arc::new(Recorder::default()))
+        .commit_editor(
+            "m",
+            &[],
+            &tokens,
+            true,
+            Arc::new(Recorder::default()),
+            &CancelToken::new(),
+        )
         .await
         .expect("editor");
     let root = ed.open_root(None).await.expect("root");
@@ -685,4 +750,129 @@ async fn cancelled_token_stops_operations() {
             .code,
         ErrorCode::Cancelled
     );
+}
+
+/// Observer whose journal can be told to fail.
+struct Journal {
+    fail_txn: bool,
+    fail_merge: bool,
+}
+
+impl CommitObserver for Journal {
+    fn on_txn_created(&self, _: &str) -> Result<()> {
+        if self.fail_txn {
+            Err(svn_types::SvnError::new(
+                ErrorCode::DiskFull,
+                "journal full",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    fn on_merged(&self, _: &CommitInfo) -> Result<()> {
+        if self.fail_merge {
+            Err(svn_types::SvnError::new(
+                ErrorCode::PermissionDenied,
+                "journal read-only",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn failing_journal_vetoes_the_commit_and_deletes_the_transaction() {
+    let s = session();
+    let obs = Arc::new(Journal {
+        fail_txn: true,
+        fail_merge: false,
+    });
+    let err = s
+        .commit_editor("m", &[], &[], false, obs, &CancelToken::new())
+        .await
+        .err()
+        .expect("vetoed");
+    assert_eq!(err.code, ErrorCode::DiskFull);
+    assert!(s.open_txns().is_empty(), "transaction must be deleted");
+    assert_eq!(
+        s.youngest_rev(&CancelToken::new()).await.expect("youngest"),
+        Revnum(2)
+    );
+}
+
+#[tokio::test]
+async fn failing_merge_notification_is_reported_with_the_merged_revision() {
+    let s = session();
+    let obs = Arc::new(Journal {
+        fail_txn: false,
+        fail_merge: true,
+    });
+    let mut ed = s
+        .commit_editor("m", &[], &[], false, obs, &CancelToken::new())
+        .await
+        .expect("editor");
+    let root = ed.open_root(None).await.expect("root");
+    ed.add_directory(&p("newdir"), root, None)
+        .await
+        .expect("dir");
+    let err = ed.close_edit().await.expect_err("observer failed");
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
+    assert!(err.message.contains("r3 was merged"), "{}", err.message);
+    assert_eq!(
+        s.youngest_rev(&CancelToken::new()).await.expect("youngest"),
+        Revnum(3)
+    );
+}
+
+#[tokio::test]
+async fn cancelled_commit_stops_editing_and_can_still_be_aborted() {
+    let s = session();
+    let token = CancelToken::new();
+    let mut ed = s
+        .commit_editor("m", &[], &[], false, Arc::new(Recorder::default()), &token)
+        .await
+        .expect("editor");
+    let root = ed.open_root(None).await.expect("root");
+    token.cancel();
+    assert_eq!(
+        ed.add_directory(&p("d"), root, None)
+            .await
+            .expect_err("cancelled")
+            .code,
+        ErrorCode::Cancelled
+    );
+    assert_eq!(
+        ed.close_directory(root).await.expect_err("cancelled").code,
+        ErrorCode::Cancelled
+    );
+    ed.abort_edit().await.expect("abort works after cancel");
+    assert!(s.open_txns().is_empty());
+
+    // Cancel just before the merge: no revision, no leaked transaction.
+    let token = CancelToken::new();
+    let ed = s
+        .commit_editor("m", &[], &[], false, Arc::new(Recorder::default()), &token)
+        .await
+        .expect("editor");
+    token.cancel();
+    assert_eq!(
+        ed.close_edit().await.expect_err("cancelled").code,
+        ErrorCode::Cancelled
+    );
+    assert!(s.open_txns().is_empty());
+    assert_eq!(
+        s.youngest_rev(&CancelToken::new()).await.expect("youngest"),
+        Revnum(2)
+    );
+
+    // An already cancelled token refuses to start a commit.
+    let dead = CancelToken::new();
+    dead.cancel();
+    let err = s
+        .commit_editor("m", &[], &[], false, Arc::new(Recorder::default()), &dead)
+        .await
+        .err()
+        .expect("cancelled");
+    assert_eq!(err.code, ErrorCode::Cancelled);
 }

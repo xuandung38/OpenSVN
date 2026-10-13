@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use async_trait::async_trait;
 use bytes::Bytes;
 use svn_types::{
-    ChangedPath, Checksum, DirId, ErrorCode, FileId, PropChange, RelPath, Result, Revnum, SvnError,
-    Timestamp,
+    CancelToken, ChangedPath, Checksum, DirId, ErrorCode, FileId, PropChange, RelPath, Result,
+    Revnum, SvnError, Timestamp,
 };
 
 use super::repo::{FakeChange, RepoState, Tree, apply_change};
@@ -22,6 +22,8 @@ pub(super) struct FakeCommitEditor {
     pub message: String,
     pub lock_tokens: Vec<(String, String)>,
     pub keep_locks: bool,
+    /// Fires when the caller cancels the commit; `abort_edit` still works afterwards.
+    pub cancel: CancelToken,
     /// Working tree of the transaction, starting from HEAD at creation.
     pub tree: Tree,
     pub base_head: Revnum,
@@ -112,6 +114,7 @@ impl FakeCommitEditor {
 #[async_trait]
 impl CommitEditor for FakeCommitEditor {
     async fn open_root(&mut self, base_rev: Option<Revnum>) -> Result<DirId> {
+        self.cancel.check()?;
         self.check_open(&RelPath::root(), base_rev)?;
         let id = DirId(self.id());
         self.dirs.insert(id, RelPath::root());
@@ -124,6 +127,7 @@ impl CommitEditor for FakeCommitEditor {
         parent: DirId,
         copy_from: Option<(&str, Revnum)>,
     ) -> Result<DirId> {
+        self.cancel.check()?;
         self.dir_path(parent)?;
         if copy_from.is_some() {
             return Err(err(
@@ -145,6 +149,7 @@ impl CommitEditor for FakeCommitEditor {
         parent: DirId,
         base_rev: Option<Revnum>,
     ) -> Result<DirId> {
+        self.cancel.check()?;
         self.dir_path(parent)?;
         self.check_open(path, base_rev)?;
         let id = DirId(self.id());
@@ -158,6 +163,7 @@ impl CommitEditor for FakeCommitEditor {
         parent: DirId,
         copy_from: Option<(&str, Revnum)>,
     ) -> Result<FileId> {
+        self.cancel.check()?;
         self.dir_path(parent)?;
         if copy_from.is_some() {
             return Err(err(
@@ -180,6 +186,7 @@ impl CommitEditor for FakeCommitEditor {
         parent: DirId,
         base_rev: Option<Revnum>,
     ) -> Result<FileId> {
+        self.cancel.check()?;
         self.dir_path(parent)?;
         self.check_open(path, base_rev)?;
         self.check_lock(path)?;
@@ -196,6 +203,7 @@ impl CommitEditor for FakeCommitEditor {
         _base_md5: Option<Checksum>,
         _result_md5: Checksum,
     ) -> Result<()> {
+        self.cancel.check()?;
         let path = self.file_path(file)?;
         let content = tokio::fs::read(&target.path)
             .await
@@ -206,6 +214,7 @@ impl CommitEditor for FakeCommitEditor {
     }
 
     async fn change_dir_prop(&mut self, dir: DirId, change: PropChange) -> Result<()> {
+        self.cancel.check()?;
         let path = self.dir_path(dir)?;
         self.apply(FakeChange::SetProp(path.clone(), change))?;
         self.touched.push(path);
@@ -213,6 +222,7 @@ impl CommitEditor for FakeCommitEditor {
     }
 
     async fn change_file_prop(&mut self, file: FileId, change: PropChange) -> Result<()> {
+        self.cancel.check()?;
         let path = self.file_path(file)?;
         self.apply(FakeChange::SetProp(path.clone(), change))?;
         self.touched.push(path);
@@ -225,6 +235,7 @@ impl CommitEditor for FakeCommitEditor {
         rev: Option<Revnum>,
         parent: DirId,
     ) -> Result<()> {
+        self.cancel.check()?;
         self.dir_path(parent)?;
         self.check_open(path, rev)?;
         self.check_lock(path)?;
@@ -234,15 +245,22 @@ impl CommitEditor for FakeCommitEditor {
     }
 
     async fn close_file(&mut self, file: FileId) -> Result<()> {
+        self.cancel.check()?;
         self.file_path(file).map(|_| ())
     }
 
     async fn close_directory(&mut self, dir: DirId) -> Result<()> {
+        self.cancel.check()?;
         self.dir_path(dir).map(|_| ())
     }
 
     async fn close_edit(self: Box<Self>) -> Result<CommitInfo> {
         let this = *self;
+        if let Err(e) = this.cancel.check() {
+            // Cancelled before the merge: delete the transaction instead of committing.
+            guard(&this.state).txns.remove(&this.txn);
+            return Err(e);
+        }
         let info = {
             let mut st = guard(&this.state);
             if !st.txns.remove(&this.txn) {
@@ -283,7 +301,17 @@ impl CommitEditor for FakeCommitEditor {
                 post_commit_err: None,
             }
         };
-        this.observer.on_merged(&info);
+        if let Err(e) = this.observer.on_merged(&info) {
+            let mut e2 = SvnError::new(
+                e.code,
+                format!(
+                    "commit r{} was merged but the observer failed: {}",
+                    info.revision.0, e.message
+                ),
+            );
+            e2.svn_code = e.svn_code;
+            return Err(e2);
+        }
         Ok(info)
     }
 
