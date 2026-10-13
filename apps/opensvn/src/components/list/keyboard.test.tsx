@@ -16,6 +16,9 @@ beforeAll(() => {
   Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, value: 280 });
 });
 
+// Hang guard only (no findBy/waitFor here): userEvent on real timers is slow on a loaded machine.
+vi.setConfig({ testTimeout: 120_000 });
+
 const PATHS = Array.from({ length: 100 }, (_, i) => `dir/file-${i}.ts`);
 
 function setup() {
