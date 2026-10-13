@@ -33,6 +33,7 @@ fn map_node_status(s: SvnNodeStatus) -> Option<NodeStatus> {
         SvnNodeStatus::Obstructed | SvnNodeStatus::Incomplete => NodeStatus::Obstructed,
         SvnNodeStatus::Ignored => NodeStatus::Ignored,
         SvnNodeStatus::Conflicted => NodeStatus::Conflicted,
+        SvnNodeStatus::External => NodeStatus::External,
         SvnNodeStatus::Excluded => return None,
     })
 }
