@@ -364,6 +364,47 @@ async fn locks_travel_in_if_header_and_merge_body() {
 }
 
 #[tokio::test]
+async fn deleting_a_directory_presents_the_locks_below_it() {
+    let srv = server(Bulk::Prefer).await;
+    mount_txn(&srv).await;
+    Mock::given(method("DELETE"))
+        .and(path_prefix_txr())
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&srv)
+        .await;
+    mount_merge(&srv, fixture("commit/full-merge.resp")).await;
+    let rec = Arc::new(Recorder::default());
+    let locks = [
+        ("d/a.txt".to_owned(), "opaquelocktoken:aaaa".to_owned()),
+        ("d/sub/b.txt".to_owned(), "opaquelocktoken:bbbb".to_owned()),
+        ("other.txt".to_owned(), "opaquelocktoken:cccc".to_owned()),
+    ];
+    let mut ed = begin(&srv, &rec, &locks, &CancelToken::new())
+        .await
+        .unwrap();
+    let root = ed.open_root(Some(Revnum(5))).await.unwrap();
+    ed.delete_entry(&p("d"), Some(Revnum(5)), root)
+        .await
+        .unwrap();
+    ed.delete_entry(&p("plain"), None, root).await.unwrap();
+    ed.close_directory(root).await.unwrap();
+    ed.close_edit().await.unwrap();
+
+    let all = srv.received_requests().await.unwrap();
+    let del = |suffix: &str| {
+        all.iter()
+            .find(|r| r.method.as_str() == "DELETE" && r.url.path().ends_with(suffix))
+            .unwrap()
+    };
+    let d = del("/trunk/d");
+    let if_header = d.headers.get("If").unwrap().to_str().unwrap();
+    assert!(if_header.contains("/svn/repo/trunk/d/a.txt> (<opaquelocktoken:aaaa>)"));
+    assert!(if_header.contains("/svn/repo/trunk/d/sub/b.txt> (<opaquelocktoken:bbbb>)"));
+    assert!(!if_header.contains("cccc"), "{if_header}");
+    assert!(del("/trunk/plain").headers.get("If").is_none());
+}
+
+#[tokio::test]
 async fn observer_veto_deletes_the_transaction() {
     let srv = server(Bulk::Prefer).await;
     mount_txn(&srv).await;
