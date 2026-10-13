@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use secrecy::SecretString;
-use svn_ra_api::fake::{FakeChange, FakeRaSession};
+use svn_ra_api::fake::{FakeChange, FakeMergeFault, FakeRaSession};
 use svn_ra_api::{
     AuthMethod, AuthPrompter, CertDecision, CertInfo, CommitInfo, CommitObserver,
     CredentialRequest, Credentials, FileRev, FileRevHandler, LogRequest, PromptReason, RaSession,
-    ReplayableSource,
+    ReplayableSource, TxnAbort,
 };
 use svn_types::{
     CancelToken, Checksum, Depth, ErrorCode, NodeKind, PropChange, RelPath, Result, Revnum,
@@ -48,6 +48,10 @@ struct Recorder(Mutex<Vec<String>>);
 impl CommitObserver for Recorder {
     fn on_txn_created(&self, txn: &str) -> Result<()> {
         self.0.lock().unwrap().push(format!("txn:{txn}"));
+        Ok(())
+    }
+    fn on_merge_sending(&self, txn: &str) -> Result<()> {
+        self.0.lock().unwrap().push(format!("sending:{txn}"));
         Ok(())
     }
     fn on_merged(&self, info: &CommitInfo) -> Result<()> {
@@ -157,7 +161,11 @@ async fn commit_creates_a_new_revision() {
     );
     assert_eq!(
         *obs.0.lock().unwrap(),
-        vec!["txn:1-fake".to_owned(), "merged:r3".to_owned()]
+        vec![
+            "txn:1-fake".to_owned(),
+            "sending:1-fake".to_owned(),
+            "merged:r3".to_owned()
+        ]
     );
 
     assert_eq!(cat(&s, "trunk/a.txt", None).await, b"three");
@@ -296,7 +304,16 @@ async fn out_of_date_edits_are_rejected() {
         .add_file(&p("trunk/a.txt"), trunk, None)
         .await
         .expect_err("exists");
-    assert_eq!(err.code, ErrorCode::Internal);
+    // Like svn: E155011 (out of date) wrapping E160020 (already exists).
+    assert_eq!(err.code, ErrorCode::OutOfDate);
+    assert_eq!(err.svn_code, Some(160_020));
+    // A node deleted on the server: E155011 wrapping E160013 (not found).
+    let err = ed
+        .open_directory(&p("gone"), root, Some(Revnum(1)))
+        .await
+        .expect_err("missing");
+    assert_eq!(err.code, ErrorCode::OutOfDate);
+    assert_eq!(err.svn_code, Some(160_013));
 }
 
 #[tokio::test]
@@ -947,5 +964,147 @@ async fn cancel_during_a_pending_read_is_reported_and_nothing_is_applied() {
             .await
             .expect("kind"),
         NodeKind::None
+    );
+}
+
+/// Commits `trunk/b.txt` = `text` through a fresh editor observed by `rec`.
+async fn commit_b(s: &FakeRaSession, rec: Arc<Recorder>, text: &str) -> Result<CommitInfo> {
+    let dir = tempfile::tempdir().expect("tmp");
+    let mut ed = s
+        .commit_editor("m", &[], &[], false, rec, &CancelToken::new())
+        .await
+        .expect("editor");
+    let root = ed.open_root(Some(Revnum(2))).await.expect("root");
+    let trunk = ed
+        .open_directory(&p("trunk"), root, Some(Revnum(2)))
+        .await
+        .expect("trunk");
+    let f = ed
+        .open_file(&p("trunk/b.txt"), trunk, Some(Revnum(2)))
+        .await
+        .expect("file");
+    ed.apply_text(
+        f,
+        None,
+        source(&dir, "b", text),
+        None,
+        Checksum::Md5([0; 16]),
+    )
+    .await
+    .expect("text");
+    ed.close_file(f).await.expect("close file");
+    ed.close_directory(trunk).await.expect("close trunk");
+    ed.close_directory(root).await.expect("close root");
+    ed.close_edit().await
+}
+
+#[tokio::test]
+async fn merge_sending_is_announced_before_the_merge() {
+    let s = session();
+    let rec = Arc::new(Recorder::default());
+    let info = commit_b(&s, rec.clone(), "new b").await.expect("commit");
+    let events = rec.0.lock().unwrap().clone();
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert!(events[0].starts_with("txn:"));
+    assert_eq!(events[1], events[0].replace("txn:", "sending:"));
+    assert_eq!(events[2], format!("merged:{}", info.revision));
+}
+
+#[tokio::test]
+async fn lost_merge_answers_and_checked_abort() {
+    let s = session();
+    let c = CancelToken::new();
+    // Lost before the merge: the transaction is still there; deleting it proves no commit.
+    s.fail_next_merge(FakeMergeFault::LostBeforeMerge);
+    let rec = Arc::new(Recorder::default());
+    let err = commit_b(&s, rec.clone(), "x").await.expect_err("unknown");
+    assert_eq!(err.code, ErrorCode::CommitOutcomeUnknown);
+    assert!(
+        rec.0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.starts_with("sending:"))
+    );
+    assert!(
+        !rec.0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.starts_with("merged:"))
+    );
+    let txn = s.open_txns().remove(0);
+    assert_eq!(
+        s.abort_txn_checked(&txn, &c).await.expect("abort"),
+        TxnAbort::Deleted
+    );
+    assert_eq!(
+        s.abort_txn_checked(&txn, &c).await.expect("again"),
+        TxnAbort::Gone
+    );
+    assert_eq!(s.youngest_rev(&c).await.expect("rev"), Revnum(2));
+
+    // Lost after the merge: the revision exists and the transaction is gone.
+    s.fail_next_merge(FakeMergeFault::LostAfterMerge);
+    let rec = Arc::new(Recorder::default());
+    let err = commit_b(&s, rec.clone(), "y").await.expect_err("unknown");
+    assert_eq!(err.code, ErrorCode::CommitOutcomeUnknown);
+    assert!(
+        !rec.0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.starts_with("merged:"))
+    );
+    assert!(s.open_txns().is_empty());
+    assert_eq!(s.youngest_rev(&c).await.expect("rev"), Revnum(3));
+    assert_eq!(cat(&s, "trunk/b.txt", None).await, b"y");
+    let name = rec.0.lock().unwrap()[0]
+        .trim_start_matches("txn:")
+        .to_owned();
+    assert_eq!(
+        s.abort_txn_checked(&name, &c).await.expect("gone"),
+        TxnAbort::Gone
+    );
+}
+
+/// Observer whose "MERGE sent" record cannot be written.
+struct NoMergeRecord;
+
+impl CommitObserver for NoMergeRecord {
+    fn on_txn_created(&self, _: &str) -> Result<()> {
+        Ok(())
+    }
+    fn on_merge_sending(&self, _: &str) -> Result<()> {
+        Err(svn_types::SvnError::new(
+            ErrorCode::DiskFull,
+            "journal full",
+        ))
+    }
+    fn on_merged(&self, _: &CommitInfo) -> Result<()> {
+        panic!("must not merge without the record");
+    }
+}
+
+#[tokio::test]
+async fn failing_merge_record_vetoes_the_merge() {
+    let s = session();
+    let ed = s
+        .commit_editor(
+            "m",
+            &[],
+            &[],
+            false,
+            Arc::new(NoMergeRecord),
+            &CancelToken::new(),
+        )
+        .await
+        .expect("editor");
+    let err = ed.close_edit().await.expect_err("vetoed");
+    assert_eq!(err.code, ErrorCode::DiskFull);
+    assert!(s.open_txns().is_empty(), "transaction deleted");
+    assert_eq!(
+        s.youngest_rev(&CancelToken::new()).await.expect("youngest"),
+        Revnum(2)
     );
 }

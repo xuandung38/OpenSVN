@@ -5,18 +5,40 @@
 //!
 //! * authentication happens before the working copy lock is taken;
 //! * nothing in the working copy changes before the server merge succeeded;
-//! * the journal records the server transaction before any content is sent and the revision
-//!   right after MERGE; [`recover_commits`] completes or cleans up whatever a crash left;
+//! * the journal records the server transaction before any content is sent, that the `MERGE`
+//!   may be in flight right before it is sent, and the revision right after it;
+//!   [`recover_commits`] / [`recover_wc_commits`] complete or clean up whatever a crash left;
+//! * a `MERGE` whose outcome is unknown ([`ErrorCode::CommitOutcomeUnknown`]) keeps its journal
+//!   and its transaction: nothing is aborted, the working copy is untouched, and no new commit
+//!   of the working copy starts until recovery settled it from the repository;
 //! * the post-commit update of all committed paths is one database transaction;
 //! * after MERGE, cancellation is ignored and the commit is never reported as failed; a merged
 //!   journal left by a crash is finalized before the next commit on the same working copy, and
 //!   finalizing never moves a node's BASE back to an older revision.
 //!
 //! Failpoints (feature `failpoints`): `commit.after_txn_created` fires once the server
-//! transaction exists, `commit.after_merge_before_finalize` after MERGE, before the working
-//! copy is touched, and `commit.after_finalize_before_queue` once the rows and the `file-commit`
-//! work items are committed but before they ran; all turn the configured `return` action into an
-//! error.
+//! transaction exists, `commit.after_merge_sent_marker` once the journal says the `MERGE` may be
+//! sent (an error vetoes the `MERGE`), `commit.journal_merged_write` instead of writing the
+//! merged revision to the journal, `commit.after_merge_before_finalize` after MERGE, before the
+//! working copy is touched, `commit.finalize` in place of the working copy update, and
+//! `commit.after_finalize_before_queue` once the rows and the `file-commit` work items are
+//! committed but before they ran; all turn the configured `return` action into an error.
+
+/// Evaluates a failpoint that injects an `Err` into the enclosing `Result` function.
+#[cfg(feature = "failpoints")]
+macro_rules! failpoint {
+    ($name:literal) => {
+        fail::fail_point!($name, |_| Err(svn_types::SvnError::new(
+            svn_types::ErrorCode::Internal,
+            concat!("failpoint ", $name)
+        )));
+    };
+}
+
+#[cfg(not(feature = "failpoints"))]
+macro_rules! failpoint {
+    ($name:literal) => {};
+}
 
 pub mod collect;
 pub mod drive;
@@ -28,7 +50,7 @@ pub mod recovery;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use svn_ra_api::{RaSession, ReplayableSource};
+use svn_ra_api::{CommitObserver, RaSession, ReplayableSource};
 use svn_types::{
     CancelToken, Checksum, Depth, ErrorCode, PropChange, RelPath, Result, Revnum, SvnError,
 };
@@ -39,27 +61,12 @@ use svn_wc::pristine::PristineIndex;
 use self::collect::{CollectOptions, ItemAction, collect};
 use self::drive::{DriveContext, DriveItem, PreparedText, drive};
 use self::journal::{JournalItem, JournalLock, JournalObserver, JournalStore, JournalText};
+use self::recovery::Reconciled;
 use crate::local::content::detranslate_to_file;
 use crate::local::paths::{abs_of, rel_of};
 use crate::wc::run_work_queue;
 
-pub use self::recovery::{RecoveryReport, recover_commits};
-
-/// Evaluates a failpoint that injects an `Err` into the enclosing `Result` function.
-#[cfg(feature = "failpoints")]
-macro_rules! failpoint {
-    ($name:literal) => {
-        fail::fail_point!($name, |_| Err(SvnError::new(
-            ErrorCode::Internal,
-            concat!("failpoint ", $name)
-        )));
-    };
-}
-
-#[cfg(not(feature = "failpoints"))]
-macro_rules! failpoint {
-    ($name:literal) => {};
-}
+pub use self::recovery::{RecoveryReport, WcCommitRecovery, recover_commits, recover_wc_commits};
 
 /// Parameters of [`commit`].
 #[derive(Debug, Clone)]
@@ -79,6 +86,9 @@ pub struct CommitOptions {
     /// Repository path of the session URL (empty when the session is at the repository root);
     /// every committed path must lie below it.
     pub session_prefix: String,
+    /// User name the server will record as the author, when known. Journaled so that recovery
+    /// can recognize the commit in the log after an unknown `MERGE` outcome.
+    pub author: Option<String>,
 }
 
 impl CommitOptions {
@@ -92,6 +102,7 @@ impl CommitOptions {
             changelists: Vec::new(),
             rev_props: Vec::new(),
             session_prefix: String::new(),
+            author: None,
         }
     }
 }
@@ -126,8 +137,14 @@ pub struct CommitResult {
 pub fn map_commit_error(mut e: SvnError) -> SvnError {
     if matches!(e.code, ErrorCode::Internal | ErrorCode::ServerUnsupported) {
         e.code = match e.svn_code {
-            // FS_CONFLICT, FS_TXN_OUT_OF_DATE, WC_NOT_UP_TO_DATE, RA_OUT_OF_DATE, FS_OUT_OF_DATE
-            Some(160_024 | 160_028 | 155_011 | 170_004 | 160_042) => ErrorCode::OutOfDate,
+            // FS_CONFLICT, FS_TXN_OUT_OF_DATE, WC_NOT_UP_TO_DATE, RA_OUT_OF_DATE, FS_OUT_OF_DATE;
+            // like svn's `fixup_commit_error` also FS_NOT_FOUND / RA_DAV_PATH_NOT_FOUND (added
+            // into a directory deleted on the server) and FS_ALREADY_EXISTS /
+            // RA_DAV_ALREADY_EXISTS (added on the server too)
+            Some(
+                160_024 | 160_028 | 155_011 | 170_004 | 160_042 | 160_013 | 175_007 | 160_020
+                | 175_005,
+            ) => ErrorCode::OutOfDate,
             // FS_PATH_ALREADY_LOCKED, FS_NO_LOCK_TOKEN, FS_LOCK_OWNER_MISMATCH
             Some(160_035 | 160_038 | 160_039) => ErrorCode::LockedByOther,
             // FS_BAD_LOCK_TOKEN, FS_NO_SUCH_LOCK, FS_LOCK_EXPIRED
@@ -200,6 +217,9 @@ async fn commit_locked(
     }
     ctx.cancel.check()?;
 
+    // A revision made by this commit is newer than this: recovery searches the log from here
+    // when the outcome of the MERGE is unknown.
+    let start_youngest = ctx.ra.youngest_rev(ctx.cancel).await?;
     let id = store.new_id();
     let data_dir = store.create_data_dir(&id)?;
     let prepared = match prepare_items(db, &harvest.items, &data_dir) {
@@ -218,7 +238,7 @@ async fn commit_locked(
             token: l.token.clone(),
         })
         .collect();
-    let initial = store.begin(
+    let mut initial = store.begin(
         id.clone(),
         db.wcroot().to_path_buf(),
         opts.keep_locks,
@@ -226,6 +246,9 @@ async fn commit_locked(
         journal_items,
         journal_locks,
     );
+    initial.start_youngest = Some(start_youngest.0);
+    initial.message = Some(opts.message.clone());
+    initial.author.clone_from(&opts.author);
     if let Err(e) = store.write(&initial) {
         let _ = store.remove(&id);
         return Err(e);
@@ -287,32 +310,12 @@ async fn commit_locked(
         return Err(map_commit_error(e));
     }
 
-    let closed = editor.close_edit().await;
-    let info = match closed {
+    let info = match editor.close_edit().await {
         Ok(info) => info,
-        Err(e) => {
-            // MERGE succeeded but the observer failed to persist it: the in-memory journal
-            // still has the revision, so carry on and finalize.
-            if observer.snapshot().merged.is_none() {
-                let txn_known = observer.snapshot().txn.is_some();
-                if !txn_known {
-                    let _ = store.remove(&id);
-                }
-                return Err(map_commit_error(e));
-            }
-            svn_ra_api::CommitInfo {
-                revision: Revnum(
-                    observer
-                        .snapshot()
-                        .merged
-                        .as_ref()
-                        .map_or(0, |m| m.revision),
-                ),
-                date: None,
-                author: None,
-                post_commit_err: None,
-            }
-        }
+        Err(e) => match after_failed_close(&store, &observer, ctx, e).await {
+            AfterClose::Merged(info) => info,
+            AfterClose::Failed(e) => return Err(e),
+        },
     };
 
     failpoint!("commit.after_merge_before_finalize");
@@ -320,14 +323,14 @@ async fn commit_locked(
     // From here on the revision exists in the repository. Cancellation is ignored and nothing
     // is reported as a failed commit: the user must never retry a commit that went through.
     let journal = observer.snapshot();
-    if let Err(e) = finalize::finalize(db, &journal, &data_dir) {
-        // The journal stays: the next commit on this working copy or `recover_commits`
-        // finishes it.
+    if let Err(e) = finalize_after_merge(db, &journal, &data_dir) {
+        // The journal stays: commit recovery (or the next commit, once the journal records the
+        // revision) finishes it.
         let mut err = SvnError::new(
             ErrorCode::WcNeedsCleanup,
             format!(
                 "committed revision {}, but the working copy could not be updated yet; it is \
-                 completed by the next commit or by commit recovery: {}",
+                 completed by commit recovery (cleanup) or the next commit: {}",
                 info.revision.0, e.message
             ),
         );
@@ -356,6 +359,109 @@ async fn commit_locked(
         committed: prepared.iter().map(|p| p.item.relpath.clone()).collect(),
         wc_warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
     }))
+}
+
+/// Folds the merged commit into the working copy (failpoint `commit.finalize` replaces it).
+fn finalize_after_merge(db: &WcDb, journal: &journal::JournalData, data_dir: &Path) -> Result<()> {
+    failpoint!("commit.finalize");
+    finalize::finalize(db, journal, data_dir)
+}
+
+/// How a commit whose `close_edit` failed continues.
+enum AfterClose {
+    /// The `MERGE` went through (the failure was recording it, or recovery found the revision):
+    /// finalize as usual.
+    Merged(svn_ra_api::CommitInfo),
+    /// The commit fails with this error; the journal was dropped or deliberately kept.
+    Failed(SvnError),
+}
+
+/// Decides what a failed `close_edit` means for the journal. A journal whose `MERGE` may have
+/// been sent is only dropped once the repository shows the commit did not happen.
+async fn after_failed_close(
+    store: &JournalStore,
+    observer: &JournalObserver,
+    ctx: &CommitContext<'_>,
+    e: SvnError,
+) -> AfterClose {
+    let snap = observer.snapshot();
+    if let Some(m) = &snap.merged {
+        // MERGE succeeded but the observer failed to persist it: the in-memory journal has the
+        // revision, so carry on and finalize. Try once more to put the revision on disk, so
+        // recovery does not depend on finding the commit in the log.
+        let info = svn_ra_api::CommitInfo {
+            revision: Revnum(m.revision),
+            date: m.date.map(svn_types::Timestamp),
+            author: m.author.clone(),
+            post_commit_err: None,
+        };
+        let _ = observer.on_merged(&info);
+        return AfterClose::Merged(info);
+    }
+    if e.code == ErrorCode::CommitOutcomeUnknown {
+        // The server may still apply the MERGE: neither the transaction nor the journal may go.
+        return AfterClose::Failed(
+            SvnError::new(
+                ErrorCode::CommitOutcomeUnknown,
+                format!(
+                    "the commit may or may not have been applied (the server's answer to the \
+                     final MERGE was lost); the working copy was not changed and the commit \
+                     journal '{}' is kept; commit recovery settles it from the repository \
+                     before the next commit of this working copy",
+                    snap.id
+                ),
+            )
+            .with_child(e),
+        );
+    }
+    if !snap.merge_sent {
+        // Failed before the MERGE was sent: nothing was merged. The RA layer deleted the
+        // transaction (best effort); a journal that names one stays for recovery to make sure.
+        if snap.txn.is_none() {
+            let _ = store.remove(&snap.id);
+        }
+        return AfterClose::Failed(map_commit_error(e));
+    }
+    // The server refused the MERGE. That is how every ordinary failure (out of date, hooks,
+    // locks) looks, but a storage failure after the revision was written can look the same, so
+    // the repository decides before the journal goes.
+    match recovery::reconcile(&snap, ctx.ra, ctx.cancel).await {
+        Ok(Reconciled::NotCommitted | Reconciled::NoMatch(_)) => {
+            let _ = store.remove(&snap.id);
+            AfterClose::Failed(map_commit_error(e))
+        }
+        Ok(Reconciled::Committed(merge)) => {
+            let revision = Revnum(merge.revision);
+            let info = svn_ra_api::CommitInfo {
+                revision,
+                date: merge.date.map(svn_types::Timestamp),
+                author: merge.author.clone(),
+                post_commit_err: None,
+            };
+            let _ = observer.on_merged(&info);
+            AfterClose::Merged(info)
+        }
+        Ok(Reconciled::Ambiguous(why)) => AfterClose::Failed(
+            SvnError::new(
+                ErrorCode::WcNeedsCleanup,
+                format!(
+                    "the server refused the commit, but {why}; the commit journal '{}' is kept \
+                     until this is resolved",
+                    snap.id
+                ),
+            )
+            .with_child(map_commit_error(e)),
+        ),
+        Err(check) => {
+            let mut err = map_commit_error(e);
+            err.message = format!(
+                "{} (whether the commit was applied could not be confirmed: {}; the commit \
+                 journal '{}' is kept for commit recovery)",
+                err.message, check.message, snap.id
+            );
+            AfterClose::Failed(err)
+        }
+    }
 }
 
 fn journal_item(p: &DriveItem) -> JournalItem {

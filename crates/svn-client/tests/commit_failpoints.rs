@@ -365,3 +365,292 @@ async fn stale_journal_never_moves_base_backwards() {
     assert_eq!(read(&e.wc, "d/f1"), "rev $Rev: 3 $\nsecond\n");
     assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
 }
+
+// ---- MERGE sent, outcome unknown (#85) ----
+
+use svn_client::commit::{WcCommitRecovery, recover_wc_commits};
+use svn_ra_api::fake::FakeMergeFault;
+
+impl Env {
+    async fn recover_wc(&self, with_session: bool) -> WcCommitRecovery {
+        let ra: Option<&dyn RaSession> = if with_session { Some(&self.ra) } else { None };
+        recover_wc_commits(&self.state, &self.db, ra, &self.cancel)
+            .await
+            .expect("recover")
+    }
+
+    fn only_journal(&self) -> svn_client::commit::journal::JournalData {
+        let files = JournalStore::new(&self.state).list().expect("list");
+        assert_eq!(files.len(), 1, "exactly one journal: {files:?}");
+        JournalStore::read(&files[0]).expect("read")
+    }
+
+    fn assert_no_journal(&self) {
+        assert!(
+            JournalStore::new(&self.state)
+                .list()
+                .expect("list")
+                .is_empty(),
+            "no journal left"
+        );
+    }
+
+    async fn youngest(&self) -> u64 {
+        self.ra
+            .inner
+            .youngest_rev(&self.cancel)
+            .await
+            .expect("rev")
+            .0
+    }
+
+    /// The next commit of this working copy is refused while a journal has an unknown outcome.
+    async fn assert_next_commit_refused(&self) {
+        write(&self.wc, "top.txt", "blocked?\n");
+        let err = self.commit().await.expect_err("refused");
+        assert_eq!(err.code, ErrorCode::WcNeedsCleanup, "{err}");
+        write(&self.wc, "top.txt", "t\n");
+    }
+}
+
+/// The process dies after the MERGE was sent and applied, before the revision reached the
+/// journal: the journal only says "MERGE sent". Recovery finds the transaction gone and the
+/// commit in the log, and finalizes it.
+#[tokio::test]
+async fn crash_after_merge_sent_is_found_in_the_log_and_finalized() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "changed\n");
+    write(&e.wc, "new.txt", "new\n");
+    local_add(&e, "new.txt");
+    let before = dump_rows(&e.wc);
+    fail::cfg("commit.journal_merged_write", "return").expect("cfg");
+    fail::cfg("commit.after_merge_before_finalize", "return").expect("cfg");
+    e.commit().await.expect_err("crash");
+    fail::remove("commit.after_merge_before_finalize");
+    fail::remove("commit.journal_merged_write");
+
+    assert_eq!(e.youngest().await, 2, "the server has the revision");
+    let j = e.only_journal();
+    assert!(j.merge_sent && j.merged.is_none(), "{j:?}");
+    assert_eq!(j.start_youngest, Some(1));
+    assert_eq!(j.message.as_deref(), Some("m"));
+    assert_eq!(dump_rows(&e.wc), before);
+    e.assert_next_commit_refused().await;
+    assert_eq!(e.youngest().await, 2, "nothing committed twice");
+
+    let report = e.recover_wc(true).await;
+    assert_eq!(report.finalized, vec![j.id.clone()], "{report:?}");
+    assert!(report.needs_user.is_empty() && report.failed.is_empty());
+    e.assert_no_journal();
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
+    let f1 = e.db.read_base(&rp("d/f1")).expect("read").expect("base");
+    assert_eq!(f1.revision, Some(2));
+    svn(&e.fx.oracle, &e.wc, &["cleanup"]);
+}
+
+/// `CommitOutcomeUnknown` while the transaction still exists (the server never applied the
+/// MERGE): the commit keeps the journal and the transaction; recovery deletes the transaction,
+/// which proves nothing was merged, and drops the journal.
+#[tokio::test]
+async fn outcome_unknown_with_the_transaction_present_is_aborted() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "changed\n");
+    let before = dump_rows(&e.wc);
+    e.ra.inner.fail_next_merge(FakeMergeFault::LostBeforeMerge);
+    let err = e.commit().await.expect_err("unknown");
+    assert_eq!(err.code, ErrorCode::CommitOutcomeUnknown, "{err}");
+    assert!(
+        !e.ra.events().iter().any(|l| l.starts_with("abort")),
+        "never aborted: {:?}",
+        e.ra.events()
+    );
+    assert_eq!(e.ra.inner.open_txns().len(), 1, "transaction kept");
+    let j = e.only_journal();
+    assert!(j.outcome_unknown());
+    assert_eq!(dump_rows(&e.wc), before, "WC untouched");
+    e.assert_next_commit_refused().await;
+
+    // Without a session nothing can be decided: the journal stays.
+    let offline = e.recover_wc(false).await;
+    assert_eq!(offline.failed.len(), 1, "{offline:?}");
+    assert_eq!(e.only_journal().id, j.id);
+
+    let report = e.recover_wc(true).await;
+    assert_eq!(report.aborted, vec![j.id], "{report:?}");
+    assert!(e.ra.inner.open_txns().is_empty());
+    e.assert_no_journal();
+    assert_eq!(dump_rows(&e.wc), before);
+    assert_eq!(e.youngest().await, 1);
+    // The working copy commits normally again.
+    let res = e.commit().await.expect("commit").expect("some");
+    assert_eq!(res.revision.0, 2);
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
+}
+
+/// `CommitOutcomeUnknown` after the server created the revision: the transaction is gone, the
+/// log shows the commit, recovery finalizes it.
+#[tokio::test]
+async fn outcome_unknown_with_the_transaction_gone_is_finalized() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "changed\n");
+    local_delete(&e, "top.txt");
+    e.ra.inner.fail_next_merge(FakeMergeFault::LostAfterMerge);
+    let err = e.commit().await.expect_err("unknown");
+    assert_eq!(err.code, ErrorCode::CommitOutcomeUnknown, "{err}");
+    assert!(e.ra.inner.open_txns().is_empty());
+    assert_eq!(e.youngest().await, 2);
+    let j = e.only_journal();
+    assert!(j.outcome_unknown());
+
+    let report = e.recover_wc(true).await;
+    assert_eq!(report.finalized, vec![j.id], "{report:?}");
+    e.assert_no_journal();
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
+    assert!(!e.wc.join("top.txt").exists());
+    // The global recovery has nothing left either.
+    let again = e.recover().await;
+    assert!(again.finalized.is_empty() && again.aborted.is_empty() && again.needs_user.is_empty());
+}
+
+/// The transaction is gone but no revision matches the commit (someone removed the transaction
+/// and committed something else): the journal is kept and reported for the user, never dropped.
+#[tokio::test]
+async fn outcome_unknown_without_a_matching_revision_needs_the_user() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "changed\n");
+    e.ra.inner.fail_next_merge(FakeMergeFault::LostBeforeMerge);
+    e.commit().await.expect_err("unknown");
+    let j = e.only_journal();
+    let txn = j.txn.clone().expect("txn");
+    e.ra.inner.abort_txn(&txn).await.expect("admin removes it");
+    e.ra.inner
+        .seed(
+            "other",
+            "m",
+            &[FakeChange::PutFile(
+                rp("d/f1"),
+                Bytes::from_static(b"other\n"),
+            )],
+        )
+        .expect("seed");
+
+    let report = e.recover_wc(true).await;
+    assert_eq!(report.needs_user.len(), 1, "{report:?}");
+    assert_eq!(report.needs_user[0].0, j.id);
+    assert_eq!(report.needs_user[0].1.code, ErrorCode::WcNeedsCleanup);
+    assert_eq!(e.only_journal(), j, "journal untouched");
+    e.assert_next_commit_refused().await;
+    // The global recovery reports it the same way.
+    let global = e.recover().await;
+    assert_eq!(global.needs_user.len(), 1, "{global:?}");
+    assert_eq!(e.only_journal(), j);
+}
+
+/// #85 item 5: the journal write after MERGE fails, then updating the working copy fails. The
+/// error says recovery finishes the commit, and it does (from the log, as the journal never
+/// got the revision).
+#[tokio::test]
+async fn double_failure_after_merge_is_finished_by_recovery() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "changed\n");
+    write(&e.wc, "new.txt", "new\n");
+    local_add(&e, "new.txt");
+    fail::cfg("commit.journal_merged_write", "return").expect("cfg");
+    fail::cfg("commit.finalize", "return").expect("cfg");
+    let err = e.commit().await.expect_err("double failure");
+    fail::remove("commit.finalize");
+    fail::remove("commit.journal_merged_write");
+    assert_eq!(err.code, ErrorCode::WcNeedsCleanup, "{err}");
+    assert!(err.message.contains("committed revision 2"), "{err}");
+    assert!(err.message.contains("recovery"), "{err}");
+    let j = e.only_journal();
+    assert!(
+        j.outcome_unknown(),
+        "the revision never reached the journal"
+    );
+    e.assert_next_commit_refused().await;
+
+    let report = e.recover_wc(true).await;
+    assert_eq!(report.finalized, vec![j.id], "{report:?}");
+    e.assert_no_journal();
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
+    assert_eq!(e.youngest().await, 2);
+}
+
+/// Same double failure, but the retry of the journal write succeeds: the journal records the
+/// revision and the next commit finalizes it first.
+#[tokio::test]
+async fn double_failure_with_a_recorded_revision_is_finished_by_the_next_commit() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "changed\n");
+    fail::cfg("commit.journal_merged_write", "1*return").expect("cfg");
+    fail::cfg("commit.finalize", "return").expect("cfg");
+    let err = e.commit().await.expect_err("double failure");
+    fail::remove("commit.finalize");
+    fail::remove("commit.journal_merged_write");
+    assert_eq!(err.code, ErrorCode::WcNeedsCleanup, "{err}");
+    assert_eq!(
+        e.only_journal().merged.map(|m| m.revision),
+        Some(2),
+        "retried write"
+    );
+    write(&e.wc, "d/f2", "other\n");
+    let res = e.commit().await.expect("commit").expect("some");
+    assert_eq!(res.revision.0, 3);
+    e.assert_no_journal();
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
+}
+
+/// The marker is on disk, then the process fails before the MERGE goes out: the transaction is
+/// deleted, the repository has no new revision, and the journal goes.
+#[tokio::test]
+async fn failure_between_marker_and_merge_drops_the_journal() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "changed\n");
+    let before = dump_rows(&e.wc);
+    fail::cfg("commit.after_merge_sent_marker", "return").expect("cfg");
+    e.commit().await.expect_err("injected");
+    fail::remove("commit.after_merge_sent_marker");
+    assert!(e.ra.inner.open_txns().is_empty());
+    assert_eq!(e.youngest().await, 1);
+    e.assert_no_journal();
+    assert_eq!(dump_rows(&e.wc), before);
+}
+
+/// The server refuses the MERGE (out of date: another commit landed during the upload). The
+/// journal said "MERGE sent", so the log is checked before it goes; another user's commit with
+/// the same message and paths but different text is not mistaken for ours.
+#[tokio::test]
+async fn merge_refused_as_out_of_date_drops_the_journal_after_checking_the_log() {
+    let _scenario = FailScenario::setup();
+    let Some(mut e) = env() else { return };
+    write(&e.wc, "d/f1", "mine\n");
+    e.ra.seed_on_text = Some((
+        "tester".into(),
+        "m".into(),
+        vec![FakeChange::PutFile(
+            rp("d/f1"),
+            Bytes::from_static(b"theirs\n"),
+        )],
+    ));
+    let before = dump_rows(&e.wc);
+    let err = e.commit().await.expect_err("out of date");
+    assert_eq!(err.code, ErrorCode::OutOfDate, "{err}");
+    assert!(
+        e.ra.events()
+            .iter()
+            .any(|l| l.starts_with("abort_txn_checked")),
+        "reconciled: {:?}",
+        e.ra.events()
+    );
+    e.assert_no_journal();
+    assert_eq!(dump_rows(&e.wc), before);
+    assert_eq!(e.youngest().await, 2);
+}

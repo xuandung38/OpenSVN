@@ -24,7 +24,8 @@ use crate::engine::{DiffOptions, EngineFacade, LockScope, LogScope, OpContext, W
 /// `switch_to_a_branch`, `open_recovers_dead_locks_and_reports_foreign_ones` (its recovery part
 /// runs below through `plant_lock` on a `svn-wc` working copy). `remote_edit_and_copy` is skipped
 /// because the in-memory repository's commit editor refuses copy-from; copy driving is covered
-/// in `edit_tests`.
+/// in `edit_tests`. Status, working copy diff and remote status are wired; their parts of the
+/// skipped groups run in `wc_status_tests` on working copies checked out by `svn-client`.
 struct RealHarness {
     fixture: super::support::Fixture,
     scratch: tempfile::TempDir,
