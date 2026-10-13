@@ -71,7 +71,10 @@ rustls-platform-verifier = "=0.7.1"
 keyring-core = "=1.0.1"
 
 # desktop app and IPC contract (specta is pre-release: keep the exact pins in step)
-tauri = "=2.12.3"
+# `common-controls-v6` is off: it makes every Windows binary that links tauri (including unit test
+# executables, which carry no manifest) fail to load with STATUS_ENTRYPOINT_NOT_FOUND. It only
+# affects the predefined About menu item; revisit together with a test manifest if needed.
+tauri = { version = "=2.12.3", default-features = false, features = ["wry", "compression", "dynamic-acl", "x11", "dbus"] }
 tauri-build = "=2.7.2"
 tauri-specta = "=2.0.0-rc.25"
 specta = "=2.0.0-rc.25"

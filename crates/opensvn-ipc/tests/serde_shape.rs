@@ -130,3 +130,35 @@ fn password_is_redacted_in_debug_but_plain_on_the_wire() {
         json!("hunter2")
     );
 }
+
+#[test]
+fn nullable_patch_key_distinguishes_unchanged_clear_and_set() {
+    // absent key: unchanged
+    let absent: SettingsPatch = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(absent.diff_external_tool, None);
+    // explicit null: clear
+    let clear: SettingsPatch = serde_json::from_value(json!({"diff.externalTool": null})).unwrap();
+    assert_eq!(clear.diff_external_tool, Some(None));
+    // value: set
+    let set: SettingsPatch = serde_json::from_value(
+        json!({"diff.externalTool": {"path": "/usr/bin/meld", "args": ["%l", "%r"]}}),
+    )
+    .unwrap();
+    assert_eq!(
+        set.diff_external_tool,
+        Some(Some(ExternalDiffTool {
+            path: "/usr/bin/meld".into(),
+            args: vec!["%l".into(), "%r".into()]
+        }))
+    );
+    // serialization keeps the three states apart
+    assert_eq!(serde_json::to_value(&absent).unwrap(), json!({}));
+    assert_eq!(
+        serde_json::to_value(&clear).unwrap(),
+        json!({"diff.externalTool": null})
+    );
+    assert_eq!(
+        serde_json::to_value(&set).unwrap(),
+        json!({"diff.externalTool": {"path": "/usr/bin/meld", "args": ["%l", "%r"]}})
+    );
+}

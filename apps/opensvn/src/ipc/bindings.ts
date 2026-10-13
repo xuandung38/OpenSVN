@@ -494,8 +494,6 @@ export type Settings = {
 	"appearance.theme": Theme,
 	"diff.mode": DiffMode,
 	"diff.ignoreWhitespace": boolean,
-	/**  `null` when no external tool is configured. */
-	"diff.externalTool": ExternalDiffTool | null,
 	/**  1..=16 */
 	"network.maxConnections": number,
 	"network.timeoutSec": number,
@@ -505,12 +503,14 @@ export type Settings = {
 	"cache.maxSizeGb": number,
 	"integrations.webRevisionUrl": string,
 	"integrations.webFileUrl": string,
+	/**  `null` when no external tool is configured. */
+	"diff.externalTool": ExternalDiffTool | null,
 };
 
-/**  Partial update: absent keys are left unchanged. */
+/**  Partial update: absent keys are left unchanged; nullable keys accept `null` to clear. */
 export type SettingsPatch = SettingsPatch_Serialize | SettingsPatch_Deserialize;
 
-/**  Partial update: absent keys are left unchanged. */
+/**  Partial update: absent keys are left unchanged; nullable keys accept `null` to clear. */
 export type SettingsPatch_Deserialize = {
 	"general.checkoutRoot"?: string | null,
 	"general.checkIntervalMin"?: number | null,
@@ -518,8 +518,6 @@ export type SettingsPatch_Deserialize = {
 	"appearance.theme"?: Theme | null,
 	"diff.mode"?: DiffMode | null,
 	"diff.ignoreWhitespace"?: boolean | null,
-	/**  `null` when no external tool is configured. */
-	"diff.externalTool"?: ExternalDiffTool | null,
 	/**  1..=16 */
 	"network.maxConnections"?: number | null,
 	"network.timeoutSec"?: number | null,
@@ -529,9 +527,11 @@ export type SettingsPatch_Deserialize = {
 	"cache.maxSizeGb"?: number | null,
 	"integrations.webRevisionUrl"?: string | null,
 	"integrations.webFileUrl"?: string | null,
+	/**  `null` when no external tool is configured. */
+	"diff.externalTool"?: ExternalDiffTool | null,
 };
 
-/**  Partial update: absent keys are left unchanged. */
+/**  Partial update: absent keys are left unchanged; nullable keys accept `null` to clear. */
 export type SettingsPatch_Serialize = {
 	"general.checkoutRoot"?: string | null,
 	"general.checkIntervalMin"?: number | null,
@@ -539,8 +539,6 @@ export type SettingsPatch_Serialize = {
 	"appearance.theme"?: Theme | null,
 	"diff.mode"?: DiffMode | null,
 	"diff.ignoreWhitespace"?: boolean | null,
-	/**  `null` when no external tool is configured. */
-	"diff.externalTool"?: ExternalDiffTool | null,
 	/**  1..=16 */
 	"network.maxConnections"?: number | null,
 	"network.timeoutSec"?: number | null,
@@ -550,6 +548,8 @@ export type SettingsPatch_Serialize = {
 	"cache.maxSizeGb"?: number | null,
 	"integrations.webRevisionUrl"?: string | null,
 	"integrations.webFileUrl"?: string | null,
+	/**  `null` when no external tool is configured. */
+	"diff.externalTool"?: ExternalDiffTool | null,
 };
 
 /**  Byte size; same wire/TS treatment as [`Rev`]. */
