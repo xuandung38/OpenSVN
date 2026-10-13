@@ -215,9 +215,7 @@ pub(crate) async fn open_external_diff(
     state: &AppState,
     target: DiffTarget,
 ) -> Result<(), AppError> {
-    use crate::programs::external_diff::{
-        STALE_AFTER, expand_args, stage_sides, staged_file_name, sweep_stale,
-    };
+    use crate::programs::external_diff::{STALE_AFTER, expand_args, stage_sides, sweep_stale};
     // Fails before any engine work when no tool is configured.
     let (program, args) = state.programs.external_diff_tool()?;
     let opts = DiffOptions {
@@ -232,6 +230,10 @@ pub(crate) async fn open_external_diff(
         )
         .with_path(diff.path));
     }
+    // Non-binary means valid UTF-8 (`is_binary` treats anything else as binary), and text sides
+    // are built from those bytes unchanged, so the staged copies are the file's exact bytes.
+    // TODO(p15): files in other text encodings are reported as binary and refused here; stage
+    // the raw bytes once the engines expose them for external diffs.
     let side = |s: &Option<opensvn_ipc::TextSide>| {
         s.as_ref()
             .map_or(Vec::new(), |t| t.content.clone().into_bytes())
@@ -240,7 +242,7 @@ pub(crate) async fn open_external_diff(
     let root =
         crate::preview::prepare_private_dir(&state.data_dir, crate::preview::EXTERNAL_DIFF_DIR)?;
     sweep_stale(&root, STALE_AFTER);
-    let (l, r) = stage_sides(&root, &staged_file_name(&diff.path), &left, &right)?;
+    let (l, r) = stage_sides(&root, &diff.path, &left, &right)?;
     let args = expand_args(&args, &l.to_string_lossy(), &r.to_string_lossy());
     state.launcher.launch(&program, &args)
 }
