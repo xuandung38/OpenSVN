@@ -59,6 +59,7 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             settings_set,
             program_choose,
             program_clear,
+            path_pick,
             reveal_in_os,
             open_external,
             diagnostics_export,
@@ -73,5 +74,6 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             WcIncoming,
             WcBanner,
             AuthPromptEvent,
+            FsDropped,
         ])
 }

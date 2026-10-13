@@ -23,6 +23,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "settings_set",
     "program_choose",
     "program_clear",
+    "path_pick",
     "reveal_in_os",
     "open_external",
     "diagnostics_export",

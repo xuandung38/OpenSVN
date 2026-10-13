@@ -62,7 +62,7 @@ async fn confirmed_pick_is_stored_with_the_canonical_path() {
     assert_eq!(stored.args, vec!["--wait"]);
     // the user saw the full command line before it was saved
     let shown = picker.confirmed.lock().unwrap().clone();
-    assert_eq!(shown, vec![format!("{} --wait", stored.path)]);
+    assert_eq!(shown, vec![format!("{}\n  \"--wait\"", stored.path)]);
 }
 
 #[tokio::test]
@@ -167,4 +167,55 @@ async fn second_request_while_a_dialog_is_open_is_refused() {
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     assert!(svc.choose(ProgramKind::Editor, vec![]).await.is_err());
     first.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn deceptive_characters_are_refused_in_arguments() {
+    let (_dir, exe) = an_executable();
+    let (svc, picker) = service(Some(exe), true);
+    for bad in [
+        "a\nb",
+        "a\rb",
+        "a\u{202E}b",
+        "a\u{200B}b",
+        "\u{7f}",
+        "\u{85}",
+        "\u{2066}x",
+    ] {
+        assert!(
+            svc.choose(ProgramKind::Editor, vec![bad.into()])
+                .await
+                .is_err(),
+            "{bad:?}"
+        );
+    }
+    assert!(
+        svc.choose(ProgramKind::Editor, vec!["x".repeat(1000); 3])
+            .await
+            .is_err(),
+        "total length"
+    );
+    assert!(picker.confirmed.lock().unwrap().is_empty());
+}
+
+#[test]
+fn dialog_text_quotes_every_argument_on_its_own_line() {
+    let text = command_line_for_dialog(
+        "/bin/ed",
+        &["a b".into(), "he said \"hi\"".into(), "back\\slash".into()],
+    );
+    assert_eq!(
+        text,
+        "/bin/ed\n  \"a b\"\n  \"he said \\\"hi\\\"\"\n  \"back\\\\slash\""
+    );
+}
+
+#[test]
+fn verbatim_prefix_is_removed_only_for_drive_paths() {
+    assert_eq!(strip_verbatim(r"\\?\C:\Tools\ed.exe"), r"C:\Tools\ed.exe");
+    assert_eq!(
+        strip_verbatim(r"\\?\UNC\srv\share\ed.exe"),
+        r"\\?\UNC\srv\share\ed.exe"
+    );
+    assert_eq!(strip_verbatim("/usr/bin/ed"), "/usr/bin/ed");
 }

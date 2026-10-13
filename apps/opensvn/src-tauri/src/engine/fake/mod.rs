@@ -21,10 +21,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use opensvn_ipc::{
-    BlameLine, BranchNode, CheckoutRequest, CleanupRequest, CommitRequest, CopyLocationRequest,
-    Depth, FileDiff, FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage,
-    RemoteEditRequest, RepoEntry, RepoInfo, ResolveRequest, Rev, RevertRequest, TextSide,
-    UpdateRequest,
+    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth, FileDiff,
+    FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage, RepoEntry, RepoInfo,
+    ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
 };
 use svn_ra_api::RaSession;
 use svn_ra_api::fake::FakeRaSession;
@@ -33,8 +32,8 @@ use svn_types::{ErrorCode, RelPath, SvnError};
 use self::state::FakeWc;
 use super::context::OpContext;
 use super::facade::{
-    DiffOptions, EngineFacade, EngineResult, LockScope, LogScope, RecoveryReport, RemoteScan,
-    StatusQuery, WcInfo, WcOpened, WcRef,
+    CheckoutPlan, DiffOptions, EngineFacade, EngineResult, LockScope, LogScope, RecoveryReport,
+    RemoteEditPlan, RemoteScan, StatusQuery, WcInfo, WcOpened, WcRef,
 };
 
 pub use seed::{DEMO_REPO_URL, demo_repo, demo_wc_root};
@@ -235,8 +234,8 @@ impl EngineFacade for FakeEngine {
         self.do_props_set(&wc.root, path, name, value)
     }
 
-    async fn checkout(&self, req: &CheckoutRequest, ctx: &OpContext) -> EngineResult<WcInfo> {
-        self.do_checkout(req, ctx).await
+    async fn checkout(&self, plan: &CheckoutPlan, ctx: &OpContext) -> EngineResult<WcInfo> {
+        self.do_checkout(plan, ctx).await
     }
 
     async fn status_remote(&self, wc: &WcRef, ctx: &OpContext) -> EngineResult<RemoteScan> {
@@ -394,8 +393,8 @@ impl EngineFacade for FakeEngine {
         self.do_unlock(scope, break_lock, ctx).await
     }
 
-    async fn remote_edit(&self, req: &RemoteEditRequest, ctx: &OpContext) -> EngineResult<Rev> {
-        self.do_remote_edit(req, ctx).await
+    async fn remote_edit(&self, plan: &RemoteEditPlan, ctx: &OpContext) -> EngineResult<Rev> {
+        self.do_remote_edit(plan, ctx).await
     }
 
     async fn copy_location(&self, req: &CopyLocationRequest, ctx: &OpContext) -> EngineResult<Rev> {

@@ -5,7 +5,6 @@
 
 use std::sync::OnceLock;
 
-use svn_types::AliveProbe;
 use sysinfo::{Pid, ProcessStatus, ProcessesToUpdate, System};
 
 /// Allowed difference between two derived boot times before they count as different boots.
@@ -24,6 +23,16 @@ pub fn current_boot_id() -> &'static str {
             let id = id.trim();
             if !id.is_empty() {
                 return format!("linux:{id}");
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if let Ok(out) = std::process::Command::new("sysctl")
+            .args(["-n", "kern.bootsessionuuid"])
+            .output()
+        {
+            let id = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            if out.status.success() && !id.is_empty() {
+                return format!("macos:{id}");
             }
         }
         format!("{BOOT_TIME_PREFIX}{}", System::boot_time())
@@ -49,25 +58,31 @@ pub fn same_boot(recorded: &str, current: &str) -> bool {
     }
 }
 
-/// True when a live (non-zombie) process with this pid exists.
-fn process_alive(pid: u32) -> bool {
-    let pid = Pid::from_u32(pid);
-    let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-    sys.process(pid)
-        .is_some_and(|p| !matches!(p.status(), ProcessStatus::Zombie | ProcessStatus::Dead))
+/// What the lock ownership store needs to know about processes.
+pub trait ProcessProbe: Send + Sync {
+    /// Start time (seconds since the epoch) of the live, non-zombie process `pid`; `None` when no
+    /// such process exists.
+    fn start_time(&self, pid: u32) -> Option<u64>;
+    /// Whether `recorded` names the boot session the machine is in now.
+    fn same_boot(&self, recorded: &str) -> bool;
 }
 
-/// [`AliveProbe`] backed by the operating system.
+/// [`ProcessProbe`] backed by the operating system.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct OsAliveProbe;
+pub struct OsProcessProbe;
 
-impl AliveProbe for OsAliveProbe {
-    fn is_alive(&self, pid: u32, boot_id: &str) -> bool {
-        if !same_boot(boot_id, current_boot_id()) {
-            return false;
-        }
-        pid == std::process::id() || process_alive(pid)
+impl ProcessProbe for OsProcessProbe {
+    fn start_time(&self, pid: u32) -> Option<u64> {
+        let pid = Pid::from_u32(pid);
+        let mut sys = System::new();
+        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+        sys.process(pid)
+            .filter(|p| !matches!(p.status(), ProcessStatus::Zombie | ProcessStatus::Dead))
+            .map(sysinfo::Process::start_time)
+    }
+
+    fn same_boot(&self, recorded: &str) -> bool {
+        same_boot(recorded, current_boot_id())
     }
 }
 
@@ -77,16 +92,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn own_process_is_alive_and_other_boot_is_dead() {
-        let probe = OsAliveProbe;
-        assert!(probe.is_alive(std::process::id(), current_boot_id()));
-        assert!(!probe.is_alive(std::process::id(), "linux:some-other-boot"));
-        assert!(!probe.is_alive(std::process::id(), "boot-time:1"));
+    fn own_process_has_a_start_time_and_current_boot_matches() {
+        let probe = OsProcessProbe;
+        assert!(probe.start_time(std::process::id()).is_some());
+        assert!(probe.same_boot(current_boot_id()));
+        assert!(!probe.same_boot("linux:some-other-boot"));
+        assert!(!probe.same_boot("boot-time:1"));
     }
 
     #[test]
-    fn nonexistent_pid_is_dead() {
-        assert!(!OsAliveProbe.is_alive(u32::MAX - 7, current_boot_id()));
+    fn nonexistent_pid_has_no_start_time() {
+        assert!(OsProcessProbe.start_time(u32::MAX - 7).is_none());
     }
 
     #[test]
@@ -100,15 +116,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn child_process_is_alive_until_it_exits() {
+    fn child_process_has_a_start_time_until_it_exits() {
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
             .unwrap();
-        let probe = OsAliveProbe;
-        assert!(probe.is_alive(child.id(), current_boot_id()));
+        let probe = OsProcessProbe;
+        let started = probe.start_time(child.id()).unwrap();
+        let mine = probe.start_time(std::process::id()).unwrap();
+        assert!(
+            started >= mine.saturating_sub(1),
+            "child cannot predate this test process"
+        );
         child.kill().unwrap();
         child.wait().unwrap();
-        assert!(!probe.is_alive(child.id(), current_boot_id()));
+        assert!(probe.start_time(child.id()).is_none());
     }
 }

@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 
 use opensvn_ipc::{
     CheckoutRequest, CommitRequest, Depth, DiffGetRequest, DiffTarget, ErrorCode, LogGetRequest,
-    LogTarget, NodeStatus, OpResult, Rev, StatusGetRequest, UpdateRequest, WcFormat, WcId,
+    LogTarget, NodeStatus, OpResult, PathGrantId, Rev, StatusGetRequest, UpdateRequest, WcFormat,
+    WcId,
 };
 
 use super::fixture::Fixture;
@@ -59,16 +60,26 @@ async fn registry_commands_round_trip() {
 #[tokio::test]
 async fn adding_something_that_is_not_a_working_copy_fails_with_a_clear_code() {
     let f = Fixture::new(Duration::ZERO).await;
-    let err = commands::wc_add_existing(f.state(), "relative/dir".into())
+    // a raw path is not accepted any more: only grants from a native dialog or drop
+    let err = commands::wc_add_existing(f.state(), PathGrantId("C:\\evil".into()))
         .await
         .unwrap_err();
-    assert_eq!(err.code, ErrorCode::NotAWorkingCopy);
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    // a file grant where a folder is needed
+    let file = f.grant_file(std::path::Path::new("/nowhere"));
+    assert_eq!(
+        commands::wc_add_existing(f.state(), file)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidArgument
+    );
     let elsewhere = if cfg!(windows) {
         r"C:\nowhere"
     } else {
         "/nowhere"
     };
-    let err = commands::wc_add_existing(f.state(), elsewhere.into())
+    let err = commands::wc_add_existing(f.state(), f.grant_dir(std::path::Path::new(elsewhere)))
         .await
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::NotAWorkingCopy);
@@ -350,7 +361,7 @@ async fn cancelling_a_checkout_ends_the_operation_quickly_and_registers_nothing(
         f.state(),
         CheckoutRequest {
             url: format!("{DEMO_REPO_URL}/trunk"),
-            path: target.into(),
+            dest: f.grant_dir(std::path::Path::new(target)),
             rev: None,
             depth: Depth::Infinity,
             sparse: None,
@@ -387,7 +398,7 @@ async fn checkout_registers_the_new_working_copy_and_rejects_format_32() {
     };
     let mut req = CheckoutRequest {
         url: format!("{DEMO_REPO_URL}/trunk"),
-        path: target.into(),
+        dest: f.grant_dir(std::path::Path::new(target)),
         rev: Some(Rev(5)),
         depth: Depth::Infinity,
         sparse: None,

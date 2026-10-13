@@ -96,32 +96,39 @@ fn dev_csp_only_adds_the_vite_dev_server() {
 }
 
 #[test]
-fn asset_protocol_is_limited_to_the_app_temp_folder() {
+fn asset_protocol_has_no_static_scope_and_is_opened_for_the_private_preview_folder_only() {
     let conf = conf();
     let asset = &conf["app"]["security"]["assetProtocol"];
     assert_eq!(asset["enable"], true);
-    assert_eq!(asset["scope"], serde_json::json!(["$TEMP/opensvn/**"]));
+    assert_eq!(
+        asset["scope"],
+        serde_json::json!([]),
+        "no static scope: /tmp is shared on Linux"
+    );
     assert!(
         conf["app"]["security"]["freezePrototype"]
             .as_bool()
             .unwrap()
     );
-}
 
-#[test]
-fn asset_scope_rejects_paths_outside_the_app_temp_folder() {
-    // The runtime scope is built from tauri.conf.json by the real context.
     let app = tauri::test::mock_builder()
         .build(crate::app_context())
         .unwrap();
     let scope = app.asset_protocol_scope();
+    let data = tempfile::tempdir().unwrap();
     let tmp = std::env::temp_dir();
-    assert!(scope.is_allowed(tmp.join("opensvn").join("diff").join("left.png")));
+    assert!(
+        !scope.is_allowed(tmp.join("opensvn").join("left.png")),
+        "nothing allowed up front"
+    );
+
+    let preview = crate::preview::prepare_preview_dir(data.path()).unwrap();
+    scope.allow_directory(&preview, true).unwrap();
+    assert!(scope.is_allowed(preview.join("diff").join("left.png")));
+    assert!(!scope.is_allowed(data.path().join("app.sqlite")));
+    assert!(!scope.is_allowed(data.path().join("preview-other").join("x.png")));
     assert!(!scope.is_allowed(tmp.join("other.png")));
-    assert!(!scope.is_allowed(tmp.join("opensvn-evil").join("x.png")));
     assert!(!scope.is_allowed("/etc/passwd"));
-    #[cfg(unix)]
-    assert!(!scope.is_allowed(tmp.join("opensvn").join("..").join("secret")));
 }
 
 #[test]
@@ -185,6 +192,7 @@ fn ipc_app(f: &Fixture) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRu
         events: std::sync::Arc::new(crate::ops::events::RecordingEvents::default()),
         picker: f.picker.clone(),
         status_timing: crate::status::StatusTiming::default(),
+        path_picker: f.paths.clone(),
     })
     .unwrap();
     app.manage(state);
@@ -275,7 +283,7 @@ async fn settings_set_over_ipc_refuses_program_keys() {
         serde_json::json!({"patch": {"tools.terminal": {"path": "/bin/sh", "args": []}}}),
     )
     .unwrap_err();
-    assert_eq!(err["code"], "permission-denied");
+    assert!(err.to_string().contains("unknown field"), "{err}");
     let ok = invoke(
         &main,
         "settings_set",

@@ -3,7 +3,8 @@
 use opensvn_ipc::{AppError, ExternalDiffTool, ProxySetting, Settings, WcFormat};
 
 fn invalid(key: &str, why: &str) -> AppError {
-    AppError::internal(format!("Invalid value for setting {key}: {why}.")).with_detail(key)
+    crate::errors::invalid_argument(format!("Invalid value for setting {key}: {why}."))
+        .with_detail(key)
 }
 
 fn check_range(key: &str, v: u32, min: u32, max: u32) -> Result<(), AppError> {

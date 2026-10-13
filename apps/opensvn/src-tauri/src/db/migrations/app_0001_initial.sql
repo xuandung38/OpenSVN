@@ -53,6 +53,8 @@ CREATE TABLE wc_lock_owner (
   dir TEXT NOT NULL,
   pid INTEGER NOT NULL,
   boot_id TEXT NOT NULL,
+  -- start time of the owning process (seconds since the epoch): tells a recycled pid from the owner
+  start_time INTEGER,
   acquired_at TEXT NOT NULL,
   PRIMARY KEY (wc_root, dir)
 );

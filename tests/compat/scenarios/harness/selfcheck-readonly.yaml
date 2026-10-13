@@ -1,0 +1,11 @@
+# Harness self-check: two svn15 checkouts of the same revision must compare equal on every
+# axis. If this fails, the harness (not the engine) is broken.
+name: selfcheck-readonly
+description: svn15 vs svn15, read-only checkout with sparse-free full trunk
+server: svn15
+repo: basic
+steps:
+  - { on: svn15, wc: a, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: b, svn: [checkout, "{url}/trunk", "."] }
+compare:
+  - { left: a, right: b, checks: [tree, status, info, wcdb] }

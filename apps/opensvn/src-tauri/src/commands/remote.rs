@@ -3,16 +3,15 @@
 
 use opensvn_ipc::{
     AppError, BranchNode, CopyLocationRequest, Layout, LayoutDetection, LockRequest, LockTargets,
-    LogGetRequest, LogPage, LogTarget, OpResult, OperationHandle, OperationKind, RemoteEditRequest,
-    RepoEntry, RepoInfo, Rev, TextSide, UnlockRequest,
+    LogGetRequest, LogPage, LogTarget, OpResult, OperationHandle, OperationKind, PathGrantId,
+    RemoteEditRequest, RemoteOp, RepoEntry, RepoInfo, Rev, TextSide, UnlockRequest,
 };
-use std::path::PathBuf;
 use tauri::State;
 
 use super::stub;
 use crate::app_state::{AppState, leaf};
 use crate::boundary::guard;
-use crate::engine::{LockScope, LogScope, OpContext};
+use crate::engine::{EditOp, LockScope, LogScope, OpContext, RemoteEditPlan};
 
 fn engine_err(e: svn_types::SvnError) -> AppError {
     AppError::from(&e)
@@ -75,15 +74,14 @@ pub async fn repo_save(
     state: State<'_, AppState>,
     url: String,
     rev: Option<Rev>,
-    save_to: String,
+    grant: PathGrantId,
 ) -> Result<OperationHandle, AppError> {
     guard(async {
+        let save_to = state.redeem_file(&grant)?;
         let title = format!("Save {}", leaf(&url));
         Ok(
             state.start_op(OperationKind::Save, title, move |engine, ctx| async move {
-                engine
-                    .repo_save(&url, rev, &PathBuf::from(save_to), &ctx)
-                    .await?;
+                engine.repo_save(&url, rev, &save_to, &ctx).await?;
                 Ok(OpResult::Done)
             }),
         )
@@ -218,8 +216,35 @@ pub async fn remote_edit(
 ) -> Result<OperationHandle, AppError> {
     guard(async {
         if request.ops.is_empty() {
-            return Err(AppError::internal("There is nothing to change."));
+            return Err(crate::errors::invalid_argument(
+                "There is nothing to change.",
+            ));
         }
+        let mut ops = Vec::with_capacity(request.ops.len());
+        for op in request.ops {
+            ops.push(match op {
+                RemoteOp::Mkdir { url } => EditOp::Mkdir { url },
+                RemoteOp::Rename { from_url, to_url } => EditOp::Rename { from_url, to_url },
+                RemoteOp::Delete { url } => EditOp::Delete { url },
+                RemoteOp::Copy {
+                    from_url,
+                    from_rev,
+                    to_url,
+                } => EditOp::Copy {
+                    from_url,
+                    from_rev,
+                    to_url,
+                },
+                RemoteOp::Upload { url, source } => EditOp::Upload {
+                    url,
+                    local_path: state.redeem_file(&source)?,
+                },
+            });
+        }
+        let request = RemoteEditPlan {
+            ops,
+            message: request.message,
+        };
         Ok(state.start_op(
             OperationKind::RemoteEdit,
             "Change repository",
@@ -245,7 +270,7 @@ fn layout_valid(layout: &Layout) -> Result<(), AppError> {
         |p: &String| p.trim().is_empty() || p.len() > 500 || p.contains('\0') || p.contains("..");
     if bad(trunk) || branches.len() > 20 || tags.len() > 20 || branches.iter().chain(tags).any(bad)
     {
-        return Err(AppError::internal(
+        return Err(crate::errors::invalid_argument(
             "The branch layout patterns are not valid.",
         ));
     }

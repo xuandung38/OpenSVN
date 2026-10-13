@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 
 use crate::ids::{OpId, Rev, Size, WcId};
+use crate::path_grants::PathGrantId;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -518,7 +519,8 @@ pub enum RemoteOp {
     },
     Upload {
         url: String,
-        local_path: String,
+        /// File chosen with `path_pick`.
+        source: PathGrantId,
     },
 }
 

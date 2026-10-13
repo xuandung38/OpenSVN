@@ -29,16 +29,22 @@ pub const CACHE_MIGRATIONS: &[Migration] = &[Migration {
 /// Each migration and its version bump commit atomically. A database written by a newer app
 /// (higher `user_version`) is refused instead of being silently downgraded.
 pub fn migrate(conn: &mut Connection, migrations: &[Migration]) -> Result<(), DbError> {
-    let current: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let latest = migrations.last().map_or(0, |m| m.version);
-    if current > latest {
+    let probe: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if probe > latest {
         return Err(DbError::NewerSchema {
-            found: current,
+            found: probe,
             supported: latest,
         });
     }
-    for m in migrations.iter().filter(|m| m.version > current) {
-        let tx = conn.transaction()?;
+    for m in migrations {
+        // IMMEDIATE takes the write lock first; the version is read again inside it, so a second
+        // instance that started at the same time sees the step already applied and skips it.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if current >= m.version {
+            continue;
+        }
         tx.execute_batch(m.sql)?;
         // `PRAGMA user_version = N` does not accept bound parameters.
         tx.execute_batch(&format!("PRAGMA user_version = {}", m.version))?;
@@ -131,5 +137,35 @@ mod tests {
         c.execute(cert, [443]).unwrap();
         c.execute(cert, [8443]).unwrap();
         assert!(c.execute(cert, [443]).is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod race_tests {
+    use super::*;
+
+    #[test]
+    fn two_instances_starting_together_both_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.sqlite");
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut c = Connection::open(path).unwrap();
+                    c.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+                    migrate(&mut c, APP_MIGRATIONS)
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+        let c = Connection::open(&path).unwrap();
+        let v: u32 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 1);
     }
 }

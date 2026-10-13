@@ -1,6 +1,7 @@
 //! Turns engine status into `wc://status-changed` deltas and keeps the snapshot cache current.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use opensvn_ipc::{AppError, FileStatus, Incoming, Rev, RevisionChanged, StatusChanged, WcId};
@@ -25,6 +26,15 @@ pub struct StatusPublisher {
     cache: CacheDb,
     events: Arc<dyn AppEvents>,
     last_rev: Mutex<HashMap<String, RevState>>,
+    gens: Mutex<HashMap<String, Arc<Generation>>>,
+}
+
+/// Orders publications of one working copy: a scan started earlier never overwrites the result of
+/// a scan started later, and delta computation + snapshot replacement are one atomic step.
+#[derive(Default)]
+struct Generation {
+    next: AtomicU64,
+    applied: tokio::sync::Mutex<u64>,
 }
 
 fn by_path(list: Vec<FileStatus>) -> BTreeMap<String, FileStatus> {
@@ -39,6 +49,7 @@ impl StatusPublisher {
             cache,
             events,
             last_rev: Mutex::new(HashMap::new()),
+            gens: Mutex::new(HashMap::new()),
         }
     }
 
@@ -61,6 +72,9 @@ impl StatusPublisher {
     /// Rescans the working copy, emits the delta against the snapshot (and a revision change when
     /// the base revision moved) and stores the new snapshot.
     pub async fn publish(&self, r: &ResolvedWc) -> Result<(), AppError> {
+        let generation = self.generation(&r.wc.id);
+        // The ticket is taken before the scan starts, so it orders scans by start time.
+        let ticket = generation.next.fetch_add(1, Ordering::SeqCst) + 1;
         let engine = Arc::clone(&self.engine);
         let wc = r.wc.clone();
         let (fresh, info) = r
@@ -81,6 +95,11 @@ impl StatusPublisher {
                 }
             })
             .await?;
+        let mut applied = generation.applied.lock().await;
+        if ticket < *applied {
+            return Ok(()); // a scan that started later already published newer state
+        }
+        *applied = ticket;
         self.apply_local(&r.wc.id, fresh)?;
         self.publish_revision(&r.wc.id, &info);
         Ok(())
@@ -133,8 +152,15 @@ impl StatusPublisher {
         }
     }
 
+    fn generation(&self, wc_id: &WcId) -> Arc<Generation> {
+        let mut gens = self.gens.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(gens.entry(wc_id.0.clone()).or_default())
+    }
+
     /// Merges the result of a remote check into the snapshot and announces it.
-    pub fn apply_remote(&self, wc_id: &WcId, scan: &RemoteScan) -> Result<(), AppError> {
+    pub async fn apply_remote(&self, wc_id: &WcId, scan: &RemoteScan) -> Result<(), AppError> {
+        let generation = self.generation(wc_id);
+        let _applying = generation.applied.lock().await;
         let mut snapshot = by_path(self.cache.status_snapshot_get(wc_id)?.unwrap_or_default());
         // Nodes that were out of date before but are not any more lose their remote info.
         let mut changed = Vec::new();
@@ -165,5 +191,67 @@ impl StatusPublisher {
             latest_rev: scan.latest_rev,
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::db::CacheDb;
+    use crate::engine::fake::demo_wc_root;
+    use crate::engine::{FakeEngine, WcRef};
+    use crate::ops::events::{Recorded, RecordingEvents};
+    use crate::wc::WcActor;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn overlapping_publishes_keep_the_snapshot_and_events_consistent() {
+        let engine = Arc::new(FakeEngine::demo(Duration::ZERO).await.unwrap());
+        let events = Arc::new(RecordingEvents::default());
+        let publisher = Arc::new(StatusPublisher::new(
+            engine.clone(),
+            CacheDb::open_in_memory().unwrap(),
+            events.clone(),
+        ));
+        let resolved = ResolvedWc {
+            wc: WcRef {
+                id: WcId("w".into()),
+                root: demo_wc_root(),
+            },
+            actor: Arc::new(WcActor::spawn(Default::default())),
+            row: crate::db::WcRow {
+                id: "w".into(),
+                name: "demo".into(),
+                root_path: demo_wc_root().to_string_lossy().into_owned(),
+                repo_uuid: "u".into(),
+                repo_root_url: "u".into(),
+                sort_order: 0,
+            },
+        };
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let (p, r) = (publisher.clone(), resolved.clone());
+                tokio::spawn(async move { p.publish(&r).await })
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+        // Whatever the interleaving, the first delta announced everything and later ones nothing
+        // new: replaying all deltas yields exactly the snapshot.
+        let mut replay = std::collections::BTreeMap::new();
+        for r in events.all() {
+            if let Recorded::Status(s) = r {
+                for c in s.changed {
+                    replay.insert(c.path.clone(), c);
+                }
+                for gone in s.removed {
+                    replay.remove(&gone);
+                }
+            }
+        }
+        let snapshot = by_path(publisher.cached(&WcId("w".into())).unwrap().unwrap());
+        assert_eq!(replay, snapshot);
     }
 }
