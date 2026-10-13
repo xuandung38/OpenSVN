@@ -1,11 +1,18 @@
 //! App self-update from a private GitHub releases repository.
 //!
 //! * The check is user initiated (`update_check`); nothing runs on a timer here.
-//! * The GitHub read token lives in the credential store under [`TOKEN_KEY`]. It is write-only
-//!   from the UI: it can be set or cleared, and only its presence can be read back.
-//! * The download URL announced by the update manifest is validated before anything is
-//!   downloaded: `https`, host exactly `api.github.com`, path inside the expected repository.
+//! * The GitHub read token lives only in the OS credential store (macOS Keychain, Windows
+//!   Credential Manager, Linux Secret Service) under [`TOKEN_KEY`]. It is write-only from the UI:
+//!   it can be set or cleared, and only its presence can be read back. When no OS store is
+//!   reachable the token cannot be saved at all; it is never kept in a file, the settings or
+//!   memory as a fallback.
+//! * Every URL the token is sent to is validated first: each update endpoint from the
+//!   `plugins.updater.endpoints` config before the check, and the download URL announced by the
+//!   update manifest before the download. Both must be `https`, host exactly `api.github.com`,
+//!   default port, no userinfo, path inside the expected repository.
 
+use std::sync::Arc;
+#[cfg(test)]
 use std::sync::{Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -33,19 +40,26 @@ pub struct UpdateInfo {
     pub notes: Option<String>,
 }
 
-/// Rejects any update download URL that is not the GitHub API for the expected repository.
-pub fn validate_download_url(url: &Url, repo: &str) -> Result<(), AppError> {
-    let ok = url.scheme() == "https"
+/// Whether `url` is the GitHub REST API under `/repos/{repo}/`: `https`, host exactly
+/// `api.github.com`, default port, no userinfo, and no dot segments or encoded separators that
+/// could leave the repository path.
+fn is_release_api_url(url: &Url, repo: &str) -> bool {
+    let path = url.path().to_ascii_lowercase();
+    url.scheme() == "https"
         && url.host_str() == Some("api.github.com")
         && url.port().is_none()
         && url.username().is_empty()
         && url.password().is_none()
         && url.path().starts_with(&format!("/repos/{repo}/"))
-        // no `..` or encoded separators that could escape the repository path
         && !url.path().split('/').any(|s| s == ".." || s == ".")
-        && !url.path().to_ascii_lowercase().contains("%2f")
-        && !url.path().to_ascii_lowercase().contains("%2e");
-    if ok {
+        && !path.contains("%2f")
+        && !path.contains("%2e")
+        && !path.contains("%5c")
+}
+
+/// Rejects any update download URL that is not the GitHub API for the expected repository.
+pub fn validate_download_url(url: &Url, repo: &str) -> Result<(), AppError> {
+    if is_release_api_url(url, repo) {
         Ok(())
     } else {
         tracing::warn!(host = ?url.host_str(), "update download URL rejected");
@@ -53,6 +67,39 @@ pub fn validate_download_url(url: &Url, repo: &str) -> Result<(), AppError> {
             "The update is not served from the expected release location.",
         ))
     }
+}
+
+/// Reads and validates `plugins.updater.endpoints` (`config` is the `plugins.updater` object).
+/// Every endpoint must pass the same check as the download URL, so the token is only ever sent to
+/// `api.github.com` for the release repository. A missing, empty or invalid list is refused.
+pub fn configured_endpoints(
+    config: Option<&serde_json::Value>,
+    repo: &str,
+) -> Result<Vec<Url>, AppError> {
+    let not_configured = || invalid_argument("Updates are not configured in this build.");
+    let list = config
+        .and_then(|c| c.get("endpoints"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(not_configured)?;
+    if list.is_empty() {
+        return Err(not_configured());
+    }
+    list.iter()
+        .map(|v| {
+            let url = v
+                .as_str()
+                .and_then(|s| Url::parse(s).ok())
+                .ok_or_else(not_configured)?;
+            if is_release_api_url(&url, repo) {
+                Ok(url)
+            } else {
+                tracing::warn!(host = ?url.host_str(), "update endpoint rejected");
+                Err(invalid_argument(
+                    "The update endpoint is not the expected release location.",
+                ))
+            }
+        })
+        .collect()
 }
 
 /// Credential store access for the updater token (backed by the OS credential store).
@@ -65,13 +112,14 @@ pub trait SecretStore: Send + Sync {
     fn delete(&self, key: &str) -> Result<(), AppError>;
 }
 
-/// In-memory secrets, used until the OS credential store crate is wired in: a token set here is
-/// lost when the app exits and never touches disk.
+/// In-memory secrets for tests. Never used by the app: the token belongs in the OS store only.
+#[cfg(test)]
 #[derive(Default)]
 pub struct MemorySecretStore {
     items: Mutex<std::collections::HashMap<String, SecretString>>,
 }
 
+#[cfg(test)]
 impl SecretStore for MemorySecretStore {
     fn get(&self, key: &str) -> Result<Option<SecretString>, AppError> {
         Ok(self
@@ -97,6 +145,86 @@ impl SecretStore for MemorySecretStore {
     }
 }
 
+/// Address of an app secret inside the OS credential store: a pseudo origin that no repository
+/// URL can produce (scheme `opensvn-app`, port 0, a realm starting with U+0001).
+fn app_secret_origin() -> svn_types::OriginKey {
+    svn_types::OriginKey {
+        scheme: "opensvn-app".into(),
+        host: "app".into(),
+        port: 0,
+        realm: "\u{1}app-secrets".into(),
+    }
+}
+
+fn store_error(e: &secure_store::StoreError) -> AppError {
+    AppError::internal("The system credential store could not be used.").with_detail(e.to_string())
+}
+
+/// [`SecretStore`] over the OS credential store (`secure-store`).
+pub struct KeychainSecretStore {
+    store: Arc<dyn secure_store::CredentialStore>,
+}
+
+impl KeychainSecretStore {
+    /// Wraps a credential store (the OS one in the app, a memory one in tests).
+    pub fn new(store: Arc<dyn secure_store::CredentialStore>) -> Self {
+        Self { store }
+    }
+}
+
+impl SecretStore for KeychainSecretStore {
+    fn get(&self, key: &str) -> Result<Option<SecretString>, AppError> {
+        self.store
+            .get(&app_secret_origin(), key)
+            .map_err(|e| store_error(&e))
+    }
+    fn set(&self, key: &str, value: &SecretString) -> Result<(), AppError> {
+        self.store
+            .set(&app_secret_origin(), key, value)
+            .map_err(|e| store_error(&e))
+    }
+    fn delete(&self, key: &str) -> Result<(), AppError> {
+        self.store
+            .delete(&app_secret_origin(), key)
+            .map(|_| ())
+            .map_err(|e| store_error(&e))
+    }
+}
+
+/// Used when no OS credential store is reachable: nothing can be saved, nothing is stored.
+pub struct UnavailableSecretStore {
+    reason: String,
+}
+
+impl SecretStore for UnavailableSecretStore {
+    fn get(&self, _: &str) -> Result<Option<SecretString>, AppError> {
+        Ok(None)
+    }
+    fn set(&self, _: &str, _: &SecretString) -> Result<(), AppError> {
+        Err(AppError::internal(
+            "No system credential store is available, so the update token cannot be saved.",
+        )
+        .with_detail(self.reason.clone()))
+    }
+    fn delete(&self, _: &str) -> Result<(), AppError> {
+        Ok(())
+    }
+}
+
+/// The OS credential store, or [`UnavailableSecretStore`] when none is reachable (for example no
+/// Secret Service daemon on Linux). There is no file or memory fallback.
+pub fn os_secret_store() -> Arc<dyn SecretStore> {
+    match secure_store::KeyringStore::os_default() {
+        Ok(s) => Arc::new(KeychainSecretStore::new(Arc::new(s))),
+        Err(e) => {
+            tracing::warn!(error = %e, "no OS credential store; the update token cannot be saved");
+            Arc::new(UnavailableSecretStore {
+                reason: e.to_string(),
+            })
+        }
+    }
+}
+
 /// Performs the actual check and installation.
 #[async_trait]
 pub trait UpdateControl: Send + Sync + 'static {
@@ -109,14 +237,19 @@ pub trait UpdateControl: Send + Sync + 'static {
 /// [`UpdateControl`] over the Tauri updater plugin (must be registered, see `lib.rs`).
 pub struct TauriUpdater<R: tauri::Runtime> {
     app: tauri::AppHandle<R>,
+    /// Validated `plugins.updater.endpoints`, or why updates cannot run. Without an `updater`
+    /// config the plugin is not registered (`lib.rs`) and the builder must not be touched.
+    endpoints: Result<Vec<Url>, AppError>,
     found: tokio::sync::Mutex<Option<tauri_plugin_updater::Update>>,
 }
 
 impl<R: tauri::Runtime> TauriUpdater<R> {
     /// Wraps an app handle.
     pub fn new(app: tauri::AppHandle<R>) -> Self {
+        let endpoints = configured_endpoints(app.config().plugins.0.get("updater"), RELEASES_REPO);
         Self {
             app,
+            endpoints,
             found: tokio::sync::Mutex::new(None),
         }
     }
@@ -125,7 +258,13 @@ impl<R: tauri::Runtime> TauriUpdater<R> {
         &self,
         token: Option<&SecretString>,
     ) -> Result<tauri_plugin_updater::UpdaterBuilder, AppError> {
-        let mut b = self.app.updater_builder();
+        // Endpoints are checked before the builder exists and before any header carries the token.
+        let endpoints = self.endpoints.clone()?;
+        let mut b = self
+            .app
+            .updater_builder()
+            .endpoints(endpoints)
+            .map_err(updater_error)?;
         if let Some(t) = token {
             b = b
                 .header("Authorization", format!("Bearer {}", t.expose_secret()))

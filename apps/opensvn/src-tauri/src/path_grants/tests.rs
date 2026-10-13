@@ -62,3 +62,73 @@ fn unknown_ids_and_expired_entries_are_cleaned() {
         "the expired grant was dropped when minting"
     );
 }
+
+#[test]
+fn display_names_show_bidi_overrides_as_escapes() {
+    let g = PathGrants::new();
+    let info = g.mint(
+        PathBuf::from("/tmp/photo\u{202E}gpj.exe"),
+        GrantKind::File,
+        MAIN_WINDOW,
+    );
+    assert_eq!(info.display_name, "photo\\u{202E}gpj.exe");
+    let plain = g.mint(
+        PathBuf::from("/tmp/Báo cáo.txt"),
+        GrantKind::File,
+        MAIN_WINDOW,
+    );
+    assert_eq!(plain.display_name, "Báo cáo.txt");
+}
+
+#[test]
+fn dialog_text_from_the_webview_is_checked_before_a_dialog_opens() {
+    use opensvn_ipc::PickRequest;
+    let ok = [
+        PickRequest::Folder { title: None },
+        PickRequest::File {
+            title: Some("Choose a file to upload".into()),
+        },
+        PickRequest::SaveFile {
+            suggested_name: "Báo cáo.txt".into(),
+            title: Some("Save".into()),
+        },
+    ];
+    for r in &ok {
+        assert!(validate_pick_request(r).is_ok(), "{r:?}");
+    }
+    let bad = [
+        PickRequest::Folder {
+            title: Some("Pick\u{202E}txt.exe".into()),
+        },
+        PickRequest::File {
+            title: Some("line\nbreak".into()),
+        },
+        PickRequest::File {
+            title: Some("x".repeat(500)),
+        },
+        PickRequest::SaveFile {
+            suggested_name: "invoice\u{202E}fdp.exe".into(),
+            title: None,
+        },
+        PickRequest::SaveFile {
+            suggested_name: "../escape.txt".into(),
+            title: None,
+        },
+        PickRequest::SaveFile {
+            suggested_name: "a\\b.txt".into(),
+            title: None,
+        },
+        PickRequest::SaveFile {
+            suggested_name: "..".into(),
+            title: None,
+        },
+        PickRequest::SaveFile {
+            suggested_name: "zero\u{200B}width".into(),
+            title: Some("\u{2066}".into()),
+        },
+    ];
+    for r in &bad {
+        let err = validate_pick_request(r).expect_err("must be refused");
+        assert_eq!(err.code, ErrorCode::InvalidArgument, "{r:?}");
+    }
+}

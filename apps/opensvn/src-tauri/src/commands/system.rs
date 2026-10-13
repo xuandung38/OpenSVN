@@ -123,6 +123,7 @@ pub async fn path_pick(
     request: PickRequest,
 ) -> Result<Option<PathGrantInfo>, AppError> {
     guard(async {
+        crate::path_grants::validate_pick_request(&request)?;
         let Ok(_open) = state.path_dialog_open.try_lock() else {
             return Err(crate::errors::invalid_argument(
                 "A file picker is already open.",
