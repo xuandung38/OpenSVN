@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:log-report xmlns:S="svn:" xmlns:D="DAV:">
+<S:log-item>
+<S:added-path node-kind="file" copyfrom-path="/../secret" copyfrom-rev="1" text-mods="true" prop-mods="false">/trunk/a.txt</S:added-path>
+<D:version-name>3</D:version-name>
+<S:date>2024-01-01T03:00:00.000000Z</S:date>
+<D:comment>m</D:comment>
+<D:creator-displayname>fixture</D:creator-displayname>
+</S:log-item>
+</S:log-report>
