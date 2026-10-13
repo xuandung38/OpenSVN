@@ -1,6 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type { IpcAdapter, Unlisten } from "./adapter";
 import type {
+  AppError,
   AuthPromptEvent,
   Banner,
   Incoming,
@@ -8,6 +9,7 @@ import type {
   OpFailed,
   OpFinished,
   OpProgress,
+  OpResult,
   RevisionChanged,
   StatusChanged,
 } from "./bindings";
@@ -49,6 +51,9 @@ export interface OpState {
   progress: OpProgress | null;
   error: string | null;
 }
+
+/** Final result of an operation, kept even when `op://finished` races ahead of `op://started`. */
+export type OpOutcome = { status: "ok"; result: OpResult } | { status: "failed"; error: AppError };
 
 /** Operations kept in the cache for the Activity panel. */
 export const MAX_OPS = 50;
@@ -174,11 +179,19 @@ function applyToCache(qc: QueryClient, name: EventName, payload: unknown): void 
     }
     case "op://finished": {
       const p = payload as OpFinished;
+      setOutcome(qc, p.opId, { status: "ok", result: p.result });
+      // Refetch repository views only for operations that change the server. Read-only ones (blame,
+      // log, status-remote) must not trigger refetching every loaded log page and open folder.
+      if (changesRepository(p.opId, qc)) {
+        void qc.invalidateQueries({ queryKey: queryKeys.repoRoot });
+        void qc.invalidateQueries({ queryKey: queryKeys.logRoot });
+      }
       updateOp(qc, p.opId, (cur) => (cur ? { ...cur, state: "done" } : cur));
       break;
     }
     case "op://failed": {
       const p = payload as OpFailed;
+      setOutcome(qc, p.opId, { status: "failed", error: p.error });
       updateOp(qc, p.opId, (cur) =>
         cur ? { ...cur, state: "failed", error: p.error.message } : cur,
       );
@@ -204,4 +217,30 @@ function updateOp(
     // Keep only the most recent operations (insertion order): the Activity panel is not a history log.
     return Object.fromEntries(ids.slice(-MAX_OPS).map((id) => [id, merged[id] as OpState]));
   });
+}
+
+function setOutcome(qc: QueryClient, opId: string, outcome: OpOutcome) {
+  qc.setQueryData<Record<string, OpOutcome>>(queryKeys.opOutcomes, (cur = {}) => {
+    const merged = { ...cur, [opId]: outcome };
+    const ids = Object.keys(merged);
+    if (ids.length <= MAX_OPS) return merged;
+    return Object.fromEntries(ids.slice(-MAX_OPS).map((id) => [id, merged[id] as OpOutcome]));
+  });
+}
+
+/** Operation kinds that write to the repository (or its locks). */
+const REPO_CHANGING_KINDS: ReadonlySet<OperationHandle["kind"]> = new Set([
+  "commit",
+  "lock",
+  "unlock",
+  "remote-edit",
+  "switch",
+  "merge",
+]);
+
+/** Unknown operations (finished before started was seen) are treated as changing: refetching is safe. */
+export function changesRepository(opId: string, qc: QueryClient): boolean {
+  const ops = qc.getQueryData<Record<string, OpState>>(queryKeys.ops);
+  const kind = ops?.[opId]?.handle.kind;
+  return kind === undefined || REPO_CHANGING_KINDS.has(kind);
 }

@@ -794,7 +794,7 @@ fn map_log_entry(e: svn_types::LogEntry) -> LogEntry {
         .changed_paths
         .into_iter()
         .map(|c| ChangedPath {
-            path: c.path,
+            path: c.path.to_string(),
             action: match c.action {
                 svn_types::ChangeAction::Added => ChangeAction::A,
                 svn_types::ChangeAction::Modified => ChangeAction::M,
@@ -807,7 +807,7 @@ fn map_log_entry(e: svn_types::LogEntry) -> LogEntry {
                 _ => PathKind::Unknown,
             },
             copy_from: c.copy_from.map(|(path, rev)| CopyFrom {
-                path,
+                path: path.to_string(),
                 rev: Rev(rev.0),
             }),
             text_mods: Some(c.text_mods),

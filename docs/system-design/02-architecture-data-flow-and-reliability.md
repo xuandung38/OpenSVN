@@ -112,7 +112,7 @@ Tính atomic: server chỉ có revision mới sau MERGE thành công; WC chỉ c
 | Danh sách WC, layout, settings, URL gần đây, cert tin cậy | `app.sqlite` trong thư mục dữ liệu app | `%APPDATA%\com.opensvn.desktop`, `~/Library/Application Support/com.opensvn.desktop`, `$XDG_DATA_HOME/com.opensvn.desktop` (tên thư mục = bundle identifier trong `tauri.conf.json`; app dùng engine giả thì dữ liệu nằm trong thư mục con `fake-engine/`) |
 | Cache log/list/blame | `cache.sqlite` (tách riêng, xóa được) | Key `(repo_uuid, path, rev)`; revision bất biến → cache vĩnh viễn |
 | Cache status | `cache.sqlite` | Chỉ để hiển thị nhanh lúc mở; luôn xác minh lại |
-| Mật khẩu | OS credential store (keyring-core) | Key theo origin: `opensvn:<scheme>://<host>:<port>/<realm>:<user>` |
+| Mật khẩu | OS credential store (keyring-core) | Service `opensvn`; account = `scheme\|host\|port\|realm\|user` (mỗi trường escape `%`→`%25`, `\|`→`%7C` nên key là đơn ánh); proxy dùng realm `\u{1}proxy` |
 | Log | `logs/opensvn.YYYY-MM-DD.log` | Xoay 7 ngày, tối đa 100MB |
 
 ## 3. Chi tiết

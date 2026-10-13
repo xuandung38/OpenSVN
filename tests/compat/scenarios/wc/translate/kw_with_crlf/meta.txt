@@ -1,0 +1,11 @@
+svn_version=1.15.0
+prop.svn:keywords=Id Rev
+prop.svn:eol-style=CRLF
+rev=22
+author=alice
+date_micros=1791884714256510
+utc_offset_secs=0
+url=file:///tmp/opensvn-golden/repo/kw_with_crlf
+root=file:///tmp/opensvn-golden/repo
+tz=UTC
+path=kw_with_crlf

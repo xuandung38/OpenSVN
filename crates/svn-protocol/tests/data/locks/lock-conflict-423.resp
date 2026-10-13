@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<D:error xmlns:D="DAV:" xmlns:m="http://apache.org/dav/xmlns" xmlns:C="svn:">
+<C:error/>
+<m:human-readable errcode="160035">
+Path '/trunk/a.txt' is already locked by user 'alice' in filesystem '7462d98e-4071-4508-b797-d2922b5cda8f'
+</m:human-readable>
+</D:error>

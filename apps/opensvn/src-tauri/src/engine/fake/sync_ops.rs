@@ -393,7 +393,7 @@ impl FakeEngine {
             let out_of_date = entry.is_none() || remote_rev > node_rev;
             let remote_lock = locks
                 .iter()
-                .find(|l| l.path.trim_start_matches('/') == repo_rel.as_str())
+                .find(|l| l.path.to_string().trim_start_matches('/') == repo_rel.as_str())
                 .map(|l| opensvn_ipc::LockInfo {
                     owner: l.owner.clone(),
                     comment: l.comment.clone(),

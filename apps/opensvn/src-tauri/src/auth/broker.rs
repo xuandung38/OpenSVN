@@ -88,7 +88,6 @@ fn map_reason(r: PromptReason) -> AuthPromptReason {
     match r {
         PromptReason::Rejected => AuthPromptReason::Rejected,
         PromptReason::NegotiateFailed => AuthPromptReason::NegotiateFailed,
-        PromptReason::Expired => AuthPromptReason::Expired,
         _ => AuthPromptReason::Initial,
     }
 }
