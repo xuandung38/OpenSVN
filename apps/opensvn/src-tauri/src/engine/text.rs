@@ -1,9 +1,9 @@
-//! Text helpers of the fake engine: percent decoding, text sides, line diff attribution.
+//! Text helpers shared by the engines: percent decoding, text sides and line matching.
 
 use opensvn_ipc::{Eol, TextSide};
 
 /// Decodes `%XX` escapes (invalid escapes stay literal).
-pub fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -23,7 +23,7 @@ pub fn percent_decode(s: &str) -> String {
 }
 
 /// Detects the line ending style of `text`.
-pub fn detect_eol(text: &str) -> Eol {
+pub(crate) fn detect_eol(text: &str) -> Eol {
     let crlf = text.matches("\r\n").count();
     let lf = text.matches('\n').count();
     match (crlf, lf - crlf) {
@@ -34,12 +34,12 @@ pub fn detect_eol(text: &str) -> Eol {
 }
 
 /// Whether `data` should be treated as binary (NUL byte or invalid UTF-8).
-pub fn is_binary(data: &[u8]) -> bool {
+pub(crate) fn is_binary(data: &[u8]) -> bool {
     data.iter().take(8000).any(|b| *b == 0) || std::str::from_utf8(data).is_err()
 }
 
 /// Text side for UTF-8 content.
-pub fn text_side(data: &[u8], label: String) -> TextSide {
+pub(crate) fn text_side(data: &[u8], label: String) -> TextSide {
     let content = String::from_utf8_lossy(data).into_owned();
     TextSide {
         eol: detect_eol(&content),
@@ -50,7 +50,10 @@ pub fn text_side(data: &[u8], label: String) -> TextSide {
 }
 
 /// For each line of `new`, the index of the matching line in `old` (longest common subsequence).
-pub fn match_lines(old: &[&str], new: &[&str]) -> Vec<Option<usize>> {
+///
+/// Quadratic in time and memory: only for the small in-memory repositories of the fake engine.
+/// The real engine attributes lines with `svn-diff` under a cost budget instead.
+pub(crate) fn match_lines(old: &[&str], new: &[&str]) -> Vec<Option<usize>> {
     let (n, m) = (old.len(), new.len());
     let mut table = vec![vec![0u32; m + 1]; n + 1];
     for i in (0..n).rev() {

@@ -1,0 +1,12 @@
+HTTP/1.1 200 OK
+Date: Mon, 01 Jan 2024 00:00:00 GMT
+Server: Apache
+Cache-Control: max-age=604800
+ETag: "2//trunk/docs/index.md"
+Accept-Ranges: bytes
+Content-Type: text/plain
+Content-Length: 28
+
+# Docs
+
+Some documentation.

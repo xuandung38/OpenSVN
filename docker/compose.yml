@@ -10,6 +10,19 @@ x-svn15: &svn15
   SVN_VERSION: "1.15.0"
   SVN_SHA512: "6bb79686baab7176e9b6c519b23141f66694298c0759d1e12332fef329eaa632e4f2e65c75ae0cd05e48e16c23d7eda7c59b322bdf03707e1a46025673282ec2"
 
+x-svn110: &svn110
+  SVN_VERSION: "1.10.8"
+  SVN_SHA512: "94464202b4a4ac7a6055c50eaa19ea55127f70f0efe5e0e655ef0a0866c8148bde56417b1dfd3204260300488ab668228faadec5015fe3e4b17e06c76e1d86b4"
+  SVN_CONFIGURE_EXTRA: "--with-lz4=internal --with-utf8proc=internal"
+x-svn19: &svn19
+  SVN_VERSION: "1.9.12"
+  SVN_SHA512: "08a5c6c0233cc1dbd992180d2077eb1c67725682c457d3f67ebb6d22db0f6b64002a699ab828d435b708340ce6fb07bb1f03d11daefb887053c427ed75ad2de7"
+  SVN_CONFIGURE_EXTRA: "svn_cv_pycfmt_apr_int64_t=L"
+x-svn18: &svn18
+  SVN_VERSION: "1.8.19"
+  SVN_SHA512: "dc163b6de80c3abebbbc7a471884d7694988c9b2d0cd5892cfe14b037bca77c0ed9f0e17fe04bc63fd859cf4b5a3859e719300153a1aa5ee3067cc289131028a"
+  SVN_CONFIGURE_EXTRA: "svn_cv_pycfmt_apr_int64_t=L"
+
 x-server: &server
   restart: "no"
   environment:
@@ -97,6 +110,87 @@ services:
       args: *svn15
     image: opensvn-compat/svn-client:1.15.0
 
+  svn110-server:
+    <<: *server
+    profiles: [legacy]
+    build:
+      context: ./svn-server
+      args: *svn110
+    image: opensvn-compat/svn-server:1.10.8
+    ports: ["127.0.0.1:8447:8443"]
+    networks:
+      default:
+        aliases: [svn110.test.local]
+    volumes:
+      - ../target/compat/certs:/certs:ro
+      - ../target/compat/logs/svn110:/var/log/svn-httpd
+      - ../fixtures:/fixtures:ro
+      - ../fixtures/repos/expected:/fixtures/repos/expected
+      - repos110:/var/svn/repos
+
+  svn110-client:
+    <<: *client
+    profiles: [legacy]
+    build:
+      context: ./svn-client
+      args: *svn110
+    image: opensvn-compat/svn-client:1.10.8
+
+  svn19-server:
+    <<: *server
+    profiles: [legacy]
+    build:
+      context: ./svn-server
+      args: *svn19
+    image: opensvn-compat/svn-server:1.9.12
+    ports: ["127.0.0.1:8446:8443"]
+    networks:
+      default:
+        aliases: [svn19.test.local]
+    volumes:
+      - ../target/compat/certs:/certs:ro
+      - ../target/compat/logs/svn19:/var/log/svn-httpd
+      - ../fixtures:/fixtures:ro
+      - ../fixtures/repos/expected:/fixtures/repos/expected
+      - repos19:/var/svn/repos
+
+  svn19-client:
+    <<: *client
+    profiles: [legacy]
+    build:
+      context: ./svn-client
+      args: *svn19
+    image: opensvn-compat/svn-client:1.9.12
+
+  svn18-server:
+    <<: *server
+    profiles: [legacy]
+    build:
+      context: ./svn-server
+      args: *svn18
+    image: opensvn-compat/svn-server:1.8.19
+    ports: ["127.0.0.1:8445:8443"]
+    networks:
+      default:
+        aliases: [svn18.test.local]
+    volumes:
+      - ../target/compat/certs:/certs:ro
+      - ../target/compat/logs/svn18:/var/log/svn-httpd
+      - ../fixtures:/fixtures:ro
+      - ../fixtures/repos/expected:/fixtures/repos/expected
+      - repos18:/var/svn/repos
+
+  svn18-client:
+    <<: *client
+    profiles: [legacy]
+    build:
+      context: ./svn-client
+      args: *svn18
+    image: opensvn-compat/svn-client:1.8.19
+
 volumes:
+  repos110:
+  repos19:
+  repos18:
   repos14:
   repos15:
