@@ -1,0 +1,2 @@
+# Fixtures contain CRLF/CR bytes that must never be normalized.
+* -text

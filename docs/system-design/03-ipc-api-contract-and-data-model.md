@@ -185,7 +185,7 @@ interface AppError {
 }
 type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'forbidden' | 'tls-untrusted'
   | 'out-of-date' | 'locked-by-other' | 'lock-token-invalid' | 'wc-busy' | 'wc-needs-cleanup'
-  | 'wc-format-unsupported' | 'not-a-working-copy' | 'conflict-blocks-commit' | 'path-not-found'
+  | 'wc-format-unsupported' | 'not-a-working-copy' | 'conflict-blocks-commit' | 'hook-failed' | 'repository-moved' | 'pristine-not-hydrated' | 'wc-invalid-operation' | 'path-not-found'
   | 'disk-full' | 'permission-denied' | 'file-in-use' | 'cancelled' | 'invalid-argument' | 'internal';
 // invalid-argument: giá trị sai, grant hết hạn/đã dùng, tùy chọn không hỗ trợ (MVP chỉ ghi format 31)
 ```
@@ -201,8 +201,12 @@ type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'forbidden' | 'tls-un
 | `wc://revision-changed` | `{ wcId, baseRev, revRange? }` | toolbar, History |
 | `wc://incoming` | `{ wcId, count, latestRev }` | badge Update, thông báo OS |
 | `wc://banner` | `{ wcId, kind, data }` (conflicts, mixed-rev, lock-stolen, needs-cleanup) | Banner |
-| `auth://prompt` | `{ requestId, kind: 'credentials' \| 'certificate', realm, url, cert?, reason?, attempt, offered }` — `reason`: `initial` \| `rejected` \| `negotiate-failed` \| `expired` (chỉ với credentials); `offered`: `('basic' \| 'negotiate')[]`; `cert.failure`: `'unknownIssuer' \| 'selfSigned' \| 'expired' \| 'notYetValid' \| 'hostnameMismatch' \| 'revoked' \| { changed: { oldSha256, newSha256 } } \| { other: string }` | Dialog Sign in / Trust |
+| `auth://prompt` | `{ requestId, kind: 'credentials' \| 'certificate', realm, url, cert?, reason?, attempt, offered }` | Dialog Sign in / Trust |
 | `fs://dropped` | `DroppedPaths` (§3.6) | Thả thư mục/file vào cửa sổ |
+
+Payload `auth://prompt`: với `kind: 'credentials'` có `reason: 'initial' | 'rejected' | 'negotiate-failed' | 'expired'` (chọn câu chữ dialog), `attempt` (số lần thất bại, từ 0) và `offered: ('basic' | 'negotiate')[]`; với `kind: 'certificate'` thì `reason` vắng, `attempt` là 0 và `offered` rỗng. `cert.failure` là `unknown-issuer | self-signed | expired | not-yet-valid | hostname-mismatch | revoked | { changed: { oldSha256, newSha256 } } | { other: string }`. Khi nhiều lỗi cùng áp dụng, báo lỗi nặng nhất: hostname-mismatch, expired, revoked, not-yet-valid đứng trên `changed`, `changed` đứng trên `self-signed`/`unknown-issuer`; cert vừa đổi vừa sai hostname phải báo `hostname-mismatch`. `changed` không bao giờ "luôn tin cậy" mà không có thao tác thay pin rõ ràng.
+
+Payload `auth://prompt`: với `kind: 'credentials'` có `reason: 'initial' | 'rejected' | 'negotiate-failed'` (chọn câu chữ dialog), `attempt` (số lần thất bại, từ 0) và `offered: ('basic' | 'negotiate')[]`. Với `kind: 'certificate'`, `cert.failure` là `unknown-issuer | self-signed | expired | not-yet-valid | hostname-mismatch | revoked | { changed: { oldSha256, newSha256 } } | { other: string }`. Khi nhiều lỗi cùng áp dụng, báo lỗi nặng nhất: hostname-mismatch, expired, revoked, not-yet-valid đứng trên `changed`, `changed` đứng trên `self-signed`/`unknown-issuer`; cert vừa đổi vừa sai hostname phải báo `hostname-mismatch`. Quyết định cho `auth_respond` (`kind: 'certificate'`): `reject | acceptOnce | acceptAlways | replacePin`. Với `changed` chỉ hợp lệ `reject` và `replacePin` (thay pin sau khi người dùng xác nhận); `acceptOnce`/`acceptAlways` không hợp lệ cho `changed`, `replacePin` chỉ hợp lệ cho `changed`, `acceptOnce`/`acceptAlways` chỉ cho `unknown-issuer`/`self-signed`; mọi lỗi khác (hostname-mismatch, expired, not-yet-valid, revoked, other) là lỗi cứng, chỉ hợp lệ `reject` (cố ý chặt hơn svn CLI, không có "accept temporarily"). UI không phải ranh giới tin cậy: transport kiểm quyết định với lỗi thực tế và coi tổ hợp sai là `reject`.
 
 Luồng prompt auth: engine gặp 401 → phát `auth://prompt`, **tạm dừng** operation → UI hiện dialog → `auth_respond` → engine tiếp tục hoặc hủy (`cancelled`).
 

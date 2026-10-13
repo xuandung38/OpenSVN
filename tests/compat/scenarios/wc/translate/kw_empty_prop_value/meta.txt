@@ -1,0 +1,10 @@
+svn_version=1.15.0
+prop.svn:keywords=
+rev=24
+author=alice
+date_micros=1791884716253723
+utc_offset_secs=0
+url=file:///tmp/opensvn-golden/repo/kw_empty_prop_value
+root=file:///tmp/opensvn-golden/repo
+tz=UTC
+path=kw_empty_prop_value

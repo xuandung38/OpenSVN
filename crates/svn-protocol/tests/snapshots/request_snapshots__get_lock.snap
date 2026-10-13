@@ -1,0 +1,9 @@
+---
+source: crates/svn-protocol/tests/request_snapshots.rs
+expression: "render(&get_lock_request(&u, &rel(\"trunk/a.txt\")).unwrap())"
+---
+PROPFIND http://svn.test.local/svn/repo/trunk/a.txt
+Depth: 0
+Content-Type: text/xml
+
+<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><lockdiscovery/></prop></propfind>
