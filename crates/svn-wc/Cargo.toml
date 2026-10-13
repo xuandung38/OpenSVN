@@ -11,7 +11,8 @@ description = "Subversion working copy engine: wc.db (format 31/32), pristine st
 workspace = true
 
 [features]
-failpoints = ["dep:fail"]
+# Crash-injection points (`fail::fail_point!`); enabled only by tests and the crash suite, never in release.
+failpoints = ["dep:fail", "fail/failpoints"]
 
 [dependencies]
 svn-types.workspace = true
@@ -20,8 +21,7 @@ rusqlite = { workspace = true, features = ["functions"] }
 sha1.workspace = true
 md-5.workspace = true
 tracing.workspace = true
-# Fault injection for crash-safety tests; compiled out unless the `failpoints` feature is on.
-fail = { workspace = true, optional = true, features = ["failpoints"] }
+fail = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
