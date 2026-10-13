@@ -3,30 +3,30 @@
 <logentry
    revision="6">
 <author>alice</author>
-<date>2026-10-13T09:05:12.806268Z</date>
+<date>2026-10-13T09:45:15.764184Z</date>
 <paths>
 <path
+   text-mods="true"
    kind="file"
    action="M"
-   prop-mods="false"
-   text-mods="true">/trunk/a.txt</path>
+   prop-mods="false">/trunk/a.txt</path>
 <path
-   action="A"
-   prop-mods="false"
    text-mods="false"
-   kind="dir">/trunk/newdir</path>
-<path
+   kind="dir"
    action="A"
-   prop-mods="false"
+   prop-mods="false">/trunk/newdir</path>
+<path
    text-mods="true"
-   kind="file">/trunk/newdir/n.txt</path>
+   kind="file"
+   action="A"
+   prop-mods="false">/trunk/newdir/n.txt</path>
 </paths>
 <msg>second commit: add dir &amp; edit</msg>
 </logentry>
 <logentry
    revision="4">
 <author>alice</author>
-<date>2026-10-13T09:04:36.423797Z</date>
+<date>2026-10-13T09:45:08.321957Z</date>
 <paths>
 <path
    action="D"
@@ -39,26 +39,26 @@
 <logentry
    revision="3">
 <author>alice</author>
-<date>2026-10-13T09:04:34.547831Z</date>
+<date>2026-10-13T09:45:07.190780Z</date>
 <paths>
 <path
-   action="M"
    prop-mods="false"
    text-mods="true"
-   kind="file">/trunk/a.txt</path>
+   kind="file"
+   action="M">/trunk/a.txt</path>
 </paths>
 <msg>edit a.txt</msg>
 </logentry>
 <logentry
    revision="2">
 <author>alice</author>
-<date>2026-10-13T09:04:32.379651Z</date>
+<date>2026-10-13T09:45:06.669520Z</date>
 <paths>
 <path
-   kind="file"
-   action="A"
    prop-mods="true"
-   text-mods="true">/trunk/a.txt</path>
+   text-mods="true"
+   kind="file"
+   action="A">/trunk/a.txt</path>
 <path
    action="A"
    prop-mods="false"
@@ -75,32 +75,32 @@
    text-mods="false"
    kind="dir">/trunk/src</path>
 <path
-   action="A"
    prop-mods="true"
    text-mods="true"
-   kind="file">/trunk/src/b.txt</path>
+   kind="file"
+   action="A">/trunk/src/b.txt</path>
 <path
-   action="A"
    prop-mods="false"
    text-mods="false"
-   kind="dir">/trunk/src/deep</path>
+   kind="dir"
+   action="A">/trunk/src/deep</path>
 <path
-   prop-mods="false"
    text-mods="true"
    kind="file"
-   action="A">/trunk/src/deep/c.cfg</path>
+   action="A"
+   prop-mods="false">/trunk/src/deep/c.cfg</path>
 <path
-   prop-mods="false"
    text-mods="true"
    kind="file"
-   action="A">/trunk/unicodé file.txt</path>
+   action="A"
+   prop-mods="false">/trunk/unicodé file.txt</path>
 </paths>
 <msg>initial: files &amp; props &lt;&amp;&gt; unicode é</msg>
 </logentry>
 <logentry
    revision="1">
 <author>alice</author>
-<date>2026-10-13T09:04:26.856003Z</date>
+<date>2026-10-13T09:45:05.135496Z</date>
 <paths>
 <path
    prop-mods="false"

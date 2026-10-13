@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <D:multistatus xmlns:D="DAV:" xmlns:ns0="DAV:">
-<D:response xmlns:S="http://subversion.tigris.org/xmlns/svn/" xmlns:C="http://subversion.tigris.org/xmlns/custom/" xmlns:V="http://subversion.tigris.org/xmlns/dav/" xmlns:lp1="DAV:" xmlns:lp2="http://subversion.tigris.org/xmlns/dav/">
+<D:response xmlns:V="http://subversion.tigris.org/xmlns/dav/" xmlns:S="http://subversion.tigris.org/xmlns/svn/" xmlns:C="http://subversion.tigris.org/xmlns/custom/" xmlns:lp2="http://subversion.tigris.org/xmlns/dav/" xmlns:lp1="DAV:">
 <D:href>/svn/repo/!svn/rvr/5/trunk/a.txt</D:href>
 <D:propstat>
 <D:prop>
@@ -9,15 +9,15 @@
 <lp1:getcontentlength>17</lp1:getcontentlength>
 <lp1:getcontenttype>text/plain</lp1:getcontenttype>
 <lp1:getetag>"3//trunk/a.txt"</lp1:getetag>
-<lp1:creationdate>2026-10-13T09:04:34.547831Z</lp1:creationdate>
-<lp1:getlastmodified>Tue, 13 Oct 2026 09:04:34 GMT</lp1:getlastmodified>
+<lp1:creationdate>2026-10-13T09:45:07.190780Z</lp1:creationdate>
+<lp1:getlastmodified>Tue, 13 Oct 2026 09:45:07 GMT</lp1:getlastmodified>
 <lp1:checked-in><D:href>/svn/repo/!svn/ver/3/trunk/a.txt</D:href></lp1:checked-in>
 <lp1:version-controlled-configuration><D:href>/svn/repo/!svn/vcc/default</D:href></lp1:version-controlled-configuration>
 <lp1:version-name>3</lp1:version-name>
 <lp1:creator-displayname>alice</lp1:creator-displayname>
 <lp2:baseline-relative-path>trunk/a.txt</lp2:baseline-relative-path>
 <lp2:md5-checksum>3e079718d4006e9d757934ce54439418</lp2:md5-checksum>
-<lp2:repository-uuid>b578b0f4-fca8-48bc-8594-a88d6cdb14e7</lp2:repository-uuid>
+<lp2:repository-uuid>7462d98e-4071-4508-b797-d2922b5cda8f</lp2:repository-uuid>
 <lp2:deadprop-count>1</lp2:deadprop-count>
 <lp2:sha1-checksum>833a7e9636909f713c0e7b946d636efae8284543</lp2:sha1-checksum>
 <D:supportedlock>

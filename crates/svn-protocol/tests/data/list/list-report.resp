@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:list-report xmlns:S="svn:" xmlns:D="DAV:">
+<S:item node-kind="dir" size="-1" created-rev="4" date="2026-10-13T09:45:08.321957Z">/trunk<D:creator-displayname>alice</D:creator-displayname></S:item>
+<S:item node-kind="file" size="17" created-rev="3" date="2026-10-13T09:45:07.190780Z">/trunk/a.txt<D:creator-displayname>alice</D:creator-displayname></S:item>
+<S:item node-kind="dir" size="-1" created-rev="4" date="2026-10-13T09:45:08.321957Z">/trunk/docs<D:creator-displayname>alice</D:creator-displayname></S:item>
+<S:item node-kind="dir" size="-1" created-rev="2" date="2026-10-13T09:45:06.669520Z">/trunk/src<D:creator-displayname>alice</D:creator-displayname></S:item>
+<S:item node-kind="file" size="10" created-rev="2" date="2026-10-13T09:45:06.669520Z">/trunk/unicodé file.txt<D:creator-displayname>alice</D:creator-displayname></S:item>
+</S:list-report>
