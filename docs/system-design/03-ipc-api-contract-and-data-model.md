@@ -61,10 +61,10 @@ type DiffTarget =
 interface FileDiff {
   path: string; binary: boolean; mime?: string;
   left?: TextSide; right?: TextSide;                               // text: full text 2 bên (CodeMirror tự diff)
-  hunks?: Hunk[];                                                  // khi file quá lớn: chỉ gửi hunks
+  hunks?: Hunk[];                                                  // chỉ khi tooLarge, tùy chọn: engine có thể gửi hunks hoặc bỏ trống (không đọc file > 5MB); UI luôn hiện banner tooLarge (Load full / công cụ ngoài) khi không có left/right
   propChanges: { name: string; before?: string; after?: string }[];
   image?: { leftUrl?: string; rightUrl?: string };                 // asset:// URL tạm
-  tooLarge?: boolean;                                              // > 5MB text → hỏi trước khi tải
+  tooLarge?: boolean;                                              // > 5MB text → hỏi trước khi tải (forceLarge); left/right bỏ trống, propChanges vẫn gửi
   tooComplex?: boolean;                                            // vượt ngân sách diff hiển thị (svn_diff::DISPLAY_MAX_COST): bỏ left/right, UI mời mở `diff_external`, không thử lại
 }
 interface TextSide { content: string; encoding: string; eol: 'LF' | 'CRLF' | 'mixed'; label: string; }

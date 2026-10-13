@@ -97,6 +97,7 @@ export function ChangesList() {
     checked.has(f.path) && checked.size > 1 ? changed.filter((c) => checked.has(c.path)) : [f];
 
   const labels = { needsLock: t("needsLockBadge"), outOfDate: t("outOfDateBadge") };
+  const rootLabel = t("wcRootRow", { name: session.wc?.name ?? "" });
 
   return (
     <>
@@ -214,6 +215,7 @@ export function ChangesList() {
                     <WcFileRow
                       id={ctx.id}
                       path={f.path}
+                      rootLabel={rootLabel}
                       glyph={glyph}
                       checked={checked.has(f.path)}
                       selected={selected === f.path}
