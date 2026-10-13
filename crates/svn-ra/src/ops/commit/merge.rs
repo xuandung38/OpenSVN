@@ -5,8 +5,9 @@ use std::time::Duration;
 use svn_protocol::commit::{
     LockHandling, MergeOptions, MergeResponse, abort_txn_request, parse_merge_response,
 };
+use svn_protocol::errors::parse_dav_error;
 use svn_protocol::xml::{Ns, XmlEvent, read_all};
-use svn_protocol::{ResponseHead, TxnName, map_http_status};
+use svn_protocol::{ParserLimits, ResponseHead, TxnName, error_from_response, map_http_status};
 use svn_types::{CancelToken, ErrorCode, RelPath, Result, SvnError};
 
 use crate::ops::update::RaWire;
@@ -34,8 +35,9 @@ impl From<SvnError> for CommitFailure {
 /// Merges the transaction into a new revision.
 ///
 /// Mirrors libsvn_ra_serf: once the request may have reached the server, only a definite
-/// non-2xx answer proves the commit did not happen. Cancellation, a transport failure and an
-/// unreadable 2xx answer all yield [`CommitFailure::OutcomeUnknown`].
+/// refusal (see [`refusal_is_definite`]) proves the commit did not happen. Cancellation, a
+/// transport failure, a gateway timeout or bare 5xx, and an unreadable 2xx answer all yield
+/// [`CommitFailure::OutcomeUnknown`], whose child is the underlying error.
 pub(super) async fn merge(
     wire: &RaWire,
     txn: &TxnName,
@@ -58,10 +60,25 @@ pub(super) async fn merge(
     let unknown = |e: SvnError| CommitFailure::OutcomeUnknown(outcome_unknown(txn, e));
     let resp = wire.send(req, cancel).await.map_err(unknown)?;
     if !resp.status().is_success() {
-        // A definite refusal (out of date, hook failure, lock error, server error).
-        return Err(CommitFailure::NotMerged(
-            crate::ops::update::error_of(resp, cancel).await,
-        ));
+        let status = resp.status().as_u16();
+        let headers = crate::ops::update::headers_of(&resp);
+        // A body that cannot be read must not hide the status; it only makes the answer
+        // less definite.
+        let body = crate::ops::update::read_limited(
+            resp,
+            ParserLimits::default().max_error_body_bytes,
+            cancel,
+        )
+        .await
+        .unwrap_or_default();
+        let err = error_from_response(status, &headers, &body);
+        let has_dav_error = parse_dav_error(&body).is_some();
+        return Err(if refusal_is_definite(status, has_dav_error) {
+            // Out of date, hook failure, lock error, authz refusal...
+            CommitFailure::NotMerged(err)
+        } else {
+            unknown(err)
+        });
     }
     let head = ResponseHead::new(
         resp.status().as_u16(),
@@ -69,6 +86,26 @@ pub(super) async fn merge(
     );
     let body = RaWire::read_small(resp, cancel).await.map_err(unknown)?;
     parse_merge_response(&head, &body).map_err(unknown)
+}
+
+/// Whether a non-2xx answer to a `MERGE` proves that the transaction was not merged.
+///
+/// - `408`, `502` and `504` never do: a reverse proxy answers them on a timeout or a broken
+///   upstream while the backend may still be running the commit (a slow pre-commit hook).
+/// - A 5xx answer counts only with a `D:error` body: that is mod_dav_svn reporting a failed
+///   commit (for example a hook failure). A bare 5xx may come from a proxy or a crashed
+///   worker after the commit started.
+/// - A 4xx answer counts with a `D:error` body as well (out of date, lock errors), and also
+///   without one: HTTP 4xx means the request was refused before it was carried out (authz,
+///   authentication, proxy limits), so the server cannot have merged anything.
+fn refusal_is_definite(status: u16, has_dav_error: bool) -> bool {
+    match status {
+        408 | 502 | 504 => false,
+        400..=499 => true,
+        500..=599 => has_dav_error,
+        // 1xx/3xx: not a refusal anyone can interpret here.
+        _ => false,
+    }
 }
 
 /// The error returned when a `MERGE` was sent but its result is unknown.
@@ -196,6 +233,23 @@ fn unreadable_status() -> SvnError {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn which_merge_refusals_are_definite() {
+        for status in [408, 502, 504] {
+            assert!(!refusal_is_definite(status, true), "{status}");
+            assert!(!refusal_is_definite(status, false), "{status}");
+        }
+        for status in [400, 401, 403, 404, 409, 412, 413, 423] {
+            assert!(refusal_is_definite(status, true), "{status}");
+            assert!(refusal_is_definite(status, false), "{status}");
+        }
+        for status in [500, 501, 503, 507] {
+            assert!(refusal_is_definite(status, true), "{status}");
+            assert!(!refusal_is_definite(status, false), "{status}");
+        }
+        assert!(!refusal_is_definite(304, true));
+    }
 
     #[test]
     fn proppatch_success_and_failure() {
