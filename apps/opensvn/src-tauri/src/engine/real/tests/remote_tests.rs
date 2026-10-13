@@ -648,6 +648,7 @@ async fn drop_while_the_directory_is_locked<F: std::future::Future>(root: &Path,
     let mut op = Box::pin(op);
     for _ in 0..500 {
         tokio::select! {
+            biased;
             _ = &mut op => panic!("the operation was expected to hang"),
             () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
         }

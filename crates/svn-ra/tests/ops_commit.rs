@@ -609,27 +609,108 @@ async fn out_of_date_at_merge_deletes_the_transaction() {
     assert_eq!(requests(&srv).await.last().unwrap().0, "DELETE");
 }
 
+/// A `D:error` body as mod_dav_svn sends it.
+fn dav_error(errcode: u32, message: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><D:error xmlns:D=\"DAV:\" \
+         xmlns:m=\"http://apache.org/dav/xmlns\" xmlns:C=\"svn:\"><C:error/>\
+         <m:human-readable errcode=\"{errcode}\">{message}</m:human-readable></D:error>"
+    )
+}
+
+/// Runs a commit whose `MERGE` gets `answer`; returns the `close_edit` error.
+async fn merge_answered(srv: &MockServer, answer: ResponseTemplate) -> SvnError {
+    mount_txn(srv).await;
+    Mock::given(method("MERGE"))
+        .respond_with(answer)
+        .mount(srv)
+        .await;
+    let rec = Arc::new(Recorder::default());
+    let mut ed = begin(srv, &rec, &[], &CancelToken::new()).await.unwrap();
+    let root = ed.open_root(None).await.unwrap();
+    ed.close_directory(root).await.unwrap();
+    let err = ed.close_edit().await.unwrap_err();
+    assert_eq!(
+        rec.events(),
+        [format!("txn:{TXN}")],
+        "never reported merged"
+    );
+    err
+}
+
+/// Refusals that prove nothing was merged: a 4xx (with or without a `D:error` body, except
+/// 408) and a 5xx that carries mod_dav_svn's `D:error` body (for example a failed hook).
 #[tokio::test]
 async fn definite_merge_refusals_delete_the_transaction() {
-    for status in [409u16, 423, 500] {
+    let hook = dav_error(165001, "Commit blocked by pre-commit hook (exit code 1)");
+    let cases = [
+        (
+            409,
+            Some(dav_error(160028, "out of date")),
+            ErrorCode::OutOfDate,
+        ),
+        (
+            423,
+            Some(dav_error(160035, "path is locked")),
+            ErrorCode::LockedByOther,
+        ),
+        (500, Some(hook.clone()), ErrorCode::HookFailed),
+        (503, Some(hook), ErrorCode::HookFailed),
+        (403, None, ErrorCode::Forbidden),
+        (409, None, ErrorCode::OutOfDate),
+        (413, None, ErrorCode::Internal),
+    ];
+    for (status, body, code) in cases {
         let srv = server(Bulk::Prefer).await;
-        mount_txn(&srv).await;
-        Mock::given(method("MERGE"))
-            .respond_with(ResponseTemplate::new(status).set_body_string("refused"))
-            .mount(&srv)
-            .await;
-        let rec = Arc::new(Recorder::default());
-        let mut ed = begin(&srv, &rec, &[], &CancelToken::new()).await.unwrap();
-        let root = ed.open_root(None).await.unwrap();
-        ed.close_directory(root).await.unwrap();
-        let err = ed.close_edit().await.unwrap_err();
-        assert_ne!(err.code, ErrorCode::CommitOutcomeUnknown, "HTTP {status}");
+        let mut answer = ResponseTemplate::new(status);
+        if let Some(b) = &body {
+            answer = answer.set_body_string(b.clone());
+        }
+        let err = merge_answered(&srv, answer).await;
+        assert_eq!(err.code, code, "HTTP {status} {body:?}: {err:?}");
         let reqs = requests(&srv).await;
         assert_eq!(
             reqs.last().unwrap(),
             &("DELETE".to_owned(), format!("{ROOT}/!svn/txn/{TXN}")),
             "HTTP {status}"
         );
+    }
+}
+
+/// Gateway timeouts and bare 5xx answers do not prove anything: behind a reverse proxy the
+/// backend may still be running the commit (a slow pre-commit hook), so the transaction is
+/// kept and the error says the outcome is unknown (never retryable).
+#[tokio::test]
+async fn gateway_and_bare_server_errors_after_merge_keep_the_transaction() {
+    let cases = [
+        (502, Some("<html>Bad Gateway</html>".to_owned())),
+        (504, Some("<html>Gateway Time-out</html>".to_owned())),
+        (504, Some(dav_error(160028, "even with a D:error body"))),
+        (408, None),
+        (502, None),
+        (500, None),
+        (500, Some("<html>Internal Server Error</html>".to_owned())),
+        (503, None),
+    ];
+    for (status, body) in cases {
+        let srv = server(Bulk::Prefer).await;
+        let mut answer = ResponseTemplate::new(status);
+        if let Some(b) = &body {
+            answer = answer.set_body_string(b.clone());
+        }
+        let err = merge_answered(&srv, answer).await;
+        assert_eq!(
+            err.code,
+            ErrorCode::CommitOutcomeUnknown,
+            "HTTP {status} {body:?}"
+        );
+        assert!(err.message.contains(TXN), "{}", err.message);
+        // The server's answer stays visible as the cause.
+        let child = err.child.as_ref().expect("cause");
+        if body.is_none() {
+            assert!(child.message.contains(&status.to_string()), "{child:?}");
+        }
+        assert_txn_kept(&srv).await;
     }
 }
 
