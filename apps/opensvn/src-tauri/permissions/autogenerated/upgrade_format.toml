@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-upgrade-format"
+description = "Enables the upgrade_format command without any pre-configured scope."
+commands.allow = ["upgrade_format"]
+
+[[permission]]
+identifier = "deny-upgrade-format"
+description = "Denies the upgrade_format command without any pre-configured scope."
+commands.deny = ["upgrade_format"]
