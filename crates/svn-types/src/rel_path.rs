@@ -4,6 +4,7 @@ use std::fmt;
 
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
+use crate::admin_name::is_admin_dir_alias;
 use crate::error::{ErrorCode, Result, SvnError};
 
 /// Relative path with `/` separators in NFC form. The empty path is the root.
@@ -34,6 +35,11 @@ fn check_structure(s: &str) -> Result<()> {
     if s.contains('\0') {
         return Err(unsafe_path("path contains NUL"));
     }
+    // Never valid in a repository relpath, and the way absolute, drive-relative and UNC paths
+    // (`C:\x`, `\\srv\share`) or traversal on Windows get past a `/`-only check.
+    if s.contains(['\\', ':']) {
+        return Err(unsafe_path(format!("backslash or colon in {s:?}")));
+    }
     for seg in s.split('/') {
         match seg {
             "" => return Err(unsafe_path(format!("empty path segment in {s:?}"))),
@@ -56,7 +62,7 @@ fn is_windows_reserved(seg: &str) -> bool {
             let rest: Vec<char> = chars.collect();
             (head == "COM" || head == "LPT")
                 && rest.len() == 1
-                && matches!(rest[0], '1'..='9' | '\u{00B9}' | '\u{00B2}' | '\u{00B3}')
+                && matches!(rest[0], '0'..='9' | '\u{00B9}' | '\u{00B2}' | '\u{00B3}')
         }
     }
 }
@@ -74,7 +80,12 @@ fn check_untrusted_segment(seg: &str, whole: &str) -> Result<()> {
             "colon (stream separator) in {whole:?}"
         )));
     }
-    if seg.eq_ignore_ascii_case(".svn") {
+    if seg.contains(['<', '>', '"', '|', '?', '*']) {
+        return Err(unsafe_path(format!(
+            "character invalid on Windows in {whole:?}"
+        )));
+    }
+    if is_admin_dir_alias(seg) {
         return Err(unsafe_path(format!(
             "administrative directory name in {whole:?}"
         )));
@@ -95,7 +106,8 @@ impl RelPath {
     }
 
     /// Builds a path from engine-internal input; the empty string yields the root.
-    /// Does not apply the stricter server-name rules.
+    /// Rejects empty/`.`/`..` segments, NUL, `\`, `:` (so no absolute, drive or UNC form), but
+    /// not the stricter server-name rules of [`RelPath::from_server`].
     pub fn new(s: &str) -> Result<Self> {
         let n = normalize(s);
         check_structure(&n)?;
@@ -105,9 +117,11 @@ impl RelPath {
     /// Builds a path from untrusted server or repository text.
     ///
     /// Rejects, on every platform: empty, `.` and `..` segments, leading/trailing/double `/`,
-    /// `\`, `:` (NTFS alternate data streams), control characters including NUL, any
-    /// `.svn` segment (case-insensitive), Windows device names (`CON`, `PRN`, `AUX`, `NUL`,
-    /// `COM1-9`, `LPT1-9`, with or without extension) and segments ending in a dot or space.
+    /// `\`, `:` (NTFS alternate data streams), control characters including NUL, characters
+    /// Windows cannot store (`<>"|?*`), any name that aliases `.svn` (Unicode case folding on the
+    /// NFKC form, ignorable code points, and the NTFS short name `SVN~<n>`), Windows device
+    /// names (`CON`, `PRN`, `AUX`, `NUL`, `COM0-9`, `LPT0-9`, with or without extension) and
+    /// segments ending in a dot or space.
     /// The result is NFC-normalized. The empty string is rejected: server paths name a node.
     pub fn from_server(s: &str) -> Result<Self> {
         if s.is_empty() {
