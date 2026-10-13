@@ -179,6 +179,12 @@ Request không idempotent (POST/PUT/MERGE/LOCK) không retry tự động; commi
 | Hiệu năng | Benchmark repo tổng hợp 100k file, so svn CLI; chạy nightly, cảnh báo khi chậm > 10% |
 | UI | Vitest component; E2E `tauri-driver` Windows/Linux cho luồng 10.1–10.5 |
 
+### 5.1 Quy ước failpoint (crash suite)
+- Dùng crate `fail`; mỗi crate tự khai feature `failpoints = ["fail/failpoints"]` (mặc định tắt).
+- Tên failpoint: `<crate>.<area>.<point>`, ví dụ `pristine.install.before_rename`, `wc.update.after_merge`.
+- Đặt failpoint tại ranh giới bền vững (trước/sau rename, commit SQLite, ghi work queue), không trong vòng lặp nóng.
+- Feature `failpoints` chỉ bật trong test và crash suite (CI: `cargo test -p svn-wc --features failpoints`, Linux); **không bao giờ** bật trong bản release.
+
 ## 6. Trade-off & xem lại khi lớn lên
 | Quyết định | Đánh đổi | Xem lại khi |
 |---|---|---|
