@@ -199,12 +199,11 @@ impl<'a> Runner<'a> {
                         .run(step, &wc_host, &args)
                         .with_context(|| format!("step {i} (engine)"))?;
                 }
-                Actor::Svn14 | Actor::Svn15 => {
-                    let version = if step.on == Actor::Svn14 {
-                        SvnVersion::V14
-                    } else {
-                        SvnVersion::V15
-                    };
+                Actor::Svn18 | Actor::Svn19 | Actor::Svn110 | Actor::Svn14 | Actor::Svn15 => {
+                    let version = step
+                        .on
+                        .svn_version()
+                        .ok_or_else(|| anyhow!("step {i}: actor has no svn version"))?;
                     let argv = if let Some(svn) = &step.svn {
                         let mut v = vec!["svn".to_string()];
                         v.extend(svn.iter().map(|a| subst(a)));
@@ -218,7 +217,18 @@ impl<'a> Runner<'a> {
                     let out = self
                         .backend
                         .exec(Target::Client(version), &wc_container, &argv)?;
-                    if out.code != 0 {
+                    if let Some(needle) = &step.fails_with {
+                        if out.code == 0 || !out.stderr.contains(needle.as_str()) {
+                            bail!(
+                                "step {i} ({:?} {}) should fail with '{needle}' but exited {}\nstdout: {}\nstderr: {}",
+                                step.on,
+                                argv.join(" "),
+                                out.code,
+                                out.stdout,
+                                out.stderr
+                            );
+                        }
+                    } else if out.code != 0 {
                         bail!(
                             "step {i} ({:?} {}) exited {}\nstdout: {}\nstderr: {}",
                             step.on,
@@ -484,6 +494,55 @@ mod tests {
         let mut report = Report::default();
         runner.compare(&scn, &scn.compare[0], &tmp.path().join("t5"), &mut report)?;
         assert!(report.passed(), "{:?}", report.mismatches);
+        Ok(())
+    }
+
+    /// Exits with a fixed code and stderr for every command.
+    struct Fixed {
+        code: i32,
+        stderr: &'static str,
+    }
+
+    impl Backend for Fixed {
+        fn exec(&self, _t: Target, _cwd: &str, _argv: &[String]) -> Result<CmdOutput> {
+            Ok(CmdOutput {
+                code: self.code,
+                stdout: String::new(),
+                stderr: self.stderr.to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn fails_with_needs_nonzero_exit_and_matching_stderr() -> Result<()> {
+        let scn = Scenario::from_yaml(
+            "name: t6\nrepo: r\nsteps:\n  - { on: svn18, wc: a, svn: [status], fails_with: E155021 }\n",
+        )?;
+        let refused = Fixed {
+            code: 1,
+            stderr: "svn: E155021: This client is too old to work with the working copy (format 32).",
+        };
+        let tmp = tempfile::tempdir()?;
+        let report = Runner::new(&refused, tmp.path().to_path_buf()).run(&scn)?;
+        assert_eq!(report.steps_run, 1);
+        // Success is a failure of the negative step.
+        let ok = Fixed {
+            code: 0,
+            stderr: "",
+        };
+        let tmp = tempfile::tempdir()?;
+        let err = Runner::new(&ok, tmp.path().to_path_buf()).run(&scn).err();
+        assert!(err.is_some_and(|e| e.to_string().contains("should fail with")));
+        // A different error is not accepted either.
+        let other = Fixed {
+            code: 1,
+            stderr: "svn: E170013: Unable to connect",
+        };
+        let tmp = tempfile::tempdir()?;
+        let err = Runner::new(&other, tmp.path().to_path_buf())
+            .run(&scn)
+            .err();
+        assert!(err.is_some_and(|e| e.to_string().contains("E170013")));
         Ok(())
     }
 }

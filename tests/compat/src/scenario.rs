@@ -14,6 +14,9 @@
 //! ```
 //! Placeholders usable in `svn` args and `sh` commands: `{url}` (repo URL), `{repo}` (repo
 //! name), `{wc}` (container path of the step's working copy).
+//!
+//! A step with `fails_with: E155021` is a negative step: it passes only when the command exits
+//! non-zero and its stderr contains the given text.
 
 use std::path::Path;
 
@@ -22,6 +25,15 @@ use serde::Deserialize;
 /// Which implementation performs a step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum Actor {
+    /// svn CLI 1.8.19 in a container (legacy profile).
+    #[serde(rename = "svn18")]
+    Svn18,
+    /// svn CLI 1.9.12 in a container (legacy profile).
+    #[serde(rename = "svn19")]
+    Svn19,
+    /// svn CLI 1.10.8 in a container (legacy profile).
+    #[serde(rename = "svn110")]
+    Svn110,
     /// svn CLI 1.14.5 in a container.
     #[serde(rename = "svn14")]
     Svn14,
@@ -39,6 +51,15 @@ pub enum Actor {
 /// Server/client Subversion version selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum SvnVersion {
+    /// Subversion 1.8.19 (legacy profile).
+    #[serde(rename = "svn18")]
+    V18,
+    /// Subversion 1.9.12 (legacy profile).
+    #[serde(rename = "svn19")]
+    V19,
+    /// Subversion 1.10.8 (legacy profile).
+    #[serde(rename = "svn110")]
+    V110,
     /// Subversion 1.14.5.
     #[serde(rename = "svn14")]
     V14,
@@ -51,8 +72,25 @@ impl SvnVersion {
     /// Short tag used in compose service names, e.g. `svn15`.
     pub fn tag(self) -> &'static str {
         match self {
+            Self::V18 => "svn18",
+            Self::V19 => "svn19",
+            Self::V110 => "svn110",
             Self::V14 => "svn14",
             Self::V15 => "svn15",
+        }
+    }
+}
+
+impl Actor {
+    /// The svn version this actor runs, for actors that are svn CLIs.
+    pub fn svn_version(self) -> Option<SvnVersion> {
+        match self {
+            Self::Svn18 => Some(SvnVersion::V18),
+            Self::Svn19 => Some(SvnVersion::V19),
+            Self::Svn110 => Some(SvnVersion::V110),
+            Self::Svn14 => Some(SvnVersion::V14),
+            Self::Svn15 => Some(SvnVersion::V15),
+            Self::Engine | Self::TortoiseManual => None,
         }
     }
 }
@@ -74,6 +112,10 @@ pub struct Step {
     /// Instructions for `tortoise-manual` steps.
     #[serde(default)]
     pub note: Option<String>,
+    /// Negative step: the command must exit non-zero and its stderr must contain this text
+    /// (e.g. `E155021` when an old client refuses a newer working copy format).
+    #[serde(default)]
+    pub fails_with: Option<String>,
 }
 
 /// What a comparison inspects.
@@ -261,6 +303,16 @@ impl Scenario {
                     "step {i}: note is only valid for tortoise-manual"
                 )));
             }
+            if let Some(needle) = &step.fails_with {
+                if step.svn.is_none() && step.sh.is_none() {
+                    return Err(bad(format!("step {i}: fails_with needs svn or sh")));
+                }
+                if step.on == Actor::Engine || needle.trim().is_empty() {
+                    return Err(bad(format!(
+                        "step {i}: fails_with needs non-empty text and an svn actor"
+                    )));
+                }
+            }
             if step.svn.as_ref().is_some_and(Vec::is_empty) {
                 return Err(bad(format!("step {i}: svn args are empty")));
             }
@@ -355,5 +407,17 @@ compare:
         ));
         let y = "name: t\nrepo: r\nsteps:\n  - { on: tortoise-manual, wc: a, note: click }\n";
         assert!(Scenario::from_yaml(y).is_ok());
+    }
+
+    #[test]
+    fn fails_with_is_validated() {
+        let ok = "name: n\nrepo: r\nsteps:\n  - { on: svn18, wc: a, svn: [status], fails_with: E155021 }\n";
+        assert!(Scenario::from_yaml(ok).is_ok());
+        let empty =
+            "name: n\nrepo: r\nsteps:\n  - { on: svn18, wc: a, svn: [status], fails_with: '' }\n";
+        assert!(Scenario::from_yaml(empty).is_err());
+        let engine =
+            "name: n\nrepo: r\nsteps:\n  - { on: engine, wc: a, svn: [status], fails_with: E1 }\n";
+        assert!(Scenario::from_yaml(engine).is_err());
     }
 }
