@@ -21,7 +21,7 @@ Cập nhật: 2026-10-13 · Liên quan: [01](01-ui-screens-menus-and-interaction
 | Toàn vẹn dữ liệu | 0 mất thay đổi local; crash ở bất kỳ điểm nào → phục hồi bằng work queue |
 | Khởi động | Cửa sổ hiện < 1s; WC gần nhất có status (từ cache) < 2s |
 | Status local | WC 100k file: lần đầu < 15s (SSD), lần sau < 3s, phản ứng thay đổi file < 1s |
-| Checkout/update | ≥ 30% nhanh hơn svn CLI 1.15 trên cùng mạng (tải song song) |
+| Checkout/update | MVP: không chậm hơn svn CLI 1.15 cùng mạng; sau MVP: ≥ 30% nhanh hơn (tải song song, GET delta) |
 | UI | 60 fps khi cuộn list 100k dòng; thao tác UI không chờ I/O |
 | Bộ nhớ | < 400MB RAM với WC 100k file; stream file lớn không nạp vào RAM |
 | Bảo mật | Không lưu mật khẩu plaintext; TLS luôn verify; log không chứa credential |
@@ -64,9 +64,9 @@ Cập nhật: 2026-10-13 · Liên quan: [01](01-ui-screens-menus-and-interaction
 
 ### 2.2 Mô hình đồng thời
 - 1 tokio runtime multi-thread. Tác vụ CPU nặng (hash, diff, nén) chạy `spawn_blocking`/rayon pool riêng.
-- **WcActor**: mỗi WC 1 actor nhận lệnh qua channel; **lệnh ghi** (update, commit, revert, switch, cleanup, lock…) chạy tuần tự; **lệnh đọc** (status, diff, log) chạy song song với snapshot đọc SQLite (WAL).
+- **WcActor**: mỗi WC 1 actor nhận lệnh qua channel; **lệnh ghi** (update, commit, revert, switch, cleanup, lock…) chạy tuần tự; **lệnh đọc** (status, diff, log) đi qua actor với busy-retry; **không đổi journal mode của wc.db** (giữ như svn — xem ghi chú `svn_sqlite.c` trong plan MVP); khi lệnh ghi dài đang chạy, status trả cache + cờ "đang cập nhật". WAL chỉ dùng cho `app.sqlite`/`cache.sqlite`.
 - Trước lệnh ghi: lấy `WC_LOCK` trong wc.db như svn (tương thích TortoiseSVN); nếu tool khác đang giữ → báo "Working copy đang được dùng bởi chương trình khác" + Retry.
-- **RaSessionPool** theo (repo root URL, user): tối đa N kết nối HTTP (mặc định 4, cấu hình 1–16) dùng chung cho mọi WC cùng server.
+- **RaSessionPool** theo (repo root URL, user): tối đa N kết nối HTTP (mặc định 4, cấu hình 1–8) dùng chung cho mọi WC cùng server.
 - Cancel: `CancellationToken` truyền xuống mọi tầng; điểm hủy an toàn chỉ giữa các work-queue item (không bao giờ để file ghi dở).
 
 ### 2.3 Luồng dữ liệu chính
@@ -81,26 +81,27 @@ Lần đầu mở WC: hiển thị cache status từ phiên trước (app.sqlite
 
 **Update**
 ```
-UI Update ─► WcActor.write ─► lấy WC_LOCK
+UI Update ─► ensure_authenticated (prompt nếu cần, CHƯA giữ lock) ─► WcActor.write ─► lấy WC_LOCK (+ ghi sổ sở hữu app.sqlite)
  ─► REPORT update-report (gửi base rev từng path, depth) 
  ─► nhận editor drive (stream XML) ─► với mỗi file: fetch nội dung (song song, GET/delta)
-     ─► ghi temp trong .svn/tmp ─► thêm WORK_QUEUE item (file-install) trong transaction
- ─► cập nhật NODES base ─► chạy work queue (rename atomic, set flags, translate eol/keywords)
- ─► file có sửa local: diff3 → merge sạch hoặc conflict skel + file .mine/.rN
+     ─► pristine mới vào .svn/tmp ─► nếu có sửa local: diff3 → kết quả/markers vào .svn/tmp (CHƯA đổi metadata)
+     ─► MỘT transaction: đổi NODES base + ghi conflict skel (nếu có) + thêm WORK_QUEUE item cài file/marker
+ ─► chạy work queue (rename atomic, set flags, translate eol/keywords)
  ─► nhả WC_LOCK ─► event status + toast
+Hủy giữa pha mạng → abort_edit, thư mục còn `incomplete` (update lại tiếp tục); crash ở bất kỳ điểm nào không bao giờ để base mới + file làm việc dựa base cũ.
 ```
 
 **Commit**
 ```
-UI Commit(paths, message) ─► WcActor.write ─► thu thập: committables (M/A/D, props, lock token)
+UI Commit(paths, message) ─► ensure_authenticated ─► WcActor.write ─► thu thập: committables (M/A/D, props, lock token)
  ─► kiểm tra: không conflict, không out-of-date cục bộ rõ ràng
- ─► POST !svn/me (create-txn) ─► với mỗi path: PUT svndiff (delta so pristine; format 32 không pristine → fulltext)
+ ─► ghi commit journal (state_dir của app) ─► POST !svn/me (create-txn) → journal ghi txn ─► với mỗi path: PUT svndiff fulltext từ file đọc lại được
                                          / MKCOL / DELETE / COPY / PROPPATCH (song song có giới hạn)
- ─► MERGE (gửi lock tokens, release-locks theo tùy chọn) ─► nhận new revision
- ─► transaction wc.db: cập nhật NODES base_rev, checksum, PRISTINE, xóa lock nếu nhả
+ ─► MERGE (gửi lock tokens, release-locks theo tùy chọn) ─► nhận new revision → journal ghi rev
+ ─► transaction wc.db: cập nhật NODES base_rev, checksum, PRISTINE, xóa lock nếu nhả ─► xóa journal
  ─► lỗi giữa chừng ─► DELETE txn trên server, WC không đổi
 ```
-Tính atomic: server chỉ có revision mới sau MERGE thành công; WC chỉ cập nhật sau khi nhận revision. Crash sau MERGE trước khi cập nhật WC → lần mở sau WC báo "out-of-date" cho các file đã commit; `update` giải quyết (giống hành vi svn).
+Tính atomic: server chỉ có revision mới sau MERGE thành công; WC chỉ cập nhật sau khi nhận revision. Crash sau MERGE trước khi cập nhật WC → lần mở sau đọc commit journal có rev → **finalize** WC theo journal (không để file "A" giả hay tree conflict add-vs-add). Journal chỉ có txn → `abort_txn` dọn txn rò.
 
 **Incoming poller**: mỗi N phút (mặc định 10) với WC đang mở: `PROPFIND`/`OPTIONS` lấy youngest rev → nếu > base → `log` khoảng mới (scope WC) → badge `Update ↓N`.
 
@@ -111,7 +112,7 @@ Tính atomic: server chỉ có revision mới sau MERGE thành công; WC chỉ c
 | Danh sách WC, layout, settings, URL gần đây, cert tin cậy | `app.sqlite` trong thư mục dữ liệu app | `%APPDATA%\OpenSVN`, `~/Library/Application Support/OpenSVN`, `$XDG_DATA_HOME/opensvn` |
 | Cache log/list/blame | `cache.sqlite` (tách riêng, xóa được) | Key `(repo_uuid, path, rev)`; revision bất biến → cache vĩnh viễn |
 | Cache status | `cache.sqlite` | Chỉ để hiển thị nhanh lúc mở; luôn xác minh lại |
-| Mật khẩu | OS credential store (keyring) | Key `opensvn:<realm>:<user>` |
+| Mật khẩu | OS credential store (keyring-core) | Key theo origin: `opensvn:<scheme>://<host>:<port>/<realm>:<user>` |
 | Log | `logs/opensvn.YYYY-MM-DD.log` | Xoay 7 ngày, tối đa 100MB |
 
 ## 3. Chi tiết
@@ -159,7 +160,7 @@ Request không idempotent (POST/PUT/MERGE/LOCK) không retry tự động; commi
 | Kịch bản | Con số | Hệ quả thiết kế |
 |---|---|---|
 | WC lớn | 100k file, 50GB, 20k thư mục | Quét song song (`ignore` WalkParallel), so stat trước hash |
-| Pristine | format 31: +50GB; format 32: chỉ file đã sửa | Gợi ý format 32 khi repo > 10GB binary |
+| Pristine | format 31: +50GB; format 32: chỉ file đã sửa | Sau MVP: gợi ý format 32 khi repo > 10GB binary |
 | Update lớn | 10k file đổi, 5GB | 4–16 kết nối song song, stream ghi đĩa, tiến trình theo bytes |
 | Log | 1M revision | Phân trang 100, cache, tìm kiếm trong cache local + server |
 | Watcher | 20k thư mục | Linux inotify cần `max_user_watches` ≥ 65536 → cảnh báo; fallback quét định kỳ |
