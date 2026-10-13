@@ -6,7 +6,7 @@ export type ButtonVariant = "default" | "primary" | "danger";
 const VARIANT: Record<ButtonVariant, string> = {
   default: "border-line bg-surface text-fg hover:bg-surface-2",
   primary: "border-accent bg-accent font-semibold text-on-accent hover:brightness-110",
-  danger: "border-bad bg-bad font-semibold text-white hover:brightness-110",
+  danger: "border-bad bg-bad font-semibold text-on-bad hover:brightness-110",
 };
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {

@@ -3,6 +3,14 @@
  * Theme selection: system via prefers-color-scheme, forced via data-theme="light|dark" on <html>
  * (or on any wrapper element, which the dev gallery uses to show both themes side by side).
  * Components must use these tokens only, never raw colour codes.
+ *
+ * shadcn/ui (design-guidelines 2.3): no shadcn alias variables are declared, because the components
+ * here are hand-written on Radix and two shadcn names (--muted, --accent) collide with OpenSVN tokens
+ * of different meaning. When vendoring a shadcn component, translate its classes instead:
+ * bg-background/bg-card/bg-popover -> bg-surface, text-foreground -> text-fg, bg-primary -> bg-accent,
+ * text-primary-foreground -> text-on-accent, bg-muted -> bg-surface-2, text-muted-foreground -> text-muted,
+ * shadcn bg-accent (hover) -> bg-sel, bg-destructive -> bg-bad, border-border/border-input -> border-line,
+ * ring -> accent.
  */
 :root,
 [data-theme="light"] {
@@ -24,7 +32,10 @@
   --add-bg: #e6f6ec;
   --del-bg: #fdeceb;
   --shadow: 0 12px 40px rgba(20, 34, 58, 0.16);
+  /* Text on solid accent/danger/warning fills. Kept as tokens so a contrast fix is a single edit here. */
   --on-accent: #ffffff;
+  --on-bad: #ffffff;
+  --on-warn: #ffffff;
   --overlay: rgba(10, 18, 30, 0.35);
 
   --f-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -77,26 +88,4 @@
   --del-bg: #3a1b1a;
   --shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
   color-scheme: dark;
-}
-
-/*
- * shadcn/ui names (design-guidelines 2.3). Re-declared per theme scope because var() references
- * resolve where they are declared, so a nested [data-theme] scope needs its own copy.
- */
-:root,
-[data-theme] {
-  /* shadcn/ui mapping (design-guidelines 2.3) */
-  --background: var(--surface);
-  --foreground: var(--fg);
-  --card: var(--surface);
-  --card-foreground: var(--fg);
-  --popover: var(--surface);
-  --popover-foreground: var(--fg);
-  --primary: var(--accent);
-  --primary-foreground: var(--on-accent);
-  --muted-foreground: var(--muted);
-  --destructive: var(--bad);
-  --border: var(--line);
-  --input: var(--line);
-  --ring: var(--accent);
 }

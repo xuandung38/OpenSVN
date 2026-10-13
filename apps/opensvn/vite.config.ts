@@ -39,7 +39,12 @@ export default defineConfig(({ mode }) => {
     clearScreen: false,
     server: { port: 1420, strictPort: true, host: "127.0.0.1" },
     // Never inline assets as data: URIs; CSP font-src is 'self' only.
-    build: { target: "es2022", outDir: "dist", assetsInlineLimit: 0 },
+    // The perf build goes to a cache dir so a bundle containing /__perf can never land in `dist`.
+    build: {
+      target: "es2022",
+      outDir: mode === "perf" ? "node_modules/.cache/perf-dist" : "dist",
+      assetsInlineLimit: 0,
+    },
     test: {
       environment: "jsdom",
       include: ["src/**/*.test.{ts,tsx}"],

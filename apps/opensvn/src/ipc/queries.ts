@@ -7,7 +7,7 @@ import { queryKeys } from "./query-keys";
 export function useWorkingCopies() {
   return useQuery({
     queryKey: queryKeys.workingCopies,
-    queryFn: () => unwrap(ipc.commands.wcList()),
+    queryFn: () => unwrap(ipc().commands.wcList()),
   });
 }
 
@@ -17,7 +17,7 @@ export function useStatus(wcId: WcId | null) {
     enabled: wcId !== null,
     queryFn: () =>
       unwrap(
-        ipc.commands.statusGet({
+        ipc().commands.statusGet({
           wcId: wcId as WcId,
           includeIgnored: false,
           includeUnversioned: true,
@@ -32,7 +32,7 @@ export function useLog(wcId: WcId | null, path = "", limit = 100) {
     enabled: wcId !== null,
     queryFn: () =>
       unwrap(
-        ipc.commands.logGet({
+        ipc().commands.logGet({
           target: { kind: "wc", wcId: wcId as WcId, path },
           fromRev: null,
           toRev: null,
@@ -48,7 +48,7 @@ export function useLog(wcId: WcId | null, path = "", limit = 100) {
 export function useSettings() {
   return useQuery({
     queryKey: queryKeys.settings,
-    queryFn: () => unwrap(ipc.commands.settingsGet()),
+    queryFn: () => unwrap(ipc().commands.settingsGet()),
   });
 }
 
@@ -75,13 +75,13 @@ export function useOperations(): OpState[] {
 
 /** Starts an update; progress arrives through op://* events, status through wc://* events. */
 export function useUpdate() {
-  return useMutation({ mutationFn: (req: UpdateRequest) => unwrap(ipc.commands.update(req)) });
+  return useMutation({ mutationFn: (req: UpdateRequest) => unwrap(ipc().commands.update(req)) });
 }
 
 export function useCommit() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (req: CommitRequest) => unwrap(ipc.commands.commit(req)),
+    mutationFn: (req: CommitRequest) => unwrap(ipc().commands.commit(req)),
     onSuccess: (_h, req) => qc.invalidateQueries({ queryKey: queryKeys.status(req.wcId) }),
   });
 }

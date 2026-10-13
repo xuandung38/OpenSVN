@@ -8,7 +8,7 @@ const COLOR: Record<StatusCode, string> = {
   R: "text-info",
   "?": "text-muted",
   "!": "text-bad",
-  C: "bg-warn text-white rounded-[4px]",
+  C: "bg-warn text-on-warn rounded-[4px]",
 };
 
 /** Mono status letter centred in a 20px cell. Always paired with a title/aria-label. */

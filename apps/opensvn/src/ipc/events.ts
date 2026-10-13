@@ -50,6 +50,9 @@ export interface OpState {
   error: string | null;
 }
 
+/** Operations kept in the cache for the Activity panel. */
+export const MAX_OPS = 50;
+
 type Handler<T> = (payload: T) => void;
 
 export interface EventBus {
@@ -74,6 +77,9 @@ export function createEventBus(adapter: IpcAdapter, qc: QueryClient): EventBus {
   const handlers = new Map<string, Set<Handler<never>>>();
   const menuHandlers = new Set<(name: MenuEventName) => void>();
   const unlistens: Unlisten[] = [];
+  // Bumped by stop(); a start() that finds a newer generation unregisters what it just subscribed.
+  let generation = 0;
+  let starting: Promise<void> | null = null;
 
   const dispatch = (name: EventName, payload: unknown) => {
     applyToCache(qc, name, payload);
@@ -91,21 +97,40 @@ export function createEventBus(adapter: IpcAdapter, qc: QueryClient): EventBus {
     },
     onMenu(handler) {
       menuHandlers.add(handler);
-      return () => menuHandlers.delete(handler);
+      return () => {
+        menuHandlers.delete(handler);
+      };
     },
-    async start(menuEvents = MENU_EVENTS) {
-      for (const name of EVENT_NAMES) {
-        unlistens.push(await adapter.listen(name, (p) => dispatch(name, p)));
-      }
-      for (const name of menuEvents) {
-        unlistens.push(
-          await adapter.listen(name, () => {
+    // Idempotent: concurrent/repeated calls share one subscription pass.
+    start(menuEvents = MENU_EVENTS) {
+      if (starting) return starting;
+      const mine = ++generation;
+      const subscribe = async (name: string, cb: (payload: unknown) => void) => {
+        const u = await adapter.listen(name, cb);
+        if (mine !== generation) {
+          // stop() ran while this listen() was in flight: undo immediately instead of leaking.
+          u();
+          return false;
+        }
+        unlistens.push(u);
+        return true;
+      };
+      starting = (async () => {
+        for (const name of EVENT_NAMES) {
+          if (!(await subscribe(name, (p) => dispatch(name, p)))) return;
+        }
+        for (const name of menuEvents) {
+          const ok = await subscribe(name, () => {
             for (const h of menuHandlers) h(name);
-          }),
-        );
-      }
+          });
+          if (!ok) return;
+        }
+      })();
+      return starting;
     },
     stop() {
+      generation++;
+      starting = null;
       for (const u of unlistens.splice(0)) u();
     },
   };
@@ -172,6 +197,11 @@ function updateOp(
 ) {
   qc.setQueryData<Record<string, OpState>>(queryKeys.ops, (cur = {}) => {
     const next = fn(cur[opId]);
-    return next ? { ...cur, [opId]: next } : cur;
+    if (!next) return cur;
+    const merged = { ...cur, [opId]: next };
+    const ids = Object.keys(merged);
+    if (ids.length <= MAX_OPS) return merged;
+    // Keep only the most recent operations (insertion order): the Activity panel is not a history log.
+    return Object.fromEntries(ids.slice(-MAX_OPS).map((id) => [id, merged[id] as OpState]));
   });
 }

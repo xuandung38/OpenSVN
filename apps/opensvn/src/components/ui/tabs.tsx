@@ -8,22 +8,32 @@ export interface TabDef {
   count?: number;
 }
 
-/** Equal-width tabs; the selected one is fg/600 with a 2px accent underline. Content is rendered by the caller. */
+/**
+ * Equal-width tabs; the selected one is fg/600 with a 2px accent underline. Every tab has a panel
+ * element so `aria-controls` always resolves; only the active panel renders its children.
+ */
 export function Tabs({
   tabs,
   value,
   onValueChange,
-  children,
+  panels,
   label,
+  className,
 }: {
   tabs: TabDef[];
   value: string;
   onValueChange: (id: string) => void;
-  children?: ReactNode;
+  /** Panel content by tab id (rendered only while that tab is active). */
+  panels?: Record<string, ReactNode>;
   label: string;
+  className?: string;
 }) {
   return (
-    <T.Root value={value} onValueChange={onValueChange} className="flex min-h-0 flex-col">
+    <T.Root
+      value={value}
+      onValueChange={onValueChange}
+      className={cn("flex min-h-0 flex-col", className)}
+    >
       <T.List aria-label={label} className="flex border-b border-line">
         {tabs.map((t) => (
           <T.Trigger
@@ -43,7 +53,16 @@ export function Tabs({
           </T.Trigger>
         ))}
       </T.List>
-      {children}
+      {tabs.map((t) => (
+        <T.Content
+          key={t.id}
+          value={t.id}
+          forceMount
+          className="min-h-0 flex-1 flex-col data-[state=active]:flex data-[state=inactive]:hidden"
+        >
+          {t.id === value ? panels?.[t.id] : null}
+        </T.Content>
+      ))}
     </T.Root>
   );
 }

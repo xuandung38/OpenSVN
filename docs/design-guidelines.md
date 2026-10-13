@@ -34,6 +34,8 @@ Thay đổi token/component sau mốc này phải cập nhật **cả** file nà
 | `--add-bg` | `#e6f6ec` | `#16301f` | Dòng thêm trong diff, block đã chọn |
 | `--del-bg` | `#fdeceb` | `#3a1b1a` | Dòng xóa trong diff |
 | `--shadow` | `0 12px 40px rgba(20,34,58,.16)` | `0 12px 40px rgba(0,0,0,.5)` | Lớp nổi |
+| `--on-accent`, `--on-bad`, `--on-warn` | `#ffffff` | `#ffffff` | Chữ trên nền đặc accent / danger / warn (tách token để sửa tương phản một chỗ; giá trị chờ PO quyết) |
+| `--overlay` | `rgba(10,18,30,.35)` | `rgba(10,18,30,.35)` | Nền mờ sau dialog/sheet |
 
 ### 2.2 Quy tắc
 - Component chỉ dùng token, không dùng mã màu trực tiếp. Chữ trên `--accent`/`--bad` là `#fff`.
@@ -52,6 +54,7 @@ Thay đổi token/component sau mốc này phải cập nhật **cả** file nà
 | `--destructive` | `--bad` |
 | `--border`, `--input` | `--line` |
 | `--ring` | `--accent` |
+Triển khai: không khai báo biến alias shadcn (`--muted`/`--accent` trùng tên token OpenSVN nhưng khác nghĩa); khi vendor component shadcn thì dịch class (`bg-accent`→`bg-sel`, `bg-muted`→`bg-surface-2`, `bg-primary`→`bg-accent`).
 Token ngữ nghĩa riêng (`--ok`, `--warn`, `--info`, `--add-bg`, `--del-bg`, `--*-soft`) giữ nguyên tên.
 
 ## 3. Chữ
@@ -147,6 +150,7 @@ Icon UI dùng bộ **lucide** (stroke 1.5–2px, 16px trong list, 18px trong too
 ## 10. Lịch sử thay đổi
 | Ngày | Phiên bản | Thay đổi |
 |---|---|---|
+| 2026-10-13 | v1.1 | Thêm token `--on-accent/--on-bad/--on-warn`, `--overlay` (giá trị không đổi); ghi chú dịch class shadcn |
 | 2026-10-13 | v1 (tạm chốt) | Token màu 2 theme, chữ IBM Plex, component cửa sổ chính, dialog, sheet Conflict resolver & Settings, glyph trạng thái, quy ước nền tảng; toolbar Branch ▾ / Location ▾ hai chế độ (SVN không có branch/tag thật) |
 
 ## Câu hỏi còn mở
