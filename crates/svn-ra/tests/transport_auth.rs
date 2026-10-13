@@ -467,3 +467,67 @@ async fn unattended_send_never_prompts_and_uses_cached_credentials() {
         Some(basic("alice", "pw"))
     );
 }
+
+#[tokio::test]
+async fn stored_credentials_are_used_silently_before_any_prompt() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
+    let prompter = ScriptedPrompter::with_stored("alice", "pw");
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    for path in ["/a", "/b"] {
+        let r = t
+            .send(get(srv.url(path)), &CancelToken::new())
+            .await
+            .expect("stored credentials");
+        assert_eq!(r.status().as_u16(), 200);
+    }
+    assert_eq!(prompter.credential_prompts(), 0);
+    assert_eq!(prompter.stored_calls.load(Ordering::SeqCst), 1);
+    let seen = srv.requests();
+    assert_eq!(seen.len(), 3, "401, retry, then preemptive");
+    assert_eq!(seen[1].header("authorization"), Some(basic("alice", "pw")));
+}
+
+#[tokio::test]
+async fn rejected_stored_credentials_lead_to_a_rejected_prompt() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "new")).await;
+    let prompter = ScriptedPrompter::with_stored("alice", "old");
+    *prompter.default_credentials.lock().unwrap() = Some(("alice".into(), "new".into()));
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    t.send(get(srv.url("/a")), &CancelToken::new())
+        .await
+        .expect("typed credentials");
+    assert_eq!(prompter.stored_calls.load(Ordering::SeqCst), 1);
+    let calls = prompter.credential_calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1, 1, "the stored attempt counts");
+    assert_eq!(
+        prompter.reasons.lock().unwrap().clone(),
+        vec![svn_ra_api::PromptReason::Rejected]
+    );
+}
+
+#[tokio::test]
+async fn unattended_send_uses_stored_credentials_but_never_prompts() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
+    let prompter = ScriptedPrompter::with_stored("alice", "pw");
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let r = t
+        .send_unattended(get(srv.url("/a")), &CancelToken::new())
+        .await
+        .expect("stored credentials");
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(prompter.credential_prompts(), 0);
+
+    // Wrong stored credentials: AuthRequired, still without a prompt.
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
+    let prompter = ScriptedPrompter::with_stored("alice", "stale");
+    *prompter.default_credentials.lock().unwrap() = Some(("alice".into(), "pw".into()));
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let err = t
+        .send_unattended(get(srv.url("/a")), &CancelToken::new())
+        .await
+        .expect_err("stale stored credentials");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert_eq!(prompter.credential_prompts(), 0);
+    assert_eq!(srv.requests().len(), 2);
+}
