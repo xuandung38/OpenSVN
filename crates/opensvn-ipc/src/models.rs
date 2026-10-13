@@ -359,6 +359,15 @@ pub enum OperationKind {
     SetDepth,
     Upgrade,
     Merge,
+    /// Local status rescan (`status_refresh`).
+    StatusRefresh,
+    Add,
+    Delete,
+    Move,
+    /// Server-side copy (`copy_location`).
+    Copy,
+    /// Download of a repository file to disk (`repo_save`).
+    Save,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
