@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
-# Glob members: new crates join without editing this file. The app crate (apps/opensvn/src-tauri)
-# is added by its owner once it exists, because cargo rejects a glob that matches nothing.
-members = ["crates/*"]
+# Glob members: new crates join without editing this file. The app crate is listed explicitly
+# because cargo rejects a glob that matches nothing.
+members = ["crates/*", "apps/opensvn/src-tauri"]
 
 [workspace.package]
 version = "0.0.0"
@@ -69,6 +69,15 @@ notify = "=8.2.0"
 reqwest = { version = "=0.13.5", default-features = false }
 rustls-platform-verifier = "=0.7.1"
 keyring-core = "=1.0.1"
+
+# desktop app and IPC contract (specta is pre-release: keep the exact pins in step)
+tauri = "=2.12.3"
+tauri-build = "=2.7.2"
+tauri-specta = "=2.0.0-rc.25"
+specta = "=2.0.0-rc.25"
+specta-typescript = "=0.0.12"
+serde_json = "=1.0.154"
+time = { version = "=0.3.55", default-features = false }
 
 # test
 proptest = "=1.12.0"

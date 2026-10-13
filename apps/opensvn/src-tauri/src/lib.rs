@@ -11,17 +11,21 @@ pub use command_registry::builder;
 /// Starts the Tauri application.
 pub fn run() {
     let builder = builder();
-    tauri::Builder::default()
+    let result = tauri::Builder::default()
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running OpenSVN");
+        .run(tauri::generate_context!());
+    if let Err(e) = result {
+        eprintln!("OpenSVN failed to start: {e}");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
