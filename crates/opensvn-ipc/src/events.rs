@@ -113,9 +113,9 @@ pub enum AuthMethodKind {
     Negotiate,
 }
 
-/// Why a TLS certificate needs a decision.
+/// Why a TLS certificate needs a decision (`unknown-issuer`, ..., `{ changed: { oldSha256, newSha256 } }`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(rename_all = "kebab-case", rename_all_fields = "camelCase")]
 pub enum CertFailureInfo {
     UnknownIssuer,
     SelfSigned,

@@ -92,6 +92,28 @@ Tests that lock these facts in: `crates/svn-wc/tests/{skel_real_blobs,schema_str
 - subst.c, full workqueue item arity, conflicts.c grammar: track B scope (not verified here).
 - svn registers a custom NFD-aware `like()` function with `case_sensitive_like`; not replicated yet. Revisit with the Vietnamese-name APFS test (A2/B3).
 
+## A2 findings (nodes, wc_lock) — verified against svn 1.15.0 behaviour
+- Working-layer row shapes (checked row-for-row by `tests/nodes_ops_vs_svn.rs`): `op_depth` of an add/delete/copy = number of segments of the
+  operation root; added rows get `changed_date = 0`; delete inserts `base-deleted` rows for the node and every present descendant at
+  `op_depth = depth(root)` and removes higher layers below it; deleting inside a copied tree layers over the copy rows; replace = same-`op_depth`
+  `INSERT OR REPLACE`; copy copies pristine props to NODES and local edits to the copy's ACTUAL; move = copy with `moved_here=1` + delete layer with
+  `moved_to` on the root only; revert removes whole layers rooted at the node and keeps changelist membership; delete clears local props/conflicts but keeps changelist.
+- Commit: BASE row gets `revision=changed_revision=new_rev`; copy children keep their own `changed_*`; committed delete leaves a `not-present` BASE row with `changed_date=0`;
+  changelists are dropped unless `--keep-changelists`; svn also fills `translated_size`/`last_mod_time` from the working file (caller does it via `record_fileinfo`).
+- WC_LOCK: `locked_levels` L on dir D covers D and descendants up to L levels below (-1 = all); obtain checks node exists (except root), empty work queue (normal mode),
+  foreign rows below (ignoring those deeper than `levels`), and the nearest row at/above that reaches the dir. An svn commit holds the root lock for its whole duration
+  (observed with a sleeping pre-commit hook); `svn commit` refuses to run while our row exists (E155004).
+- Ownership is outside wc.db; risk noted in `wc_lock.rs` docs: a dead record plus a later svn lock on the same directory is indistinguishable from the stale row.
 ## Corrections after review of the schema PR
 - `reverse_unordered_selects` is NOT a normal svn setting: it is compiled in only for SVN_DEBUG builds (sqlite.c). OpenSVN enables it under `debug_assertions` only (section 5 above and the lead's settings note list it as unconditional; treat that row as debug-only).
 - `open` probes with a READ_WRITE connection (falls back to read-only for write-protected files), so a hot journal left by a crashed writer is rolled back like svn does; the `sqlite_stat1` re-install runs in one `BEGIN IMMEDIATE` with a 100 ms busy timeout and is skipped (debug log) when the database is busy.
+
+## Review follow-ups (nodes, wc_lock)
+- Nodes: copy now carries the source's delete layers (shifted to the destination depth) and refuses locally added, incomplete, not-present, excluded and mixed-revision sources with `WcFormatUnsupported`
+  (A3: full mixed-revision and non-present support, which needs more svn oracle cases); recursive revert removes working layers of the whole subtree; non-recursive revert of an operation root with
+  child operations returns svn's E155038 (`svn_code = 155038`); committing a replacement drops the old BASE subtree; the batch API `commit_nodes` runs a whole commit in one transaction (parents first);
+  moving a local copy is a plain copy (no `moved_here`); `decode_props` reads a zero-length blob as no properties. Observed in svn: delete layers carried by a copy have `changed_date = 0`.
+- wc_lock: row first, then ownership record, then marker file `.svn/tmp/opensvn-lock-*` (skel `(pid boot dir levels)`); cleanup removes a row only for a dead owner's record plus a matching marker;
+  no marker means foreign (`needs_user_action`). The orphan-row sweep is gone. Verified with real svn: `svn cleanup` empties `.svn/tmp`, so after crash + cleanup + a new svn lock our recovery leaves svn's row alone.
+  Open question for the integration phase: confirm on Windows that TortoiseSVN "Break write locks" also clears `.svn/tmp`.
+- Windows: an SQLite connection in DELETE journal mode cannot delete the journal our TRUNCATE-mode connection keeps open (`SQLITE_IOERR_DELETE`); the library maps IOERR_DELETE/IOERR_LOCK to `WcBusy`.

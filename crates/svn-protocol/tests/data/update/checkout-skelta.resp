@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:update-report xmlns:S="svn:" xmlns:V="http://subversion.tigris.org/xmlns/dav/" xmlns:D="DAV:"  inline-props="true">
+<S:target-revision rev="5"/>
+<S:open-directory rev="5">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/4/trunk</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">4</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:08.321957Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+<S:add-file name="a.txt" sha1-checksum="833a7e9636909f713c0e7b946d636efae8284543">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/3/trunk/a.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">3</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:07.190780Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+<S:set-prop name="custom:tag">v&lt;1&gt;&amp;"q"</S:set-prop>
+<S:prop><V:md5-checksum>3e079718d4006e9d757934ce54439418</V:md5-checksum></S:prop></S:add-file>
+<S:add-directory name="docs" bc-url="/svn/repo/!svn/bc/4/trunk/docs">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/4/trunk/docs</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">4</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:08.321957Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+</S:add-directory>
+<S:add-directory name="src" bc-url="/svn/repo/!svn/bc/2/trunk/src">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/2/trunk/src</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">2</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:06.669520Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+<S:add-file name="b.txt" sha1-checksum="34e829d1c403f5533b4831bf732e44dc8324f70a">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/2/trunk/src/b.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">2</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:06.669520Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+<S:set-prop name="svn:executable">*</S:set-prop>
+<S:prop><V:md5-checksum>3db2050fcf84bb631dcae417d3db518c</V:md5-checksum></S:prop></S:add-file>
+<S:add-directory name="deep" bc-url="/svn/repo/!svn/bc/2/trunk/src/deep">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/2/trunk/src/deep</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">2</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:06.669520Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+<S:add-file name="c.cfg" sha1-checksum="75d155771c678a74cef8ce298f9b752cc10c5d70">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/2/trunk/src/deep/c.cfg</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">2</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:06.669520Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+<S:prop><V:md5-checksum>f968f33f844c98de1d3b4fe70f2e1a0f</V:md5-checksum></S:prop></S:add-file>
+</S:add-directory>
+</S:add-directory>
+<S:add-file name="unicodé file.txt" sha1-checksum="82e7a448a523fc18c0b913fd6a946e1eca462517">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/2/trunk/unicod%C3%A9%20file.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">2</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-13T09:45:06.669520Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">7462d98e-4071-4508-b797-d2922b5cda8f</S:set-prop>
+<S:prop><V:md5-checksum>5489f8fc627bb67d57b3bab93a7c9eb1</V:md5-checksum></S:prop></S:add-file>
+</S:open-directory>
+</S:update-report>
