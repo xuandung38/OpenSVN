@@ -1,0 +1,20 @@
+{
+  "name": "opensvn-workspace",
+  "private": true,
+  "packageManager": "pnpm@11.0.9",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "pnpm --filter opensvn tauri dev",
+    "build": "pnpm --filter opensvn build",
+    "tauri": "pnpm --filter opensvn tauri",
+    "gen:ipc": "pnpm --filter opensvn gen:ipc",
+    "lint": "biome check .",
+    "typecheck": "pnpm --filter opensvn typecheck",
+    "test": "pnpm --filter opensvn test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15"
+  }
+}
