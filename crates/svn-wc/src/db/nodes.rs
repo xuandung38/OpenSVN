@@ -156,6 +156,10 @@ fn parse_depth(s: &str) -> Depth {
 
 /// Decodes a `properties` blob; an empty blob or `()` is an empty property list.
 pub(crate) fn decode_props(blob: &[u8]) -> Result<Props> {
+    // svn reads a zero-length blob as "no properties" (sqlite3_column_blob yields NULL).
+    if blob.is_empty() {
+        return Ok(Vec::new());
+    }
     skel::parse_proplist(&Skel::parse(blob)?)
 }
 
@@ -287,14 +291,11 @@ pub(crate) fn children(conn: &Connection, wc_id: i64, parent: &RelPath) -> Resul
     Ok(out)
 }
 
-/// Current row for every path in the subtree of `root` (including `root`), sorted by path.
-pub(crate) fn subtree_current(conn: &Connection, wc_id: i64, root: &RelPath) -> Result<Vec<Node>> {
+/// Every row (all layers) of the subtree of `root`, ordered by path then `op_depth`.
+pub(crate) fn subtree_rows(conn: &Connection, wc_id: i64, root: &RelPath) -> Result<Vec<Node>> {
     let sql = format!(
-        "SELECT {NODE_COLUMNS} FROM nodes AS n WHERE wc_id = ?1 \
-         AND (local_relpath = ?2 OR {}) \
-         AND op_depth = (SELECT MAX(op_depth) FROM nodes AS n2 \
-                         WHERE n2.wc_id = n.wc_id AND n2.local_relpath = n.local_relpath) \
-         ORDER BY local_relpath",
+        "SELECT {NODE_COLUMNS} FROM nodes WHERE wc_id = ?1 AND (local_relpath = ?2 OR {}) \
+         ORDER BY local_relpath, op_depth",
         strict_descendant("local_relpath", "?2")
     );
     let mut stmt = conn.prepare(&sql).map_err(sql_err)?;

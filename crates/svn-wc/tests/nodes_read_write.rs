@@ -350,3 +350,65 @@ fn reads_an_svn_created_working_copy() {
     );
     assert_eq!(db.children(&rp("d")).expect("kids"), vec![rp("d/f")]);
 }
+
+#[test]
+fn empty_properties_blob_reads_as_no_properties() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = new_wc(tmp.path());
+    db.base_add(
+        &rp("a.txt"),
+        &base(NodeKind::File, "trunk/a.txt", None),
+        &[],
+    )
+    .expect("add");
+    db.with_write(|tx| {
+        tx.execute(
+            "UPDATE nodes SET properties = X'' WHERE local_relpath = 'a.txt'",
+            [],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    })
+    .expect("blank props");
+    let n = db.read_node(&rp("a.txt")).expect("read").expect("node");
+    assert_eq!(n.properties, Some(Vec::new()));
+}
+
+#[test]
+fn commit_batch_is_all_or_nothing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = new_wc(tmp.path());
+    db.base_add(
+        &rp("a.txt"),
+        &base(NodeKind::File, "trunk/a.txt", None),
+        &[],
+    )
+    .expect("add");
+    let info = CommitInfo {
+        new_rev: 9,
+        date: Some(1),
+        author: Some("bob".into()),
+        ..CommitInfo::default()
+    };
+    let err = db
+        .commit_nodes(
+            &[(rp("a.txt"), info.clone()), (rp("ghost"), info.clone())],
+            &[],
+        )
+        .expect_err("second path does not exist");
+    assert_eq!(err.code, ErrorCode::PathNotFound);
+    let n = db.read_node(&rp("a.txt")).expect("read").expect("node");
+    assert_eq!(
+        n.revision,
+        Some(5),
+        "first path must be rolled back with the batch"
+    );
+    db.commit_nodes(&[(rp("a.txt"), info)], &[]).expect("batch");
+    assert_eq!(
+        db.read_node(&rp("a.txt"))
+            .expect("read")
+            .expect("node")
+            .revision,
+        Some(9)
+    );
+}
