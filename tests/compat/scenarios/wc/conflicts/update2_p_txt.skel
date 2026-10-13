@@ -1,0 +1,1 @@
+((update ((subversion file:///tmp/opensvn-golden-conflicts/repo 36 94f6253a-7b20-480a-8721-e0ec1b48d6aa p.txt 1 4 file) (subversion file:///tmp/opensvn-golden-conflicts/repo 36 94f6253a-7b20-480a-8721-e0ec1b48d6aa p.txt 1 6 file))) ((prop (p.txt.prej) (added one two) (one 1 1 two 1 2) (two mine2 one mine1 added mine) (added theirs one theirs1 two theirs2))))
