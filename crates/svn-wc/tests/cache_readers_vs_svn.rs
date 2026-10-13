@@ -283,3 +283,34 @@ fn symlink_and_unknown_external_kinds_are_read() {
         ]
     );
 }
+
+#[test]
+fn non_numeric_external_revision_is_reported_as_corrupt() {
+    if skip_without_svn() {
+        return;
+    }
+    let (_tmp, base, url) = fixture();
+    let wc = checkout(&base, &url, "wc", &[]);
+    svn(
+        &wc,
+        &[
+            "propset",
+            "-q",
+            "svn:externals",
+            &format!("{url}/e ext-dir\n"),
+            "d",
+        ],
+    );
+    svn(&wc, &["update", "-q"]);
+    let rw = rusqlite::Connection::open(wc.join(".svn/wc.db")).expect("open rw");
+    rw.execute(
+        "UPDATE externals SET def_revision = 'HEAD' WHERE local_relpath = 'd/ext-dir'",
+        [],
+    )
+    .expect("damage");
+    drop(rw);
+    let db = WcDb::open(&wc).expect("open");
+    let err = db.external(&rp("d/ext-dir")).expect_err("corrupt");
+    assert_eq!(err.code, svn_types::ErrorCode::Corrupt);
+    assert!(err.message.contains("HEAD"), "{}", err.message);
+}
