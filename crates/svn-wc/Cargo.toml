@@ -16,6 +16,7 @@ failpoints = ["dep:fail", "fail/failpoints"]
 
 [dependencies]
 svn-types.workspace = true
+ignore.workspace = true
 thiserror.workspace = true
 rusqlite = { workspace = true, features = ["functions"] }
 sha1.workspace = true
