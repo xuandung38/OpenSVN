@@ -1,8 +1,9 @@
 [workspace]
 resolver = "3"
 # Glob members: new crates join without editing this file. The app crate is listed explicitly
-# because cargo rejects a glob that matches nothing.
-members = ["crates/*", "apps/opensvn/src-tauri"]
+# because cargo rejects a glob that matches nothing. xtask and tests/compat are the dev tooling
+# crates (compat harness).
+members = ["crates/*", "apps/opensvn/src-tauri", "xtask", "tests/compat"]
 
 [workspace.package]
 version = "0.0.0"
