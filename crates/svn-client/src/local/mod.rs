@@ -21,7 +21,6 @@ pub mod props;
 pub mod resolve;
 pub mod revert;
 pub mod state;
-pub mod wc_adapters;
 
 pub use add::{AddOptions, add};
 pub use autoprops::AddConfig;

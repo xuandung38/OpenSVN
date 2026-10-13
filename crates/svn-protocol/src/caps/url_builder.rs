@@ -10,6 +10,59 @@ fn unsafe_href(msg: impl Into<String>) -> SvnError {
     SvnError::new(ErrorCode::UnsafePath, msg)
 }
 
+/// Name of a transaction and which kind of stub addresses it: the server answers
+/// `SVN-VTxn-Name` (virtual transaction, used behind write-through proxies) instead of
+/// `SVN-Txn-Name` when the client sent a `SVN-VTxn-Name` request header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxnName {
+    /// Validated name.
+    pub name: String,
+    /// Addressed through the `vtxn`/`vtxr` stubs.
+    pub virtual_: bool,
+}
+
+impl TxnName {
+    /// A plain transaction.
+    pub fn plain(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            virtual_: false,
+        }
+    }
+
+    /// A virtual transaction.
+    pub fn virtual_txn(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            virtual_: true,
+        }
+    }
+}
+
+impl From<&str> for TxnName {
+    fn from(name: &str) -> Self {
+        Self::plain(name)
+    }
+}
+
+impl From<&String> for TxnName {
+    fn from(name: &String) -> Self {
+        Self::plain(name.as_str())
+    }
+}
+
+impl From<String> for TxnName {
+    fn from(name: String) -> Self {
+        Self::plain(name)
+    }
+}
+
+impl From<&TxnName> for TxnName {
+    fn from(t: &TxnName) -> Self {
+        t.clone()
+    }
+}
+
 /// What an accepted href points at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HrefKind {
@@ -63,8 +116,9 @@ pub struct UrlBuilder {
     me: String,
     rev: String,
     rev_root: String,
-    txn: Vec<String>,
-    txn_root: Vec<String>,
+    /// `(virtual, stub)`: the plain and the virtual (`SVN-VTxn-Name`) transaction stubs.
+    txn: Vec<(bool, String)>,
+    txn_root: Vec<(bool, String)>,
     dec: Decoded,
 }
 
@@ -134,16 +188,17 @@ impl UrlBuilder {
             u.set_path(p);
             Ok(u.path().trim_end_matches('/').to_owned())
         };
-        let mut txn = Vec::new();
-        let mut txn_root = Vec::new();
-        for s in [&caps.txn_stub, &caps.vtxn_stub].into_iter().flatten() {
-            txn.push(norm(s)?);
+        let mut txn: Vec<(bool, String)> = Vec::new();
+        let mut txn_root: Vec<(bool, String)> = Vec::new();
+        for (virt, s) in [(false, &caps.txn_stub), (true, &caps.vtxn_stub)] {
+            if let Some(s) = s {
+                txn.push((virt, norm(s)?));
+            }
         }
-        for s in [&caps.txn_root_stub, &caps.vtxn_root_stub]
-            .into_iter()
-            .flatten()
-        {
-            txn_root.push(norm(s)?);
+        for (virt, s) in [(false, &caps.txn_root_stub), (true, &caps.vtxn_root_stub)] {
+            if let Some(s) = s {
+                txn_root.push((virt, norm(s)?));
+            }
         }
         let me = norm(&caps.me_resource)?;
         let rev = norm(&caps.rev_stub)?;
@@ -154,8 +209,8 @@ impl UrlBuilder {
         let mut special_parents: Vec<String> = Vec::new();
         for p in [&me, &rev, &rev_root]
             .into_iter()
-            .chain(txn.iter())
-            .chain(txn_root.iter())
+            .chain(txn.iter().map(|(_, p)| p))
+            .chain(txn_root.iter().map(|(_, p)| p))
         {
             let parent = parent_of(p);
             if parent != root && under(&parent, &root) && !special_parents.contains(&parent) {
@@ -167,10 +222,13 @@ impl UrlBuilder {
             me: decode_path(&me)?,
             rev: decode_path(&rev)?,
             rev_root: decode_path(&rev_root)?,
-            txn: txn.iter().map(|p| decode_path(p)).collect::<Result<_>>()?,
+            txn: txn
+                .iter()
+                .map(|(_, p)| decode_path(p))
+                .collect::<Result<_>>()?,
             txn_root: txn_root
                 .iter()
-                .map(|p| decode_path(p))
+                .map(|(_, p)| decode_path(p))
                 .collect::<Result<_>>()?,
             special_parents: special_parents
                 .iter()
@@ -231,30 +289,38 @@ impl UrlBuilder {
         }
     }
 
-    /// URL of a transaction resource.
-    pub fn txn(&self, name: &str) -> Result<Url> {
-        Self::txn_name(name)?;
-        let base = self.txn.first().ok_or_else(|| {
-            SvnError::new(
-                ErrorCode::ServerUnsupported,
-                "server did not announce a transaction stub",
-            )
-        })?;
-        join_encoded(&self.origin, base, &[name])
+    /// URL of a transaction resource (plain or virtual stub, as the name's kind says).
+    pub fn txn(&self, txn: impl Into<TxnName>) -> Result<Url> {
+        let txn = txn.into();
+        Self::txn_name(&txn.name)?;
+        let base = Self::stub_for(&self.txn, txn.virtual_, "transaction")?;
+        join_encoded(&self.origin, base, &[&txn.name])
     }
 
     /// URL of `path` in a transaction root.
-    pub fn txn_root(&self, name: &str, path: &RelPath) -> Result<Url> {
-        Self::txn_name(name)?;
-        let base = self.txn_root.first().ok_or_else(|| {
-            SvnError::new(
-                ErrorCode::ServerUnsupported,
-                "server did not announce a transaction root stub",
-            )
-        })?;
-        let mut segs: Vec<&str> = vec![name];
+    pub fn txn_root(&self, txn: impl Into<TxnName>, path: &RelPath) -> Result<Url> {
+        let txn = txn.into();
+        Self::txn_name(&txn.name)?;
+        let base = Self::stub_for(&self.txn_root, txn.virtual_, "transaction root")?;
+        let mut segs: Vec<&str> = vec![&txn.name];
         segs.extend(path.components());
         join_encoded(&self.origin, base, &segs)
+    }
+
+    fn stub_for<'a>(stubs: &'a [(bool, String)], virt: bool, what: &str) -> Result<&'a String> {
+        stubs
+            .iter()
+            .find(|(v, _)| *v == virt)
+            .map(|(_, p)| p)
+            .ok_or_else(|| {
+                SvnError::new(
+                    ErrorCode::ServerUnsupported,
+                    format!(
+                        "server did not announce a {}{what} stub",
+                        if virt { "virtual " } else { "" }
+                    ),
+                )
+            })
     }
 
     /// Accepts an href from a response only if it names this session's origin and lies below

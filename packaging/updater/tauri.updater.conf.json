@@ -1,0 +1,11 @@
+{
+  "bundle": { "createUpdaterArtifacts": true },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACED-BY-write-updater-config.mjs",
+      "endpoints": [
+        "https://api.github.com/repos/xuandung38/OpenSVN-releases/contents/latest.json?ref=main"
+      ]
+    }
+  }
+}

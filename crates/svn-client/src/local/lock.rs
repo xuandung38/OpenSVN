@@ -4,7 +4,7 @@ use svn_types::{CancelToken, RelPath, Result};
 use svn_wc::WcDb;
 use svn_wc::db::{LockState, ObtainMode};
 
-use super::wc_adapters::run_work_queue;
+use crate::wc::run_work_queue;
 
 /// Runs `f` with the working copy write lock held on the whole tree.
 ///

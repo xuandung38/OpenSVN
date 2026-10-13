@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
-use rusqlite::params;
 use support::rec_ra::{RecRa, raw_error};
 use support::*;
 use svn_client::commit::{CommitContext, CommitOptions, CommitResult, commit, map_commit_error};
@@ -272,16 +271,14 @@ async fn out_of_date_leaves_everything_untouched() {
 }
 
 fn insert_lock_row(db: &WcDb, rel: &str, token: &str) {
-    db.with_write(|tx| {
-        tx.execute(
-            "INSERT INTO lock (repos_id, repos_relpath, lock_token, lock_owner, lock_comment, lock_date) \
-             SELECT id, ?1, ?2, 'tester', NULL, 1 FROM repository LIMIT 1",
-            params![rel, token],
-        )
+    let lock = svn_wc::db::LockInfo {
+        token: token.to_owned(),
+        owner: Some("tester".to_owned()),
+        comment: None,
+        date: Some(1),
+    };
+    db.with_txn(|t| t.lock_add(&rp(rel), &lock))
         .expect("insert lock");
-        Ok(())
-    })
-    .expect("write");
 }
 
 #[tokio::test]

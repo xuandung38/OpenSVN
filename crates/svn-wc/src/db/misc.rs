@@ -1,8 +1,8 @@
 //! Read side of the BASE caches kept next to the node: the repository LOCK cache, the `dav_cache`
 //! blob and the `inherited_props` cache. All three belong to the BASE (`op_depth = 0`) row.
 //!
-//! Writing these caches is not needed by the MVP (the lock cache is written by the lock commands
-//! through a later milestone), so only readers exist here.
+//! Only readers live here; the lock cache is written through [`super::WcTxn::lock_add`] and
+//! [`super::WcTxn::lock_remove`].
 
 use rusqlite::{Connection, OptionalExtension, params};
 use svn_types::{RelPath, Result};

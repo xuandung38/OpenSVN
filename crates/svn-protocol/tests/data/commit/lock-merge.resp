@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<D:merge-response xmlns:D="DAV:">
+<D:updated-set>
+<D:response>
+<D:href>/svn/repo/!svn/vcc/default</D:href>
+<D:propstat><D:prop>
+<D:resourcetype><D:baseline/></D:resourcetype>
+
+<D:version-name>11</D:version-name>
+<D:creationdate>2026-10-13T09:45:33.854827Z</D:creationdate>
+<D:creator-displayname>alice</D:creator-displayname>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+</D:response>
+</D:updated-set>
+</D:merge-response>

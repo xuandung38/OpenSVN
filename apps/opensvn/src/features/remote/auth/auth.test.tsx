@@ -76,13 +76,16 @@ test("originOf shows host:port including the default port", () => {
   expect(originOf("https://svn.example.com:8443/x")).toBe("https://svn.example.com:8443");
 });
 
-test("normalizeAuthPrompt fills defaults for older payloads", () => {
+test("normalizeAuthPrompt falls back to safe defaults for missing reason/offered", () => {
   const p = normalizeAuthPrompt({
     requestId: "r",
     kind: "credentials",
     realm: "x",
     url: "https://h/",
     cert: null,
+    reason: null,
+    attempt: 0,
+    offered: [],
   });
   expect(p).toMatchObject({
     kind: "credentials",
@@ -91,7 +94,16 @@ test("normalizeAuthPrompt fills defaults for older payloads", () => {
     offered: ["basic"],
   });
   expect(
-    normalizeAuthPrompt({ requestId: "r", kind: "certificate", realm: "x", url: "u", cert: null }),
+    normalizeAuthPrompt({
+      requestId: "r",
+      kind: "certificate",
+      realm: "x",
+      url: "u",
+      cert: null,
+      reason: null,
+      attempt: 0,
+      offered: [],
+    }),
   ).toBeNull();
 });
 

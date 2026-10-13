@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use opensvn_svn_oracle::{MinVersion, Oracle};
-use rusqlite::{Connection, OpenFlags};
 use svn_types::{MemoryLockOwnership, RelPath};
 use svn_wc::WcDb;
 use svn_wc::db::{LockOwner, find_wcroot};
@@ -129,11 +128,8 @@ fn norm_props(blob: Option<Vec<u8>>) -> String {
 
 /// Every NODES, ACTUAL_NODE and PRISTINE row as sorted text lines.
 pub fn dump_rows(wc: &Path) -> Vec<String> {
-    let conn = Connection::open_with_flags(
-        wc.join(".svn/wc.db"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .expect("open wc.db");
+    let db = WcDb::open(wc).expect("open wc.db");
+    db.with_read(|conn| {
     let mut out = Vec::new();
     let mut stmt = conn
         .prepare(
@@ -190,7 +186,9 @@ pub fn dump_rows(wc: &Path) -> Vec<String> {
         })
         .expect("q");
     out.extend(rows.map(|r| r.expect("row")));
-    out
+    Ok(out)
+    })
+    .expect("read wc.db")
 }
 
 /// `svn status --xml -v` of `wc` with path and attribute order normalised.

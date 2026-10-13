@@ -8,7 +8,7 @@ use svn_wc::workqueue::WorkItem;
 
 use super::lock::write_op;
 use super::state::subtree;
-use super::wc_adapters::skels;
+use crate::wc::skels;
 
 /// Which version of the conflicted content to keep (`--accept`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

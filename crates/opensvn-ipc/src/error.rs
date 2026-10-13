@@ -30,6 +30,8 @@ pub enum ErrorCode {
     PermissionDenied,
     FileInUse,
     Cancelled,
+    /// The request itself is invalid (bad value, expired path grant, unsupported option).
+    InvalidArgument,
     Internal,
 }
 

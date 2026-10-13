@@ -6,10 +6,9 @@
 use std::fs::File;
 use std::path::Path;
 
-use rusqlite::params;
 use svn_types::{ErrorCode, RelPath, Result, SvnError};
 use svn_wc::WcDb;
-use svn_wc::db::{CommitInfo, sql_err};
+use svn_wc::db::CommitInfo;
 use svn_wc::pristine::{Md5Digest, PristineError, Sha1Digest};
 use svn_wc::workqueue::WorkItem;
 
@@ -17,7 +16,6 @@ use super::collect::{ItemAction, ItemKind};
 use super::journal::{JournalData, JournalItem, JournalMerge};
 use crate::local::content::stat_cache;
 use crate::local::paths::abs_of;
-use crate::local::wc_adapters::{pristine_store, skels};
 
 fn bad_digest(what: &str, item: &JournalItem) -> SvnError {
     SvnError::new(
@@ -28,6 +26,11 @@ fn bad_digest(what: &str, item: &JournalItem) -> SvnError {
 
 /// Installs the committed texts as pristines and updates the working copy rows of every
 /// committed path. The caller holds the WC lock and runs the work queue afterwards.
+///
+/// The node rows, the released lock rows and the `file-commit` work items are written in ONE
+/// transaction (`svn_wc__db_global_commit` plus `svn_wc__db_lock_remove` with their work items):
+/// after a crash either nothing changed (the journal finalizes again) or everything did and the
+/// queued items finish the working files.
 pub fn finalize(db: &WcDb, journal: &JournalData, data_dir: &Path) -> Result<()> {
     let merged = journal
         .merged
@@ -42,17 +45,27 @@ pub fn finalize(db: &WcDb, journal: &JournalData, data_dir: &Path) -> Result<()>
         let rel = RelPath::new(&item.relpath)?;
         let info = commit_info(db, journal, merged, item, &rel)?;
         if item.kind == ItemKind::File && item.action != ItemAction::Delete {
-            work.push(WorkItem::FileCommit {
-                relpath: item.relpath.clone(),
-            });
+            work.push(
+                WorkItem::FileCommit {
+                    relpath: item.relpath.clone(),
+                }
+                .to_skel(),
+            );
         }
-        batch.push((rel, info));
+        batch.push((rel, info, item.lock_token.is_some()));
     }
-    db.commit_nodes(&batch, &skels(&work))?;
-    if !journal.keep_locks {
-        release_lock_rows(db, journal)?;
-    }
-    Ok(())
+    let release_locks = !journal.keep_locks;
+    db.with_txn(|t| {
+        for (rel, info, had_lock) in &batch {
+            // The server released the lock with the commit; drop the cached row while BASE
+            // still names the repository location it is keyed by.
+            if release_locks && *had_lock {
+                t.lock_remove(rel)?;
+            }
+            t.commit_node(rel, info)?;
+        }
+        t.queue_work(&work)
+    })
 }
 
 fn commit_info(
@@ -85,7 +98,7 @@ fn commit_info(
 }
 
 fn install_pristines(db: &WcDb, journal: &JournalData, data_dir: &Path) -> Result<()> {
-    let mut store = pristine_store(db);
+    let mut store = db.pristine_store();
     for item in &journal.items {
         let Some(text) = &item.text else { continue };
         let sha1 = Sha1Digest::from_hex(&text.sha1).ok_or_else(|| bad_digest("sha1", item))?;
@@ -114,23 +127,4 @@ fn install_pristines(db: &WcDb, journal: &JournalData, data_dir: &Path) -> Resul
             .map_err(|e: PristineError| SvnError::from(e))?;
     }
     Ok(())
-}
-
-/// Drops the cached lock rows of paths whose tokens were used (the server released them).
-fn release_lock_rows(db: &WcDb, journal: &JournalData) -> Result<()> {
-    let tokens: Vec<&str> = journal
-        .items
-        .iter()
-        .filter_map(|i| i.lock_token.as_deref())
-        .collect();
-    if tokens.is_empty() {
-        return Ok(());
-    }
-    db.with_write(|tx| {
-        for t in tokens {
-            tx.execute("DELETE FROM lock WHERE lock_token = ?1", params![t])
-                .map_err(sql_err)?;
-        }
-        Ok(())
-    })
 }

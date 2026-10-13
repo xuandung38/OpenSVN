@@ -96,26 +96,14 @@ export function normalizeAuthPrompt(p: AuthPromptEvent): AuthPromptInfo | null {
       failure: parseCertFailure((p.cert as unknown as Record<string, unknown>).failure),
     };
   }
-  // The contract (doc 03, PR #43) adds reason/attempt/offered to `auth://prompt`, but the generated
-  // bindings do not carry them yet. Each @ts-expect-error below starts failing the moment
-  // `gen:ipc` emits the field: then delete this fallback and read the typed properties directly.
-  // @ts-expect-error -- remove once bindings carry `reason` (contract #43)
-  const reason: unknown = p.reason;
-  // @ts-expect-error -- remove once bindings carry `attempt` (contract #43)
-  const attempt: unknown = p.attempt;
-  // @ts-expect-error -- remove once bindings carry `offered` (contract #43)
-  const offered: unknown = p.offered;
   return {
     kind: "credentials",
     requestId: p.requestId,
     realm: p.realm,
     url: p.url,
-    reason:
-      reason === "rejected" || reason === "negotiate-failed" || reason === "initial"
-        ? reason
-        : "initial",
-    attempt: typeof attempt === "number" && attempt >= 0 ? attempt : 0,
-    offered: asMethods(offered),
+    reason: p.reason === "rejected" || p.reason === "negotiate-failed" ? p.reason : "initial",
+    attempt: p.attempt >= 0 ? p.attempt : 0,
+    offered: asMethods(p.offered),
   };
 }
 

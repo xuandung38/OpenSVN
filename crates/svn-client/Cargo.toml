@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "High-level Subversion client operations over svn-wc and svn-ra-api"
+description = "High-level Subversion client operations: checkout, update, switch, status, diff, commit and local edits"
 
 [lints]
 workspace = true
@@ -18,10 +18,11 @@ failpoints = ["dep:fail", "fail/failpoints", "svn-wc/failpoints"]
 async-trait.workspace = true
 bytes.workspace = true
 md-5.workspace = true
-rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
+svn-delta.workspace = true
+svn-diff.workspace = true
 svn-ra-api.workspace = true
 svn-types.workspace = true
 svn-wc.workspace = true
@@ -31,6 +32,6 @@ tracing.workspace = true
 fail = { workspace = true, optional = true }
 
 [dev-dependencies]
+svn-ra-api = { workspace = true, features = ["fake"] }
 opensvn-svn-oracle = { path = "../../tests/svn-oracle" }
-svn-ra-api = { path = "../svn-ra-api", features = ["fake"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

@@ -9,6 +9,7 @@ use crate::models::WcFormat;
 use crate::models::{
     Depth, DiffTarget, IgnoreScope, LockTargets, LogTarget, RemoteOp, ResolveChoice, SparseEntry,
 };
+use crate::path_grants::PathGrantId;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -39,7 +40,8 @@ pub struct IgnoreAddRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CheckoutRequest {
     pub url: String,
-    pub path: String,
+    /// Folder chosen with `path_pick`; becomes the working copy root.
+    pub dest: PathGrantId,
     pub rev: Option<Rev>,
     pub depth: Depth,
     pub sparse: Option<Vec<SparseEntry>>,
@@ -179,6 +181,8 @@ pub enum AuthResponse {
     Certificate {
         decision: CertDecision,
     },
+    /// Use single sign-on (only valid when the prompt offered `negotiate`).
+    Negotiate,
     Cancel,
 }
 
@@ -188,6 +192,8 @@ pub enum CertDecision {
     Reject,
     AcceptOnce,
     AcceptAlways,
+    // Replace the pinned certificate (valid only when the certificate changed).
+    ReplacePin,
 }
 
 /// Credential metadata only; never contains a password.

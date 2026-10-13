@@ -1,0 +1,218 @@
+//! `status` and `diff` compared with what the real svn 1.15 prints for the same working copy.
+//! Skipped when no svn 1.15 is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
+mod common;
+
+use std::path::Path;
+
+use common::oracle::*;
+use common::*;
+use svn_client::{DiffOptions, StatusOptions, checkout, diff, status, update};
+use svn_types::{CancelToken, Depth, NodeStatus, PropStatus, WcStatus};
+
+fn letters(s: &WcStatus) -> String {
+    let c0 = match s.text {
+        NodeStatus::Added => 'A',
+        NodeStatus::Deleted => 'D',
+        NodeStatus::Modified => 'M',
+        NodeStatus::Replaced => 'R',
+        NodeStatus::Missing | NodeStatus::Incomplete => '!',
+        NodeStatus::Obstructed => '~',
+        NodeStatus::Unversioned => '?',
+        NodeStatus::Ignored => 'I',
+        NodeStatus::Conflicted => 'C',
+        _ => ' ',
+    };
+    let c1 = match s.props {
+        PropStatus::Modified => 'M',
+        PropStatus::Conflicted => 'C',
+        _ => ' ',
+    };
+    let c6 = if s.tree_conflict { 'C' } else { ' ' };
+    let path = if s.path.is_root() {
+        ".".to_owned()
+    } else {
+        s.path.to_string()
+    };
+    format!("{c0}{c1}{c6} {path}")
+}
+
+/// `svn status` lines reduced to text, property and tree-conflict columns plus the path.
+fn svn_letters(oracle: &opensvn_svn_oracle::Oracle, wc: &Path) -> Vec<String> {
+    let mut v: Vec<String> = svn_status(oracle, wc, &[])
+        .lines()
+        .filter(|l| {
+            // Tree-conflict detail lines, the summary, and the changelist group headers
+            // (`--- Changelist 'name':` preceded by an empty line) carry no item status.
+            !l.trim_start().starts_with('>')
+                && !l.starts_with("Summary")
+                && !l.starts_with("  ")
+                && !l.starts_with("--- Changelist")
+                && !l.is_empty()
+        })
+        .map(|l| {
+            let c: Vec<char> = l.chars().collect();
+            format!("{}{}{} {}", c[0], c[1], c[6], &l[8..])
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+async fn our_letters(wc: &Path) -> Vec<String> {
+    let mut v: Vec<String> = status(&ctx(), wc, &StatusOptions::default(), &CancelToken::new())
+        .await
+        .expect("status")
+        .iter()
+        .filter(|s| {
+            !s.path.is_root()
+                || s.text != NodeStatus::Normal
+                || matches!(s.props, PropStatus::Modified | PropStatus::Conflicted)
+                || s.tree_conflict
+        })
+        .map(letters)
+        .collect();
+    v.sort();
+    v
+}
+
+/// Working copy at r1 made by this client with a representative mix of local changes made by svn.
+async fn local_changes() -> Option<(
+    opensvn_svn_oracle::Oracle,
+    Repo,
+    Sandbox,
+    std::path::PathBuf,
+)> {
+    let oracle = oracle()?;
+    let repo = Repo::new(&oracle);
+    build_r1(&repo);
+    let sb = Sandbox::new();
+    let ours = sb.path("wc");
+    checkout(
+        &ctx(),
+        &repo.fake(None),
+        &ours,
+        None,
+        Depth::Infinity,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("checkout");
+    write(&ours.join("README"), "hello\nthere\nworld\n");
+    write(
+        &ours.join("docs/guide.txt"),
+        "one\ntwo\nthree\nfour\nfive\nsix\nSEVEN\n",
+    );
+    repo.svn(&ours, &["propset", "-q", "color", "green", "docs"]);
+    repo.svn(&ours, &["propset", "-q", "extra", "1", "README"]);
+    write(&ours.join("added.txt"), "new\nfile\n");
+    write(&ours.join("emptyadd.txt"), "");
+    repo.svn(&ours, &["add", "-q", "added.txt", "emptyadd.txt"]);
+    repo.svn(&ours, &["rm", "-q", "run.sh"]);
+    std::fs::remove_file(ours.join("empty.txt")).expect("rm");
+    write(&ours.join("scratch.txt"), "unversioned\n");
+    write(&ours.join("build.o"), "ignored by default\n");
+    repo.svn(&ours, &["propset", "-q", "svn:ignore", "*.tmp", "."]);
+    write(&ours.join("x.tmp"), "ignored by property\n");
+    repo.svn(&ours, &["changelist", "-q", "work", "README"]);
+    Some((oracle, repo, sb, ours))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn local_status_matches_svn_status() {
+    let Some((oracle, _repo, _sb, ours)) = local_changes().await else {
+        return;
+    };
+    assert_eq!(our_letters(&ours).await, svn_letters(&oracle, &ours));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_reports_changelist_and_ignored_items() {
+    let Some((_o, _repo, _sb, ours)) = local_changes().await else {
+        return;
+    };
+    let all = status(
+        &ctx(),
+        &ours,
+        &StatusOptions {
+            include_ignored: true,
+            ..StatusOptions::default()
+        },
+        &CancelToken::new(),
+    )
+    .await
+    .expect("status");
+    let find = |p: &str| {
+        all.iter()
+            .find(|s| s.path.as_str() == p)
+            .unwrap_or_else(|| panic!("{p} missing"))
+    };
+    assert_eq!(find("README").changelist.as_deref(), Some("work"));
+    assert_eq!(find("build.o").text, NodeStatus::Ignored);
+    assert_eq!(find("x.tmp").text, NodeStatus::Ignored);
+    assert_eq!(find("scratch.txt").text, NodeStatus::Unversioned);
+    assert_eq!(find("empty.txt").text, NodeStatus::Missing);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn diff_matches_svn_diff_byte_for_byte() {
+    let Some((_o, repo, _sb, ours)) = local_changes().await else {
+        return;
+    };
+    let expected = repo.svn(&ours, &["diff"]);
+    let got = diff(&ctx(), &ours, &DiffOptions::default(), &CancelToken::new())
+        .await
+        .expect("diff");
+    assert_eq!(String::from_utf8_lossy(&got), expected);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_and_diff_after_conflicting_update_match_svn() {
+    let Some(oracle) = oracle() else { return };
+    let repo = Repo::new(&oracle);
+    let seed = build_r1(&repo);
+    let sb = Sandbox::new();
+    let ours = sb.path("wc");
+    checkout(
+        &ctx(),
+        &repo.fake(Some(1)),
+        &ours,
+        None,
+        Depth::Infinity,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("checkout");
+    write(&ours.join("README"), "hello\nmine\n");
+    write(
+        &ours.join("docs/guide.txt"),
+        "ONE\ntwo\nthree\nfour\nfive\nsix\nseven\n",
+    );
+    write(&seed.join("README"), "hello\ntheirs\n");
+    write(
+        &seed.join("docs/guide.txt"),
+        "one\ntwo\nthree\nfour\nfive\nsix\nSEVEN\n",
+    );
+    repo.svn(&seed, &["rm", "-q", "empty.txt"]);
+    repo.svn(&seed, &["commit", "-q", "-m", "r2"]);
+    write(&ours.join("empty.txt"), "edited\n");
+    update(
+        &ctx(),
+        &repo.fake(None),
+        &ours,
+        None,
+        Depth::Unknown,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("update");
+    assert_eq!(our_letters(&ours).await, svn_letters(&oracle, &ours));
+    let expected = repo.svn(&ours, &["diff"]);
+    let got = diff(&ctx(), &ours, &DiffOptions::default(), &CancelToken::new())
+        .await
+        .expect("diff");
+    assert_eq!(String::from_utf8_lossy(&got), expected);
+}

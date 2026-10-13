@@ -1,0 +1,8 @@
+Trying to change property 'k'
+but the property has already been locally changed to a different value.
+Local property value:
+Cannot display: property value is binary data
+
+Incoming property value:
+Cannot display: property value is binary data
+

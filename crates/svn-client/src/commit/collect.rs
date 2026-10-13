@@ -95,34 +95,7 @@ fn blocked(msg: String) -> SvnError {
 /// Repository path where `rel` lives after a commit: its BASE location, or the parent's plus
 /// its name for anything added or copied.
 pub fn destination_repos_relpath(db: &WcDb, rel: &RelPath) -> Result<String> {
-    let node = db.read_node(rel)?.ok_or_else(|| {
-        SvnError::new(
-            ErrorCode::PathNotFound,
-            format!("'{rel}' is not under version control"),
-        )
-    })?;
-    let base_loc = |n: &svn_wc::db::Node| n.repos_relpath.clone();
-    if node.presence == svn_wc::db::Presence::BaseDeleted {
-        return db
-            .read_base(rel)?
-            .and_then(|b| base_loc(&b))
-            .ok_or_else(|| SvnError::new(ErrorCode::Corrupt, "deleted node without BASE"));
-    }
-    if node.op_depth == 0
-        && let Some(p) = base_loc(&node)
-    {
-        return Ok(p);
-    }
-    let parent = rel
-        .parent()
-        .ok_or_else(|| SvnError::new(ErrorCode::Corrupt, "root node without repository path"))?;
-    let pp = destination_repos_relpath(db, &parent)?;
-    let name = rel.file_name().unwrap_or_default();
-    Ok(if pp.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{pp}/{name}")
-    })
+    Ok(db.read_repos_info(rel)?.repos_relpath)
 }
 
 struct Collector<'a> {

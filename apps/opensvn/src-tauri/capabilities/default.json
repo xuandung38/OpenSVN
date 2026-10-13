@@ -1,11 +1,19 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window only. core:event:allow-listen / allow-unlisten: the UI subscribes to op://, wc:// and auth:// events emitted by Rust. No emit (UI talks to Rust through commands), no window/webview/menu/path/resources/app permissions: nothing in the UI needs them yet; add per-feature when a screen requires one. App commands are allowed one by one.",
+  "description": "Main window only. core:event:allow-listen / allow-unlisten: the UI subscribes to op://, wc:// and auth:// events emitted by Rust. No emit (UI talks to Rust through commands), no window/webview/menu/path/resources/app permissions: nothing in the UI needs them yet; add per-feature when a screen requires one. App commands are allowed one by one; program-choose / program-clear only open a native file dialog or clear a value (the program to run is picked and confirmed natively, never passed by the UI). opener:allow-open-url, scoped to https:// URLs only, lets the UI open links (revision pages, docs) in the browser; open-path, reveal and every other scheme stay denied.",
   "windows": ["main"],
   "permissions": [
     "core:event:allow-listen",
     "core:event:allow-unlisten",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://*"
+        }
+      ]
+    },
     "allow-repo-info",
     "allow-repo-list",
     "allow-repo-cat",
@@ -27,6 +35,9 @@
     "allow-accounts-sign-out",
     "allow-settings-get",
     "allow-settings-set",
+    "allow-program-choose",
+    "allow-program-clear",
+    "allow-path-pick",
     "allow-reveal-in-os",
     "allow-open-external",
     "allow-diagnostics-export",

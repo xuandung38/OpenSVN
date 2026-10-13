@@ -1,9 +1,9 @@
 //! Streaming `S:log-report` response parser.
 
 use bytes::Bytes;
-use svn_types::{ChangeAction, LogEntry, NodeKind, Result, Revnum};
+use svn_types::{ChangeAction, ChangedPath, LogEntry, NodeKind, Result, Revnum};
 
-use crate::display_path::{DisplayChangedPath, RepoDisplayPath};
+use crate::display_path::RepoDisplayPath;
 
 use crate::http::{ResponseParser, parse_chunked};
 use crate::limits::ParserLimits;
@@ -16,11 +16,8 @@ use crate::xml::{Ns, StartTag, XmlEvent, XmlReader};
 /// entry that has `has_children`, then an end marker. `merge_depth` is 0 for top-level entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogItem {
-    /// The entry. Its `changed_paths` is always empty: paths are in [`LogItem::changed_paths`]
-    /// as display-only values; use [`LogItem::into_log_entry`] to build the contract form.
+    /// The entry, changed paths included when they were requested.
     pub entry: LogEntry,
-    /// Changed paths (when requested), display-only.
-    pub changed_paths: Vec<DisplayChangedPath>,
     /// Revision properties beyond author, date and message (`LogRevprops::All`/`Only`), with
     /// decoded values.
     pub revprops: Vec<(String, Bytes)>,
@@ -44,23 +41,8 @@ struct Building {
     rev: Option<Revnum>,
     end_marker: bool,
     entry: LogEntry,
-    paths: Vec<DisplayChangedPath>,
     revprops: Vec<(String, Bytes)>,
     subtractive: bool,
-}
-
-impl LogItem {
-    /// Builds the contract `LogEntry` with `changed_paths` filled in. Paths become plain
-    /// strings here, so call it only where the contract requires that.
-    pub fn into_log_entry(self) -> LogEntry {
-        let mut entry = self.entry;
-        entry.changed_paths = self
-            .changed_paths
-            .into_iter()
-            .map(DisplayChangedPath::into_contract)
-            .collect();
-        entry
-    }
 }
 
 /// Incremental parser emitting one [`LogItem`] per `S:log-item`.
@@ -140,7 +122,6 @@ impl LogParser {
                     rev: None,
                     end_marker: false,
                     subtractive: false,
-                    paths: Vec::new(),
                     revprops: Vec::new(),
                     entry: LogEntry {
                         rev: Revnum(0),
@@ -239,11 +220,11 @@ impl LogParser {
                     _ => None,
                 };
                 ParserLimits::check(
-                    item.paths.len() + 1,
+                    item.entry.changed_paths.len() + 1,
                     self.limits.max_changed_paths,
                     "changed paths",
                 )?;
-                item.paths.push(DisplayChangedPath {
+                item.entry.changed_paths.push(ChangedPath {
                     path: RepoDisplayPath::parse(text.trim())?,
                     action,
                     kind: kind_for(tag.attr("node-kind")),
@@ -274,7 +255,6 @@ impl LogParser {
                 }
                 out.push(LogItem {
                     entry: item.entry,
-                    changed_paths: item.paths,
                     revprops: item.revprops,
                     merge_depth,
                     subtractive_merge: item.subtractive,

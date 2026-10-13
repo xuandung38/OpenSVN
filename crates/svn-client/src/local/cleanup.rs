@@ -4,7 +4,7 @@ use svn_types::{CancelToken, RelPath, Result};
 use svn_wc::WcDb;
 use svn_wc::db::{LockCleanup, ObtainMode};
 
-use super::wc_adapters::{pristine_store, run_work_queue};
+use crate::wc::run_work_queue;
 
 /// What [`cleanup`] did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub fn cleanup(db: &WcDb, cancel: &CancelToken) -> Result<CleanupReport> {
     db.wc_lock_obtain(&root, -1, ObtainMode::Cleanup)?;
     let result = (|| {
         let work_items = run_work_queue(db, cancel)?;
-        let pristines_removed = pristine_store(db).remove_unreferenced()?;
+        let pristines_removed = db.pristine_store().remove_unreferenced()?;
         Ok(CleanupReport {
             locks,
             work_items,

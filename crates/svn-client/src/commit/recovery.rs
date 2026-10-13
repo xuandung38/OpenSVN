@@ -13,7 +13,7 @@ use svn_wc::WcDb;
 use super::finalize::finalize;
 use super::journal::{JournalData, JournalStore};
 use crate::local::lock::with_wc_lock;
-use crate::local::wc_adapters::run_work_queue;
+use crate::wc::run_work_queue;
 
 /// What [`recover_commits`] did.
 #[derive(Debug, Default)]
