@@ -1,0 +1,9 @@
+Index: f
+===================================================================
+--- f	(revision 1)
++++ f	(working copy)
+@@ -1 +1 @@
+-hello
+\ No newline at end of file
++world
+\ No newline at end of file

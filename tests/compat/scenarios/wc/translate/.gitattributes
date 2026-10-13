@@ -1,0 +1,2 @@
+# Fixtures are byte-exact (CR/LF/CRLF content); never normalise.
+* -text

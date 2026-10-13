@@ -87,10 +87,24 @@ fn fixture() -> Fixture {
 
 /// Runs `svn_cmds` on one checkout and `ours` on another, then compares.
 fn check(name: &str, prep: &dyn Fn(&Path), svn_cmds: &[&[&str]], ours: &dyn Fn(&WcDb, &Path)) {
+    check_after(&|_| {}, name, prep, svn_cmds, ours);
+}
+
+/// Like [`check`], but `history` first commits more revisions (from a scratch checkout) so that
+/// `prep` can build mixed-revision working copies with `svn update -r`.
+fn check_after(
+    history: &dyn Fn(&Path),
+    name: &str,
+    prep: &dyn Fn(&Path),
+    svn_cmds: &[&[&str]],
+    ours: &dyn Fn(&WcDb, &Path),
+) {
     if skip_without_svn_1_15() {
         return;
     }
     let fx = fixture();
+    let scratch = checkout(&fx.base, &fx.url, "history", &[]);
+    history(&scratch);
     let a = checkout(&fx.base, &fx.url, "svn-side", &[]);
     let b = checkout(&fx.base, &fx.url, "our-side", &[]);
     prep(&a);
@@ -705,6 +719,20 @@ fn commit_of_a_replacement_keeps_the_delete_layers_of_the_new_copy() {
     );
 }
 
+/// Two more revisions: r2 changes `d/f2` and `d/sub/g`, r3 deletes `d/f1`.
+fn more_history(wc: &Path) {
+    write(wc, "d/f2", "two\n");
+    write(wc, "d/sub/g", "three\n");
+    svn(wc, &["commit", "-q", "-m", "r2"]);
+    svn(wc, &["rm", "-q", "d/f1"]);
+    svn(wc, &["commit", "-q", "-m", "r3"]);
+}
+
+fn copy_d_to_dc(db: &WcDb, wc: &Path) {
+    cp(&wc.join("d"), &wc.join("dc"));
+    db.op_copy(&rp("d"), &rp("dc"), &[]).expect("cp");
+}
+
 #[test]
 fn commit_nodes_accepts_the_child_items_svn_gathers_for_a_replaced_root() {
     if skip_without_svn_1_15() {
@@ -755,23 +783,84 @@ fn commit_nodes_accepts_the_child_items_svn_gathers_for_a_replaced_root() {
     );
 }
 
+/// Two more revisions: r2 changes `d/f2` and `d/sub/g`, r3 deletes `d/f1`.
+fn more_history(wc: &Path) {
+    write(wc, "d/f2", "two\n");
+    write(wc, "d/sub/g", "three\n");
+    svn(wc, &["commit", "-q", "-m", "r2"]);
+    svn(wc, &["rm", "-q", "d/f1"]);
+    svn(wc, &["commit", "-q", "-m", "r3"]);
+}
+
+fn copy_d_to_dc(db: &WcDb, wc: &Path) {
+    cp(&wc.join("d"), &wc.join("dc"));
+    db.op_copy(&rp("d"), &rp("dc"), &[]).expect("cp");
+}
+
 #[test]
-fn mixed_revision_copy_is_refused_explicitly() {
-    if skip_without_svn_1_15() {
-        return;
-    }
-    let fx = fixture();
-    let a = checkout(&fx.base, &fx.url, "svn-side", &[]);
-    let other = checkout(&fx.base, &fx.url, "other", &[]);
-    write(&other, "d/f2", "changed\n");
-    svn(&other, &["commit", "-q", "-m", "two"]);
-    svn(&a, &["update", "-q", "d/f2"]); // d@1 contains d/f2@2
-    let db = WcDb::open(&a).expect("open");
-    let err = db.op_copy(&rp("d"), &rp("dc"), &[]).expect_err("mixed");
-    assert_eq!(err.code, svn_types::ErrorCode::WcFormatUnsupported);
-    assert!(err.message.contains("mixed-revision"), "{}", err.message);
-    assert!(
-        db.read_node(&rp("dc")).expect("read").is_none(),
-        "nothing was written"
+fn copy_of_a_mixed_revision_directory_layers_like_svn() {
+    check_after(
+        &more_history,
+        "copy-mixed",
+        &|wc| svn(wc, &["update", "-q", "-r1", "d/sub"]),
+        &[&["cp", "-q", "d", "dc"]],
+        &copy_d_to_dc,
+    );
+}
+
+#[test]
+fn copy_of_nested_mixed_revisions_layers_each_level() {
+    check_after(
+        &more_history,
+        "copy-mixed-nested",
+        &|wc| {
+            svn(wc, &["update", "-q", "-r1", "d/sub"]);
+            svn(wc, &["update", "-q", "-r3", "d/sub/g"]);
+        },
+        &[&["cp", "-q", "d", "dc"]],
+        &copy_d_to_dc,
+    );
+}
+
+#[test]
+fn copy_keeps_not_present_children_at_their_revision() {
+    check_after(
+        &more_history,
+        "copy-not-present",
+        &|wc| {
+            svn(wc, &["update", "-q", "-r1"]);
+            svn(wc, &["update", "-q", "-r3", "d/f1"]);
+        },
+        &[&["cp", "-q", "d", "dc"]],
+        &copy_d_to_dc,
+    );
+}
+
+#[test]
+fn copy_keeps_excluded_children_excluded() {
+    check(
+        "copy-excluded",
+        &|wc| svn(wc, &["update", "-q", "--set-depth", "exclude", "d/sub"]),
+        &[&["cp", "-q", "d", "dc"]],
+        &|db, wc| {
+            fs::create_dir_all(wc.join("dc")).expect("mkdir");
+            cp(&wc.join("d"), &wc.join("dc"));
+            db.op_copy(&rp("d"), &rp("dc"), &[]).expect("cp");
+        },
+    );
+}
+
+#[test]
+fn copy_of_a_single_mixed_revision_file_needs_no_layering() {
+    // A copy of a single mixed-revision child must not need layering: it is its own root.
+    check_after(
+        &more_history,
+        "copy-mixed-file",
+        &|wc| svn(wc, &["update", "-q", "-r1", "d/sub/g"]),
+        &[&["cp", "-q", "d/sub/g", "gg"]],
+        &|db, wc| {
+            fs::copy(wc.join("d/sub/g"), wc.join("gg")).expect("copy");
+            db.op_copy(&rp("d/sub/g"), &rp("gg"), &[]).expect("cp");
+        },
     );
 }

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:log-report xmlns:S="svn:" xmlns:D="DAV:">
+<S:log-item>
+<S:added-path copyfrom-path="/trunk/src" copyfrom-rev="4" node-kind="dir" text-mods="false" prop-mods="false">/branches/b1</S:added-path>
+<D:version-name>5</D:version-name>
+<D:comment>branch b1 copy</D:comment>
+<D:creator-displayname>alice</D:creator-displayname>
+<S:date>2026-10-13T09:04:38.541421Z</S:date>
+</S:log-item>
+<S:log-item>
+<S:deleted-path node-kind="file" text-mods="false" prop-mods="false">/trunk/docs/readme.md</S:deleted-path>
+<D:version-name>4</D:version-name>
+<S:date>2026-10-13T09:04:36.423797Z</S:date>
+<D:comment>delete readme</D:comment>
+<D:creator-displayname>alice</D:creator-displayname>
+</S:log-item>
+</S:log-report>

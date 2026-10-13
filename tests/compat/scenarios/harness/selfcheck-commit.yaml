@@ -1,0 +1,18 @@
+# Harness self-check with writes: wc a edits, adds, sets a property and commits; wc b updates.
+# Both must converge to the same tree/status/info. Uses a throw-away copy of the fixture repo.
+name: selfcheck-commit
+description: svn15 vs svn15 after commit/update round trip
+server: svn15
+repo: basic
+fresh_repo: true
+steps:
+  - { on: svn15, wc: a, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: b, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: a, sh: "echo changed >> README.txt && printf 'new\\n' > added.txt && chmod +x added.txt" }
+  - { on: svn15, wc: a, svn: [add, added.txt] }
+  - { on: svn15, wc: a, svn: [propset, svn:executable, "*", added.txt] }
+  - { on: svn15, wc: a, svn: [commit, -m, "selfcheck change"] }
+  - { on: svn15, wc: a, svn: [update] }
+  - { on: svn15, wc: b, svn: [update] }
+compare:
+  - { left: a, right: b, checks: [tree, status, info] }

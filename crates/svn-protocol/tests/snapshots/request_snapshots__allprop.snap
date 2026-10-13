@@ -1,0 +1,9 @@
+---
+source: crates/svn-protocol/tests/request_snapshots.rs
+expression: "render(&allprop_request(&u, Revnum(3), &rel(\"trunk\")).unwrap())"
+---
+PROPFIND http://svn.test.local/svn/repo/!svn/rvr/3/trunk
+Depth: 0
+Content-Type: text/xml
+
+<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><allprop xmlns="DAV:"/></propfind>
