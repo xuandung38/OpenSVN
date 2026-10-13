@@ -20,7 +20,7 @@
 
 mod error;
 pub mod item;
-mod paths;
+pub(crate) mod paths;
 pub mod runner;
 
 pub use error::WorkQueueError;
