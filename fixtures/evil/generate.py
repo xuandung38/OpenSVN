@@ -241,6 +241,19 @@ write("options", "root-not-prefix", options(**{"SVN-Repository-Root": "/elsewher
       "reject", "repository root that is not a prefix of the session URL")
 write("options", "root-dotdot", options(**{"SVN-Repository-Root": "/svn/repo/.."}), O,
       "reject", "repository root with a .. segment")
+write("options", "root-backslash-dotdot", options(**{"SVN-Repository-Root": "/svn/repo\\.."}), O,
+      "reject", "repository root with a backslash .. segment (the URL parser reads \\ as /)")
+write("options", "root-abs-backslash-dotdot",
+      options(**{"SVN-Repository-Root": "http://svn.test.local\\svn\\repo\\.."}), O, "reject",
+      "absolute repository root with a backslash right after the host and a .. segment")
+write("options", "root-tab-dotdot", options(**{"SVN-Repository-Root": "/svn/repo/.\t."}), O,
+      "reject", "repository root with a tab between dots (the URL parser deletes tabs)")
+write("options", "root-encoded-tab-dotdot", options(**{"SVN-Repository-Root": "/svn/repo/%2e%09%2e"}),
+      O, "reject", "repository root with an encoded tab between encoded dots")
+write("options", "root-encoded-backslash", options(**{"SVN-Repository-Root": "/svn/repo%5C.."}), O,
+      "reject", "repository root with an encoded backslash before ..")
+write("options", "me-tab", options(**{"SVN-Me-Resource": "/svn/repo/!svn/.\t./me"}), O,
+      "reject", "me resource with a tab between dots")
 write("options", "me-other-host", options(**{"SVN-Me-Resource": "http://evil.test.local/!svn/me"}),
       O, "reject", "me resource on another host (commits would go there)")
 write("options", "stub-other-host", options(**{"SVN-Rev-Root-Stub": "//evil.test.local/svn/repo/!svn/rvr"}),

@@ -139,8 +139,12 @@ pub struct JournalData {
 
 impl JournalData {
     /// The outcome of the `MERGE` is unknown: it may have been sent and no revision is recorded.
+    ///
+    /// A version 1 journal has no `merge_sent` marker: one that names a transaction but no
+    /// revision may have been left by a crash during the `MERGE`, so it counts as unknown too
+    /// and is settled by the server (transaction deleted now, or the log), never aborted blindly.
     pub fn outcome_unknown(&self) -> bool {
-        self.merge_sent && self.merged.is_none()
+        self.merged.is_none() && (self.merge_sent || (self.version == 1 && self.txn.is_some()))
     }
 }
 
@@ -589,9 +593,25 @@ mod tests {
             "keep_changelist":false,"txn":"7-x","merged":null,"items":[]}"#;
         std::fs::write(&path, v1).expect("write");
         let data = JournalStore::read(&path).expect("v1");
-        assert!(!data.merge_sent && !data.outcome_unknown());
+        assert!(!data.merge_sent);
+        // No marker in version 1: a named transaction may have been merged.
+        assert!(data.outcome_unknown());
         assert_eq!(data.txn.as_deref(), Some("7-x"));
         assert_eq!(data.start_youngest, None);
+        let no_txn = JournalData {
+            txn: None,
+            ..data.clone()
+        };
+        assert!(!no_txn.outcome_unknown());
+        let merged = JournalData {
+            merged: Some(JournalMerge {
+                revision: 3,
+                date: None,
+                author: None,
+            }),
+            ..data
+        };
+        assert!(!merged.outcome_unknown());
     }
 
     #[test]

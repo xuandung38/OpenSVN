@@ -316,6 +316,54 @@ async fn basic_over_plain_http_is_refused_before_any_prompt() {
 }
 
 #[tokio::test]
+async fn stored_credentials_are_never_offered_over_plain_http() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(401).insert_header("www-authenticate", "Basic realm=\"r\""),
+        )
+        .mount(&server)
+        .await;
+    let prompter = ScriptedPrompter::with_stored("alice", "pw");
+    let t = HttpTransport::new(
+        TransportConfig {
+            proxy: ProxyConfig::Disabled,
+            ..TransportConfig::default()
+        },
+        prompter.clone(),
+        Arc::new(MemoryTrustStore::new()),
+    )
+    .with_negotiate(None);
+    let url = format!("{}/", server.uri());
+    let err = t
+        .send(req("GET", url.clone()), &CancelToken::new())
+        .await
+        .expect_err("refused");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    let err = t
+        .send_unattended(req("GET", url), &CancelToken::new())
+        .await
+        .expect_err("refused");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    // The store is not even asked, so nothing is sent or reported.
+    assert_eq!(
+        prompter
+            .stored_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(prompter.credential_prompts(), 0);
+    assert_eq!(prompter.stored_rejections(), 0);
+    let received = server.received_requests().await.unwrap();
+    assert_eq!(received.len(), 2);
+    assert!(
+        received
+            .iter()
+            .all(|r| !r.headers.contains_key("authorization"))
+    );
+}
+
+#[tokio::test]
 async fn same_origin_redirect_is_followed_and_cross_origin_is_blocked() {
     let server = MockServer::start().await;
     let other = MockServer::start().await;

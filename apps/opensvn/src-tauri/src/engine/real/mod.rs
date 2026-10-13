@@ -3,7 +3,7 @@
 //! * Repository reads, locks, branch listing and server-side edits go through [`RaSession`]
 //!   (`remote`, `blame`, `layout`, `remote_edit`, `locks`).
 //! * Opening a working copy reads `wc.db` through `svn-wc` and runs crash recovery (`wc_read`,
-//!   `recovery`, `journal`).
+//!   `recovery`; commit journals are `svn-client`'s, below `<state_dir>/commit-journals/`).
 //! * Status, working copy diff and remote status run through `svn-client` (`wc_status`, with the
 //!   type mapping in `wc_map`).
 //! * Local working copy edits (revert, add/delete/move, cleanup, resolve, ignore, properties,
@@ -38,7 +38,6 @@ use super::facade::{
 
 mod blame;
 mod commit;
-mod journal;
 mod layout;
 mod local;
 mod local_util;
@@ -58,9 +57,8 @@ mod wc_read;
 #[cfg(test)]
 mod tests;
 
-pub use journal::{CommitJournal, JournalPhase, JournalRecord, JournalStore};
 pub use local_util::{SvnConfigSource, default_subversion_config_dir, read_local_ignores};
-pub use recovery::{RecoveryHooks, UnwiredRecovery};
+pub use recovery::{ClientRecovery, RecoveryHooks};
 
 /// Opens repository sessions for the engine.
 ///
@@ -143,9 +141,9 @@ pub struct RealEngineConfig {
     /// Boot session id of this process (`lock_ownership::current_boot_id()` in the app); with
     /// the process id it identifies the locks this process takes.
     pub boot_id: String,
-    /// Per-user state directory; commit journals live below it.
+    /// Per-user state directory; commit journals live below it (`commit-journals/`).
     pub state_dir: PathBuf,
-    /// Steps of crash recovery that need the working copy layer.
+    /// Steps of crash recovery that need the working copy layer ([`ClientRecovery`]).
     pub recovery: Arc<dyn RecoveryHooks>,
 }
 
@@ -154,7 +152,7 @@ pub struct RealEngine {
     connector: Arc<dyn SessionConnector>,
     lock_ownership: Arc<dyn LockOwnershipStore>,
     boot_id: String,
-    journals: JournalStore,
+    state_dir: PathBuf,
     recovery: Arc<dyn RecoveryHooks>,
     /// Where local operations read svn's runtime configuration (ignores, auto-props).
     svn_config: Arc<SvnConfigSource>,
@@ -167,7 +165,7 @@ impl RealEngine {
             connector: config.connector,
             lock_ownership: config.lock_ownership,
             boot_id: config.boot_id,
-            journals: JournalStore::new(config.state_dir),
+            state_dir: config.state_dir,
             recovery: config.recovery,
             svn_config: Arc::new(SvnConfigSource::default()),
         }

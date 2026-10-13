@@ -134,6 +134,10 @@ fn hook_failures_and_redirects_have_their_own_codes() {
         "ftp://x/y",
         "/relative",
         "https://a/b\nX-Evil: 1",
+        "https://svn.test.local/alert/.\t./x",
+        "https://svn.test.local\\alert",
+        "https://svn.test.local/alert%0D%0AX-Evil:%201",
+        "https://svn.test.local/alert%5C..",
         "",
     ] {
         let h = svn_protocol::Headers::from_pairs([("Location", loc)]);
