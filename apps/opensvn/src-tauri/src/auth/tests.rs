@@ -418,11 +418,12 @@ async fn a_rejected_saved_password_is_not_offered_again_until_new_credentials_ar
     answer(&broker, &events, 0, "alice", "old", true).await;
     task.await.unwrap().unwrap();
 
-    // The transport offers the saved password, the server rejects it, the user is prompted
-    // and cancels.
+    // The transport offers the saved password, the server rejects it (reported through the
+    // hook), the user is prompted and cancels.
     assert!(broker.stored_credentials(&initial).await.is_some());
     let rejected =
         CredentialRequest::new(origin(), 1, vec![AuthMethod::Basic], PromptReason::Rejected);
+    broker.stored_credentials_rejected(&rejected).await;
     let (b, r) = (broker.clone(), rejected.clone());
     let task = tokio::spawn(async move { b.credentials(&r).await });
     let prompt = next_prompt_after(&events, 1).await;
