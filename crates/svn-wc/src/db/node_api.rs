@@ -3,14 +3,24 @@
 //! Write methods take `work`: serialized work items queued in the same transaction as the row
 //! changes, so a crash can never leave the rows changed without the file operation recorded.
 
+use rusqlite::OptionalExtension;
 use svn_types::{Depth, NodeKind, RelPath, Result};
 
-use super::WcDb;
 use super::actual::{self, ConflictRecord};
 use super::nodes::{self, Node, Props};
 use super::ops::{self, BaseNode, CommitInfo};
 use super::sql_err;
+use super::{WcDb, failpoint};
 use crate::skel::Skel;
+
+/// Stat cache of a working file, stored with its node by [`WcDb::wq_record_and_fetch_next`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FileInfo {
+    /// Size of the file after translation, when known.
+    pub translated_size: Option<i64>,
+    /// Modification time (APR microseconds) when the file was last known unmodified.
+    pub last_mod_time: Option<i64>,
+}
 
 impl WcDb {
     // ---- reads ---------------------------------------------------------------------------
@@ -88,6 +98,45 @@ impl WcDb {
     /// Queues work items without any other change.
     pub fn queue_work(&self, work: &[Skel]) -> Result<()> {
         self.write_with_work(work, |_| Ok(()))
+    }
+
+    /// Finishes a work item and fetches the next one in ONE transaction, like
+    /// `svn_wc__db_wq_record_and_fetch_next`: deletes item `completed_id`, optionally stores the
+    /// stat cache of one path, and returns the lowest-id remaining item (`None` when the queue is
+    /// empty). Either all of it is durable or none, so a crash can neither replay a finished item
+    /// without its fileinfo nor lose the fileinfo of a finished item.
+    ///
+    /// Failpoints: `wc.wq.after_delete` and `wc.wq.after_fileinfo` fire between the steps.
+    pub fn wq_record_and_fetch_next(
+        &self,
+        completed_id: i64,
+        fileinfo: Option<(&RelPath, FileInfo)>,
+    ) -> Result<Option<(i64, Skel)>> {
+        self.with_write(|tx| {
+            tx.execute("DELETE FROM work_queue WHERE id = ?1", [completed_id])
+                .map_err(sql_err)?;
+            failpoint!("wc.wq.after_delete");
+            if let Some((path, info)) = fileinfo {
+                ops::record_fileinfo(
+                    tx,
+                    self.wc_id,
+                    path,
+                    info.translated_size,
+                    info.last_mod_time,
+                )?;
+            }
+            failpoint!("wc.wq.after_fileinfo");
+            let next: Option<(i64, Vec<u8>)> = tx
+                .query_row(
+                    "SELECT id, work FROM work_queue ORDER BY id LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(sql_err)?;
+            next.map(|(id, blob)| Ok((id, Skel::parse(&blob)?)))
+                .transpose()
+        })
     }
 
     /// Removes a finished work item.
