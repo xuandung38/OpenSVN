@@ -112,8 +112,8 @@ checks that the cold run repairs all 100 000 cache entries.
 
 ### Gates (round 1)
 - `cargo fmt --all --check`: pass.
-- `cargo clippy -p svn-wc --all-targets -- -D warnings`: pass. Workspace clippy: see PR comment
-  (first attempt failed with "No space left on device" on the shared host).
+- `cargo clippy -p svn-wc --all-targets -- -D warnings`: pass.
+- `cargo clippy --workspace --all-targets -- -D warnings`: pass (after the merge of origin/main).
 - `OPENSVN_REQUIRE_SVN=1 cargo test -p svn-wc` with svn 1.14.3: 212 passed, 0 failed, 1 ignored
   (the benchmark); `status_vs_svn` 10/10 (the format-32 case skips on 1.14).
 - Same with `OPENSVN_SVN_BIN` = svn 1.15.0 (nix store): 212 passed, 0 failed, 1 ignored;
