@@ -12,11 +12,12 @@ workspace = true
 
 [features]
 # In-memory repository, recording editor and null reporter for tests of dependent crates.
-fake = []
+fake = ["dep:md-5"]
 
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
+md-5 = { workspace = true, optional = true }
 secrecy.workspace = true
 svn-types.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync"] }

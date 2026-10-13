@@ -33,6 +33,7 @@ fn all_codes() -> Vec<SvnErrorCode> {
         FileInUse,
         Cancelled,
         CommitOutcomeUnknown,
+        LimitExceeded,
         Corrupt,
         ServerUnsupported,
         Internal,
@@ -43,7 +44,9 @@ fn all_codes() -> Vec<SvnErrorCode> {
             | WcFormatUnsupported | NotAWorkingCopy | ConflictBlocksCommit | HookFailed
             | RepositoryMoved | PristineNotHydrated | WcInvalidOperation | PathNotFound
             | UnsafePath | DiskFull | PermissionDenied | FileInUse | Cancelled
-            | CommitOutcomeUnknown | Corrupt | ServerUnsupported | Internal => v.push(c),
+            | CommitOutcomeUnknown | LimitExceeded | Corrupt | ServerUnsupported | Internal => {
+                v.push(c)
+            }
         }
     }
     v
@@ -69,6 +72,21 @@ fn corrupt_needs_cleanup_and_unsafe_path_is_internal() {
     let (unsafe_path, _, _) = map_svn_error_code(SvnErrorCode::UnsafePath);
     assert_eq!(corrupt, ErrorCode::WcNeedsCleanup);
     assert_eq!(unsafe_path, ErrorCode::Internal);
+}
+
+#[test]
+fn limit_exceeded_is_final_and_offers_no_cleanup() {
+    let e = AppError::from(&SvnError::new(
+        SvnErrorCode::LimitExceeded,
+        "the folder listing has more than 1000000 entries",
+    ));
+    assert_eq!(e.code, ErrorCode::InvalidArgument);
+    assert!(!e.retryable);
+    assert_eq!(e.actions, None);
+    assert_eq!(
+        e.message,
+        "the folder listing has more than 1000000 entries"
+    );
 }
 
 #[test]

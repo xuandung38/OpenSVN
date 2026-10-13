@@ -85,6 +85,11 @@ pub enum ErrorCode {
     /// commit, it happened; otherwise remove the transaction with `abort_txn`. Never retry the
     /// commit blindly: it could be applied twice.
     CommitOutcomeUnknown,
+    /// The request is valid but its result would exceed a size limit the engine enforces to
+    /// bound memory and work (for example a directory listing with more entries than the
+    /// listing cap). Nothing is wrong with the data; the user can ask for less (a smaller
+    /// subtree, a lower depth). Retrying the same request fails the same way.
+    LimitExceeded,
     /// Data on disk or on the wire is corrupt or violates a protocol rule.
     Corrupt,
     /// Server lacks a required capability.

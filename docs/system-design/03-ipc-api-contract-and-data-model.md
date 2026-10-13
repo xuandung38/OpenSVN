@@ -220,6 +220,7 @@ type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'negotiate-failed' | 
   | 'disk-full' | 'permission-denied' | 'file-in-use' | 'cancelled' | 'invalid-argument' | 'internal';
 // negotiate-failed: SSO (Negotiate/Kerberos) thất bại và không có Basic để hỏi (server không cho Basic, URL http vì SSO chỉ qua https, token mutual auth sai, hoặc người dùng chọn lại SSO); action 'sign-in'
 // invalid-argument: giá trị sai, grant hết hạn/đã dùng, tùy chọn không hỗ trợ (MVP chỉ ghi format 31)
+//   cũng dùng khi yêu cầu hợp lệ nhưng kết quả vượt giới hạn của engine (engine `LimitExceeded`, vd liệt kê thư mục quá số mục cho phép); retryable=false, không có action (không gợi ý Cleanup vì dữ liệu không hỏng), message bảo người dùng liệt kê thư mục nhỏ hơn hoặc depth thấp hơn
 ```
 
 ## 5. Events (Rust → UI)

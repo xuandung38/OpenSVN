@@ -15,6 +15,7 @@ use svn_protocol::{
 };
 use svn_types::{CancelToken, ErrorCode, RelPath, RepoUrl, Result, SvnError};
 
+use crate::ops::read::ListLimits;
 use crate::transport::{HttpRequest, HttpResponse, HttpTransport, RequestBody};
 
 /// Default number of parallel connections assumed when the caller does not say.
@@ -34,6 +35,7 @@ pub struct RaWire {
     session_rel: RelPath,
     connections: usize,
     bulk: BulkPreference,
+    list_limits: ListLimits,
 }
 
 impl RaWire {
@@ -61,6 +63,7 @@ impl RaWire {
             session_rel,
             connections: DEFAULT_CONNECTIONS,
             bulk: BulkPreference::Auto,
+            list_limits: ListLimits::default(),
         })
     }
 
@@ -92,6 +95,18 @@ impl RaWire {
     pub fn with_bulk_preference(mut self, bulk: BulkPreference) -> Self {
         self.bulk = bulk;
         self
+    }
+
+    /// Caps for recursive (`Depth::Infinity`) listings.
+    #[must_use]
+    pub fn with_list_limits(mut self, limits: ListLimits) -> Self {
+        self.list_limits = limits;
+        self
+    }
+
+    /// Caps for recursive listings.
+    pub fn list_limits(&self) -> ListLimits {
+        self.list_limits
     }
 
     /// Update mode preference.
