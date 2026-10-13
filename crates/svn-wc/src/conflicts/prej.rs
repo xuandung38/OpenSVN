@@ -10,10 +10,12 @@
 //!
 //! Known approximations, all confined to the *diagnostic text*:
 //! * svn orders the properties by APR hash iteration; this port sorts the names bytewise.
-//! * The "fuzzy" ASCII rendering of non-ASCII values (`svn_utf__fuzzy_escape`) is done with
-//!   NFKD decomposition and combining-mark stripping (`é` becomes `e`, verified against svn),
-//!   but utf8proc's `LUMP` mapping (typographic quotes and dashes to ASCII) is not reproduced:
-//!   such characters appear as `{U+2019}`.
+//! * The "fuzzy" ASCII rendering of non-ASCII values (`svn_utf__fuzzy_escape`) uses NFKD
+//!   decomposition with combining-mark stripping (`é` becomes `e`) and utf8proc's `LUMP` table
+//!   (`’` to `'`, dashes to `-`, no-break space to a space); verified against svn 1.15.0
+//!   fixtures. Stripping uses the canonical combining class, which equals utf8proc's mark
+//!   test for all practical text. A UTF-8-encoded surrogate renders as `?\XX` bytes where svn
+//!   prints `{U?D800}`.
 //! * The legacy 1.7/1.8 `prej-install` conflict skel is not supported.
 
 use std::fmt::Write as _;
@@ -121,11 +123,58 @@ fn conflict_message(name: &str, v: &PropValues<'_>) -> String {
     }
 }
 
+/// utf8proc's `UTF8PROC_LUMP` mapping, the part svn's fuzzy rendering applies before
+/// decomposing: space separators (Zs) to a space, dash punctuation (Pd) and the minus sign to
+/// `-`, connector punctuation (Pc) to `_`, plus a few quote, slash, bracket and caret lookalikes.
+/// Double quotes are deliberately absent: utf8proc leaves them alone.
+fn lump(c: char) -> Option<char> {
+    Some(match c as u32 {
+        // Zs
+        0x00A0 | 0x1680 | 0x2000..=0x200A | 0x202F | 0x205F | 0x3000 => ' ',
+        // Apostrophes
+        0x2018 | 0x2019 | 0x02BC | 0x02C8 => '\'',
+        // Pd and U+2212
+        0x058A
+        | 0x05BE
+        | 0x1400
+        | 0x1806
+        | 0x2010..=0x2015
+        | 0x2E17
+        | 0x2E1A
+        | 0x2E3A
+        | 0x2E3B
+        | 0x2E40
+        | 0x301C
+        | 0x3030
+        | 0x30A0
+        | 0xFE31
+        | 0xFE32
+        | 0xFE58
+        | 0xFE63
+        | 0xFF0D
+        | 0x2212 => '-',
+        0x2044 | 0x2215 => '/',
+        0x2236 => ':',
+        0x2039 | 0x2329 | 0x3008 => '<',
+        0x203A | 0x232A | 0x3009 => '>',
+        0x2216 => '\\',
+        0x02C4 | 0x02C6 | 0x2038 | 0x2303 => '^',
+        // Pc and U+02CD
+        0x203F | 0x2040 | 0x2054 | 0xFE33 | 0xFE34 | 0xFE4D..=0xFE4F | 0xFF3F | 0x02CD => '_',
+        0x02CB => '`',
+        0x2223 => '|',
+        0x223C => '~',
+        _ => return None,
+    })
+}
+
 /// `svn_utf__fuzzy_escape`: an ASCII-only rendering for display.
 ///
-/// ASCII passes through; CR and CRLF become LF, tab and form feed become a space, other control
-/// characters are dropped; invalid bytes become `?\XX`; other characters are NFKD-decomposed,
-/// combining marks dropped, and what is still non-ASCII becomes `{U+XXXX}`.
+/// Mirrors `utf8proc_decompose` with the flags svn passes (compatibility decomposition, `LUMP`,
+/// `STRIPMARK`) followed by svn's own placeholder loop: bytes 1..126 pass through unchanged
+/// (tab, form feed, vertical tab, CR and LF included; the newline rewriting flags of utf8proc do
+/// not apply to `decompose`), NUL becomes `\0`, invalid bytes become `?\XX`, combining marks are
+/// dropped, and every other character, DEL and NEL included, becomes `{U+XXXX}`.
 pub fn fuzzy_escape(input: &[u8]) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
@@ -141,33 +190,23 @@ pub fn fuzzy_escape(input: &[u8]) -> String {
                 )
             }
         };
-        let mut chars = valid.chars().peekable();
-        while let Some(c) = chars.next() {
-            match c {
-                '\r' => {
-                    if chars.peek() == Some(&'\n') {
-                        chars.next();
-                    }
-                    out.push('\n');
-                }
-                '\n' => out.push('\n'),
-                '\t' | '\x0c' => out.push(' '),
-                c if c.is_control() => {}
-                c if c.is_ascii() => out.push(c),
-                c => {
+        for c in valid.chars() {
+            match lump(c) {
+                Some(l) => out.push(l),
+                None => {
                     for d in std::iter::once(c).nfkd() {
                         if canonical_combining_class(d) != 0 {
                             continue;
                         }
-                        if d.is_ascii() {
-                            if d.is_ascii_control() && !matches!(d, '\n') {
-                                continue;
+                        match d as u32 {
+                            0 => out.push_str("\\0"),
+                            1..=126 => out.push(d),
+                            cp if cp > 0xFFFF => {
+                                let _ = write!(out, "{{U+{cp:06X}}}");
                             }
-                            out.push(d);
-                        } else if (d as u32) > 0xFFFF {
-                            let _ = write!(out, "{{U+{:06X}}}", d as u32);
-                        } else {
-                            let _ = write!(out, "{{U+{:04X}}}", d as u32);
+                            cp => {
+                                let _ = write!(out, "{{U+{cp:04X}}}");
+                            }
                         }
                     }
                 }
@@ -204,17 +243,15 @@ pub fn conflict_description(name: &str, v: &PropValues<'_>) -> Vec<u8> {
             },
             ..MergeOptions::default()
         };
-        let merged = merge3(
-            fuzzy_escape(incoming_base).as_bytes(),
-            fuzzy_escape(mine).as_bytes(),
-            fuzzy_escape(incoming).as_bytes(),
-            &opts,
-            &CancelToken::new(),
-        );
+        // svn decides on the raw values and only renders the ASCII-fuzzed text, so values that
+        // differ just in characters that fuzz to the same ASCII still conflict. The merged
+        // output consists of raw value lines and ASCII marker lines, so fuzzing the whole
+        // output renders the same text.
+        let merged = merge3(incoming_base, mine, incoming, &opts, &CancelToken::new());
         if let Ok(result) = merged
             && !result.conflicts.is_empty()
         {
-            out.extend_from_slice(&result.text);
+            out.extend_from_slice(fuzzy_escape(&result.text).as_bytes());
             return out;
         }
     }

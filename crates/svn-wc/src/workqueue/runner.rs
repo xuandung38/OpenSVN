@@ -90,7 +90,13 @@ pub trait WorkingCopyOps {
     fn actual_props(&self, relpath: &str) -> Result<BTreeMap<String, Vec<u8>>, WorkQueueError>;
     /// Inputs for `sync-file-flags`; `None` when the node is not a normal/added file.
     fn sync_flags_input(&self, relpath: &str) -> Result<Option<SyncInput>, WorkQueueError>;
-    /// Writes the `.prej` property reject file recorded in the node's conflict data.
+    /// Writes the `.prej` property reject file recorded in the node's conflict data; the text
+    /// comes from `conflicts::prej::prej_text`.
+    ///
+    /// `legacy` is the property conflict skel that svn 1.7 and 1.8 stored in the work item. It
+    /// is not supported: an implementation must fail with a clear error telling the user to
+    /// finish the interrupted operation with `svn cleanup` using the client that created the
+    /// working copy, and must not silently write nothing.
     fn write_prop_reject_file(
         &mut self,
         relpath: &str,

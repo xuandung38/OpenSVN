@@ -34,6 +34,8 @@ fn matches_the_reject_files_svn_wrote() {
         "update_binary",
         "update_non_ascii",
         "update_single_line",
+        "update_fuzzy_equal_sides",
+        "update_controls_and_lump",
         "merge_single_line",
     ] {
         let expected = fixture(name, "prej").unwrap();
@@ -146,10 +148,48 @@ fn binary_detection_matches_svn() {
 fn fuzzy_escape_follows_svn() {
     assert_eq!(fuzzy_escape(b"plain\nline"), "plain\nline");
     assert_eq!(fuzzy_escape("café ü".as_bytes()), "cafe u");
-    assert_eq!(fuzzy_escape(b"a\r\nb\rc\td\x01e"), "a\nb\nc de");
+    // Controls below DEL are kept; NUL, DEL and NEL are not.
+    assert_eq!(
+        fuzzy_escape(b"a\r\nb\rc\td\x0be\x0cf\x01g"),
+        "a\r\nb\rc\td\x0be\x0cf\x01g"
+    );
+    assert_eq!(fuzzy_escape(b"n\0u\x7fl"), "n\\0u{U+007F}l");
+    assert_eq!(fuzzy_escape("a\u{85}b".as_bytes()), "a{U+0085}b");
     assert_eq!(fuzzy_escape(b"ok\xFFbad\xC3"), "ok?\\FFbad?\\C3");
     assert_eq!(fuzzy_escape("日本".as_bytes()), "{U+65E5}{U+672C}");
     assert_eq!(fuzzy_escape("😀".as_bytes()), "{U+01F600}");
+}
+
+#[test]
+fn lump_table_follows_utf8proc() {
+    assert_eq!(
+        fuzzy_escape("it\u{2019}s \u{2013} \u{2212}1 a\u{a0}b\u{3000}c".as_bytes()),
+        "it's - -1 a b c"
+    );
+    assert_eq!(
+        fuzzy_escape(
+            "\u{2044}\u{2236}\u{2039}\u{203a}\u{2216}\u{2303}\u{203f}\u{2cb}\u{2223}\u{223c}"
+                .as_bytes()
+        ),
+        "/:<>\\^_`|~"
+    );
+    // Double quotes are not lumped.
+    assert_eq!(
+        fuzzy_escape("\u{201c}q\u{201d}".as_bytes()),
+        "{U+201C}q{U+201D}"
+    );
+}
+
+#[test]
+fn conflict_is_decided_on_raw_values_and_rendered_fuzzy() {
+    // Values that fuzz to the same ASCII still conflict, as in svn.
+    let v = values(Some("x"), Some("café\n"), Some("cafe\n"), Some("x\n"));
+    let text = String::from_utf8(conflict_description("p", &v)).unwrap();
+    assert!(
+        text.contains("<<<<<<< (local property value)\ncafe\n||||||| "),
+        "{text}"
+    );
+    assert!(text.contains("=======\ncafe\n>>>>>>> "), "{text}");
 }
 
 #[test]
