@@ -1,0 +1,2 @@
+svn_version=1.15.0
+prop.svn:eol-style=CRLF

@@ -1,0 +1,64 @@
+[package]
+name = "svn-protocol-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone: the fuzz crate is not part of the engine workspace and needs nightly (cargo-fuzz).
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+svn-protocol = { path = ".." }
+svn-types = { path = "../../svn-types" }
+
+[[bin]]
+name = "multistatus"
+path = "fuzz_targets/multistatus.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "log_parser"
+path = "fuzz_targets/log_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "error_body"
+path = "fuzz_targets/error_body.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "get_locks"
+path = "fuzz_targets/get_locks.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "xml_reader"
+path = "fuzz_targets/xml_reader.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "href_vetting"
+path = "fuzz_targets/href_vetting.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "update_parser"
+path = "fuzz_targets/update_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "file_revs"
+path = "fuzz_targets/file_revs.rs"
+test = false
+doc = false

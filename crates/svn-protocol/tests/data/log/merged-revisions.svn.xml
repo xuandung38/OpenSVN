@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<log>
+<logentry
+   revision="8">
+<author>alice</author>
+<date>2026-10-13T09:45:21.561818Z</date>
+<paths>
+<path
+   text-mods="false"
+   kind="dir"
+   action="M"
+   prop-mods="true">/trunk/src</path>
+<path
+   action="M"
+   prop-mods="false"
+   text-mods="true"
+   kind="file">/trunk/src/b.txt</path>
+</paths>
+<msg>merge b1 into trunk</msg>
+<logentry
+   reverse-merge="false"
+   revision="7">
+<author>alice</author>
+<date>2026-10-13T09:45:19.408533Z</date>
+<paths>
+<path
+   action="M"
+   prop-mods="false"
+   text-mods="true"
+   kind="file">/branches/b1/b.txt</path>
+</paths>
+<msg>edit on branch</msg>
+</logentry>
+<logentry
+   reverse-merge="false"
+   revision="5">
+<author>alice</author>
+<date>2026-10-13T09:45:08.662021Z</date>
+<paths>
+<path
+   copyfrom-path="/trunk/src"
+   copyfrom-rev="4"
+   action="A"
+   prop-mods="false"
+   text-mods="false"
+   kind="dir">/branches/b1</path>
+</paths>
+<msg>branch b1 copy</msg>
+</logentry>
+</logentry>
+<logentry
+   revision="6">
+<author>alice</author>
+<date>2026-10-13T09:45:15.764184Z</date>
+<paths>
+<path
+   kind="file"
+   action="M"
+   prop-mods="false"
+   text-mods="true">/trunk/a.txt</path>
+<path
+   kind="dir"
+   action="A"
+   prop-mods="false"
+   text-mods="false">/trunk/newdir</path>
+<path
+   kind="file"
+   action="A"
+   prop-mods="false"
+   text-mods="true">/trunk/newdir/n.txt</path>
+</paths>
+<msg>second commit: add dir &amp; edit</msg>
+</logentry>
+<logentry
+   revision="4">
+<author>alice</author>
+<date>2026-10-13T09:45:08.321957Z</date>
+<paths>
+<path
+   text-mods="false"
+   kind="file"
+   action="D"
+   prop-mods="false">/trunk/docs/readme.md</path>
+</paths>
+<msg>delete readme</msg>
+</logentry>
+</log>
