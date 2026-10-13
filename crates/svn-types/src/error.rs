@@ -34,15 +34,20 @@ pub enum ErrorCode {
     /// A repository hook rejected the operation (pre-commit, pre-lock, pre-revprop-change;
     /// Subversion error 165001). The hook's own output is the error message and is shown to the user.
     HookFailed,
-    /// The server redirected a write (301/302/307/308): the repository moved
-    /// (Subversion `SVN_ERR_RA_SESSION_URL_MISMATCH`, "Repository moved permanently"). The new
-    /// location is in the error message; it was validated as an https URL on the same scheme
-    /// (`RepoUrl::parse`) before being reported.
+    /// The server answered with a redirect (301/302/307/308) that the client does not follow:
+    /// svn reports `SVN_ERR_RA_DAV_RELOCATED` (175011), "Repository moved permanently". Policy:
+    /// same-origin redirects are followed for read methods; write methods and cross-origin
+    /// redirects return this code. The new location is in the error message; it was validated
+    /// as an https URL on the same scheme (`RepoUrl::parse`) before being reported.
     RepositoryMoved,
     /// The pristine (base text) of a file is not stored locally, as in a format-32 working copy
     /// made with `--store-pristine=no`. Operations that need it (diff, revert) must first fetch
     /// the base text from the repository.
     PristineNotHydrated,
+    /// The operation is not valid in the working copy's current state (Subversion E1550xx
+    /// refusals, e.g. E155038 "can't revert without reverting children"). The message explains
+    /// what the user has to change first.
+    WcInvalidOperation,
     /// Path does not exist.
     PathNotFound,
     /// Path failed safety validation (traversal, reserved name, symlink).
