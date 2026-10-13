@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<D:options-response xmlns:D="DAV:">
+<D:activity-collection-set><D:href>/svn/repo/!svn/act/</D:href></D:activity-collection-set></D:options-response>
