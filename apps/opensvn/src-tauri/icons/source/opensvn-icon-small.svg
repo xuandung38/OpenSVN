@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img">
+<title>OpenSVN</title>
+<!-- Simplified variant for 16-32 px (ring and commit dot, no lettering, artwork fills the canvas). -->
+<rect x="24" y="24" width="976" height="976" rx="220" fill="#2363d1"/>
+<circle cx="512" cy="512" r="318" fill="none" stroke="#ffffff" stroke-width="116"/>
+<circle cx="737" cy="287" r="124" fill="#4cc27e" stroke="#2363d1" stroke-width="52"/>
+</svg>

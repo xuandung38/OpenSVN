@@ -192,7 +192,7 @@ export type BranchRef = {
 	url: string,
 };
 
-export type CertDecision = "reject" | "acceptOnce" | "acceptAlways";
+export type CertDecision = "reject" | "acceptOnce" | "acceptAlways" | "replacePin";
 
 /**  Why a TLS certificate needs a decision (`unknown-issuer`, ..., `{ changed: { oldSha256, newSha256 } }`). */
 export type CertFailureInfo = "unknown-issuer" | "self-signed" | "expired" | "not-yet-valid" | "hostname-mismatch" | "revoked" | 

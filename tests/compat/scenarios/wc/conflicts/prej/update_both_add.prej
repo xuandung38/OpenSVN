@@ -1,0 +1,6 @@
+Trying to add new property 'k'
+but the property already exists.
+<<<<<<< (local property value)
+mine||||||| (incoming 'changed from' value)
+=======
+theirs>>>>>>> (incoming 'changed to' value)
