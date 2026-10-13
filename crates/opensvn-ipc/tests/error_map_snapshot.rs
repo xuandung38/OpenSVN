@@ -32,6 +32,7 @@ fn all_codes() -> Vec<SvnErrorCode> {
         PermissionDenied,
         FileInUse,
         Cancelled,
+        CommitOutcomeUnknown,
         Corrupt,
         ServerUnsupported,
         Internal,
@@ -41,8 +42,8 @@ fn all_codes() -> Vec<SvnErrorCode> {
             | OutOfDate | LockedByOther | LockTokenInvalid | WcBusy | WcNeedsCleanup
             | WcFormatUnsupported | NotAWorkingCopy | ConflictBlocksCommit | HookFailed
             | RepositoryMoved | PristineNotHydrated | WcInvalidOperation | PathNotFound
-            | UnsafePath | DiskFull | PermissionDenied | FileInUse | Cancelled | Corrupt
-            | ServerUnsupported | Internal => v.push(c),
+            | UnsafePath | DiskFull | PermissionDenied | FileInUse | Cancelled
+            | CommitOutcomeUnknown | Corrupt | ServerUnsupported | Internal => v.push(c),
         }
     }
     v
