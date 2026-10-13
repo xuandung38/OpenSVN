@@ -58,7 +58,7 @@ pub struct PropChange {
 /// Repository lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockInfo {
-    /// Locked repository path.
+    /// Locked repository path. Server text: validate with `RelPath::from_server` before any I/O.
     pub path: String,
     /// Lock token.
     pub token: String,
@@ -75,7 +75,8 @@ pub struct LockInfo {
 /// Directory listing entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
-    /// Entry name (single path segment).
+    /// Entry name (single path segment). Server text: validate with `RelPath::from_server`
+    /// before using it to build a local path.
     pub name: String,
     /// Node kind.
     pub kind: NodeKind,
@@ -109,13 +110,14 @@ pub enum ChangeAction {
 /// One changed path of a log entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedPath {
-    /// Absolute repository path (untrusted server text, never used for I/O without validation).
+    /// Absolute repository path. Untrusted server text: validate with `RelPath::from_server`
+    /// before any I/O.
     pub path: String,
     /// What happened.
     pub action: ChangeAction,
     /// Node kind.
     pub kind: NodeKind,
-    /// Copy source path and revision.
+    /// Copy source path (untrusted server text, see `path`) and revision.
     pub copy_from: Option<(String, Revnum)>,
     /// Whether file text changed.
     pub text_mods: bool,
