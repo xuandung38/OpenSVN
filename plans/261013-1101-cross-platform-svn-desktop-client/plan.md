@@ -1,6 +1,6 @@
 # Plan: OpenSVN — SVN client desktop kiểu GitHub Desktop, engine Rust tự viết
 
-Status: draft — chờ duyệt
+Status: roadmap tổng quan — phase 1–4 đã được chi tiết hóa và thay thế bởi [261013-1410-mvp-parallel-implementation](../261013-1410-mvp-parallel-implementation/plan.md)
 Nghiên cứu: [../reports/research-261013-1101-smartsvn-github-desktop-style-svn-client-report.md](../reports/research-261013-1101-smartsvn-github-desktop-style-svn-client-report.md)
 Kiến trúc & ADR: [../../docs/system-architecture.md](../../docs/system-architecture.md)
 

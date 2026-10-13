@@ -122,7 +122,7 @@ type Layout =
 | `add` / `delete` / `move` | `{ wcId, paths }` / `{ wcId, paths, keepLocal? }` / `{ wcId, from, to }` |
 | `cleanup` | `{ wcId, removeUnversioned?, removeIgnored?, vacuumPristines? }` |
 | `set_depth` | `{ wcId, path, depth }` |
-| `upgrade_format` | `{ wcId, to: 32 }` |
+| `upgrade_format` | `{ wcId, to: 32 }` — **sau MVP** |
 | `resolve` | `{ wcId, path, choice: 'mine' \| 'theirs' \| 'working' \| 'base' }` |
 | `props_set` | `{ wcId, path, name, value \| null }` |
 
@@ -202,9 +202,16 @@ CREATE TABLE trusted_cert (
   host TEXT NOT NULL, sha256 TEXT NOT NULL, subject TEXT, expires_at TEXT, trusted_at TEXT NOT NULL,
   PRIMARY KEY (host, sha256)
 );
-CREATE TABLE account (                    -- metadata, KHÔNG có mật khẩu
-  realm TEXT PRIMARY KEY, username TEXT, method TEXT NOT NULL CHECK (method IN ('basic','negotiate')),
+CREATE TABLE account (                    -- metadata, KHÔNG có mật khẩu; khóa theo origin (không chỉ realm)
+  scheme TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, realm TEXT NOT NULL,
+  username TEXT, method TEXT NOT NULL CHECK (method IN ('basic','negotiate')),
   last_used_at TEXT
+,
+  PRIMARY KEY (scheme, host, port, realm)
+);
+CREATE TABLE wc_lock_owner (               -- sổ sở hữu WC_LOCK (wc.db không lưu PID)
+  wc_root TEXT NOT NULL, dir TEXT NOT NULL, pid INTEGER NOT NULL, boot_id TEXT NOT NULL, acquired_at TEXT NOT NULL,
+  PRIMARY KEY (wc_root, dir)
 );
 CREATE TABLE commit_message_history (id INTEGER PRIMARY KEY, repo_uuid TEXT, message TEXT, used_at TEXT);
 CREATE TABLE setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);   -- JSON value
@@ -234,10 +241,10 @@ Log theo path dùng `log_path_by_path`; khi khoảng revision chưa nằm trong 
 | `diff.mode` | `'split' \| 'unified'` | split |
 | `diff.ignoreWhitespace` | boolean | false |
 | `diff.externalTool` | `{ path, args } \| null` | null |
-| `network.maxConnections` | number 1–16 | 4 |
+| `network.maxConnections` | number 1–8 | 4 |
 | `network.timeoutSec` | number | 60 |
 | `network.proxy` | `'system' \| { url }` | system |
-| `wc.defaultFormat` | 31 \| 32 | 31 |
+| `wc.defaultFormat` | 31 (MVP chỉ ghi 31; 32 sau MVP) | 31 |
 | `wc.readSubversionConfig` | boolean | true |
 | `cache.maxSizeGb` | number | 2 |
 | `integrations.webRevisionUrl` | string | `https://{server}/!/#{repo}/commit/r{rev}/` |

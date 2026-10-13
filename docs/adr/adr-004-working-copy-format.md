@@ -13,6 +13,9 @@
   - Chế độ pristine thể hiện qua `svn info` ("Working Copy Store Pristine").
 
 ## Decision
+
+> **Cập nhật 2026-10-13 (PO, red-team plan MVP):** MVP **đọc** format 31 và 32 nhưng **chỉ tạo/ghi format 31**. Lý do: svn 1.15.0 mới phát hành 2026-10-08, VisualSVN/TortoiseSVN có thể chưa hỗ trợ; giảm ~3 tuần đường găng. Format 32 (ghi, pristines-on-demand, upgrade) → plan sau MVP.
+
 Engine đọc/ghi **đúng định dạng `.svn/wc.db` của libsvn_wc**:
 1. **Format 31** — mặc định, tương thích rộng nhất (1.8+).
 2. **Format 32** — tùy chọn khi checkout, cho phép `store-pristine=no` với repo nhiều binary (yêu cầu mọi tool còn lại của người dùng ≥1.15).
@@ -46,4 +49,4 @@ Tương thích là yêu cầu cứng. Tối ưu vẫn làm được ở tầng *
 ## Action Items
 1. [ ] Nghiên cứu `subversion/libsvn_wc/wc-metadata.sql`, `wc-queries.sql`, `wc_db.c`, `workqueue.c`, `conflicts.c` (Apache 2.0) → viết đặc tả nội bộ `docs/wc-db-format-notes.md`.
 2. [ ] Bộ test tương thích hai chiều: engine ↔ svn 1.14 (format 31) và svn 1.15 (format 31/32).
-3. [ ] UI checkout: tùy chọn "Không lưu bản gốc (cần svn ≥1.15)" + cảnh báo tương thích.
+3. [ ] (Sau MVP) UI checkout: tùy chọn "Không lưu bản gốc (cần svn ≥1.15)" + cảnh báo tương thích.

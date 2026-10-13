@@ -39,7 +39,7 @@ Working copy dùng chung được với svn CLI / TortoiseSVN / SmartSVN (ADR-00
 | [ADR-001](adr/adr-001-svn-engine-language-rust.md) | Engine viết bằng Rust, ưu tiên pure Rust | Accepted |
 | [ADR-002](adr/adr-002-ui-framework-tauri-react.md) | UI: Tauri 2 + React/TS, CodeMirror 6; dự phòng Electron | Accepted (chờ spike Linux) |
 | [ADR-003](adr/adr-003-rust-core-library-stack.md) | Thư viện engine: tokio, reqwest, rustls-platform-verifier, quick-xml, rusqlite, cross-krb5, keyring... | Accepted |
-| [ADR-004](adr/adr-004-working-copy-format.md) | Tương thích `.svn/wc.db` format 31 (svn 1.8+) và 32 (svn 1.15, pristines on demand) | Accepted |
+| [ADR-004](adr/adr-004-working-copy-format.md) | Tương thích `.svn/wc.db`: MVP đọc 31/32, ghi 31; ghi 32 (pristines on demand) sau MVP | Accepted (cập nhật 2026-10-13) |
 
 ## Frontend
 | Nhu cầu | Chọn |
@@ -63,7 +63,7 @@ Working copy dùng chung được với svn CLI / TortoiseSVN / SmartSVN (ADR-00
 | Lint/format | clippy, rustfmt, cargo-deny; Biome (TS) |
 | Môi trường test | Docker (Linux runner): Apache httpd + mod_dav_svn + svn CLI 1.14 & 1.15; VisualSVN Server test nội bộ cho kiểm thử thủ công/định kỳ |
 | Máy dev | macOS (dev chính); Windows/Linux qua CI + VM |
-| Đóng gói | Windows: MSI/NSIS ký Authenticode; macOS: DMG ký Developer ID + notarize; Linux: AppImage + .deb + .rpm |
-| Cập nhật | `tauri-plugin-updater` từ GitHub Releases (repo private) hoặc server nội bộ |
+| Đóng gói | Windows: MSI ký Authenticode; macOS: DMG ký Developer ID + notarize; Linux: AppImage + .deb |
+| Cập nhật | `tauri-plugin-updater` từ GitHub Releases của repo private riêng `OpenSVN-releases` (token fine-grained chỉ đọc repo đó) |
 | Mobile (sau) | iPadOS qua TestFlight; Android APK |
 | Bảo mật | Mật khẩu chỉ trong OS credential store; log lọc credential; TLS luôn verify |
