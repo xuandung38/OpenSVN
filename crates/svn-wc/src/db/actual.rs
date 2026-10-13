@@ -182,6 +182,22 @@ pub(crate) fn write_conflict(
     Ok(())
 }
 
+/// Stores only the `conflict_data` skel of `path`, keeping the checksum columns.
+pub(crate) fn write_conflict_data(
+    conn: &Connection,
+    wc_id: i64,
+    path: &RelPath,
+    skel: &Skel,
+) -> Result<()> {
+    ensure_row(conn, wc_id, path)?;
+    conn.execute(
+        "UPDATE actual_node SET conflict_data = ?3 WHERE wc_id = ?1 AND local_relpath = ?2",
+        params![wc_id, path.as_str(), skel.unparse()],
+    )
+    .map_err(sql_err)?;
+    Ok(())
+}
+
 /// Clears every conflict column of `path`.
 pub(crate) fn clear_conflict(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<()> {
     conn.execute(
