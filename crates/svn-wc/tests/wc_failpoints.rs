@@ -68,7 +68,7 @@ fn transaction_failpoints_leave_all_or_nothing_state() {
     for point in ["wc.wq.after_delete", "wc.wq.after_fileinfo"] {
         fail::cfg(point, "return").expect("cfg");
         let err = db
-            .wq_record_and_fetch_next(ids[0], Some((&a, info)))
+            .wq_record_and_fetch_next(Some(ids[0]), &[(a.clone(), info)])
             .expect_err("injected");
         assert!(err.message.contains(point), "{}", err.message);
         fail::remove(point);
@@ -87,7 +87,7 @@ fn transaction_failpoints_leave_all_or_nothing_state() {
         );
     }
     let next = db
-        .wq_record_and_fetch_next(ids[0], Some((&a, info)))
+        .wq_record_and_fetch_next(Some(ids[0]), &[(a.clone(), info)])
         .expect("done")
         .expect("next item");
     assert_eq!(next.0, ids[1]);
@@ -99,9 +99,26 @@ fn transaction_failpoints_leave_all_or_nothing_state() {
     );
     assert_eq!(db.work_items().expect("items").len(), 1);
     assert_eq!(
-        db.wq_record_and_fetch_next(ids[1], None).expect("last"),
+        db.wq_record_and_fetch_next(Some(ids[1]), &[])
+            .expect("last"),
         None
     );
     assert!(db.work_items().expect("items").is_empty());
+
+    // First fetch (nothing to complete), several paths, and a path whose node is gone.
+    db.queue_work(std::slice::from_ref(&second)).expect("queue");
+    let gone = RelPath::new("gone.txt").expect("rel");
+    let first = db
+        .wq_record_and_fetch_next(None, &[(gone, info), (a.clone(), FileInfo::default())])
+        .expect("missing node is ignored")
+        .expect("item");
+    assert_eq!(first.1, second);
+    assert_eq!(
+        db.work_items().expect("items").len(),
+        1,
+        "None completes nothing"
+    );
+    let node = db.read_node(&a).expect("read").expect("node");
+    assert_eq!((node.translated_size, node.last_mod_time), (None, None));
     scenario.teardown();
 }

@@ -101,29 +101,38 @@ impl WcDb {
     }
 
     /// Finishes a work item and fetches the next one in ONE transaction, like
-    /// `svn_wc__db_wq_record_and_fetch_next`: deletes item `completed_id`, optionally stores the
-    /// stat cache of one path, and returns the lowest-id remaining item (`None` when the queue is
-    /// empty). Either all of it is durable or none, so a crash can neither replay a finished item
-    /// without its fileinfo nor lose the fileinfo of a finished item.
+    /// `svn_wc__db_wq_record_and_fetch_next`: deletes item `completed_id` (`None` for the first
+    /// fetch, when nothing is finished yet), stores the stat cache of every `(path, info)` entry,
+    /// and returns the lowest-id remaining item (`None` when the queue is empty). Either all of it
+    /// is durable or none, so a crash can neither replay a finished item without its fileinfo nor
+    /// lose the fileinfo of a finished item.
+    ///
+    /// A `fileinfo` path whose node no longer exists is skipped silently (an earlier item of the
+    /// same queue may have deleted it); the item is still completed.
     ///
     /// Failpoints: `wc.wq.after_delete` and `wc.wq.after_fileinfo` fire between the steps.
     pub fn wq_record_and_fetch_next(
         &self,
-        completed_id: i64,
-        fileinfo: Option<(&RelPath, FileInfo)>,
+        completed_id: Option<i64>,
+        fileinfo: &[(RelPath, FileInfo)],
     ) -> Result<Option<(i64, Skel)>> {
         self.with_write(|tx| {
-            tx.execute("DELETE FROM work_queue WHERE id = ?1", [completed_id])
-                .map_err(sql_err)?;
+            if let Some(id) = completed_id {
+                tx.execute("DELETE FROM work_queue WHERE id = ?1", [id])
+                    .map_err(sql_err)?;
+            }
             failpoint!("wc.wq.after_delete");
-            if let Some((path, info)) = fileinfo {
-                ops::record_fileinfo(
+            for (path, info) in fileinfo {
+                match ops::record_fileinfo(
                     tx,
                     self.wc_id,
                     path,
                     info.translated_size,
                     info.last_mod_time,
-                )?;
+                ) {
+                    Err(e) if e.code == svn_types::ErrorCode::PathNotFound => {}
+                    other => other?,
+                }
             }
             failpoint!("wc.wq.after_fileinfo");
             let next: Option<(i64, Vec<u8>)> = tx
