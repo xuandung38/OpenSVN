@@ -414,3 +414,36 @@ async fn server_alternating_realms_cannot_loop_the_client_forever() {
     );
     assert!(prompter.credential_prompts() <= 6);
 }
+
+#[tokio::test]
+async fn unattended_send_never_prompts_and_uses_cached_credentials() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+
+    // No cached credentials: the 401 is an error, not a prompt.
+    let err = t
+        .send_unattended(get(srv.url("/a")), &CancelToken::new())
+        .await
+        .expect_err("needs credentials");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert_eq!(prompter.credential_prompts(), 0);
+    assert_eq!(srv.requests().len(), 1);
+
+    // Once an interactive request cached them, unattended requests reuse them silently.
+    t.send(get(srv.url("/b")), &CancelToken::new())
+        .await
+        .expect("interactive");
+    assert_eq!(prompter.credential_prompts(), 1);
+    let r = t
+        .send_unattended(get(srv.url("/c")), &CancelToken::new())
+        .await
+        .expect("cached credentials");
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(prompter.credential_prompts(), 1);
+    let seen = srv.requests();
+    assert_eq!(
+        seen.last().unwrap().header("authorization"),
+        Some(basic("alice", "pw"))
+    );
+}
