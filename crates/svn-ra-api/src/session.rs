@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use svn_types::{
     CancelToken, DeltaEditor, Depth, DirEntry, LockInfo, LogEntry, NodeKind, PropChange, RelPath,
-    RepoUrl, Reporter, Result, Revnum, WindowSink,
+    RepoDisplayPath, RepoUrl, Reporter, Result, Revnum, WindowSink,
 };
 use tokio::io::AsyncWrite;
 
@@ -71,9 +71,8 @@ pub struct LogRequest {
 /// One revision of a file as reported by `file_revs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileRev {
-    /// Absolute repository path at that revision. Untrusted server text: validate with
-    /// `RelPath::from_server` before any I/O.
-    pub path: String,
+    /// Absolute repository path at that revision, display only.
+    pub path: RepoDisplayPath,
     /// Revision.
     pub rev: Revnum,
     /// Revision properties (author, date, log).
