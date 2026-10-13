@@ -1,0 +1,6 @@
+$Id$ $Rev$ $Revision$ $LastChangedRevision$ $Date$ $LastChangedDate$ $Author$ $LastChangedBy$ $HeadURL$ $URL$ $Header$
+stale: $Id$ $Rev: 99 $ $Date: junk $ $Author:$
+fixed: $Rev::            $ $Rev:: 12345678901234567890 $ $Author:: x $ $Date::   $ $Id::  $
+unknown: $Foo$ $foo: bar$ $id$ $REV$ $Rev $ $$ $$$ $Id
+nested: $Id$Rev$ x$ and $Rev: $Date$
+tail $Rev$
