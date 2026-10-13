@@ -1,0 +1,102 @@
+# OpenSVN compat environment: Apache + mod_dav_svn servers and svn CLI clients for the
+# pinned Subversion versions. Driven by `cargo xtask compat up|down|status|fixtures`.
+# Runtime state lives under ../target/compat (certs, logs, client work dirs).
+name: opensvn-compat
+
+x-svn14: &svn14
+  SVN_VERSION: "1.14.5"
+  SVN_SHA512: "e4800564d0cc68be98f19aa58d89181de83f237f0ccff10824d9237f8c65eb0071f7176ac54e9e8f8ecbf685849bd3e94be48f678f4c23ed6a5fd7fb6edd0321"
+x-svn15: &svn15
+  SVN_VERSION: "1.15.0"
+  SVN_SHA512: "6bb79686baab7176e9b6c519b23141f66694298c0759d1e12332fef329eaa632e4f2e65c75ae0cd05e48e16c23d7eda7c59b322bdf03707e1a46025673282ec2"
+
+x-server: &server
+  restart: "no"
+  environment:
+    SVN_DUMPIO: "${SVN_DUMPIO:-0}"
+    # Log files are handed to the invoking user so purge/clean never needs root on Linux.
+    HOST_UID: "${HOST_UID:-1000}"
+    HOST_GID: "${HOST_GID:-1000}"
+  depends_on:
+    certs:
+      condition: service_completed_successfully
+
+x-client: &client
+  user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+  environment:
+    HOME: /tmp/home
+  volumes:
+    - ../target/compat/certs:/certs:ro
+    - ../target/compat/work:/work
+  depends_on:
+    certs:
+      condition: service_completed_successfully
+
+services:
+  # One-shot: create the test CA + server certificate (idempotent).
+  certs:
+    build:
+      context: ./svn-client
+      args: *svn15
+    image: opensvn-compat/svn-client:1.15.0
+    # Runs as the invoking user so the files in target/compat/certs are not root-owned.
+    # Use `cargo xtask compat up`, which pre-creates that directory as the same user.
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    entrypoint: ["/gen-certs.sh", "/certs"]
+    volumes:
+      - ./svn-server/gen-certs.sh:/gen-certs.sh:ro
+      - ../target/compat/certs:/certs
+
+  svn14-server:
+    <<: *server
+    build:
+      context: ./svn-server
+      args: *svn14
+    image: opensvn-compat/svn-server:1.14.5
+    ports: ["127.0.0.1:8443:8443"]
+    networks:
+      default:
+        aliases: [svn14.test.local]
+    volumes:
+      - ../target/compat/certs:/certs:ro
+      - ../target/compat/logs/svn14:/var/log/svn-httpd
+      - ../fixtures:/fixtures:ro
+      # Only the pinned dump hashes are writable (`fixtures --update-hash`).
+      - ../fixtures/repos/expected:/fixtures/repos/expected
+      - repos14:/var/svn/repos
+
+  svn15-server:
+    <<: *server
+    build:
+      context: ./svn-server
+      args: *svn15
+    image: opensvn-compat/svn-server:1.15.0
+    ports: ["127.0.0.1:8444:8443"]
+    networks:
+      default:
+        aliases: [svn15.test.local]
+    volumes:
+      - ../target/compat/certs:/certs:ro
+      - ../target/compat/logs/svn15:/var/log/svn-httpd
+      - ../fixtures:/fixtures:ro
+      # Only the pinned dump hashes are writable (`fixtures --update-hash`).
+      - ../fixtures/repos/expected:/fixtures/repos/expected
+      - repos15:/var/svn/repos
+
+  svn14-client:
+    <<: *client
+    build:
+      context: ./svn-client
+      args: *svn14
+    image: opensvn-compat/svn-client:1.14.5
+
+  svn15-client:
+    <<: *client
+    build:
+      context: ./svn-client
+      args: *svn15
+    image: opensvn-compat/svn-client:1.15.0
+
+volumes:
+  repos14:
+  repos15:
