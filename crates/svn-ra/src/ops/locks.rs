@@ -77,7 +77,7 @@ pub(crate) async fn lock(
     let resp = wire.send(req, cancel).await?;
     let status = resp.status().as_u16();
     let head = ResponseHead::new(status, headers_of(&resp));
-    let body = RaWire::read_small(resp).await?;
+    let body = RaWire::read_small(resp, cancel).await?;
     if !(200..300).contains(&status) {
         return Err(lock_error(
             status,
@@ -97,7 +97,7 @@ async fn current_token(
     let resp = wire.send(req, cancel).await?;
     let status = resp.status().as_u16();
     let head = ResponseHead::new(status, headers_of(&resp));
-    let body = RaWire::read_small(resp).await?;
+    let body = RaWire::read_small(resp, cancel).await?;
     Ok(parse_get_lock_response(repo, &head, &body)?.map(|l| l.token))
 }
 

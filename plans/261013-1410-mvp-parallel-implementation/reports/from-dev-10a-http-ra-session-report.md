@@ -47,7 +47,9 @@ skipped and a `tracing` warning is logged. Locks and log paths stay `RepoDisplay
 |---|---|
 | `cargo fmt --all --check` | pass |
 | `cargo clippy -p svn-ra --all-targets -- -D warnings` | pass. Scoped to svn-ra, because the shared disk ran out during a workspace build. svn-ra is the only crate this branch touches. |
-| `cargo test -p svn-ra --no-fail-fast` (after merging the updated #75) | 127 passed, 1 failed, 10 ignored. The failure is the timing-flaky `transport_auth::cancel_interrupts_a_request_queued_behind_a_prompt` from main (P04). It passed 10 of 10 when run on its own. |
+| After merging #75 at 440b9d8 (review fixes): `cargo fmt --all --check`, then `cargo clippy -p svn-ra --all-targets -- -D warnings` | pass. `read.rs` and `locks.rs` now pass their cancel token to `RaWire::read_small`. |
+| After merging #75 at 440b9d8: `cargo test -p svn-ra -p svn-ra-api -p svn-protocol --no-fail-fast` | 389 passed, 0 failed, 15 ignored |
+| `cargo test -p svn-ra --no-fail-fast` (after merging the earlier #75 head) | 127 passed, 1 failed, 10 ignored. The failure is the timing-flaky `transport_auth::cancel_interrupts_a_request_queued_behind_a_prompt` from main (P04). It passed 10 of 10 when run on its own. |
 
 ## Not done
 
