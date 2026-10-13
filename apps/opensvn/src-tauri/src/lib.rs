@@ -1,23 +1,124 @@
-//! OpenSVN desktop app shell. Commands are stubs until the backend services land.
+//! OpenSVN desktop app backend: IPC command handlers over the app services (operations,
+//! working copy actors, settings, storage) and the engine boundary.
 
+mod app_state;
+#[cfg(test)]
+mod app_tests;
+mod boundary;
 mod command_names;
 mod command_registry;
 mod commands;
+mod db;
+pub mod engine;
+mod errors;
 mod events;
+pub mod lock_ownership;
+mod ops;
+mod path_grants;
+mod preview;
+mod programs;
+pub mod settings;
+mod status;
+mod wc;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use tauri::Manager;
+
+use app_state::{AppDeps, AppState};
+use engine::{EngineFacade, FakeEngine};
 
 pub use command_names::COMMAND_NAMES;
 pub use command_registry::builder;
 
+/// Simulated time per item of the fake engine's long operations (visible progress in the UI).
+const FAKE_STEP_DELAY: Duration = Duration::from_millis(40);
+
+fn startup_error(msg: impl std::fmt::Display) -> Box<dyn std::error::Error> {
+    Box::new(std::io::Error::other(msg.to_string()))
+}
+
+/// Builds the engine: the fake engine with demo data until the real engine is registered.
+fn default_engine() -> Result<Arc<dyn EngineFacade>, Box<dyn std::error::Error>> {
+    let engine = tauri::async_runtime::block_on(FakeEngine::demo(FAKE_STEP_DELAY))
+        .map_err(|e| startup_error(format!("fake engine: {e}")))?;
+    Ok(Arc::new(engine))
+}
+
+/// Folder for everything the fake engine's demo data touches. The user's real `app.sqlite` is
+/// never written with fake rows; when the real engine is registered the app uses the data
+/// directory itself.
+const FAKE_ENGINE_SUBDIR: &str = "fake-engine";
+
+/// Opens storage and builds the services. Nothing here waits on I/O beyond opening the databases;
+/// working copy recovery and demo registration run afterwards in the background.
+fn build_state<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+) -> Result<AppState, Box<dyn std::error::Error>> {
+    let data_dir = db::current_data_dir()
+        .map_err(startup_error)?
+        .join(FAKE_ENGINE_SUBDIR);
+    let preview = preview::prepare_preview_dir(&data_dir)
+        .map_err(|e| startup_error(format!("{} {}", e.message, e.detail.unwrap_or_default())))?;
+    app.asset_protocol_scope()
+        .allow_directory(&preview, true)
+        .map_err(startup_error)?;
+    AppState::build(AppDeps {
+        data_dir,
+        engine: default_engine()?,
+        events: Arc::new(ops::TauriEvents::new(app.handle().clone())),
+        picker: Arc::new(programs::NativeProgramPicker),
+        path_picker: Arc::new(path_grants::NativePathPicker),
+    })
+    .map_err(|e| startup_error(format!("{} {}", e.message, e.detail.unwrap_or_default())))
+}
+
+/// Runs after the window exists: registers the demo working copy on first start and recovers
+/// every registered working copy (stale locks), announcing what needs the user.
+async fn finish_startup<R: tauri::Runtime>(handle: tauri::AppHandle<R>) {
+    let state = handle.state::<AppState>();
+    if state.wcs.list().await.map(|l| l.is_empty()).unwrap_or(true) {
+        let demo_root = engine::fake::demo_wc_root();
+        // Best effort: a failure here only means the sidebar starts empty.
+        let _ = state.wcs.add_existing(&demo_root.to_string_lossy()).await;
+    }
+    state.recover_all().await;
+}
+
+/// The generated app context (config, capabilities, assets). The macro may expand only once per
+/// binary, so the app and the tests share this function.
+fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
+    tauri::generate_context!()
+}
+
 /// Starts the Tauri application.
 pub fn run() {
-    let builder = builder();
+    let builder = builder::<tauri::Wry>();
     let result = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            // Native drag and drop: the WebView only ever sees grants, never the dropped paths.
+            if window.label() != path_grants::MAIN_WINDOW {
+                return;
+            }
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) =
+                event
+            {
+                window
+                    .state::<AppState>()
+                    .handle_drop(paths, position.x, position.y);
+            }
+        })
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
+            let state = build_state(app)?;
+            app.manage(state);
+            tauri::async_runtime::spawn(finish_startup(app.handle().clone()));
             Ok(())
         })
-        .run(tauri::generate_context!());
+        .run(app_context::<tauri::Wry>());
     if let Err(e) = result {
         eprintln!("OpenSVN failed to start: {e}");
         std::process::exit(1);
@@ -36,7 +137,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("opensvn-bindings-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let file = dir.join("bindings.ts");
-        builder()
+        builder::<tauri::Wry>()
             .export(specta_typescript::Typescript::default(), &file)
             .expect("export bindings");
         let out = std::fs::read_to_string(&file).expect("read bindings");
@@ -86,8 +187,8 @@ mod tests {
     }
 
     #[test]
-    fn stubs_return_internal_not_implemented() {
-        let err = tauri::async_runtime::block_on(commands::wc_list()).expect_err("stub");
+    fn commands_of_later_services_are_still_stubs() {
+        let err = tauri::async_runtime::block_on(commands::diagnostics_export()).expect_err("stub");
         assert_eq!(err.code, opensvn_ipc::ErrorCode::Internal);
         assert_eq!(err.message, "not implemented");
     }
