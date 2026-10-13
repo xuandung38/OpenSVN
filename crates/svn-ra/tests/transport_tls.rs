@@ -238,3 +238,31 @@ async fn changed_and_hostname_mismatched_is_reported_as_hostname_mismatch() {
         vec![sha256_fingerprint(&first.cert_der)]
     );
 }
+
+#[tokio::test]
+async fn unattended_send_never_asks_about_a_certificate() {
+    let ca = TestCa::new();
+    let server = TlsServer::start(&ca.leaf(&["localhost"], false), ok_handler()).await;
+    let prompter = ScriptedPrompter::with_cert_decision(CertDecision::AcceptOnce);
+    let t = plain_transport(prompter.clone(), Arc::default(), vec![]);
+    let err = t
+        .send_unattended(
+            HttpRequest::new(Method::GET, server.url("/a")),
+            &CancelToken::new(),
+        )
+        .await
+        .expect_err("needs a decision");
+    assert_eq!(err.code, ErrorCode::TlsUntrusted);
+    assert_eq!(prompter.cert_prompts(), 0);
+    // A certificate the user already accepted for the session is used silently.
+    assert_eq!(get(&t, server.url("/b")).await.expect("ok"), 200);
+    let resp = t
+        .send_unattended(
+            HttpRequest::new(Method::GET, server.url("/c")),
+            &CancelToken::new(),
+        )
+        .await
+        .expect("accepted earlier");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(prompter.cert_prompts(), 1);
+}
