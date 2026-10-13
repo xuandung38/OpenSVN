@@ -87,7 +87,8 @@ async fn failed_plans_leave_no_revision_and_no_transaction() {
         )
         .await
         .unwrap_err();
-    assert_eq!(err.code, ErrorCode::Internal);
+    // The fake answers an existing path like svn: out of date (E160020, already exists).
+    assert_eq!(err.code, ErrorCode::OutOfDate);
     assert_eq!(
         f.engine.repo_info(URL, &ctx()).await.unwrap().youngest_rev,
         before

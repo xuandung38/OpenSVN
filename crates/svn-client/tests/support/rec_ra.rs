@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
-use svn_ra_api::fake::FakeRaSession;
+use svn_ra_api::fake::{FakeChange, FakeRaSession};
 use svn_ra_api::{
     CommitEditor, CommitInfo, CommitObserver, FileMeta, FileRevHandler, LogRequest, RaSession,
-    ReplayableSource, ReportFn, UpdateRequest,
+    ReplayableSource, ReportFn, TxnAbort, UpdateRequest,
 };
 use svn_types::{
     CancelToken, Checksum, DeltaEditor, Depth, DirEntry, DirId, ErrorCode, FileId, LockInfo,
@@ -35,6 +35,9 @@ pub struct RecRa {
     pub fail_on_text: Option<SvnError>,
     /// Cancel this token right after the server accepted the MERGE.
     pub cancel_after_merge: Option<CancelToken>,
+    /// Commit `(author, message, changes)` to the fake repository when the first text upload
+    /// starts, so the commit in progress is out of date at MERGE.
+    pub seed_on_text: Option<(String, String, Vec<FakeChange>)>,
     pub on_auth: Option<AuthHook>,
 }
 
@@ -48,6 +51,7 @@ impl RecRa {
             cancel_on_text: None,
             fail_on_text: None,
             cancel_after_merge: None,
+            seed_on_text: None,
             on_auth: None,
         }
     }
@@ -72,6 +76,8 @@ struct RecEditor {
     cancel_on_text: Option<CancelToken>,
     fail_on_text: Option<SvnError>,
     cancel_after_merge: Option<CancelToken>,
+    seed_on_text: Option<(String, String, Vec<FakeChange>)>,
+    fake: FakeRaSession,
     dirs: HashMap<DirId, String>,
     files: HashMap<FileId, String>,
     counter: u32,
@@ -190,6 +196,11 @@ impl CommitEditor for RecEditor {
         if let Some(e) = self.fail_on_text.take() {
             return Err(e);
         }
+        if let Some((author, message, changes)) = self.seed_on_text.take() {
+            self.fake
+                .seed(&author, &message, &changes)
+                .expect("concurrent commit");
+        }
         match &mut self.inner {
             Some(e) => e.apply_text(file, base, target, base_md5, result_md5).await,
             None => Ok(()),
@@ -275,6 +286,7 @@ impl CommitEditor for RecEditor {
                     author: Some("tester".into()),
                     post_commit_err: None,
                 };
+                this.observer.on_merge_sending("recorded-txn")?;
                 this.observer.on_merged(&info)?;
                 Ok(info)
             }
@@ -448,6 +460,8 @@ impl RaSession for RecRa {
             cancel_on_text: self.cancel_on_text.clone(),
             fail_on_text: self.fail_on_text.clone(),
             cancel_after_merge: self.cancel_after_merge.clone(),
+            seed_on_text: self.seed_on_text.clone(),
+            fake: self.inner.clone(),
             dirs: HashMap::new(),
             files: HashMap::new(),
             counter: 0,
@@ -456,6 +470,10 @@ impl RaSession for RecRa {
     async fn abort_txn(&self, txn_name: &str) -> Result<()> {
         push(&self.log, format!("abort_txn {txn_name}"));
         self.inner.abort_txn(txn_name).await
+    }
+    async fn abort_txn_checked(&self, txn_name: &str, cancel: &CancelToken) -> Result<TxnAbort> {
+        push(&self.log, format!("abort_txn_checked {txn_name}"));
+        self.inner.abort_txn_checked(txn_name, cancel).await
     }
 }
 
