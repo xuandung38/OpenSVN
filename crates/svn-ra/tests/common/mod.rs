@@ -41,6 +41,9 @@ pub struct ScriptedPrompter {
     pub delay: Mutex<Duration>,
     pub concurrent: AtomicUsize,
     pub max_concurrent: AtomicUsize,
+    /// Answer of `stored_credentials` (nothing stored by default).
+    pub stored: Mutex<Option<(String, String)>>,
+    pub stored_calls: AtomicUsize,
 }
 
 impl ScriptedPrompter {
@@ -61,6 +64,13 @@ impl ScriptedPrompter {
             .lock()
             .unwrap()
             .push_back(answer.map(|(u, p)| (u.to_owned(), p.to_owned())));
+    }
+
+    /// Prompter with `user`/`pass` in its credential store and nothing to answer a prompt.
+    pub fn with_stored(user: &str, pass: &str) -> Arc<Self> {
+        let p = Self::default();
+        *p.stored.lock().unwrap() = Some((user.into(), pass.into()));
+        Arc::new(p)
     }
 
     pub fn credential_prompts(&self) -> usize {
@@ -99,6 +109,23 @@ impl AuthPrompter for ScriptedPrompter {
             save: false,
             method: AuthMethod::Basic,
         })
+    }
+
+    async fn stored_credentials(
+        &self,
+        _req: &svn_ra_api::CredentialRequest,
+    ) -> Option<Credentials> {
+        self.stored_calls.fetch_add(1, Ordering::SeqCst);
+        self.stored
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|(username, password)| Credentials {
+                username,
+                password: SecretString::from(password),
+                save: true,
+                method: AuthMethod::Basic,
+            })
     }
 
     async fn confirm_certificate(&self, info: &CertInfo) -> CertDecision {
