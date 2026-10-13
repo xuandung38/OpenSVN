@@ -22,7 +22,7 @@ use tokio::io::AsyncWrite;
 use super::support::{StaticConnector, URL, UUID, ctx, dir, fixture_on, put, standard_repo};
 use crate::engine::context::{OpContext, ProgressReporter, ProgressUpdate};
 use crate::engine::facade::{CheckoutPlan, EngineFacade, WcRef};
-use crate::engine::real::{Anchor, ConnectOptions, SessionConnector, UnwiredRecovery};
+use crate::engine::real::{Anchor, ClientRecovery, ConnectOptions, SessionConnector};
 
 /// Runs once, right after the next update drive finished (a commit landing between drives).
 type AfterUpdate = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
@@ -93,7 +93,7 @@ fn setup() -> Setup {
         after_update: Arc::clone(&after_update),
     });
     Setup {
-        f: fixture_on(repo, connector, Arc::new(UnwiredRecovery)),
+        f: fixture_on(repo, connector, Arc::new(ClientRecovery)),
         hang,
         after_update,
         tmp: tempfile::tempdir().unwrap(),
@@ -561,7 +561,7 @@ async fn a_connector_that_cannot_anchor_is_refused_instead_of_checking_out_the_r
     let f = fixture_on(
         repo.clone(),
         Arc::new(StaticConnector(vec![repo])),
-        Arc::new(UnwiredRecovery),
+        Arc::new(ClientRecovery),
     );
     let tmp = tempfile::tempdir().unwrap();
     let wc = tmp.path().join("wc");

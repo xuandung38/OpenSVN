@@ -8,7 +8,7 @@ use bytes::Bytes;
 use svn_ra_api::fake::{FakeChange, FakeRaSession};
 use svn_ra_api::{
     CommitEditor, CommitObserver, FileMeta, FileRevHandler, LogRequest, RaSession, ReportFn,
-    UpdateRequest,
+    TxnAbort, UpdateRequest,
 };
 use svn_types::{
     CancelToken, DeltaEditor, Depth, DirEntry, ErrorCode, LockInfo, LockOwnershipStore, LogEntry,
@@ -20,7 +20,7 @@ use tokio::io::AsyncWrite;
 
 use crate::engine::OpContext;
 use crate::engine::real::{
-    RealEngine, RealEngineConfig, RecoveryHooks, SessionConnector, UnwiredRecovery,
+    ClientRecovery, ConnectOptions, RealEngine, RealEngineConfig, RecoveryHooks, SessionConnector,
 };
 
 pub(super) const URL: &str = "https://svn.test.local/repos/real";
@@ -92,7 +92,7 @@ pub(super) struct Fixture {
 }
 
 pub(super) fn fixture() -> Fixture {
-    fixture_with(Arc::new(UnwiredRecovery))
+    fixture_with(Arc::new(ClientRecovery))
 }
 
 pub(super) fn fixture_with(recovery: Arc<dyn RecoveryHooks>) -> Fixture {
@@ -226,12 +226,15 @@ pub(super) fn count_rows(root: &Path, table: &str) -> i64 {
     .unwrap()
 }
 
-/// Session that behaves like the in-memory repository except for `abort_txn`, which fails with
-/// `abort_error` when set; records the order of sign-in and abort calls.
+/// Session that behaves like the in-memory repository except for `abort_txn` and
+/// `abort_txn_checked`, which fail with `abort_error` when set; records the order of sign-in and
+/// abort calls, and the interactivity every connection through [`ScriptedConnector`] asked for.
 pub(super) struct ScriptedSession {
     pub(super) inner: FakeRaSession,
     pub(super) abort_error: Option<ErrorCode>,
     pub(super) calls: std::sync::Mutex<Vec<&'static str>>,
+    /// `interactive` of every `connect_with` (`true` for a plain `connect`).
+    pub(super) connects: std::sync::Mutex<Vec<bool>>,
     /// When set, `lock` and `unlock` never answer (a server that hangs).
     pub(super) hang_locks: std::sync::atomic::AtomicBool,
 }
@@ -242,12 +245,17 @@ impl ScriptedSession {
             inner,
             abort_error,
             calls: std::sync::Mutex::new(Vec::new()),
+            connects: std::sync::Mutex::new(Vec::new()),
             hang_locks: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     pub(super) fn calls(&self) -> Vec<&'static str> {
         self.calls.lock().unwrap().clone()
+    }
+
+    pub(super) fn connects(&self) -> Vec<bool> {
+        self.connects.lock().unwrap().clone()
     }
 }
 
@@ -394,6 +402,17 @@ impl RaSession for ScriptedSession {
             None => self.inner.abort_txn(txn_name).await,
         }
     }
+    async fn abort_txn_checked(
+        &self,
+        txn_name: &str,
+        cancel: &CancelToken,
+    ) -> Result<TxnAbort, SvnError> {
+        self.calls.lock().unwrap().push("abort");
+        match self.abort_error {
+            Some(code) => Err(SvnError::new(code, format!("abort {txn_name} failed"))),
+            None => self.inner.abort_txn_checked(txn_name, cancel).await,
+        }
+    }
 }
 
 /// Connector that always hands out the same scripted session.
@@ -407,6 +426,64 @@ impl SessionConnector for ScriptedConnector {
         cancel: &CancelToken,
     ) -> Result<Arc<dyn RaSession>, SvnError> {
         cancel.check()?;
+        self.0.connects.lock().unwrap().push(true);
         Ok(self.0.clone() as Arc<dyn RaSession>)
     }
+
+    async fn connect_with(
+        &self,
+        _url: &RepoUrl,
+        options: &ConnectOptions,
+        cancel: &CancelToken,
+    ) -> Result<Arc<dyn RaSession>, SvnError> {
+        cancel.check()?;
+        self.0.connects.lock().unwrap().push(options.interactive);
+        Ok(self.0.clone() as Arc<dyn RaSession>)
+    }
+}
+
+/// Checks out `trunk` of the fixture's repository with `svn-client` into a fresh temporary
+/// directory (a working copy with pristines, as the app makes them).
+pub(super) async fn checkout_trunk(f: &Fixture) -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("wc");
+    let trunk = f
+        .repo
+        .at(&RepoUrl::parse(&format!("{URL}/trunk")).unwrap())
+        .unwrap();
+    svn_client::checkout(
+        &f.engine.client_ctx(&ctx()),
+        &trunk,
+        &root,
+        None,
+        Depth::Infinity,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .unwrap();
+    (tmp, root)
+}
+
+/// Commits everything below `root` with `svn-client` over `ra` (rooted at the repository root),
+/// journaled where the engine's recovery looks.
+pub(super) async fn client_commit(
+    f: &Fixture,
+    root: &Path,
+    ra: &dyn RaSession,
+    message: &str,
+) -> Result<Option<svn_client::commit::CommitResult>, SvnError> {
+    let (db, _) = svn_client::wc::open_containing(&f.engine.lock_owner(), root)?;
+    let state_dir = f.engine.commit_journal_dir();
+    svn_client::commit::commit(
+        &db,
+        &svn_client::commit::CommitContext {
+            ra,
+            state_dir: &state_dir,
+            cancel: &CancelToken::new(),
+        },
+        &[db.wcroot().to_path_buf()],
+        &svn_client::commit::CommitOptions::new(message),
+    )
+    .await
 }
