@@ -23,6 +23,7 @@
 //! separate and lives with the update/merge code that produces them.
 
 pub mod markers;
+pub mod prej;
 
 use svn_types::{ErrorCode, Result, SvnError};
 

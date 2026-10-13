@@ -174,8 +174,21 @@ async fn changed_pinned_certificate_is_reported_distinctly_and_replaces_the_pin_
         calls[0].failure
     );
 
-    // "Accept always" on a changed certificate replaces the old pin, after the explicit prompt.
-    let accepting = ScriptedPrompter::with_cert_decision(CertDecision::AcceptAlways);
+    // AcceptOnce and AcceptAlways are invalid for a changed certificate: treated as a rejection,
+    // and the old pin stays.
+    for invalid in [CertDecision::AcceptOnce, CertDecision::AcceptAlways] {
+        let p = ScriptedPrompter::with_cert_decision(invalid);
+        let t = plain_transport(p.clone(), trust.clone(), vec![]);
+        let err = get(&t, server.url("/"))
+            .await
+            .expect_err("invalid decision");
+        assert_eq!(err.code, ErrorCode::TlsUntrusted, "{invalid:?}");
+        assert_eq!(p.cert_prompts(), 1);
+        assert_eq!(trust.pinned("localhost", server.addr.port()), vec![old_fp]);
+    }
+
+    // `ReplacePin` replaces the old pin, after the explicit prompt.
+    let accepting = ScriptedPrompter::with_cert_decision(CertDecision::ReplacePin);
     let t2 = plain_transport(accepting.clone(), trust.clone(), vec![]);
     assert_eq!(get(&t2, server.url("/")).await.expect("accepted"), 200);
     assert_eq!(accepting.cert_prompts(), 1);

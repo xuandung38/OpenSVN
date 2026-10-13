@@ -251,3 +251,18 @@ fn auth_prompt_carries_reason_offered_methods_and_structured_cert_failure() {
     let sso: AuthResponse = serde_json::from_value(json!({"kind": "negotiate"})).unwrap();
     assert!(matches!(sso, AuthResponse::Negotiate));
 }
+
+#[test]
+fn certificate_decisions_use_camel_case_on_the_wire() {
+    for (d, wire) in [
+        (CertDecision::Reject, "reject"),
+        (CertDecision::AcceptOnce, "acceptOnce"),
+        (CertDecision::AcceptAlways, "acceptAlways"),
+        (CertDecision::ReplacePin, "replacePin"),
+    ] {
+        let r = AuthResponse::Certificate { decision: d };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v, json!({"kind":"certificate","decision":wire}));
+        assert_eq!(serde_json::from_value::<AuthResponse>(v).unwrap(), r);
+    }
+}

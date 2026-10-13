@@ -1497,3 +1497,23 @@ fn synthesized_svn_1_14_interrupted_update_queue_runs() {
     );
     assert!(q.items.is_empty());
 }
+
+#[test]
+fn a_pristine_is_not_accepted_as_a_file_install_source() {
+    let mut w = wc();
+    let sha = install(&mut w, b"text");
+    let mut ops = FakeOps::default();
+    ops.nodes.insert("f".into(), node(sha, &[]));
+    let mut q = MemQueue::with(&[WorkItem::FileInstall {
+        relpath: "f".into(),
+        use_commit_times: false,
+        record_fileinfo: false,
+        source: Some(pristine_rel(&sha)),
+    }]);
+    let err = run(&w, &mut ops, &mut q).unwrap_err();
+    let WorkQueueError::ItemFailed { source, .. } = err else {
+        panic!()
+    };
+    assert!(matches!(*source, WorkQueueError::UnsafePath(_)), "{source}");
+    assert!(!w.dir.path().join("f").exists());
+}

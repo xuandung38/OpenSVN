@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "com.opensvn.desktop",
+  "bundle": {
+    "active": true,
+    "publisher": "OpenSVN contributors",
+    "copyright": "Copyright 2026 OpenSVN contributors",
+    "category": "DeveloperTool",
+    "shortDescription": "Subversion desktop client",
+    "longDescription": "OpenSVN is a cross-platform Subversion desktop client built on a native Rust engine.",
+    "license": "Apache-2.0",
+    "resources": {
+      "../../../LICENSE": "licenses/LICENSE",
+      "../../../NOTICE": "licenses/NOTICE",
+      "../public/licenses/ibm-plex-OFL-1.1.txt": "licenses/ibm-plex-OFL-1.1.txt",
+      "../../../packaging/generated/THIRD-PARTY-LICENSES.txt": "licenses/THIRD-PARTY-LICENSES.txt",
+      "../../../packaging/generated/third-party-licenses.json": "licenses/third-party-licenses.json"
+    },
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "hardenedRuntime": true,
+      "entitlements": "../../../packaging/macos/entitlements.plist"
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper" },
+      "wix": { "language": "en-US" }
+    },
+    "linux": {
+      "deb": {
+        "section": "devel",
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"],
+        "recommends": ["libgssapi-krb5-2"]
+      },
+      "appimage": { "bundleMediaFramework": false }
+    }
+  }
+}
