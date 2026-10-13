@@ -22,7 +22,10 @@ pub enum ProxyConfig {
     System,
     /// Connect directly.
     Disabled,
-    /// Use a fixed proxy for every request.
+    /// Use a fixed proxy for every request. Proxy credentials are sent (Basic) only because the
+    /// user configured them explicitly, even for an `http://` proxy; a 407 from an unconfigured
+    /// proxy is never answered with a prompt. Credentials for the target server are unaffected
+    /// and never go over plain http.
     Manual {
         /// Proxy URL, for example `http://proxy.test.local:3128`.
         url: String,

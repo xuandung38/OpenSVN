@@ -16,7 +16,8 @@ async-trait.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 reqwest = { workspace = true, features = ["rustls-no-provider", "stream", "system-proxy"] }
-# `ring` provider: no cmake/NASM needed on Windows, unlike aws-lc-rs.
+# `ring` provider: smaller C/asm surface than aws-lc-rs; FIPS and post-quantum key exchange are not
+# MVP requirements (see ADR-003).
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 rustls-platform-verifier.workspace = true
 secrecy.workspace = true

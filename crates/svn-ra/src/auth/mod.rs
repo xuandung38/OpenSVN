@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use reqwest::header::HeaderValue;
 use secrecy::SecretString;
 use svn_ra_api::{AuthMethod, AuthPrompter};
-use svn_types::{ErrorCode, OriginKey, Result, SvnError};
+use svn_types::{CancelToken, ErrorCode, OriginKey, Result, SvnError};
 use url::Url;
 
 pub use basic::basic_header;
@@ -157,6 +157,7 @@ impl AuthManager {
         url: &Url,
         challenges: &Challenges,
         sent: &Attached,
+        cancel: &CancelToken,
     ) -> Result<Attached> {
         let key = HostKey::from_url(url)?;
         let Some(realm) = challenges.basic_realm.as_deref() else {
@@ -183,7 +184,7 @@ impl AuthManager {
         };
         // Generation observed before queueing: a request that carried no credentials may have
         // been sent at any earlier generation, so only the carried case is compared.
-        let _gate = flight.gate.lock().await;
+        let _gate = or_cancel(cancel, flight.gate.lock()).await?;
 
         let attempt = {
             let mut state = lock(&flight.state);
@@ -223,7 +224,12 @@ impl AuthManager {
         };
 
         let offered = challenges.offered_methods();
-        let answer = self.prompter.credentials(&origin, attempt, &offered).await;
+        // A cancelled prompt leaves the flight untouched so other requests can still ask.
+        let answer = or_cancel(
+            cancel,
+            self.prompter.credentials(&origin, attempt, &offered),
+        )
+        .await?;
         let mut state = lock(&flight.state);
         state.generation += 1;
         let Some(creds) = answer else {
@@ -247,6 +253,21 @@ impl AuthManager {
             origin: Some(origin),
             generation: state.generation,
         })
+    }
+}
+
+/// Runs `fut` unless `cancel` fires first.
+pub(crate) async fn or_cancel<T>(
+    cancel: &CancelToken,
+    fut: impl std::future::Future<Output = T>,
+) -> Result<T> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(cancel
+            .check()
+            .err()
+            .unwrap_or_else(|| SvnError::new(ErrorCode::Cancelled, "operation cancelled"))),
+        v = fut => Ok(v),
     }
 }
 

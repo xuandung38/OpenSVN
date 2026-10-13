@@ -485,3 +485,120 @@ async fn connection_limit_is_clamped_to_serf_range() {
     assert_eq!(c(100).effective_connections(), 8);
     assert_eq!(TransportConfig::default().effective_connections(), 4);
 }
+
+#[tokio::test]
+async fn write_methods_are_never_redirected() {
+    let server = MockServer::start().await;
+    Mock::given(path("/old"))
+        .respond_with(ResponseTemplate::new(301).insert_header("location", "/new"))
+        .mount(&server)
+        .await;
+    let t = plain_transport(|_| {});
+    for m in [
+        "PUT",
+        "MKCOL",
+        "DELETE",
+        "COPY",
+        "MOVE",
+        "PROPPATCH",
+        "MERGE",
+        "POST",
+        "LOCK",
+        "UNLOCK",
+    ] {
+        let err = t
+            .send(req(m, format!("{}/old", server.uri())), &CancelToken::new())
+            .await
+            .expect_err(m);
+        assert!(
+            err.message.contains("repository moved"),
+            "{m}: {}",
+            err.message
+        );
+        assert!(err.message.contains("/new"), "{m}: {}", err.message);
+    }
+    let hits = server.received_requests().await.unwrap();
+    assert!(hits.iter().all(|r| r.url.path() == "/old"));
+    assert_eq!(hits.len(), 10);
+}
+
+#[tokio::test]
+async fn a_held_streaming_response_does_not_starve_parallel_requests() {
+    let ca = TestCa::new();
+    let srv = TlsServer::start(
+        &ca.leaf(&["localhost"], false),
+        Arc::new(|seen| {
+            if seen.method.as_str() == "REPORT" {
+                Reply::zeros(10 * 1024 * 1024 * 1024)
+            } else {
+                Reply::ok("x")
+            }
+        }),
+    )
+    .await;
+    let t = transport_trusting(&ca, ScriptedPrompter::with_credentials("a", "b"), |c| {
+        c.max_connections_per_host = 2;
+    });
+    let mut report = t
+        .send(
+            HttpRequest::new(Method::from_bytes(b"REPORT").unwrap(), srv.url("/r")),
+            &CancelToken::new(),
+        )
+        .await
+        .expect("report");
+    assert!(report.chunk().await.unwrap().is_some());
+    let gets: Vec<_> = (0..8)
+        .map(|i| {
+            let t = Arc::clone(&t);
+            let url = srv.url(&format!("/g{i}"));
+            tokio::spawn(async move {
+                let r = t
+                    .send(HttpRequest::new(Method::GET, url), &CancelToken::new())
+                    .await?;
+                r.bytes(10).await
+            })
+        })
+        .collect();
+    for g in gets {
+        tokio::time::timeout(Duration::from_secs(10), g)
+            .await
+            .expect("no deadlock")
+            .unwrap()
+            .expect("get");
+    }
+    assert!(report.chunk().await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn the_connection_slot_is_released_when_the_body_ends() {
+    let ca = TestCa::new();
+    let srv = TlsServer::start(
+        &ca.leaf(&["localhost"], false),
+        Arc::new(|_| Reply::ok("body")),
+    )
+    .await;
+    let t = transport_trusting(&ca, ScriptedPrompter::with_credentials("a", "b"), |c| {
+        c.max_connections_per_host = 1;
+    });
+    let mut first = t
+        .send(
+            HttpRequest::new(Method::GET, srv.url("/1")),
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap();
+    while first.chunk().await.unwrap().is_some() {}
+    // `first` is still alive, but its body is finished, so the only slot is free again.
+    let second = tokio::time::timeout(
+        Duration::from_secs(5),
+        t.send(
+            HttpRequest::new(Method::GET, srv.url("/2")),
+            &CancelToken::new(),
+        ),
+    )
+    .await
+    .expect("slot released at end of body")
+    .expect("second");
+    assert_eq!(second.status().as_u16(), 200);
+    drop(first);
+}

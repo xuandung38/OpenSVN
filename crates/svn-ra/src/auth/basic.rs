@@ -3,16 +3,22 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use reqwest::header::HeaderValue;
+use secrecy::zeroize::Zeroize;
 use secrecy::{ExposeSecret, SecretString};
 use svn_types::{ErrorCode, Result, SvnError};
 
 /// Builds the header value, marked sensitive so HTTP stacks never print it.
 pub fn basic_header(username: &str, password: &SecretString) -> Result<HeaderValue> {
     let mut plain = format!("{username}:{}", password.expose_secret());
-    let encoded = STANDARD.encode(plain.as_bytes());
-    // Best-effort scrub of the plaintext copy.
-    plain.clear();
-    let mut value = HeaderValue::from_str(&format!("Basic {encoded}")).map_err(|_| {
+    let mut encoded = STANDARD.encode(plain.as_bytes());
+    plain.zeroize();
+    let mut text = format!("Basic {encoded}");
+    encoded.zeroize();
+    // The `HeaderValue` itself keeps a copy of the base64 text and cannot be zeroized; it is
+    // marked sensitive so HTTP stacks never print it.
+    let parsed = HeaderValue::from_str(&text);
+    text.zeroize();
+    let mut value = parsed.map_err(|_| {
         SvnError::new(
             ErrorCode::Internal,
             "credentials cannot be encoded as a header",

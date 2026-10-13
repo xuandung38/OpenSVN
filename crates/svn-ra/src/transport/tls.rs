@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -29,6 +30,9 @@ pub trait TrustStore: Send + Sync {
     fn pinned(&self, host: &str, port: u16) -> Vec<[u8; 32]>;
     /// Pins a fingerprint after the user chose "accept always".
     fn pin(&self, host: &str, port: u16, sha256: [u8; 32]);
+    /// Replaces every pin of this `(host, port)` with `sha256` after the user accepted a
+    /// changed certificate.
+    fn replace_pins(&self, host: &str, port: u16, sha256: [u8; 32]);
 }
 
 type PinMap = HashMap<(String, u16), Vec<[u8; 32]>>;
@@ -61,6 +65,11 @@ impl TrustStore for MemoryTrustStore {
             list.push(sha256);
         }
     }
+
+    fn replace_pins(&self, host: &str, port: u16, sha256: [u8; 32]) {
+        let mut pins = self.pins.lock().unwrap_or_else(PoisonError::into_inner);
+        pins.insert((host.to_owned(), port), vec![sha256]);
+    }
 }
 
 /// SHA-256 of a DER certificate.
@@ -76,6 +85,8 @@ pub(crate) struct CertProblem {
     pub(crate) overridable: bool,
     /// The host has pinned certificates and this one is different.
     pub(crate) changed: bool,
+    /// Fingerprints that were pinned before the certificate changed.
+    pub(crate) previous: Vec<[u8; 32]>,
 }
 
 impl CertProblem {
@@ -103,13 +114,24 @@ impl CertProblem {
     }
 }
 
+/// What to persist when the user accepts a certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PinAction {
+    /// Trust for this session only.
+    SessionOnly,
+    /// Add to the host's pins.
+    Add,
+    /// The certificate changed: the new pin replaces the old ones.
+    Replace,
+}
+
 /// Per-`(host, port)` TLS state shared between the verifier and the transport.
 pub(crate) struct OriginTls {
     host: String,
     port: u16,
     trust: Arc<dyn TrustStore>,
     accepted_for_session: Mutex<HashSet<[u8; 32]>>,
-    problem: Mutex<Option<CertProblem>>,
+    problem: Mutex<Option<(Instant, CertProblem)>>,
     /// Fingerprints the user refused since the last successful connection.
     rejected: Mutex<HashSet<[u8; 32]>>,
     /// Serializes certificate prompts so concurrent requests ask only once.
@@ -129,12 +151,15 @@ impl OriginTls {
         }
     }
 
-    /// Latest recorded problem, if any.
-    pub(crate) fn problem(&self) -> Option<CertProblem> {
+    /// Problem recorded at or after `since`. Older entries belong to earlier attempts and must
+    /// not be blamed for an unrelated network failure.
+    pub(crate) fn problem_since(&self, since: Instant) -> Option<CertProblem> {
         self.problem
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .as_ref()
+            .filter(|(at, _)| *at >= since)
+            .map(|(_, p)| p.clone())
     }
 
     /// Whether this fingerprint is currently trusted (session accept or pin).
@@ -146,14 +171,16 @@ impl OriginTls {
             || self.trust.pinned(&self.host, self.port).contains(fp)
     }
 
-    /// Trust `fp` for the rest of the session and, when `permanent`, pin it.
-    pub(crate) fn accept(&self, fp: [u8; 32], permanent: bool) {
+    /// Trust `fp` for the rest of the session and apply the pin action.
+    pub(crate) fn accept(&self, fp: [u8; 32], pin: PinAction) {
         self.accepted_for_session
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(fp);
-        if permanent {
-            self.trust.pin(&self.host, self.port, fp);
+        match pin {
+            PinAction::SessionOnly => {}
+            PinAction::Add => self.trust.pin(&self.host, self.port, fp),
+            PinAction::Replace => self.trust.replace_pins(&self.host, self.port, fp),
         }
         *self.problem.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
@@ -184,7 +211,8 @@ impl OriginTls {
     }
 
     fn record(&self, problem: CertProblem) {
-        *self.problem.lock().unwrap_or_else(PoisonError::into_inner) = Some(problem);
+        *self.problem.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((Instant::now(), problem));
     }
 }
 
@@ -268,6 +296,18 @@ impl LeafDetails {
     }
 }
 
+/// `errSecNotTrusted`: Security.framework's code for a chain that ends in an untrusted anchor.
+const ERR_SEC_NOT_TRUSTED: i32 = -67843;
+
+/// Whether a platform-verifier message ends in the OSStatus for an untrusted anchor. The text
+/// before the code is a localized description and is deliberately ignored.
+fn is_untrusted_anchor(message: &str) -> bool {
+    message
+        .rsplit_once(':')
+        .and_then(|(_, code)| code.trim().parse::<i32>().ok())
+        == Some(ERR_SEC_NOT_TRUSTED)
+}
+
 fn classify(err: &TlsError, leaf: Option<&LeafDetails>, now_secs: i64) -> CertFailure {
     // Some platform verifiers report expiry only as an opaque message, so check the dates too.
     if let Some(l) = leaf {
@@ -299,7 +339,7 @@ fn classify(err: &TlsError, leaf: Option<&LeafDetails>, now_secs: i64) -> CertFa
             }
             // Platform verifiers without a dedicated code (macOS: "certificate is not trusted")
             // report an untrusted anchor this way.
-            CertificateError::Other(o) if o.to_string().contains("not trusted") => {
+            CertificateError::Other(o) if is_untrusted_anchor(&o.to_string()) => {
                 if leaf.is_some_and(|l| l.self_issued) {
                     CertFailure::SelfSigned
                 } else {
@@ -347,17 +387,17 @@ impl ServerCertVerifier for PolicyVerifier {
             failure,
             CertFailure::UnknownIssuer | CertFailure::SelfSigned
         );
-        let mut changed = false;
+        let mut previous = Vec::new();
         if overridable {
             if self.origin.is_trusted(&fp) {
                 return Ok(ServerCertVerified::assertion());
             }
-            changed = !self
+            previous = self
                 .origin
                 .trust
-                .pinned(&self.origin.host, self.origin.port)
-                .is_empty();
+                .pinned(&self.origin.host, self.origin.port);
         }
+        let changed = !previous.is_empty();
         let micros = |s: i64| Timestamp(s.saturating_mul(1_000_000));
         self.origin.record(CertProblem {
             info: CertInfo {
@@ -372,6 +412,7 @@ impl ServerCertVerifier for PolicyVerifier {
             },
             overridable,
             changed,
+            previous,
         });
         Err(err)
     }
@@ -428,4 +469,75 @@ pub(crate) fn make_client_config(
     // Negotiate/NTLM bind to a connection, so never upgrade to HTTP/2.
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use rustls::OtherError;
+
+    use super::*;
+
+    fn other(msg: &str) -> TlsError {
+        #[derive(Debug)]
+        struct Msg(String);
+        impl std::fmt::Display for Msg {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+        impl std::error::Error for Msg {}
+        TlsError::InvalidCertificate(CertificateError::Other(OtherError(Arc::new(Msg(
+            msg.to_owned()
+        )))))
+    }
+
+    fn leaf(self_issued: bool) -> LeafDetails {
+        LeafDetails {
+            subject: String::new(),
+            issuer: String::new(),
+            self_issued,
+            not_before: 0,
+            not_after: i64::MAX,
+            dns_names: Vec::new(),
+            ip_addrs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn untrusted_anchor_is_recognized_by_status_code_not_by_text() {
+        for msg in [
+            "\u{201c}x\u{201d} certificate is not trusted: -67843",
+            "\u{ab}x\u{bb} n'est pas fiable : -67843",
+            "\u{300c}x\u{300d}\u{306f}\u{4fe1}\u{983c}\u{3067}\u{304d}\u{307e}\u{305b}\u{3093}: -67843",
+        ] {
+            assert_eq!(
+                classify(&other(msg), Some(&leaf(true)), 1),
+                CertFailure::SelfSigned,
+                "{msg}"
+            );
+            assert_eq!(
+                classify(&other(msg), Some(&leaf(false)), 1),
+                CertFailure::UnknownIssuer,
+                "{msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_status_codes_and_plain_text_stay_hard_failures() {
+        for msg in [
+            "certificate is not trusted: -67828",
+            "certificate is not trusted",
+            "not trusted: abc",
+            "-67843 is mentioned but not at the end: yes",
+        ] {
+            assert!(
+                matches!(
+                    classify(&other(msg), Some(&leaf(true)), 1),
+                    CertFailure::Other(_)
+                ),
+                "{msg}"
+            );
+        }
+    }
 }

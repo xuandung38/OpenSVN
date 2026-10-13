@@ -149,7 +149,7 @@ async fn pin_does_not_override_hard_failures() {
 }
 
 #[tokio::test]
-async fn changed_pinned_certificate_is_reported_distinctly_and_never_pinned_silently() {
+async fn changed_pinned_certificate_is_reported_distinctly_and_replaces_the_pin_only_on_accept() {
     let first = TestCa::self_signed_leaf(&["localhost"]);
     let replacement = TestCa::self_signed_leaf(&["localhost"]);
     let server = TlsServer::start(&replacement, ok_handler()).await;
@@ -170,11 +170,17 @@ async fn changed_pinned_certificate_is_reported_distinctly_and_never_pinned_sile
         calls[0].failure
     );
 
-    // "Accept always" on a changed certificate is downgraded to this session only.
+    // "Accept always" on a changed certificate replaces the old pin, after the explicit prompt.
     let accepting = ScriptedPrompter::with_cert_decision(CertDecision::AcceptAlways);
-    let t2 = plain_transport(accepting, trust.clone(), vec![]);
+    let t2 = plain_transport(accepting.clone(), trust.clone(), vec![]);
     assert_eq!(get(&t2, server.url("/")).await.expect("accepted"), 200);
-    assert_eq!(trust.pinned("localhost", server.addr.port()), vec![old_fp]);
+    assert_eq!(accepting.cert_prompts(), 1);
+    let new_fp = sha256_fingerprint(&replacement.cert_der);
+    assert_eq!(trust.pinned("localhost", server.addr.port()), vec![new_fp]);
+    // The new pin is honored without another prompt.
+    let t3 = plain_transport(accepting.clone(), trust, vec![]);
+    assert_eq!(get(&t3, server.url("/")).await.expect("pinned"), 200);
+    assert_eq!(accepting.cert_prompts(), 1);
 }
 
 #[tokio::test]

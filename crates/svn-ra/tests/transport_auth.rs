@@ -325,3 +325,80 @@ async fn url_userinfo_is_rejected() {
     assert!(!err.message.contains("pw"));
     assert!(srv.requests().is_empty());
 }
+
+#[tokio::test]
+async fn cancel_interrupts_a_prompt_that_never_answers() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    *prompter.delay.lock().unwrap() = Duration::from_secs(3600);
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let cancel = CancelToken::new();
+    let c2 = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        c2.cancel();
+    });
+    let start = std::time::Instant::now();
+    let err = t
+        .send(get(srv.url("/")), &cancel)
+        .await
+        .expect_err("cancelled");
+    assert_eq!(err.code, ErrorCode::Cancelled);
+    assert!(start.elapsed() < Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn cancel_interrupts_a_request_queued_behind_a_prompt() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    *prompter.delay.lock().unwrap() = Duration::from_secs(3600);
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    // The first request owns the prompt and never gets an answer.
+    let owner_cancel = CancelToken::new();
+    let owner = {
+        let (t, url, c) = (Arc::clone(&t), srv.url("/a"), owner_cancel.clone());
+        tokio::spawn(async move { t.send(get(url), &c).await.map(|_| ()) })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let queued_cancel = CancelToken::new();
+    let queued = {
+        let (t, url, c) = (Arc::clone(&t), srv.url("/b"), queued_cancel.clone());
+        tokio::spawn(async move { t.send(get(url), &c).await.map(|_| ()) })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    queued_cancel.cancel();
+    let err = tokio::time::timeout(Duration::from_secs(1), queued)
+        .await
+        .expect("returns within 1s")
+        .unwrap()
+        .expect_err("cancelled");
+    assert_eq!(err.code, ErrorCode::Cancelled);
+    assert_eq!(prompter.credential_prompts(), 1);
+    owner_cancel.cancel();
+    let err = owner.await.unwrap().expect_err("cancelled");
+    assert_eq!(err.code, ErrorCode::Cancelled);
+}
+
+#[tokio::test]
+async fn server_alternating_realms_cannot_loop_the_client_forever() {
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let c = Arc::clone(&counter);
+    let handler: Arc<Handler> = Arc::new(move |_| {
+        let n = c.fetch_add(1, Ordering::SeqCst);
+        Reply::unauthorized(if n.is_multiple_of(2) { "A" } else { "B" })
+    });
+    let (ca, srv) = server(handler).await;
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let err = t
+        .send(get(srv.url("/")), &CancelToken::new())
+        .await
+        .expect_err("bounded");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert!(
+        srv.requests().len() <= 10,
+        "{} requests",
+        srv.requests().len()
+    );
+    assert!(prompter.credential_prompts() <= 6);
+}
