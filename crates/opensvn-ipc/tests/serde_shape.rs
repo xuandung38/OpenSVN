@@ -105,6 +105,34 @@ fn settings_patch_uses_dotted_keys_and_omits_absent() {
 }
 
 #[test]
+fn checkout_root_is_readable_but_not_patchable() {
+    let s = serde_json::to_value(sample_settings()).unwrap();
+    assert_eq!(s["general.checkoutRoot"], json!("~/svn"));
+    let err = serde_json::from_value::<SettingsPatch>(json!({"general.checkoutRoot": "/etc"}))
+        .unwrap_err();
+    assert!(err.to_string().contains("unknown field"), "{err}");
+}
+
+#[test]
+fn checkout_request_and_result_shapes() {
+    let req: CheckoutRequest = serde_json::from_value(json!({
+        "url": "https://svn.test.local/r/trunk", "dest": "g1", "destName": "proj", "rev": null,
+        "depth": "infinity", "sparse": null, "format": 31, "storePristine": true,
+        "ignoreExternals": false
+    }))
+    .unwrap();
+    assert_eq!(req.dest_name.as_deref(), Some("proj"));
+    assert_eq!(
+        serde_json::to_value(OpResult::CheckedOut {
+            wc_id: Some(WcId("w".into())),
+            new_rev: Rev(3)
+        })
+        .unwrap(),
+        json!({"kind": "checkedOut", "wcId": "w", "newRev": 3})
+    );
+}
+
+#[test]
 fn proxy_setting_shape() {
     assert_eq!(
         serde_json::to_value(ProxySetting::System).unwrap(),

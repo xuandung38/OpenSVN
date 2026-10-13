@@ -193,6 +193,7 @@ fn ipc_app(f: &Fixture) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRu
         picker: f.picker.clone(),
         path_picker: f.paths.clone(),
         launcher: f.launcher.clone(),
+        revealer: f.revealer.clone(),
     })
     .unwrap();
     app.manage(state);
@@ -281,6 +282,14 @@ async fn settings_set_over_ipc_refuses_program_keys() {
         &main,
         "settings_set",
         serde_json::json!({"patch": {"tools.terminal": {"path": "/bin/sh", "args": []}}}),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("unknown field"), "{err}");
+    // the default checkout folder changes only through the native folder dialog
+    let err = invoke(
+        &main,
+        "settings_set",
+        serde_json::json!({"patch": {"general.checkoutRoot": "/etc"}}),
     )
     .unwrap_err();
     assert!(err.to_string().contains("unknown field"), "{err}");

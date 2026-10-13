@@ -142,6 +142,19 @@ impl AppDb {
         })
     }
 
+    /// Repository URLs used recently, newest first (checkout dialog suggestions).
+    pub fn recent_url_list(&self, limit: u32) -> Result<Vec<String>, DbError> {
+        self.db.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT url FROM recent_url ORDER BY last_used_at DESC, url LIMIT ?1",
+            )?;
+            let rows = stmt
+                .query_map(params![limit], |r| r.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            Ok(rows)
+        })
+    }
+
     /// Records a commit message for the history drop-down; the table keeps the newest 200 rows.
     pub fn commit_message_add(&self, repo_uuid: &str, message: &str) -> Result<(), DbError> {
         if message.trim().is_empty() {
@@ -264,6 +277,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = AppDb::open(&dir.path().join("nested")).unwrap();
         db.recent_url_touch("https://svn.test.local/r").unwrap();
+        db.recent_url_touch("https://svn.test.local/r").unwrap();
+        assert_eq!(db.recent_url_list(10).unwrap(), ["https://svn.test.local/r"]);
         drop(db);
         AppDb::open(&dir.path().join("nested")).unwrap();
     }

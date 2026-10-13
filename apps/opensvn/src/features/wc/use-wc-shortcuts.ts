@@ -7,6 +7,13 @@ import { useWcSession } from "./wc-session";
 export type MainView = "changes" | "history" | "browse";
 
 /**
+ * A native menu item and its accelerator can both reach the WebView for one key press (the menu
+ * event and the keydown). A menu event this soon after the same action ran from the keyboard is
+ * the echo and is ignored.
+ */
+export const MENU_ECHO_MS = 400;
+
+/**
  * App-level keyboard shortcuts (doc 01 section 8) and the native-menu events that mirror them.
  * Selection-scoped actions (lock, discard, log, blame) apply to the selected file. The latest
  * session/action values are read through a ref so the listeners are registered once.
@@ -15,20 +22,34 @@ export function useWcShortcuts({
   onView,
   onToggleActivity,
   onAddExisting,
+  onSwitchRepo,
+  onOpenSettings,
 }: {
   onView: (v: MainView) => void;
   onToggleActivity: () => void;
   onAddExisting: () => void;
+  /** Opens the "Current repository" picker (Mod+T). */
+  onSwitchRepo?: () => void;
+  onOpenSettings?: () => void;
 }): void {
   const session = useWcSession();
   const actions = useWcActions();
   const bus = useEventBus();
-  const latest = useRef({ session, actions, onView, onToggleActivity, onAddExisting });
-  latest.current = { session, actions, onView, onToggleActivity, onAddExisting };
+  const props = { onView, onToggleActivity, onAddExisting, onSwitchRepo, onOpenSettings };
+  const latest = useRef({ session, actions, ...props });
+  latest.current = { session, actions, ...props };
 
   useEffect(() => {
+    const lastKey = new Map<ShortcutId, number>();
     const run = (id: ShortcutId): boolean => {
-      const { session: s, actions: a, onView, onToggleActivity, onAddExisting } = latest.current;
+      const {
+        session: s,
+        actions: a,
+        onView,
+        onToggleActivity,
+        onAddExisting,
+        onSwitchRepo,
+      } = latest.current;
       const sel = s.files.find((f) => f.path === s.selected);
       const selPaths = sel ? [sel.path] : [];
       switch (id) {
@@ -63,6 +84,10 @@ export function useWcShortcuts({
         case "addExisting":
           onAddExisting();
           return true;
+        case "switchRepo":
+          if (!onSwitchRepo) return false;
+          onSwitchRepo();
+          return true;
         case "switch":
           if (!s.wc) return false;
           s.openDialog({ kind: "switch" });
@@ -94,6 +119,7 @@ export function useWcShortcuts({
       "blame",
       "checkout",
       "addExisting",
+      "switchRepo",
       "switch",
       "viewChanges",
       "viewHistory",
@@ -106,6 +132,7 @@ export function useWcShortcuts({
       if (document.querySelector("dialog[open]")) return;
       for (const id of ids) {
         if (matchShortcut(e, id) && run(id)) {
+          lastKey.set(id, Date.now());
           e.preventDefault();
           return;
         }
@@ -114,14 +141,23 @@ export function useWcShortcuts({
     window.addEventListener("keydown", onKey);
 
     const off = bus.onMenu((name) => {
+      if (document.querySelector("dialog[open]")) return;
+      if (name === "menu://settings") {
+        latest.current.onOpenSettings?.();
+        return;
+      }
       const map: Record<string, ShortcutId | undefined> = {
         "menu://commit": "commit",
         "menu://update": "update",
         "menu://refresh": "checkUpdates",
         "menu://add-working-copy": "addExisting",
+        "menu://checkout": "checkout",
+        "menu://switch-repository": "switchRepo",
       };
       const id = map[name];
-      if (id) run(id);
+      if (!id) return;
+      if (Date.now() - (lastKey.get(id) ?? Number.NEGATIVE_INFINITY) < MENU_ECHO_MS) return;
+      run(id);
     });
     return () => {
       window.removeEventListener("keydown", onKey);

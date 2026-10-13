@@ -15,7 +15,8 @@ export const settingsStrings = defineStrings({
     saved: "Settings saved",
     checkoutRoot: "Default checkout folder",
     changeFolder: "Change…",
-    needsPicker: "Choosing a folder needs the native folder picker (not available yet).",
+    needsPicker:
+      "New checkouts are created inside this folder. It is chosen in the system folder dialog.",
     checkInterval: "Check for updates every (minutes, 0 = off)",
     language: "Language",
     langVi: "Tiếng Việt",
@@ -75,7 +76,8 @@ export const settingsStrings = defineStrings({
     saved: "Đã lưu cài đặt",
     checkoutRoot: "Thư mục checkout mặc định",
     changeFolder: "Đổi…",
-    needsPicker: "Chọn thư mục cần hộp thoại chọn thư mục của hệ điều hành (chưa có).",
+    needsPicker:
+      "Các checkout mới được tạo trong thư mục này. Chọn bằng hộp thoại chọn thư mục của hệ điều hành.",
     checkInterval: "Kiểm tra cập nhật mỗi (phút, 0 = tắt)",
     language: "Ngôn ngữ",
     langVi: "Tiếng Việt",

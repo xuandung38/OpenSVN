@@ -71,12 +71,26 @@ impl ProgramLauncher for RecordingLauncher {
     }
 }
 
+/// File manager double: records what would have been shown.
+#[derive(Default)]
+pub struct RecordingRevealer {
+    pub revealed: Mutex<Vec<PathBuf>>,
+}
+
+impl crate::os_shell::FolderRevealer for RecordingRevealer {
+    fn reveal(&self, path: &std::path::Path) -> Result<(), AppError> {
+        self.revealed.lock().unwrap().push(path.to_path_buf());
+        Ok(())
+    }
+}
+
 pub struct Fixture {
     pub app: tauri::App<MockRuntime>,
     pub events: Arc<RecordingEvents>,
     pub picker: Arc<Scripted>,
     pub paths: Arc<ScriptedPaths>,
     pub launcher: Arc<RecordingLauncher>,
+    pub revealer: Arc<RecordingRevealer>,
     pub engine: Arc<FakeEngine>,
     _dir: tempfile::TempDir,
 }
@@ -90,6 +104,7 @@ impl Fixture {
         let picker = Arc::new(Scripted::default());
         let paths = Arc::new(ScriptedPaths::default());
         let launcher = Arc::new(RecordingLauncher::default());
+        let revealer = Arc::new(RecordingRevealer::default());
         let state = AppState::build(AppDeps {
             data_dir: dir.path().to_path_buf(),
             engine: engine.clone(),
@@ -97,6 +112,7 @@ impl Fixture {
             picker: picker.clone(),
             path_picker: paths.clone(),
             launcher: launcher.clone(),
+            revealer: revealer.clone(),
         })
         .unwrap();
         let app = tauri::test::mock_app();
@@ -107,6 +123,7 @@ impl Fixture {
             picker,
             paths,
             launcher,
+            revealer,
             engine,
             _dir: dir,
         }

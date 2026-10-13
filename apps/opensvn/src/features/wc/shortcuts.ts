@@ -14,6 +14,7 @@ export type ShortcutId =
   | "blame"
   | "checkout"
   | "addExisting"
+  | "switchRepo"
   | "viewChanges"
   | "viewHistory"
   | "viewBrowse"
@@ -39,6 +40,7 @@ export const SHORTCUTS: Record<ShortcutId, Spec> = {
   blame: { key: "b", shift: true },
   checkout: { key: "o", shift: true },
   addExisting: { key: "o" },
+  switchRepo: { key: "t" },
   viewChanges: { key: "1" },
   viewHistory: { key: "2" },
   viewBrowse: { key: "3" },

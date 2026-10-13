@@ -10,6 +10,7 @@ use svn_types::SvnError;
 use crate::db::{AppDb, CacheDb};
 use crate::engine::{EngineFacade, OpContext, WcRef};
 use crate::ops::{AppEvents, OperationManager};
+use crate::os_shell::FolderRevealer;
 use crate::path_grants::{PathGrants, PathPicker};
 use crate::programs::{ProgramLauncher, ProgramPicker, ProgramService};
 use crate::settings::{SettingsService, system_locale};
@@ -30,6 +31,8 @@ pub struct AppDeps {
     pub path_picker: Arc<dyn PathPicker>,
     /// Starts external programs (the diff tool).
     pub launcher: Arc<dyn ProgramLauncher>,
+    /// Shows items in the file manager.
+    pub revealer: Arc<dyn FolderRevealer>,
 }
 
 /// Services shared by all commands. Managed by Tauri and injected as `State<AppState>`.
@@ -58,6 +61,8 @@ pub struct AppState {
     pub programs: ProgramService,
     /// Starts external programs (the diff tool).
     pub launcher: Arc<dyn ProgramLauncher>,
+    /// Shows items in the file manager.
+    pub revealer: Arc<dyn FolderRevealer>,
     /// Data directory; private folders for generated files live under it.
     pub data_dir: std::path::PathBuf,
 }
@@ -83,6 +88,7 @@ impl AppState {
             path_dialog_open: tokio::sync::Mutex::new(()),
             programs: ProgramService::new(Arc::clone(&settings), deps.picker),
             launcher: deps.launcher,
+            revealer: deps.revealer,
             data_dir: deps.data_dir,
             ops: OperationManager::new(Arc::clone(&deps.events)),
             events: deps.events,

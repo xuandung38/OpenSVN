@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use opensvn_ipc::{AppError, ErrorCode, WcId, WorkingCopy};
+use opensvn_ipc::{AppError, ErrorCode, WcEntry, WcId, WorkingCopy};
 
 use super::actor::{RetryPolicy, WcActor};
 use crate::db::{AppDb, WcRow, now_iso};
@@ -159,6 +159,61 @@ impl WcRegistry {
         Ok(out)
     }
 
+    /// Every registered working copy for the repository manager, including the ones that cannot be
+    /// read any more (`missing`), in list order.
+    pub async fn entries(&self) -> Result<Vec<WcEntry>, AppError> {
+        let mut out = Vec::new();
+        for row in self.db.wc_list()? {
+            let (url, problem) = match self.describe(&row).await {
+                Ok(wc) => (Some(wc.url), None),
+                Err(e) => (None, Some(e.message)),
+            };
+            out.push(WcEntry {
+                id: WcId(row.id),
+                name: row.name,
+                root_path: row.root_path,
+                repo_root_url: row.repo_root_url,
+                repo_uuid: row.repo_uuid,
+                url,
+                added_at: row.added_at,
+                last_opened_at: row.last_opened_at,
+                missing: problem.is_some(),
+                problem,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Points a registered working copy at the folder it was moved to. The folder must be a working
+    /// copy of the same repository and must not be registered under another entry.
+    pub async fn locate(&self, id: &WcId, path: &Path) -> Result<WorkingCopy, AppError> {
+        let row = self.db.wc_get(&id.0)?.ok_or_else(|| unknown_wc(id))?;
+        let shown = path.to_string_lossy().into_owned();
+        let info = self
+            .engine
+            .wc_info(path, &OpContext::detached())
+            .await
+            .map_err(|e| AppError::from(&e).with_path(shown.clone()))?;
+        if info.repo_uuid != row.repo_uuid {
+            return Err(crate::errors::invalid_argument(
+                "This folder is a working copy of another repository.",
+            )
+            .with_path(shown));
+        }
+        if let Some(other) = self.db.wc_get_by_root(&info.root_path)?
+            && other.id != row.id
+        {
+            return Err(crate::errors::invalid_argument(format!(
+                "This folder is already in the list as \"{}\".",
+                other.name
+            ))
+            .with_path(shown));
+        }
+        self.db.wc_set_root(&row.id, &info.root_path)?;
+        let row = self.db.wc_get(&id.0)?.ok_or_else(|| unknown_wc(id))?;
+        self.describe(&row).await
+    }
+
     /// Registers the working copy at `path` (idempotent: an already registered root is returned).
     pub async fn add_existing(&self, path: &str) -> Result<WorkingCopy, AppError> {
         if path.trim().is_empty() || path.contains('\0') || !Path::new(path).is_absolute() {
@@ -183,6 +238,8 @@ impl WcRegistry {
                     repo_uuid: info.repo_uuid.clone(),
                     repo_root_url: info.repo_root_url.clone(),
                     sort_order: 0,
+                    added_at: String::new(),
+                    last_opened_at: None,
                 };
                 self.db.wc_insert(&row)?;
                 row

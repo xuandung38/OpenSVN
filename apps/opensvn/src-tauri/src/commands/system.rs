@@ -93,7 +93,34 @@ pub async fn path_pick(
     .await
 }
 
-stub!(reveal_in_os(wc_id: WcId, path: String) -> ());
+/// Shows a working copy item in the file manager. `path` is relative to the working copy root;
+/// an empty path reveals the root folder itself.
+#[tauri::command]
+#[specta::specta]
+pub async fn reveal_in_os(
+    state: State<'_, AppState>,
+    wc_id: WcId,
+    path: String,
+) -> Result<(), AppError> {
+    guard(async {
+        let resolved = state.wcs.resolve(&wc_id)?;
+        let mut target = resolved.wc.root.clone();
+        if !path.is_empty() {
+            let rel = svn_types::RelPath::new(&path).map_err(|e| AppError::from(&e))?;
+            for part in rel.components() {
+                target.push(part);
+            }
+        }
+        if std::fs::symlink_metadata(&target).is_err() {
+            return Err(crate::errors::invalid_argument(
+                "The folder no longer exists. Locate the working copy or remove it from the list.",
+            )
+            .with_path(target.to_string_lossy()));
+        }
+        state.revealer.reveal(&target)
+    })
+    .await
+}
 stub!(open_external(wc_id: WcId, path: String, open_with: OpenWith) -> ());
 // Returns the path of the created diagnostics zip.
 stub!(diagnostics_export() -> String);
