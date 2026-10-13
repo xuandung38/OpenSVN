@@ -1,0 +1,24 @@
+OpenSVN
+This file lists third-party code that OpenSVN incorporates or ports.
+
+Apache Subversion
+Copyright 2026 The Apache Software Foundation
+https://subversion.apache.org/
+
+Portions of OpenSVN are ported from, or derived from, Apache Subversion, which is
+licensed under the Apache License, Version 2.0:
+https://www.apache.org/licenses/LICENSE-2.0
+
+Ported areas:
+  - libsvn_diff: text diff, diff3 and merge algorithms
+  - libsvn_wc: wc-metadata.sql, wc-queries.sql and the skel (work queue) format
+  - libsvn_subr: subst (keyword and EOL translation) and svndiff
+
+Ported source files keep the original Apache Software Foundation license header and carry
+an additional "Modified by OpenSVN" line.
+
+Upstream NOTICE (Apache Subversion 1.15.0):
+  This product includes software developed by many people, and distributed
+  under Contributor License Agreements to The Apache Software Foundation
+  (https://www.apache.org/).  See the accompanying COMMITTERS file and the
+  revision logs for an exact contribution history.
