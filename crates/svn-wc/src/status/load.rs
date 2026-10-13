@@ -72,6 +72,8 @@ pub(crate) struct NodeRec {
     pub repos_relpath: Option<String>,
     /// Revision of the BASE layer.
     pub base_revision: Option<u64>,
+    /// Presence of the BASE layer.
+    pub base_presence: Option<Presence>,
     pub changed_rev: Option<u64>,
     pub changed_author: Option<String>,
     pub changed_date: Option<i64>,
@@ -169,6 +171,17 @@ fn build(group: &[Row]) -> Option<NodeRec> {
         None
     };
     let moved_to = group.iter().find_map(|r| r.moved_to.clone());
+    // A deleted node reports the last-changed data of the layer it deletes (`read_info` steps
+    // below a base-deleted row).
+    let changed = if status == DbStatus::Deleted {
+        group
+            .iter()
+            .skip(1)
+            .find(|r| matches!(r.presence, Presence::Normal | Presence::Incomplete))
+            .unwrap_or(top)
+    } else {
+        top
+    };
     Some(NodeRec {
         status,
         kind: top.kind,
@@ -186,9 +199,10 @@ fn build(group: &[Row]) -> Option<NodeRec> {
         last_mod_time: top.last_mod_time,
         repos_relpath: top.repos_path.clone(),
         base_revision: base.and_then(|b| b.revision),
-        changed_rev: top.changed_rev,
-        changed_author: top.changed_author.clone(),
-        changed_date: top.changed_date,
+        base_presence: base.map(|b| b.presence),
+        changed_rev: changed.changed_rev,
+        changed_author: changed.changed_author.clone(),
+        changed_date: changed.changed_date,
         had_props: top.had_props,
         special: top.special,
         file_external: top.file_external,
