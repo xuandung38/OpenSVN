@@ -1,0 +1,11 @@
+# Self-check for the Subversion 1.10.8 image: two svn110 checkouts of the same revision must compare
+# equal on every axis (legacy profile: `cargo xtask compat up --legacy`).
+name: selfcheck-svn110
+description: svn110 vs svn110, read-only checkout
+server: svn110
+repo: basic
+steps:
+  - { on: svn110, wc: a, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn110, wc: b, svn: [checkout, "{url}/trunk", "."] }
+compare:
+  - { left: a, right: b, checks: [tree, status, info, wcdb], reader: svn110 }

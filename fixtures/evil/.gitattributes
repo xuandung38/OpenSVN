@@ -1,0 +1,4 @@
+# Hostile documents and svndiff streams are byte-exact test inputs.
+*.xml -text
+*.svndiff binary
+*.headers -text

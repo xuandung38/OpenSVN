@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:get-locks-report xmlns:S="svn:" xmlns:D="DAV:"><S:lock><S:path>/trunk/../../etc/passwd</S:path>
+<S:token>opaquelocktoken:a51c8c59-0dda-4d35-bb7f-b4ab1f3d2ee9</S:token>
+<S:creationdate>2024-01-01T01:00:00.000000Z</S:creationdate><S:owner>fixture</S:owner>
+</S:lock></S:get-locks-report>

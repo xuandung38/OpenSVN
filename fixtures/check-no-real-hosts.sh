@@ -8,9 +8,11 @@ cd "$root"
 paths=(fixtures tests/compat/scenarios)
 status=0
 
-# Any URL host that is not on the allowlist.
-bad_urls=$(grep -RIEho --exclude='check-no-real-hosts.sh' 'https?://[^/[:space:]"'"'"')>]+' "${paths[@]}" 2>/dev/null \
-  | sed -E 's|https?://||; s|^[^@]*@||; s|:[0-9]+$||' \
+# Any URL host that is not on the allowlist. XML namespace names (DAV/svn/XML Schema) are URIs,
+# not hosts anything connects to, so they are dropped first; `:$VAR` ports in scripts count as ports.
+bad_urls=$(grep -RIEho --exclude='check-no-real-hosts.sh' 'https?://[^[:space:]"'"'"')>]+' "${paths[@]}" 2>/dev/null \
+  | grep -Ev '^http://(subversion\.tigris\.org/xmlns/|apache\.org/dav/(props|propset)/|www\.w3\.org/)' \
+  | sed -E 's|https?://||; s|/.*$||; s|^[^@]*@||; s|:([0-9]+\|\$[A-Za-z_]+\|\{[a-z]+\})$||' \
   | grep -Ev '^(([a-z0-9-]+\.)*test\.local|localhost|127\.0\.0\.1|example\.(com|org|net)|\{[a-z]+\}.*)$' \
   | sort -u || true)
 if [ -n "$bad_urls" ]; then
