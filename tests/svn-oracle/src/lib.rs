@@ -152,9 +152,72 @@ impl Oracle {
         cmd
     }
 
+    /// `file://` URL for an absolute local path, as svn expects it on this platform: percent-encoded
+    /// (spaces, non-ASCII), `/` separators, `file:///C:/dir/repo` for Windows drive paths and
+    /// `file://server/share/repo` for UNC paths.
+    pub fn file_url(path: &Path) -> String {
+        if cfg!(windows) {
+            file_url_from_str(&path.to_string_lossy(), true)
+        } else {
+            file_url_from_bytes(path.as_os_str().as_encoded_bytes())
+        }
+    }
+
     /// The isolated svn configuration directory.
     pub fn config_dir(&self) -> &Path {
         self.config_dir.path()
+    }
+}
+
+/// Unix path bytes to a `file://` URL (backslash is an ordinary character there).
+fn file_url_from_bytes(path: &[u8]) -> String {
+    let mut out = String::from("file://");
+    percent_encode_into(&mut out, path);
+    out
+}
+
+/// Path text to a `file://` URL. With `windows`, accepts `C:\dir`, `C:/dir`, `\\?\C:\dir` and
+/// UNC `\\server\share\dir`; without it the text is a Unix path. Exposed for tests on any OS.
+fn file_url_from_str(path: &str, windows: bool) -> String {
+    if !windows {
+        return file_url_from_bytes(path.as_bytes());
+    }
+    let path = path.strip_prefix(r"\\?\").unwrap_or(path);
+    let path = path
+        .strip_prefix(r"UNC\")
+        .map_or_else(|| path.to_string(), |rest| format!(r"\\{rest}"));
+    let forward = path.replace('\\', "/");
+    let mut out = String::from("file://");
+    if let Some(unc) = forward.strip_prefix("//") {
+        // Host stays unencoded; everything after it is path.
+        let (host, rest) = unc.split_once('/').unwrap_or((unc, ""));
+        out.push_str(host);
+        out.push('/');
+        percent_encode_into(&mut out, rest.as_bytes());
+    } else {
+        let bytes = forward.as_bytes();
+        let has_drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+        out.push('/');
+        if has_drive {
+            // `C:` keeps its colon so the URL reads file:///C:/dir.
+            out.push(char::from(bytes[0].to_ascii_uppercase()));
+            out.push(':');
+            percent_encode_into(&mut out, &bytes[2..]);
+        } else {
+            percent_encode_into(&mut out, bytes.strip_prefix(b"/").unwrap_or(bytes));
+        }
+    }
+    out
+}
+
+/// Percent-encode everything except unreserved characters and `/`.
+fn percent_encode_into(out: &mut String, bytes: &[u8]) {
+    for &b in bytes {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
     }
 }
 
@@ -259,6 +322,63 @@ pub fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
         num(parts.next()?)?,
         parts.next().and_then(num).unwrap_or(0),
     ))
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    #[test]
+    fn windows_drive_paths_become_file_triple_slash_urls() {
+        let cases = [
+            (r"C:\Users\me\repo", "file:///C:/Users/me/repo"),
+            ("c:/work/repo", "file:///C:/work/repo"),
+            (
+                r"D:\My Repos\Tài liệu",
+                "file:///D:/My%20Repos/T%C3%A0i%20li%E1%BB%87u",
+            ),
+            (r"\\?\C:\temp\r#1", "file:///C:/temp/r%231"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(file_url_from_str(input, true), want, "{input}");
+        }
+    }
+
+    #[test]
+    fn windows_unc_paths_keep_the_host() {
+        assert_eq!(
+            file_url_from_str(r"\\srv\share\my repo", true),
+            "file://srv/share/my%20repo"
+        );
+        assert_eq!(
+            file_url_from_str(r"\\?\UNC\srv\share\r", true),
+            "file://srv/share/r"
+        );
+    }
+
+    #[test]
+    fn unix_paths_are_encoded_and_keep_backslashes_as_data() {
+        assert_eq!(
+            file_url_from_str("/tmp/a b/repo", false),
+            "file:///tmp/a%20b/repo"
+        );
+        assert_eq!(
+            file_url_from_str("/tmp/we\\ird%", false),
+            "file:///tmp/we%5Cird%25"
+        );
+    }
+
+    #[test]
+    fn file_url_matches_the_platform_form() {
+        let dir = std::env::temp_dir();
+        let url = Oracle::file_url(&dir.join("a b"));
+        assert!(
+            url.starts_with("file:///") || url.starts_with("file://"),
+            "{url}"
+        );
+        assert!(url.ends_with("/a%20b"), "{url}");
+        assert!(!url.contains('\\'), "{url}");
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -411,7 +531,7 @@ mod tests {
                 .status()?
                 .success()
         );
-        let url = format!("file://{}", repo.display());
+        let url = Oracle::file_url(&repo);
         let out = oracle
             .svn()
             .args(["info", "--show-item", "revision", &url])

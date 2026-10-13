@@ -207,7 +207,7 @@ async fn commit_creates_a_new_revision() {
         seen[0]
             .changed_paths
             .iter()
-            .any(|c| c.path == "/trunk/b.txt")
+            .any(|c| c.path.as_str() == "/trunk/b.txt")
     );
 }
 
@@ -321,7 +321,7 @@ async fn locks_gate_commits_and_are_released_on_merge() {
         )
         .await
         .expect("lock");
-    assert_eq!(lock.path, "/trunk/a.txt");
+    assert_eq!(lock.path.as_str(), "/trunk/a.txt");
     assert_eq!(lock.owner, "tester");
     assert_eq!(
         s.lock(&p("trunk/a.txt"), None, false, None, &c)

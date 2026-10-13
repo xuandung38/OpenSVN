@@ -192,7 +192,14 @@ impl<'a> WorkQueueRunner<'a> {
     /// documents as possibly temporary (install source, remove, move, translate source and
     /// destination).
     fn operand(&self, relpath: &str) -> Result<PathBuf, WorkQueueError> {
-        resolve_operand(&self.config.wc_root, relpath)
+        resolve_operand(&self.config.wc_root, relpath, false)
+    }
+
+    /// Like [`operand`](Self::operand) for read-only SOURCES (`file-install` source,
+    /// `file-translate` source), which may also be a stored pristine text
+    /// (`.svn/pristine/<xx>/<sha1>.svn-base`, as svn 1.14 and TortoiseSVN 1.14 queue them).
+    fn source_operand(&self, relpath: &str) -> Result<PathBuf, WorkQueueError> {
+        resolve_operand(&self.config.wc_root, relpath, true)
     }
 
     fn tmp_dir(&self) -> Result<PathBuf, WorkQueueError> {
@@ -290,7 +297,7 @@ impl<'a> WorkQueueRunner<'a> {
         relpath: &str,
     ) -> Result<Box<dyn Read>, WorkQueueError> {
         if let Some(src) = source {
-            let path = self.operand(src)?;
+            let path = self.source_operand(src)?;
             return Ok(Box::new(
                 File::open(&path).map_err(WorkQueueError::io("open", &path))?,
             ));
@@ -353,7 +360,7 @@ impl<'a> WorkQueueRunner<'a> {
     }
 
     fn file_translate(&mut self, local: &str, src: &str, dst: &str) -> Result<(), WorkQueueError> {
-        let (src_abs, dst_abs) = (self.operand(src)?, self.operand(dst)?);
+        let (src_abs, dst_abs) = (self.source_operand(src)?, self.operand(dst)?);
         // Keyword values come from the node's database row, but the properties that select the
         // translation are the *actual* ones (`svn_wc__get_translate_info` with props = NULL).
         let info = self.ops.install_info(local)?;
