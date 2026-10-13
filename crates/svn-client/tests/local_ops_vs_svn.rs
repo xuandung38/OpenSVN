@@ -298,7 +298,7 @@ fn delete_file_dir_and_keep_local() {
                 &[p(wc, "d")],
                 &DeleteOptions {
                     keep_local: true,
-                    force: false,
+                    ..DeleteOptions::default()
                 },
             )
             .expect("rm");
@@ -325,13 +325,274 @@ fn delete_refuses_modified_without_force() {
         &cancel,
         &[wc.join("top.txt"), wc.join("e")],
         &DeleteOptions {
-            keep_local: false,
             force: true,
+            ..DeleteOptions::default()
         },
     )
     .expect("forced");
     assert!(!wc.join("top.txt").exists());
     assert!(!wc.join("e").exists());
+}
+
+/// Runs `setup` (svn commands) on two checkouts, then `svn rm target` on one and our delete on
+/// the other: svn must refuse with `E<code>`, we must refuse with the same Subversion code,
+/// and both working copies must be untouched and identical (rows, status, files on disk).
+fn check_refused(name: &str, prep: &dyn Fn(&Path), setup: &[&[&str]], target: &str, code: u32) {
+    let Some(fx) = fixture() else { return };
+    let a = checkout(&fx.oracle, &fx.base, &fx.url, "svn-side");
+    let b = checkout(&fx.oracle, &fx.base, &fx.url, "our-side");
+    for wc in [&a, &b] {
+        prep(wc);
+        for cmd in setup {
+            svn(&fx.oracle, wc, cmd);
+        }
+    }
+    let out = fx
+        .oracle
+        .svn()
+        .args(["rm", "-q", target])
+        .current_dir(&a)
+        .output()
+        .expect("svn rm");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{name}: svn accepted the delete");
+    assert!(
+        stderr.contains(&format!("E{code}")),
+        "{name}: svn said {stderr}"
+    );
+
+    let db = open(&b);
+    let err = local::delete(
+        &db,
+        &CancelToken::new(),
+        &[b.join(target)],
+        &DeleteOptions::default(),
+    )
+    .expect_err(name);
+    assert_eq!(err.svn_code, Some(code), "{name}: {err}");
+    assert_eq!(err.code, svn_types::ErrorCode::WcInvalidOperation, "{name}");
+    assert!(db.work_items().expect("wq").is_empty(), "{name}: queue");
+    drop(db);
+    assert_rows_equal(name, &dump_rows(&a), &dump_rows(&b));
+    assert_eq!(
+        status_xml(&fx.oracle, &a).replace("svn-side", "X"),
+        status_xml(&fx.oracle, &b).replace("our-side", "X"),
+        "{name}: svn status differs"
+    );
+    assert_eq!(tree(&a), tree(&b), "{name}: files on disk differ");
+}
+
+#[test]
+fn delete_never_removes_local_work_without_force() {
+    // E195006: "Use --force to override this restriction (local modifications may be lost)".
+    check_refused(
+        "added-file",
+        &|wc| write(wc, "new.txt", "precious\n"),
+        &[&["add", "-q", "new.txt"]],
+        "new.txt",
+        195_006,
+    );
+    check_refused(
+        "added-empty-file",
+        &|wc| write(wc, "empty.txt", ""),
+        &[&["add", "-q", "empty.txt"]],
+        "empty.txt",
+        195_006,
+    );
+    check_refused(
+        "added-dir-with-files",
+        &|wc| write(wc, "nd/a", "precious\n"),
+        &[&["add", "-q", "nd"]],
+        "nd",
+        195_006,
+    );
+    check_refused(
+        "added-dir-with-props",
+        &|_| {},
+        &[&["mkdir", "-q", "mk"], &["propset", "-q", "p", "v", "mk"]],
+        "mk",
+        195_006,
+    );
+    check_refused(
+        "copied-then-modified-file",
+        &|_| {},
+        &[
+            &["cp", "-q", "d/f2", "c.txt"],
+            &["propset", "-q", "x", "1", "c.txt"],
+        ],
+        "c.txt",
+        195_006,
+    );
+    check_refused(
+        "copied-dir-with-modified-child",
+        &|_| {},
+        &[
+            &["cp", "-q", "d", "dc"],
+            &["propset", "-q", "x", "1", "dc/f2"],
+        ],
+        "dc",
+        195_006,
+    );
+    check_refused(
+        "modified-file",
+        &|wc| write(wc, "top.txt", "changed\n"),
+        &[],
+        "top.txt",
+        195_006,
+    );
+    check_refused(
+        "modified-file-below-dir",
+        &|wc| write(wc, "d/sub/g", "changed\n"),
+        &[],
+        "d",
+        195_006,
+    );
+    check_refused(
+        "replaced-by-plain-add",
+        &|_| {},
+        &[
+            &["rm", "-q", "--keep-local", "top.txt"],
+            &["add", "-q", "top.txt"],
+        ],
+        "top.txt",
+        195_006,
+    );
+    // E200005: unversioned (not ignored) content.
+    check_refused(
+        "unversioned-child",
+        &|wc| write(wc, "e/unv", "u\n"),
+        &[],
+        "e",
+        200_005,
+    );
+}
+
+#[test]
+fn copied_file_is_modified_on_disk_after_copy() {
+    // Text change of a copy: svn refuses as well (copied-then-modified).
+    let Some(fx) = fixture() else { return };
+    let wc = checkout(&fx.oracle, &fx.base, &fx.url, "wc");
+    svn(&fx.oracle, &wc, &["cp", "-q", "d/f2", "c.txt"]);
+    write(&wc, "c.txt", "mine\n");
+    let db = open(&wc);
+    let err = local::delete(
+        &db,
+        &CancelToken::new(),
+        &[wc.join("c.txt")],
+        &DeleteOptions::default(),
+    )
+    .expect_err("refused");
+    assert_eq!(err.svn_code, Some(195_006), "{err}");
+    assert_eq!(read(&wc, "c.txt"), "mine\n");
+}
+
+#[test]
+fn delete_allows_what_svn_allows() {
+    check(&Case {
+        name: "rm-unmodified-copy-and-empty-add",
+        prep: &|_| {},
+        svn_cmds: &[
+            &["cp", "-q", "d", "dc"],
+            &["cp", "-q", "top.txt", "t.copy"],
+            &["mkdir", "-q", "emptydir"],
+            &["rm", "-q", "dc", "t.copy", "emptydir"],
+        ],
+        ours: &|db, cancel, wc| {
+            local::copy(db, cancel, &p(wc, "d"), &p(wc, "dc")).expect("cp");
+            local::copy(db, cancel, &p(wc, "top.txt"), &p(wc, "t.copy")).expect("cp");
+            std::fs::create_dir(p(wc, "emptydir")).expect("mkdir");
+            local::add(
+                db,
+                cancel,
+                &[p(wc, "emptydir")],
+                &AddOptions::default(),
+                &cfg(),
+            )
+            .expect("add");
+            local::delete(
+                db,
+                cancel,
+                &[p(wc, "dc"), p(wc, "t.copy"), p(wc, "emptydir")],
+                &DeleteOptions::default(),
+            )
+            .expect("rm");
+        },
+    });
+    // --keep-local checks nothing: modified and added files stay on disk.
+    check(&Case {
+        name: "rm-keep-local-modified-and-added",
+        prep: &|wc| {
+            write(wc, "top.txt", "changed\n");
+            write(wc, "new.txt", "precious\n");
+        },
+        svn_cmds: &[
+            &["add", "-q", "new.txt"],
+            &["rm", "-q", "--keep-local", "top.txt", "new.txt"],
+        ],
+        ours: &|db, cancel, wc| {
+            local::add(
+                db,
+                cancel,
+                &[p(wc, "new.txt")],
+                &AddOptions::default(),
+                &cfg(),
+            )
+            .expect("add");
+            local::delete(
+                db,
+                cancel,
+                &[p(wc, "top.txt"), p(wc, "new.txt")],
+                &DeleteOptions {
+                    keep_local: true,
+                    ..DeleteOptions::default()
+                },
+            )
+            .expect("rm");
+        },
+    });
+    // Ignored items do not block and go with their directory.
+    check(&Case {
+        name: "rm-dir-with-only-ignored-items",
+        prep: &|wc| {
+            write(wc, "e/x.o", "o\n");
+            write(wc, "e/build.o/inner", "i\n");
+            write(wc, "d/sub/y.pyc", "p\n");
+        },
+        svn_cmds: &[&["rm", "-q", "e", "d"]],
+        ours: &|db, cancel, wc| {
+            local::delete(
+                db,
+                cancel,
+                &[p(wc, "e"), p(wc, "d")],
+                &DeleteOptions::default(),
+            )
+            .expect("rm");
+        },
+    });
+}
+
+#[test]
+fn delete_of_a_missing_added_file_is_allowed() {
+    // Status '!' is not a local modification for svn's check.
+    let Some(fx) = fixture() else { return };
+    let a = checkout(&fx.oracle, &fx.base, &fx.url, "svn-side");
+    let b = checkout(&fx.oracle, &fx.base, &fx.url, "our-side");
+    for wc in [&a, &b] {
+        write(wc, "gone.txt", "g\n");
+        svn(&fx.oracle, wc, &["add", "-q", "gone.txt"]);
+        std::fs::remove_file(wc.join("gone.txt")).expect("rm file");
+    }
+    svn(&fx.oracle, &a, &["rm", "-q", "gone.txt"]);
+    let db = open(&b);
+    local::delete(
+        &db,
+        &CancelToken::new(),
+        &[b.join("gone.txt")],
+        &DeleteOptions::default(),
+    )
+    .expect("rm");
+    drop(db);
+    assert_rows_equal("rm-missing-added", &dump_rows(&a), &dump_rows(&b));
 }
 
 #[test]
@@ -387,6 +648,23 @@ fn copy_wc_to_wc() {
             )
             .expect("ps");
             local::copy(db, cancel, &p(wc, "d"), &p(wc, "dcopy")).expect("cp");
+        },
+    });
+}
+
+#[test]
+fn copy_dir_takes_unversioned_items_along() {
+    check(&Case {
+        name: "copy-unversioned",
+        prep: &|wc| {
+            write(wc, "d/unv.txt", "u\n");
+            write(wc, "d/x.o", "o\n");
+            write(wc, "d/ud/z", "z\n");
+            write(wc, "d/sub/u2", "u2\n");
+        },
+        svn_cmds: &[&["cp", "-q", "d", "dc"]],
+        ours: &|db, cancel, wc| {
+            local::copy(db, cancel, &p(wc, "d"), &p(wc, "dc")).expect("cp");
         },
     });
 }

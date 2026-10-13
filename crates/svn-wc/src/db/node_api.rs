@@ -63,6 +63,21 @@ impl WcDb {
         self.with_read(|c| actual::read_conflict(c, self.wc_id, path))
     }
 
+    /// Destination of a local move whose source (delete root) is `path`, if any.
+    pub fn moved_to(&self, path: &RelPath) -> Result<Option<RelPath>> {
+        let found: Option<String> = self.with_read(|c| {
+            c.query_row(
+                "SELECT moved_to FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+                 AND moved_to IS NOT NULL ORDER BY op_depth DESC LIMIT 1",
+                rusqlite::params![self.wc_id, path.as_str()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)
+        })?;
+        found.map(|p| RelPath::new(&p)).transpose()
+    }
+
     /// The node whose `moved_to` names `path` (the source of a local move to `path`), if any.
     pub fn moved_from(&self, path: &RelPath) -> Result<Option<RelPath>> {
         let found: Option<String> = self.with_read(|c| {

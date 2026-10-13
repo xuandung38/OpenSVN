@@ -53,8 +53,16 @@ pub struct JournalItem {
     pub action: ItemAction,
     /// Uploaded text, if any.
     pub text: Option<JournalText>,
-    /// Lock token that was sent with the commit.
-    pub lock_token: Option<String>,
+}
+
+/// A lock token sent with the commit; its working copy lock row is dropped by the finalize
+/// transaction unless the locks are kept.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JournalLock {
+    /// Working copy relative path of the locked node.
+    pub relpath: String,
+    /// Lock token.
+    pub token: String,
 }
 
 /// Outcome of the server merge.
@@ -87,6 +95,10 @@ pub struct JournalData {
     pub merged: Option<JournalMerge>,
     /// Committed paths, sorted parents first.
     pub items: Vec<JournalItem>,
+    /// Every lock token sent with the commit (committed paths, unmodified locked files met by
+    /// the harvest, locked nodes below deleted directories).
+    #[serde(default)]
+    pub locks: Vec<JournalLock>,
 }
 
 /// Directory that stores journals and their data.
@@ -231,6 +243,7 @@ impl JournalStore {
         keep_locks: bool,
         keep_changelist: bool,
         items: Vec<JournalItem>,
+        locks: Vec<JournalLock>,
     ) -> JournalData {
         JournalData {
             version: FORMAT_VERSION,
@@ -241,6 +254,7 @@ impl JournalStore {
             txn: None,
             merged: None,
             items,
+            locks,
         }
     }
 }
@@ -321,7 +335,6 @@ mod tests {
                 size: 3,
                 data: "0.txt".into(),
             }),
-            lock_token: Some("opaquelocktoken:x".into()),
         }
     }
 
@@ -335,6 +348,10 @@ mod tests {
             true,
             false,
             vec![item()],
+            vec![JournalLock {
+                relpath: "a/b.txt".into(),
+                token: "opaquelocktoken:x".into(),
+            }],
         );
         store.write(&data).expect("write");
         data.txn = Some("7-x".into());
@@ -344,7 +361,14 @@ mod tests {
             author: Some("u".into()),
         });
         store.write(&data).expect("rewrite");
-        let second = store.begin("2-a".into(), PathBuf::from("/wc"), false, false, Vec::new());
+        let second = store.begin(
+            "2-a".into(),
+            PathBuf::from("/wc"),
+            false,
+            false,
+            Vec::new(),
+            Vec::new(),
+        );
         store.write(&second).expect("write");
 
         let files = store.list().expect("list");

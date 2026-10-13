@@ -88,6 +88,7 @@ fn resolve_one(
     let mut resolve_text = false;
     let mut resolve_props = false;
     let mut resolve_tree = false;
+    let mut new_props_for_txn = None;
 
     if scope.text
         && let Some(text) = skel.text()
@@ -125,9 +126,7 @@ fn resolve_one(
             ResolveChoice::MineFull => Some(prop.mine_props.clone().unwrap_or_default()),
             ResolveChoice::TheirsFull => Some(prop.their_props.clone().unwrap_or_default()),
         };
-        if let Some(p) = new_props {
-            db.set_props(rel, &p, &[])?;
-        }
+        new_props_for_txn = new_props;
         work.extend(
             prop.markers
                 .iter()
@@ -148,17 +147,23 @@ fn resolve_one(
         return Ok(false);
     }
     let all_gone = skel.resolve(resolve_text, resolve_props.then_some(""), resolve_tree)?;
-    if all_gone {
-        db.resolve(rel, &skels(&work))?;
-    } else {
-        db.mark_conflict(
-            rel,
-            &ConflictRecord {
-                skel: skel.to_skel(),
-                texts: record.texts.clone(),
-            },
-            &skels(&work),
-        )?;
-    }
+    // The chosen properties, the conflict record and the marker removals change together.
+    db.with_txn(|t| {
+        if let Some(p) = &new_props_for_txn {
+            t.set_props(rel, p)?;
+        }
+        if all_gone {
+            t.clear_conflict(rel)?;
+        } else {
+            t.write_conflict(
+                rel,
+                &ConflictRecord {
+                    skel: skel.to_skel(),
+                    texts: record.texts.clone(),
+                },
+            )?;
+        }
+        t.queue_work(&skels(&work))
+    })?;
     Ok(true)
 }

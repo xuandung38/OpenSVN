@@ -38,29 +38,46 @@ pub fn finalize(db: &WcDb, journal: &JournalData, data_dir: &Path) -> Result<()>
     let mut items: Vec<&JournalItem> = journal.items.iter().collect();
     items.sort_by(|a, b| a.relpath.cmp(&b.relpath));
     let mut batch = Vec::with_capacity(items.len());
-    let mut work = Vec::new();
     for item in items {
         let rel = RelPath::new(&item.relpath)?;
         let info = commit_info(journal, merged, item)?;
-        if item.kind == ItemKind::File && item.action != ItemAction::Delete {
-            work.push(
+        let file_commit =
+            (item.kind == ItemKind::File && item.action != ItemAction::Delete).then(|| {
                 WorkItem::FileCommit {
                     relpath: item.relpath.clone(),
                 }
-                .to_skel(),
-            );
-        }
-        batch.push((rel, info, item.lock_token.is_some()));
+                .to_skel()
+            });
+        batch.push((rel, info, file_commit));
     }
-    let release_locks = !journal.keep_locks;
+    let locks = if journal.keep_locks {
+        Vec::new()
+    } else {
+        journal
+            .locks
+            .iter()
+            .map(|l| Ok((RelPath::new(&l.relpath)?, l.token.as_str())))
+            .collect::<Result<Vec<_>>>()?
+    };
     db.with_txn(|t| {
-        for (rel, info, had_lock) in &batch {
-            // The server released the lock with the commit; drop the cached row while BASE
-            // still names the repository location it is keyed by.
-            if release_locks && *had_lock {
-                t.lock_remove(rel)?;
+        // The server released the locks with the commit; drop the cached rows (only those
+        // still holding the sent token) while BASE still names the repository locations they
+        // are keyed by, including the nodes below a committed deletion.
+        for (rel, token) in &locks {
+            t.lock_remove_token(rel, token)?;
+        }
+        let mut work = Vec::new();
+        for (rel, info, file_commit) in &batch {
+            // A journal finalized late (recovery after the working copy moved on, e.g. the
+            // same path committed again as a later revision) must never take BASE back.
+            if t.read_base(rel)?
+                .and_then(|b| b.revision)
+                .is_some_and(|r| r > merged.revision)
+            {
+                continue;
             }
             t.commit_node(rel, info)?;
+            work.extend(file_commit.iter().cloned());
         }
         t.queue_work(&work)
     })

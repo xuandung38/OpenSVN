@@ -79,6 +79,24 @@ fn finalize_journal(
     store.remove(&data.id)
 }
 
+/// Finalizes every merged journal of the working copy `db` (whose lock the caller holds), so
+/// a commit never starts from a BASE that misses an earlier merged revision. Journals of other
+/// working copies, unmerged ones and unreadable ones are left to [`recover_commits`].
+pub(crate) fn finalize_pending_for_wc(store: &JournalStore, db: &WcDb) -> Result<()> {
+    for path in store.list()? {
+        let Ok(data) = JournalStore::read(&path) else {
+            continue;
+        };
+        if data.merged.is_none() || data.wcroot != db.wcroot() {
+            continue;
+        }
+        finalize(db, &data, &store.data_dir_of(&data.id))?;
+        run_work_queue(db, &CancelToken::new())?;
+        store.remove(&data.id)?;
+    }
+    Ok(())
+}
+
 async fn abort_journal(
     store: &JournalStore,
     data: &JournalData,

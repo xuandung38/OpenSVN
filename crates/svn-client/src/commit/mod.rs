@@ -7,7 +7,10 @@
 //! * nothing in the working copy changes before the server merge succeeded;
 //! * the journal records the server transaction before any content is sent and the revision
 //!   right after MERGE; [`recover_commits`] completes or cleans up whatever a crash left;
-//! * the post-commit update of all committed paths is one database transaction.
+//! * the post-commit update of all committed paths is one database transaction;
+//! * after MERGE, cancellation is ignored and the commit is never reported as failed; a merged
+//!   journal left by a crash is finalized before the next commit on the same working copy, and
+//!   finalizing never moves a node's BASE back to an older revision.
 //!
 //! Failpoints (feature `failpoints`): `commit.after_txn_created` fires once the server
 //! transaction exists, `commit.after_merge_before_finalize` after MERGE, before the working
@@ -35,7 +38,7 @@ use svn_wc::pristine::PristineIndex;
 
 use self::collect::{CollectOptions, ItemAction, collect};
 use self::drive::{DriveContext, DriveItem, PreparedText, drive};
-use self::journal::{JournalItem, JournalObserver, JournalStore, JournalText};
+use self::journal::{JournalItem, JournalLock, JournalObserver, JournalStore, JournalText};
 use crate::local::content::detranslate_to_file;
 use crate::local::paths::{abs_of, rel_of};
 use crate::wc::run_work_queue;
@@ -99,7 +102,8 @@ pub struct CommitContext<'a> {
     pub ra: &'a dyn RaSession,
     /// Application state directory holding the commit journals.
     pub state_dir: &'a Path,
-    /// Cancellation; a commit cancelled before MERGE leaves the working copy untouched.
+    /// Cancellation; a commit cancelled before MERGE leaves the working copy untouched. Once
+    /// the server accepted the MERGE it is ignored: the commit is finished and reported.
     pub cancel: &'a CancelToken,
 }
 
@@ -112,6 +116,9 @@ pub struct CommitResult {
     pub post_commit_err: Option<String>,
     /// Working copy paths that were committed.
     pub committed: Vec<RelPath>,
+    /// The commit is in the repository and the working copy rows are updated, but finishing the
+    /// working files failed (e.g. a file is in use); `cleanup` completes it.
+    pub wc_warning: Option<String>,
 }
 
 /// Reclassifies errors the RA layer could not map: out-of-date and lock failures keep their
@@ -176,6 +183,10 @@ async fn commit_locked(
         .iter()
         .map(|t| rel_of(db, t))
         .collect::<Result<_>>()?;
+    let store = JournalStore::new(ctx.state_dir);
+    // A merged commit of this working copy that was never folded in (crash or failure after
+    // MERGE) goes first, so the new commit starts from the true BASE.
+    recovery::finalize_pending_for_wc(&store, db)?;
     let harvest = collect(
         db,
         &rels,
@@ -189,7 +200,6 @@ async fn commit_locked(
     }
     ctx.cancel.check()?;
 
-    let store = JournalStore::new(ctx.state_dir);
     let id = store.new_id();
     let data_dir = store.create_data_dir(&id)?;
     let prepared = match prepare_items(db, &harvest.items, &data_dir) {
@@ -200,12 +210,21 @@ async fn commit_locked(
         }
     };
     let journal_items: Vec<JournalItem> = prepared.iter().map(journal_item).collect();
+    let journal_locks: Vec<JournalLock> = harvest
+        .locks
+        .iter()
+        .map(|l| JournalLock {
+            relpath: l.relpath.as_str().to_owned(),
+            token: l.token.clone(),
+        })
+        .collect();
     let initial = store.begin(
         id.clone(),
         db.wcroot().to_path_buf(),
         opts.keep_locks,
         opts.keep_changelist,
         journal_items,
+        journal_locks,
     );
     if let Err(e) = store.write(&initial) {
         let _ = store.remove(&id);
@@ -213,12 +232,12 @@ async fn commit_locked(
     }
     let observer = Arc::new(JournalObserver::new(store.clone(), initial));
 
-    let tokens: Vec<(String, String)> = prepared
+    let tokens: Vec<(String, String)> = harvest
+        .locks
         .iter()
-        .filter_map(|p| {
-            let t = p.item.lock_token.clone()?;
-            let path = drive::editor_path(&opts.session_prefix, &p.item.repos_relpath).ok()?;
-            Some((path.as_str().to_owned(), t))
+        .filter_map(|l| {
+            let path = drive::editor_path(&opts.session_prefix, &l.repos_relpath).ok()?;
+            Some((path.as_str().to_owned(), l.token.clone()))
         })
         .collect();
 
@@ -298,15 +317,44 @@ async fn commit_locked(
 
     failpoint!("commit.after_merge_before_finalize");
 
+    // From here on the revision exists in the repository. Cancellation is ignored and nothing
+    // is reported as a failed commit: the user must never retry a commit that went through.
     let journal = observer.snapshot();
-    finalize::finalize(db, &journal, &data_dir)?;
+    if let Err(e) = finalize::finalize(db, &journal, &data_dir) {
+        // The journal stays: the next commit on this working copy or `recover_commits`
+        // finishes it.
+        let mut err = SvnError::new(
+            ErrorCode::WcNeedsCleanup,
+            format!(
+                "committed revision {}, but the working copy could not be updated yet; it is \
+                 completed by the next commit or by commit recovery: {}",
+                info.revision.0, e.message
+            ),
+        );
+        err.svn_code = e.svn_code;
+        return Err(err);
+    }
     failpoint!("commit.after_finalize_before_queue");
-    run_work_queue(db, ctx.cancel)?;
-    store.remove(&id)?;
+    // The rows and the `file-commit` items are committed in wc.db: the journal has done its
+    // job, and any queued item left over is finished by the next operation or `cleanup`.
+    let mut warnings = Vec::new();
+    if let Err(e) = store.remove(&id) {
+        warnings.push(format!(
+            "could not remove the commit journal: {}",
+            e.message
+        ));
+    }
+    if let Err(e) = run_work_queue(db, &CancelToken::new()) {
+        warnings.push(format!(
+            "updating the committed working files did not finish; run cleanup: {}",
+            e.message
+        ));
+    }
     Ok(Some(CommitResult {
         revision: info.revision,
         post_commit_err: info.post_commit_err,
         committed: prepared.iter().map(|p| p.item.relpath.clone()).collect(),
+        wc_warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
     }))
 }
 
@@ -317,7 +365,6 @@ fn journal_item(p: &DriveItem) -> JournalItem {
         kind: p.item.kind,
         action: p.item.action,
         text: p.text.as_ref().map(|t| t.record.clone()),
-        lock_token: p.item.lock_token.clone(),
     }
 }
 

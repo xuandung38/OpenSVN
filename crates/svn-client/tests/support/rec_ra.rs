@@ -33,6 +33,8 @@ pub struct RecRa {
     pub cancel_on_text: Option<CancelToken>,
     /// Fail the drive with this error when the first text upload starts.
     pub fail_on_text: Option<SvnError>,
+    /// Cancel this token right after the server accepted the MERGE.
+    pub cancel_after_merge: Option<CancelToken>,
     pub on_auth: Option<AuthHook>,
 }
 
@@ -45,6 +47,7 @@ impl RecRa {
             next_rev: 2,
             cancel_on_text: None,
             fail_on_text: None,
+            cancel_after_merge: None,
             on_auth: None,
         }
     }
@@ -68,6 +71,7 @@ struct RecEditor {
     next_rev: u64,
     cancel_on_text: Option<CancelToken>,
     fail_on_text: Option<SvnError>,
+    cancel_after_merge: Option<CancelToken>,
     dirs: HashMap<DirId, String>,
     files: HashMap<FileId, String>,
     counter: u32,
@@ -262,7 +266,7 @@ impl CommitEditor for RecEditor {
     async fn close_edit(self: Box<Self>) -> Result<CommitInfo> {
         let this = *self;
         push(&this.log, "close_edit".into());
-        match this.inner {
+        let merged = match this.inner {
             Some(e) => e.close_edit().await,
             None => {
                 let info = CommitInfo {
@@ -274,7 +278,13 @@ impl CommitEditor for RecEditor {
                 this.observer.on_merged(&info)?;
                 Ok(info)
             }
+        };
+        if merged.is_ok()
+            && let Some(t) = &this.cancel_after_merge
+        {
+            t.cancel();
         }
+        merged
     }
 
     async fn abort_edit(self: Box<Self>) -> Result<()> {
@@ -437,6 +447,7 @@ impl RaSession for RecRa {
             next_rev: self.next_rev,
             cancel_on_text: self.cancel_on_text.clone(),
             fail_on_text: self.fail_on_text.clone(),
+            cancel_after_merge: self.cancel_after_merge.clone(),
             dirs: HashMap::new(),
             files: HashMap::new(),
             counter: 0,
