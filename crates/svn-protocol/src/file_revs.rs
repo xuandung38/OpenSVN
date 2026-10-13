@@ -12,10 +12,9 @@ use svn_types::{RelPath, Result, Revnum};
 use crate::caps::{UrlBuilder, advertise_caps};
 use crate::display_path::RepoDisplayPath;
 use crate::http::{HttpRequest, Method, ResponseParser, parse_chunked};
+use crate::limits::ParserLimits;
 use crate::util::{Base64Stream, corrupt, parse_revnum};
 use crate::xml::{Ns, StartTag, XmlEvent, XmlReader, XmlWriter};
-
-const MAX_PROP_BYTES: usize = 8 << 20;
 
 /// Builds `REPORT rvr/PEG/file` with an `S:file-revs-report` body for revisions `start..=end`.
 pub fn file_revs_request(
@@ -36,6 +35,35 @@ pub fn file_revs_request(
     w.element("S:path", &[], "").end();
     let req = HttpRequest::new(Method::Report, urls.rev_root(peg, file)?).xml_body(w.finish()?);
     Ok(advertise_caps(req))
+}
+
+/// Revision range to request and whether the caller must reverse the answer itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileRevsPlan {
+    /// `S:start-revision` to send.
+    pub start: Revnum,
+    /// `S:end-revision` to send.
+    pub end: Revnum,
+    /// The server answers oldest first only; reverse the revisions after receiving them.
+    pub client_reverses: bool,
+}
+
+/// Capability-driven range choice: a descending range (`start > end`) is sent as is when the
+/// server has `reverse-file-revs`; otherwise it is asked for ascending and flagged for reversal.
+pub fn plan_file_revs(caps: &crate::Capabilities, start: Revnum, end: Revnum) -> FileRevsPlan {
+    if start > end && !caps.dav.reverse_file_revs {
+        FileRevsPlan {
+            start: end,
+            end: start,
+            client_reverses: true,
+        }
+    } else {
+        FileRevsPlan {
+            start,
+            end,
+            client_reverses: false,
+        }
+    }
 }
 
 /// One step of a file-revs answer.
@@ -103,6 +131,7 @@ pub struct FileRevsParser {
     capture: Capture,
     capture_depth: usize,
     in_rev: bool,
+    limits: ParserLimits,
     failed: bool,
 }
 
@@ -128,7 +157,16 @@ impl FileRevsParser {
             capture: Capture::None,
             capture_depth: 0,
             in_rev: false,
+            limits: ParserLimits::default(),
             failed: false,
+        }
+    }
+
+    /// Creates a parser with explicit limits.
+    pub fn with_limits(limits: ParserLimits) -> Self {
+        Self {
+            limits,
+            ..Self::new()
         }
     }
 
@@ -188,9 +226,7 @@ impl FileRevsParser {
             Capture::None => {}
             Capture::Prop { text: buf, .. } => {
                 buf.push_str(text);
-                if buf.len() > MAX_PROP_BYTES {
-                    return Err(corrupt("property value too large"));
-                }
+                ParserLimits::check(buf.len(), self.limits.max_text_bytes, "property value")?;
             }
             Capture::TxDelta(b64) => {
                 let data = b64.push(text)?;

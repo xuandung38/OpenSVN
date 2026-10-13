@@ -3,7 +3,9 @@
 use svn_types::{ErrorCode, Result, Revnum, SvnError, Timestamp};
 
 use crate::errors::error_from_response;
+use crate::errors::sanitize_message;
 use crate::http::{ResponseHead, ResponseParser, parse_chunked};
+use crate::limits::ParserLimits;
 use crate::util::{corrupt, parse_revnum, parse_timestamp};
 use crate::xml::{Ns, XmlEvent, XmlReader};
 
@@ -66,6 +68,7 @@ pub struct MergeResponseParser {
     text: String,
     post_commit: Option<String>,
     root_seen: bool,
+    limits: ParserLimits,
     failed: bool,
 }
 
@@ -103,9 +106,11 @@ impl MergeResponseParser {
                 XmlEvent::Text(t) => {
                     if self.field.is_some() {
                         self.text.push_str(&t);
-                        if self.text.len() > 1 << 20 {
-                            return Err(corrupt("oversized merge-response field"));
-                        }
+                        ParserLimits::check(
+                            self.text.len(),
+                            self.limits.max_text_bytes,
+                            "merge-response field",
+                        )?;
                     }
                 }
                 XmlEvent::End(name) => {
@@ -116,7 +121,12 @@ impl MergeResponseParser {
                             "version-name" => self.current.rev = Some(parse_revnum(&text)?),
                             "creationdate" => self.current.date = Some(parse_timestamp(&text)?),
                             "creator-displayname" => self.current.author = Some(text),
-                            _ => self.post_commit = Some(text.trim().to_owned()),
+                            _ => {
+                                self.post_commit = Some(sanitize_message(
+                                    text.trim(),
+                                    self.limits.max_error_message_bytes,
+                                ));
+                            }
                         }
                     } else if name.is(&Ns::Dav, "response") {
                         let done = std::mem::take(&mut self.current);

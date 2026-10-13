@@ -63,6 +63,63 @@ pub fn create_txn_request(
     Ok(advertise_caps(req))
 }
 
+/// How to start a transaction on this server.
+#[derive(Debug)]
+pub struct CreateTxnPlan {
+    /// The `POST !svn/me` request.
+    pub request: HttpRequest,
+    /// Revision properties the server could not take with the request: after
+    /// [`parse_create_txn_response`](super::parse_create_txn_response) send them with
+    /// [`txn_proppatch_request`]. Empty when `create-txn-with-props` is available.
+    pub deferred_revprops: Vec<PropChange>,
+}
+
+/// Capability-driven transaction start: revision properties travel with the request when the
+/// server lists `create-txn-with-props`, otherwise a plain `create-txn` is sent and the
+/// properties are deferred to a PROPPATCH on the transaction.
+pub fn create_txn_plan(
+    urls: &UrlBuilder,
+    caps: &Capabilities,
+    revprops: &[(&str, &[u8])],
+) -> Result<CreateTxnPlan> {
+    if revprops.is_empty() || caps.supports_post("create-txn-with-props") {
+        return Ok(CreateTxnPlan {
+            request: create_txn_request(urls, caps, revprops)?,
+            deferred_revprops: Vec::new(),
+        });
+    }
+    Ok(CreateTxnPlan {
+        request: create_txn_request(urls, caps, &[])?,
+        deferred_revprops: revprops
+            .iter()
+            .map(|(n, v)| PropChange {
+                name: (*n).to_owned(),
+                value: Some(Bytes::copy_from_slice(v)),
+            })
+            .collect(),
+    })
+}
+
+/// Transaction properties that tell the server which client is committing
+/// (`svn:txn-client-compat-version`, `svn:txn-user-agent`). Servers without the
+/// `ephemeral-txnprops` capability get none.
+pub fn ephemeral_txn_props(
+    caps: &Capabilities,
+    compat_version: &str,
+    user_agent: &str,
+) -> Vec<(&'static str, Vec<u8>)> {
+    if !caps.dav.ephemeral_txnprops {
+        return Vec::new();
+    }
+    vec![
+        (
+            "svn:txn-client-compat-version",
+            compat_version.as_bytes().to_vec(),
+        ),
+        ("svn:txn-user-agent", user_agent.as_bytes().to_vec()),
+    ]
+}
+
 /// Builds `MKCOL` for a new directory.
 pub fn mkcol_request(urls: &UrlBuilder, txn: &str, path: &RelPath) -> Result<HttpRequest> {
     Ok(advertise_caps(HttpRequest::new(
@@ -82,6 +139,17 @@ pub struct PutOptions<'a> {
     pub result_md5: Option<&'a str>,
     /// Lock held on the path.
     pub lock: Option<LockToken<'a>>,
+}
+
+impl<'a> PutOptions<'a> {
+    /// Sets the result checksum only when the server verifies it (`put-result-checksum`).
+    #[must_use]
+    pub fn with_result_md5(mut self, caps: &Capabilities, md5: &'a str) -> Self {
+        if caps.verifies_put_result_checksum() {
+            self.result_md5 = Some(md5);
+        }
+        self
+    }
 }
 
 /// Builds `PUT` of a svndiff body (an empty body creates an empty file).

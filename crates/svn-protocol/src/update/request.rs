@@ -2,7 +2,7 @@
 
 use svn_types::{Depth, ErrorCode, RelPath, Result, Revnum, SvnError};
 
-use crate::caps::{UrlBuilder, advertise_caps};
+use crate::caps::{BulkPreference, Capabilities, UrlBuilder, advertise_caps};
 use crate::http::{HttpRequest, Method};
 use crate::xml::XmlWriter;
 
@@ -16,6 +16,27 @@ pub enum UpdateMode {
         /// Ask for properties inline (`S:include-props`); needs the `inline-props` capability.
         include_props: bool,
     },
+}
+
+impl UpdateMode {
+    /// Picks the mode from what the server announced:
+    /// send-all only when the server permits it and either the client asks for it or the server
+    /// prefers it; otherwise skelta, with properties inline when the server has `inline-props`
+    /// (without it the answer contains `fetch-props` and `fetch-file` elements instead).
+    pub fn select(caps: &Capabilities, preference: BulkPreference) -> Self {
+        let want_bulk = match preference {
+            BulkPreference::Bulk => true,
+            BulkPreference::Skelta => false,
+            BulkPreference::Auto => caps.bulk_updates == Some(crate::caps::BulkUpdates::Prefer),
+        };
+        if want_bulk && caps.bulk_updates_allowed() {
+            UpdateMode::SendAll
+        } else {
+            UpdateMode::Skelta {
+                include_props: caps.dav.inline_props,
+            }
+        }
+    }
 }
 
 /// Parameters of an update, switch, status -u or diff-style report.

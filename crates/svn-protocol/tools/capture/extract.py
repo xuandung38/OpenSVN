@@ -115,7 +115,8 @@ M += [("checkout", ME, "update/checkout-send-all"),
       ("commit-out-of-date", dict(method="DELETE", status=204), "commit/abort-txn"),
       ("blame", dict(method="REPORT", status=200, path="rvr"), "file_revs/blame")]
 
-M += [("log-control-chars", dict(method="REPORT", status=200, path="rvr"), "log/control-chars")]
+M += [("list-trunk", dict(method="REPORT", status=200, path="rvr"), "list/list-report"),
+      ("log-control-chars", dict(method="REPORT", status=200, path="rvr"), "log/control-chars")]
 
 if os.path.isdir(DEST): shutil.rmtree(DEST)
 for step, sel, dest in M:

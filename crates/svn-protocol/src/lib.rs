@@ -14,6 +14,7 @@ pub mod file_revs;
 pub mod get;
 pub mod http;
 pub mod limits;
+pub mod list_report;
 pub mod locks;
 pub mod log;
 pub mod propfind;
@@ -23,7 +24,8 @@ pub mod xml;
 mod util;
 
 pub use caps::{
-    AcceptedHref, BulkUpdates, Capabilities, DavCaps, HrefKind, UrlBuilder, options_request,
+    AcceptedHref, BulkPreference, BulkUpdates, Capabilities, DavCaps, HrefKind, ListStrategy,
+    UrlBuilder, options_request,
 };
 pub use display_path::{DisplayChangedPath, RepoDisplayPath, RepoLock};
 pub use errors::{error_from_response, map_errcode, map_http_status};
