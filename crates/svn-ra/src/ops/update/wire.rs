@@ -10,8 +10,8 @@ use std::sync::Arc;
 use bytes::{Bytes, BytesMut};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use svn_protocol::{
-    Body, Capabilities, Headers, HrefKind, ParserLimits, UrlBuilder, error_from_response,
-    options_request,
+    Body, BulkPreference, Capabilities, Headers, HrefKind, ParserLimits, UrlBuilder,
+    error_from_response, options_request,
 };
 use svn_types::{CancelToken, ErrorCode, RelPath, RepoUrl, Result, SvnError};
 
@@ -33,6 +33,7 @@ pub struct RaWire {
     /// Session location relative to the repository root.
     session_rel: RelPath,
     connections: usize,
+    bulk: BulkPreference,
 }
 
 impl RaWire {
@@ -59,6 +60,7 @@ impl RaWire {
             urls: Arc::new(urls),
             session_rel,
             connections: DEFAULT_CONNECTIONS,
+            bulk: BulkPreference::Auto,
         })
     }
 
@@ -69,7 +71,8 @@ impl RaWire {
         cancel: &CancelToken,
     ) -> Result<Self> {
         let req = options_request(&session_url)?;
-        let resp = send_with(&transport, req, RequestBody::Empty, cancel).await?;
+        let body = buffered_body(&req)?;
+        let resp = send_with(&transport, req, body, cancel).await?;
         let head = svn_protocol::ResponseHead::new(resp.status().as_u16(), headers_of(&resp));
         let body = read_limited(resp, ParserLimits::default().max_error_body_bytes, cancel).await?;
         let caps = Capabilities::from_options_response(&session_url, &head, &body)?;
@@ -82,6 +85,18 @@ impl RaWire {
     pub fn with_connections(mut self, connections: usize) -> Self {
         self.connections = connections.clamp(1, 8);
         self
+    }
+
+    /// Chooses between send-all and skeleton updates (default: let the server decide).
+    #[must_use]
+    pub fn with_bulk_preference(mut self, bulk: BulkPreference) -> Self {
+        self.bulk = bulk;
+        self
+    }
+
+    /// Update mode preference.
+    pub fn bulk_preference(&self) -> BulkPreference {
+        self.bulk
     }
 
     /// Connections the transport pool offers (1..=8).
@@ -137,16 +152,7 @@ impl RaWire {
         req: svn_protocol::HttpRequest,
         cancel: &CancelToken,
     ) -> Result<HttpResponse> {
-        let body = match &req.body {
-            Body::Empty => RequestBody::Empty,
-            Body::Bytes(b) => RequestBody::Bytes(b.clone()),
-            Body::Stream(_) => {
-                return Err(SvnError::new(
-                    ErrorCode::Internal,
-                    "streamed protocol bodies must be sent with send_with_body",
-                ));
-            }
-        };
+        let body = buffered_body(&req)?;
         send_with(&self.transport, req, body, cancel).await
     }
 
@@ -181,6 +187,18 @@ impl RaWire {
     /// Reads a small answer completely (at most 4 MiB).
     pub async fn read_small(resp: HttpResponse) -> Result<Bytes> {
         resp.bytes(SMALL_BODY_LIMIT).await
+    }
+}
+
+/// Transport body for a protocol request that carries no stream.
+fn buffered_body(req: &svn_protocol::HttpRequest) -> Result<RequestBody> {
+    match &req.body {
+        Body::Empty => Ok(RequestBody::Empty),
+        Body::Bytes(b) => Ok(RequestBody::Bytes(b.clone())),
+        Body::Stream(_) => Err(SvnError::new(
+            ErrorCode::Internal,
+            "streamed protocol bodies must be sent with send_with_body",
+        )),
     }
 }
 

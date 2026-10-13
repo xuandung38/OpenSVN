@@ -37,10 +37,25 @@ pub(super) async fn merge(
 
 /// Deletes a transaction; a transaction that is already gone counts as deleted.
 pub(super) async fn delete_txn(wire: &RaWire, txn: &TxnName, cancel: &CancelToken) -> Result<()> {
+    delete_txn_found(wire, txn, cancel).await.map(|_| ())
+}
+
+/// Like [`delete_txn`], telling whether the transaction existed (`true`) or was already gone.
+/// HTTP 400 counts as "not found": a server answers it for a name that is not a transaction of
+/// the requested kind.
+pub(super) async fn delete_txn_found(
+    wire: &RaWire,
+    txn: &TxnName,
+    cancel: &CancelToken,
+) -> Result<bool> {
     let req = abort_txn_request(wire.urls(), txn)?;
     let resp = wire.send(req, cancel).await?;
-    if resp.status().is_success() || resp.status().as_u16() == 404 {
-        return Ok(());
+    let status = resp.status().as_u16();
+    if resp.status().is_success() {
+        return Ok(true);
+    }
+    if matches!(status, 400 | 404) {
+        return Ok(false);
     }
     Err(crate::ops::update::error_of(resp, cancel).await)
 }

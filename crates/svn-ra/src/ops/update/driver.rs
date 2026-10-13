@@ -1,9 +1,9 @@
 //! Update, switch and status drive: report in, editor calls out.
 
+use svn_protocol::ResponseParser;
 use svn_protocol::update::{
     UpdateMode as WireMode, UpdateParser, UpdateReportBuilder, UpdateRequestOptions,
 };
-use svn_protocol::{BulkPreference, ResponseParser};
 use svn_ra_api::{
     DEFAULT_COMMAND_CAPACITY, EditorHandle, EditorWorker, ReportFn, UpdateMode, UpdateRequest,
 };
@@ -105,7 +105,7 @@ async fn collect_report(
 /// Request options for `req`, choosing send-all or skeleton mode from the server capabilities.
 fn request_options(wire: &RaWire, req: &UpdateRequest) -> Result<UpdateRequestOptions> {
     let caps = wire.caps();
-    let mut mode = WireMode::select(caps, BulkPreference::Auto);
+    let mut mode = WireMode::select(caps, wire.bulk_preference());
     if matches!(mode, WireMode::Skelta { .. }) && wire.connections() < 2 {
         // Downloads need a connection besides the one held by the report.
         if caps.bulk_updates_allowed() {
