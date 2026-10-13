@@ -33,6 +33,14 @@ fn preserved_extension_follows_the_patterns() {
     assert_eq!(preserved_extension("a.txt", &pats), "txt");
     assert_eq!(preserved_extension("a.Hpp", &pats), "Hpp");
     assert_eq!(preserved_extension("a.js", &pats), "js");
+    // apr_fnmatch: a backslash makes the next character literal.
+    let esc = vec![r"tx\t".to_string(), r"[\]x]y".to_string()];
+    assert_eq!(preserved_extension("a.txt", &esc), "txt");
+    assert_eq!(preserved_extension("a.tyt", &esc), "");
+    assert_eq!(preserved_extension("a.]y", &esc), "]y");
+    let literal_star = vec![r"\*".to_string()];
+    assert_eq!(preserved_extension("a.*", &literal_star), "*");
+    assert_eq!(preserved_extension("a.b", &literal_star), "");
     assert_eq!(preserved_extension("a.rs.bak", &pats), "");
     assert_eq!(preserved_extension("a.h", &pats), "");
     assert_eq!(preserved_extension("a.c", &[]), "");
@@ -92,18 +100,33 @@ fn an_existing_symlink_is_never_reused_or_followed() {
     assert_eq!(fs::read(&victim).unwrap(), b"keep");
 }
 
+fn plain() -> TranslateInfo {
+    TranslateInfo::default()
+}
+
+fn write_wc_file(w: &tempfile::TempDir, rel: &str, bytes: &[u8]) {
+    let p = w.path().join(rel);
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(p, bytes).unwrap();
+}
+
 #[test]
 fn text_markers_for_an_update_conflict() {
     let w = wc();
-    fs::create_dir_all(w.path().join("trunk")).unwrap();
+    write_wc_file(&w, "trunk/t.txt", b"mine\r\nline\r\n");
     let labels = TextMarkerLabels::for_update(Some(1), 2, "");
+    let info = TranslateInfo {
+        eol_style: crate::translate::EolStyle::CrLf,
+        keywords_prop: None,
+        special: false,
+    };
     let m = create_text_markers(
         w.path(),
         "trunk/t.txt",
         &labels,
         &MarkerSource::InWc(".svn/tmp/left".into()),
         &MarkerSource::InWc(".svn/tmp/right".into()),
-        &MarkerSource::InWc(".svn/tmp/target".into()),
+        &info,
     )
     .unwrap();
     assert_eq!(m.conflict.original.as_deref(), Some("trunk/t.txt.r1"));
@@ -116,28 +139,42 @@ fn text_markers_for_an_update_conflict() {
             "{f}"
         );
     }
+    let [
+        WorkItem::FileTranslate {
+            src: s1, dst: d1, ..
+        },
+        WorkItem::FileTranslate {
+            src: s2, dst: d2, ..
+        },
+        WorkItem::FileTranslate {
+            src: s3,
+            dst: d3,
+            local,
+        },
+        WorkItem::FileRemove { relpath: removed },
+    ] = &m.work_items[..]
+    else {
+        panic!("{:?}", m.work_items)
+    };
     assert_eq!(
-        m.work_items,
-        vec![
-            WorkItem::FileTranslate {
-                local: "trunk/t.txt".into(),
-                src: ".svn/tmp/left".into(),
-                dst: "trunk/t.txt.r1".into()
-            },
-            WorkItem::FileTranslate {
-                local: "trunk/t.txt".into(),
-                src: ".svn/tmp/right".into(),
-                dst: "trunk/t.txt.r2".into()
-            },
-            WorkItem::FileTranslate {
-                local: "trunk/t.txt".into(),
-                src: ".svn/tmp/target".into(),
-                dst: "trunk/t.txt.mine".into()
-            },
-            WorkItem::FileRemove {
-                relpath: ".svn/tmp/target".into()
-            },
-        ]
+        (s1.as_str(), d1.as_str()),
+        (".svn/tmp/left", "trunk/t.txt.r1")
+    );
+    assert_eq!(
+        (s2.as_str(), d2.as_str()),
+        (".svn/tmp/right", "trunk/t.txt.r2")
+    );
+    assert_eq!(
+        (d3.as_str(), local.as_str()),
+        ("trunk/t.txt.mine", "trunk/t.txt")
+    );
+    // The third source and the removal are the freshly staged detranslated copy.
+    assert!(s3.starts_with(".svn/tmp/marker-"), "{s3}");
+    assert_eq!(removed, s3);
+    assert_eq!(
+        fs::read(w.path().join(s3)).unwrap(),
+        b"mine\r\nline\r\n",
+        "CRLF repo-normal form is CRLF"
     );
     // A second conflict on the same file gets numbered names.
     let again = create_text_markers(
@@ -146,15 +183,157 @@ fn text_markers_for_an_update_conflict() {
         &labels,
         &MarkerSource::InWc("l".into()),
         &MarkerSource::InWc("r".into()),
-        &MarkerSource::InWc("t".into()),
+        &plain(),
     )
     .unwrap();
     assert_eq!(again.conflict.mine.as_deref(), Some("trunk/t.txt.2.mine"));
 }
 
 #[test]
+fn detranslation_normalises_the_working_file() {
+    let w = wc();
+    write_wc_file(&w, "f", b"$Id: f 7 2026-01-01 00:00:00Z al $\nx\r\ny\r\n");
+    let info = TranslateInfo {
+        eol_style: crate::translate::EolStyle::Native,
+        keywords_prop: Some(b"Id".to_vec()),
+        special: false,
+    };
+    let m = create_text_markers(
+        w.path(),
+        "f",
+        &TextMarkerLabels::for_update(Some(1), 2, ""),
+        &MarkerSource::InWc("a".into()),
+        &MarkerSource::InWc("b".into()),
+        &info,
+    )
+    .unwrap();
+    let WorkItem::FileTranslate { src, .. } = &m.work_items[2] else {
+        panic!()
+    };
+    // The working file mixes endings; detranslation repairs them (force repair) to LF.
+    assert_eq!(fs::read(w.path().join(src)).unwrap(), b"$Id$\nx\ny\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_working_file_is_staged_as_special_text() {
+    let w = wc();
+    std::os::unix::fs::symlink("some/dest", w.path().join("l")).unwrap();
+    let m = create_text_markers(
+        w.path(),
+        "l",
+        &TextMarkerLabels::for_update(Some(1), 2, ""),
+        &MarkerSource::InWc("a".into()),
+        &MarkerSource::InWc("b".into()),
+        &plain(),
+    )
+    .unwrap();
+    let WorkItem::FileTranslate { src, .. } = &m.work_items[2] else {
+        panic!()
+    };
+    assert_eq!(fs::read(w.path().join(src)).unwrap(), b"link some/dest");
+}
+
+/// The class of bug the public API used to allow: a caller handing in "the working file" as the
+/// thing to delete. No input can produce a `file-remove` of anything but a staged `.svn/tmp` file.
+#[test]
+fn queueing_can_never_remove_the_working_file_or_any_wc_path() {
+    let w = wc();
+    write_wc_file(&w, "t.txt", b"data");
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("ext"), b"external").unwrap();
+    let sources = [
+        (
+            MarkerSource::InWc("t.txt".into()),
+            MarkerSource::InWc("t.txt".into()),
+        ),
+        (
+            MarkerSource::InWc(".svn/tmp/x".into()),
+            MarkerSource::External(outside.path().join("ext")),
+        ),
+        (
+            MarkerSource::External(outside.path().join("ext")),
+            MarkerSource::External(outside.path().join("ext")),
+        ),
+    ];
+    for (original, their) in sources {
+        let m = create_text_markers(
+            w.path(),
+            "t.txt",
+            &TextMarkerLabels::for_merge(1, 2, ""),
+            &original,
+            &their,
+            &plain(),
+        )
+        .unwrap();
+        let removals: Vec<_> = m
+            .work_items
+            .iter()
+            .filter_map(|i| {
+                if let WorkItem::FileRemove { relpath } = i {
+                    Some(relpath.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(!removals.is_empty());
+        for r in &removals {
+            assert!(r.starts_with(".svn/tmp/marker-"), "unexpected removal {r}");
+            assert_ne!(*r, "t.txt");
+        }
+        assert_eq!(fs::read(w.path().join("t.txt")).unwrap(), b"data");
+        // Sources are never removal targets.
+        let sources_of_translate: Vec<_> = m
+            .work_items
+            .iter()
+            .filter_map(|i| {
+                if let WorkItem::FileTranslate { src, .. } = i {
+                    Some(src.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(sources_of_translate.len(), 3);
+        // The staged detranslated copy is removed first, then staged external copies.
+        let WorkItem::FileRemove { relpath: first } = &m.work_items[3] else {
+            panic!()
+        };
+        assert_eq!(first, sources_of_translate[2]);
+    }
+}
+
+#[test]
+fn in_wc_sources_must_be_paths_the_runner_accepts() {
+    let w = wc();
+    write_wc_file(&w, "t.txt", b"data");
+    for bad in [
+        "../x",
+        "/abs",
+        ".svn/wc.db",
+        ".svn/tmp/a/b",
+        ".svn/pristine/zz/zz.svn-base",
+        ".svn/pristine",
+    ] {
+        let r = create_text_markers(
+            w.path(),
+            "t.txt",
+            &TextMarkerLabels::for_update(Some(1), 2, ""),
+            &MarkerSource::InWc(bad.into()),
+            &MarkerSource::InWc("ok".into()),
+            &plain(),
+        );
+        assert!(r.is_err(), "{bad}");
+        // Nothing was created before the validation failed.
+        assert!(!w.path().join("t.txt.r1").exists(), "{bad}");
+    }
+}
+
+#[test]
 fn external_sources_are_staged_inside_the_working_copy() {
     let w = wc();
+    write_wc_file(&w, "f", b"data");
     let outside = tempfile::tempdir().unwrap();
     let (l, r) = (outside.path().join("l"), outside.path().join("r"));
     fs::write(&l, b"left").unwrap();
@@ -165,7 +344,7 @@ fn external_sources_are_staged_inside_the_working_copy() {
         &TextMarkerLabels::for_merge(2, 3, ""),
         &MarkerSource::External(l),
         &MarkerSource::External(r),
-        &MarkerSource::InWc("t".into()),
+        &plain(),
     )
     .unwrap();
     let WorkItem::FileTranslate { src, .. } = &m.work_items[0] else {
@@ -173,12 +352,13 @@ fn external_sources_are_staged_inside_the_working_copy() {
     };
     assert!(src.starts_with(".svn/tmp/marker-"), "{src}");
     assert_eq!(fs::read(w.path().join(src)).unwrap(), b"left");
-    let removals: Vec<_> = m
-        .work_items
-        .iter()
-        .filter(|i| matches!(i, WorkItem::FileRemove { .. }))
-        .collect();
-    assert_eq!(removals.len(), 3, "target copy plus the two staged files");
+    // translate x3, remove detranslated copy, then the two staged external copies (svn order).
+    assert_eq!(m.work_items.len(), 6);
+    assert!(
+        m.work_items[3..]
+            .iter()
+            .all(|i| matches!(i, WorkItem::FileRemove { .. }))
+    );
     assert_eq!(m.conflict.original.as_deref(), Some("f.merge-left.r2"));
 }
 
