@@ -24,4 +24,5 @@ export const queryKeys = {
   ops: ["ops"] as const,
   opOutcomes: ["op-outcomes"] as const,
   settings: ["settings"] as const,
+  engineCapabilities: ["engine-capabilities"] as const,
 };

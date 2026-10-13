@@ -409,3 +409,55 @@ async fn default_checkout_folder_is_chosen_natively_and_granted_by_rust() {
     f.wait_op(&h).await.unwrap();
     assert!(root.path().join("from-default").is_dir());
 }
+
+#[tokio::test]
+async fn an_unfinished_checkout_is_registered_as_resumable_only_when_its_working_copy_exists() {
+    use crate::engine::{CheckoutPlan, EngineFacade, OpContext};
+
+    let f = Fixture::new(Duration::ZERO).await;
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("partial");
+    std::fs::create_dir(&root).unwrap();
+    // The engine can read a working copy here (as after a checkout that stopped half-way)...
+    f.engine
+        .checkout(
+            &CheckoutPlan {
+                url: format!("{DEMO_REPO_URL}/trunk"),
+                path: root.clone(),
+                rev: None,
+                depth: Depth::Infinity,
+                sparse: None,
+                format: WcFormat::V31,
+                store_pristine: true,
+                ignore_externals: false,
+            },
+            &OpContext::detached(),
+        )
+        .await
+        .unwrap();
+    // ...but without an administrative folder directly inside, nothing is registered.
+    assert!(f.state().wcs.add_unfinished(&root).await.is_none());
+    assert!(commands::wc_entries(f.state()).await.unwrap().is_empty());
+
+    std::fs::create_dir(root.join(".svn")).unwrap();
+    let wc = f.state().wcs.add_unfinished(&root).await.unwrap();
+    let entries = commands::wc_entries(f.state()).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, wc.id);
+    assert!(!entries[0].missing);
+    // Registering again is idempotent.
+    let again = f.state().wcs.add_unfinished(&root).await.unwrap();
+    assert_eq!(again.id, wc.id);
+
+    // A folder that is no working copy at all is left alone.
+    let other = parent.path().join("other");
+    std::fs::create_dir_all(other.join(".svn")).unwrap();
+    assert!(f.state().wcs.add_unfinished(&other).await.is_none());
+}
+
+#[tokio::test]
+async fn engine_capabilities_come_from_the_engine() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let caps = commands::engine_capabilities(f.state()).await.unwrap();
+    assert_eq!(caps, opensvn_ipc::EngineCapabilities { externals: true });
+}

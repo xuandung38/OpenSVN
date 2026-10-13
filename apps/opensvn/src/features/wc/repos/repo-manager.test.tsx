@@ -3,7 +3,7 @@ import { beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { AppShell } from "../../../app/app-shell";
 import type { WcEntry } from "../../../ipc/bindings";
 import { mockCalls, mockEmit, setMockOpDuration } from "../../../ipc/mock/adapter";
-import { resetWcMock } from "../../../ipc/mock/wc-mock-commands";
+import { markMockWcIncomplete, resetWcMock } from "../../../ipc/mock/wc-mock-commands";
 import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../../test-utils";
 import {
   filterEntries,
@@ -70,6 +70,7 @@ describe("repo model", () => {
     lastOpenedAt: null,
     missing: false,
     problem: null,
+    incomplete: false,
     ...p,
   });
 
@@ -195,6 +196,15 @@ test("Mod+T opens the picker; typing filters, Enter switches through wc_open", a
   expect(active && document.getElementById(active)?.getAttribute("aria-selected")).toBe("true");
   await user().type(again, "zzz");
   expect(screen.getByText("No repository matches “zzz”.")).toBeTruthy();
+});
+
+test("a working copy left by an unfinished checkout is flagged Incomplete — Update to finish", async () => {
+  markMockWcIncomplete("wc-docs");
+  const { list } = await openPicker();
+  const docs = within(list).getByRole("option", { name: /design-docs/ });
+  expect(docs.textContent).toContain("Incomplete — Update to finish");
+  const game = within(list).getByRole("option", { name: /game-client/ });
+  expect(game.textContent).not.toContain("Incomplete");
 });
 
 test("a missing working copy offers Locate…, which re-grants through the native dialog", async () => {
