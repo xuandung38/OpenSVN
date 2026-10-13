@@ -6,7 +6,7 @@ REQUEST LOCK /svn/repo/trunk/a.txt
 > DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
 > X-SVN-Version-Name: 9
 RESPONSE 200
-< X-SVN-Creation-Date: 2026-10-13T09:05:45.451000Z
+< X-SVN-Creation-Date: 2026-10-13T09:45:29.103188Z
 < X-SVN-Lock-Owner: alice
-< Lock-Token: <opaquelocktoken:7529f6f5-d3a2-4520-97f8-87d435ba67a0>
+< Lock-Token: <opaquelocktoken:cd8deef0-b78f-4c50-91fb-811fe95229b1>
 < Content-Type: text/xml; charset="utf-8"

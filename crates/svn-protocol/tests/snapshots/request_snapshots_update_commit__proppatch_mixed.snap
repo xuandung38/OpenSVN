@@ -1,0 +1,14 @@
+---
+source: crates/svn-protocol/tests/request_snapshots_update_commit.rs
+expression: "render(&proppatch_request(&u, t, &rel(\"trunk\"), &changes, Some(Revnum(3)),\nNone).unwrap())"
+---
+PROPPATCH http://svn.test.local/svn/repo/!svn/txr/12-ab/trunk
+Content-Type: text/xml
+X-SVN-Version-Name: 3
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+
+<?xml version="1.0" encoding="utf-8"?><D:propertyupdate xmlns:D="DAV:" xmlns:V="http://subversion.tigris.org/xmlns/dav/" xmlns:C="http://subversion.tigris.org/xmlns/custom/" xmlns:S="http://subversion.tigris.org/xmlns/svn/"><D:set><D:prop><S:ignore>*.o&#13;
+build
+</S:ignore><C:binary V:encoding="base64">AJ//AQ==</C:binary><S:needs-lock>*</S:needs-lock></D:prop></D:set><D:remove><D:prop><C:custom:old/><S:keywords/></D:prop></D:remove></D:propertyupdate>

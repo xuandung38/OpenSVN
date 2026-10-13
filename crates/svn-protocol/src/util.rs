@@ -88,6 +88,52 @@ pub(crate) fn validate_lock_token(token: &str) -> Result<String, SvnError> {
     }
 }
 
+/// Parses a lower- or upper-case hex digest of exactly `N` bytes.
+pub(crate) fn parse_hex<const N: usize>(s: &str) -> Result<[u8; N], SvnError> {
+    let s = s.trim();
+    if s.len() != N * 2 || !s.is_ascii() {
+        return Err(corrupt(format!("invalid checksum {s:?}")));
+    }
+    let mut out = [0_u8; N];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+            .map_err(|_| corrupt(format!("invalid checksum {s:?}")))?;
+    }
+    Ok(out)
+}
+
+/// Incremental base64 decoder for text that arrives in arbitrary pieces.
+#[derive(Debug, Default)]
+pub(crate) struct Base64Stream {
+    pending: String,
+}
+
+impl Base64Stream {
+    /// Adds text (whitespace ignored) and returns every byte that is now decodable.
+    pub(crate) fn push(&mut self, text: &str) -> Result<Vec<u8>, SvnError> {
+        self.pending
+            .extend(text.chars().filter(|c| !c.is_whitespace()));
+        let usable = self.pending.len() / 4 * 4;
+        if usable == 0 {
+            return Ok(Vec::new());
+        }
+        let rest = self.pending.split_off(usable);
+        let chunk = std::mem::replace(&mut self.pending, rest);
+        STANDARD
+            .decode(chunk.as_bytes())
+            .map_err(|e| corrupt(format!("invalid base64: {e}")))
+    }
+
+    /// Ends the stream; leftover characters must form a complete group.
+    pub(crate) fn finish(&mut self) -> Result<(), SvnError> {
+        if self.pending.is_empty() {
+            Ok(())
+        } else {
+            Err(corrupt("truncated base64 data"))
+        }
+    }
+}
+
 /// Days since 1970-01-01 for a proleptic Gregorian date.
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -207,5 +253,33 @@ mod tests {
         assert!(percent_decode("%zz").is_err());
         assert!(percent_decode("%ff").is_err());
         assert!(percent_decode("%4").is_err());
+    }
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+
+    #[test]
+    fn hex_digests() {
+        assert_eq!(parse_hex::<2>("0aFf").unwrap(), [0x0a, 0xff]);
+        assert!(parse_hex::<2>("0aF").is_err());
+        assert!(parse_hex::<2>("zzzz").is_err());
+        assert!(parse_hex::<2>("\u{e9}abc").is_err());
+    }
+
+    #[test]
+    fn base64_in_odd_pieces() {
+        let mut b = Base64Stream::default();
+        let mut out = Vec::new();
+        for piece in ["U1Z", "OAA", "=", "\n="] {
+            out.extend(b.push(piece).unwrap());
+        }
+        b.finish().unwrap();
+        assert_eq!(out, b"SVN\0");
+        let mut b = Base64Stream::default();
+        b.push("U1Z").unwrap();
+        assert!(b.finish().is_err());
+        assert!(Base64Stream::default().push("!!!!").is_err());
     }
 }

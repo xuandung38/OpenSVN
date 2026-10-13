@@ -57,6 +57,8 @@ pub mod codes {
     pub const RA_NOT_LOCKED: u32 = 170_007;
     /// `SVN_ERR_RA_DAV_PATH_NOT_FOUND`.
     pub const RA_DAV_PATH_NOT_FOUND: u32 = 175_007;
+    /// `SVN_ERR_RA_DAV_RELOCATED`.
+    pub const RA_DAV_RELOCATED: u32 = 175_011;
     /// `SVN_ERR_RA_DAV_CONN_TIMEOUT`.
     pub const RA_DAV_CONN_TIMEOUT: u32 = 175_012;
     /// `SVN_ERR_RA_DAV_FORBIDDEN`.
@@ -109,9 +111,8 @@ pub fn map_errcode(code: u32) -> Option<ErrorCode> {
         | RA_DAV_FORBIDDEN
         | CLIENT_FORBIDDEN_BY_SERVER => ErrorCode::Forbidden,
         // A hook rejection is a repository policy message, not an authorization failure.
-        // TODO(ErrorCode::HookFailed): map here once the contract adds the variant; `Internal`
-        // keeps the UI from offering a re-login meanwhile, and `svn_code` stays on the error.
-        REPOS_HOOK_FAILURE => ErrorCode::Internal,
+        REPOS_HOOK_FAILURE => ErrorCode::HookFailed,
+        RA_DAV_RELOCATED => ErrorCode::RepositoryMoved,
         RA_SERF_SSL_CERT_UNTRUSTED => ErrorCode::TlsUntrusted,
         RA_DAV_CONN_TIMEOUT => ErrorCode::Timeout,
         RA_NOT_IMPLEMENTED | UNSUPPORTED_FEATURE | REPOS_DISABLED_FEATURE => {
@@ -135,6 +136,7 @@ pub fn map_http_status(status: u16) -> ErrorCode {
         412 => ErrorCode::LockTokenInvalid,
         423 => ErrorCode::LockedByOther,
         501 => ErrorCode::ServerUnsupported,
+        301 | 302 | 307 | 308 => ErrorCode::RepositoryMoved,
         300..=399 | 502 | 503 => ErrorCode::Network,
         _ => ErrorCode::Internal,
     }
@@ -209,7 +211,10 @@ pub fn sanitize_message(text: &str, max: usize) -> String {
 }
 
 /// Builds the error for a failed response. `body` should be the (bounded) response body.
-pub fn error_from_response(status: u16, _headers: &Headers, body: &[u8]) -> SvnError {
+pub fn error_from_response(status: u16, headers: &Headers, body: &[u8]) -> SvnError {
+    if matches!(status, 301 | 302 | 307 | 308) {
+        return moved_error(status, headers);
+    }
     if let Some(entries) = parse_dav_error(body) {
         return chain_from_entries(status, &entries);
     }
@@ -222,6 +227,19 @@ pub fn error_from_response(status: u16, _headers: &Headers, body: &[u8]) -> SvnE
         _ => "request failed",
     };
     SvnError::new(map_http_status(status), format!("HTTP {status}: {reason}"))
+}
+
+/// Redirect the client does not follow: report the (validated) new location.
+fn moved_error(status: u16, headers: &Headers) -> SvnError {
+    let location = headers
+        .get("Location")
+        .filter(|l| !l.chars().any(char::is_control))
+        .and_then(|l| svn_types::RepoUrl::parse(l.trim()).ok());
+    let message = match location {
+        Some(url) => format!("HTTP {status}: repository moved to {url}"),
+        None => format!("HTTP {status}: repository moved (no usable Location)"),
+    };
+    SvnError::new(ErrorCode::RepositoryMoved, message).with_svn_code(codes::RA_DAV_RELOCATED)
 }
 
 fn chain_from_entries(status: u16, entries: &[DavErrorEntry]) -> SvnError {

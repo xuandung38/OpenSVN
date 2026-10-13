@@ -1,0 +1,8 @@
+---
+source: crates/svn-protocol/tests/request_snapshots_update_commit.rs
+expression: "render(&abort_txn_request(&u, \"12-ab\").unwrap())"
+---
+DELETE http://svn.test.local/svn/repo/!svn/txn/12-ab
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
