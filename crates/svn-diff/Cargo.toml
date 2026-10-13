@@ -11,7 +11,7 @@ description = "Subversion-compatible line diff, unified output and three-way mer
 workspace = true
 
 [dependencies]
-imara-diff = { workspace = true }
+svn-types = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

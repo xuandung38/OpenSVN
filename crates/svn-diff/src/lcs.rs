@@ -1,9 +1,32 @@
+// ====================================================================
+//    Licensed to the Apache Software Foundation (ASF) under one
+//    or more contributor license agreements.  See the NOTICE file
+//    distributed with this work for additional information
+//    regarding copyright ownership.  The ASF licenses this file
+//    to you under the Apache License, Version 2.0 (the
+//    "License"); you may not use this file except in compliance
+//    with the License.  You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+//    Unless required by applicable law or agreed to in writing,
+//    software distributed under the License is distributed on an
+//    "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+//    KIND, either express or implied.  See the License for the
+//    specific language governing permissions and limitations
+//    under the License.
+// ====================================================================
+//
+// Modified by OpenSVN: C pointer rings and pools replaced by index arenas; cancellation/budget checks added.
+
 //! Longest common subsequence over token position rings.
 //!
 //! Faithful port of `libsvn_diff/lcs.c` (Apache Subversion 1.15.0, Apache License 2.0), based
 //! on the Wu/Manber/Myers O(NP) algorithm.  The C code threads raw pointers through
 //! circular linked lists; here positions and LCS nodes live in index arenas, which keeps the
 //! algorithm (and therefore the chosen LCS among equal candidates) identical.
+
+use crate::control::{Ctl, DiffError};
 
 /// Index value used for a null pointer.
 pub(crate) const NIL: usize = usize::MAX;
@@ -217,7 +240,8 @@ pub(crate) fn lcs(
     counts2: &[u32],
     prefix_lines: i64,
     suffix_lines: i64,
-) -> usize {
+    ctl: &mut Ctl<'_>,
+) -> Result<usize, DiffError> {
     // EOF is always a sync point: tack on a zero-length node with sentinel positions.
     let off0 = if list1 != NIL {
         pos[list1].offset + suffix_lines + 1
@@ -247,7 +271,7 @@ pub(crate) fn lcs(
         if prefix_lines != 0 {
             head = prepend_lcs(arena, pos, head, prefix_lines, 1, 1);
         }
-        return head;
+        return Ok(head);
     }
 
     let mut unique = [0i64; 2];
@@ -283,12 +307,14 @@ pub(crate) fn lcs(
         // For k < 0 insertions are free.
         let mut k = d.min(0) - p;
         while k < 0 {
+            ctl.tick(1)?;
             snake(&mut fp, at(k), counts, pos, arena);
             k += 1;
         }
         // For k > 0 deletions are free.
         let mut k = d.max(0) + p;
         while k >= 0 {
+            ctl.tick(1)?;
             snake(&mut fp, at(k), counts, pos, arena);
             k -= 1;
         }
@@ -319,5 +345,5 @@ pub(crate) fn lcs(
     if prefix_lines != 0 {
         result = prepend_lcs(arena, pos, result, prefix_lines, 1, 1);
     }
-    result
+    Ok(result)
 }

@@ -8,6 +8,7 @@ use svn_diff::{
     ConflictStyle, DiffOptions, DisplayOptions, IgnoreSpace, LineKind, MergeOptions,
     UnifiedOptions, diff, merge3, split_lines, unified,
 };
+use svn_types::CancelToken;
 
 /// Small vocabulary and mixed EOLs maximize repeated lines and ambiguous alignments.
 fn doc() -> impl Strategy<Value = Vec<u8>> {
@@ -48,21 +49,21 @@ proptest! {
 
     #[test]
     fn merge_with_unchanged_theirs_is_mine(base in doc(), x in doc()) {
-        let r = merge3(&base, &x, &base, &opts());
+        let r = merge3(&base, &x, &base, &opts(), &CancelToken::new()).unwrap();
         prop_assert_eq!(r.text, x);
         prop_assert!(r.conflicts.is_empty());
     }
 
     #[test]
     fn merge_with_unchanged_mine_is_theirs(base in doc(), y in doc()) {
-        let r = merge3(&base, &base, &y, &opts());
+        let r = merge3(&base, &base, &y, &opts(), &CancelToken::new()).unwrap();
         prop_assert_eq!(r.text, y);
         prop_assert!(r.conflicts.is_empty());
     }
 
     #[test]
     fn identical_edits_never_conflict(base in doc(), x in doc()) {
-        let r = merge3(&base, &x, &x, &opts());
+        let r = merge3(&base, &x, &x, &opts(), &CancelToken::new()).unwrap();
         prop_assert_eq!(r.text, x);
         prop_assert!(r.conflicts.is_empty());
     }
@@ -70,7 +71,7 @@ proptest! {
     #[test]
     fn merge_never_panics(base in doc(), m in doc(), t in doc(), style in any_style()) {
         let o = MergeOptions { style, ..MergeOptions::default() };
-        let r = merge3(&base, &m, &t, &o);
+        let r = merge3(&base, &m, &t, &o, &CancelToken::new()).unwrap();
         if r.conflicts.is_empty() && style != ConflictStyle::OnlyConflicts {
             // A conflict-free merge has no marker lines unless the inputs already had them.
             prop_assert!(!r.text.starts_with(b"<<<<<<<"));
@@ -78,8 +79,8 @@ proptest! {
     }
 
     #[test]
-    fn display_hunks_rebuild_new(a in doc(), b in doc(), ctx in 0usize..5) {
-        let hunks = diff(&a, &b, &DisplayOptions { diff: DiffOptions::default(), context: ctx });
+    fn display_hunks_rebuild_new(a in doc(), b in doc(), ctx in prop_oneof![0usize..5, Just(usize::MAX)]) {
+        let hunks = diff(&a, &b, &DisplayOptions { diff: DiffOptions::default(), context: ctx }, &CancelToken::new()).unwrap();
         let a_lines = split_lines(&a);
         let mut rebuilt: Vec<u8> = Vec::new();
         let mut at = 0usize;
@@ -103,15 +104,15 @@ proptest! {
             v
         }).collect();
         let o = DisplayOptions {
-            diff: DiffOptions { ignore_space: IgnoreSpace::All, ignore_eol_style: false },
+            diff: DiffOptions { ignore_space: IgnoreSpace::All, ..DiffOptions::default() },
             context: 3,
         };
-        prop_assert!(diff(&a, &spaced, &o).is_empty());
+        prop_assert!(diff(&a, &spaced, &o, &CancelToken::new()).unwrap().is_empty());
     }
 
     #[test]
     fn unified_output_applies_cleanly(a in doc(), b in doc()) {
-        let out = unified(&a, &b, &UnifiedOptions::default());
+        let out = unified(&a, &b, &UnifiedOptions::default(), &CancelToken::new()).unwrap();
         if a == b {
             prop_assert!(out.is_empty());
         } else {

@@ -7,6 +7,7 @@
 use std::time::Instant;
 
 use svn_diff::{DisplayOptions, MergeOptions, UnifiedOptions, diff, merge3, unified};
+use svn_types::CancelToken;
 
 fn make(lines: usize, step: usize, tag: &str) -> Vec<u8> {
     let mut out = Vec::new();
@@ -39,22 +40,66 @@ fn best<T>(runs: usize, mut f: impl FnMut() -> T) -> (std::time::Duration, T) {
 fn main() {
     let base20 = make(20_000, usize::MAX, "x");
     let new20 = make(20_000, 97, "m");
-    let (t, h) = best(7, || diff(&base20, &new20, &DisplayOptions::default()));
+    let (t, h) = best(7, || {
+        diff(
+            &base20,
+            &new20,
+            &DisplayOptions::default(),
+            &CancelToken::new(),
+        )
+    });
     println!(
         "display diff 20k lines: {t:?} ({} hunks)  target < 50ms",
-        h.len()
+        h.as_ref().map_or(0, Vec::len)
     );
-    let (t, u) = best(7, || unified(&base20, &new20, &UnifiedOptions::default()));
-    println!("unified 20k lines: {t:?} ({} bytes)", u.len());
+    let (t, u) = best(7, || {
+        unified(
+            &base20,
+            &new20,
+            &UnifiedOptions::default(),
+            &CancelToken::new(),
+        )
+    });
+    println!(
+        "unified 20k lines: {t:?} ({} bytes)",
+        u.as_ref().map_or(0, Vec::len)
+    );
+
+    let alt = |shift: usize| -> Vec<u8> {
+        (0..20_000usize)
+            .flat_map(|i| {
+                if (i + shift).is_multiple_of(2) {
+                    b"a\n"
+                } else {
+                    b"b\n"
+                }
+            })
+            .copied()
+            .collect()
+    };
+    let (a, b) = (alt(0), alt(1));
+    let (t, h) = best(7, || {
+        diff(&a, &b, &DisplayOptions::default(), &CancelToken::new())
+    });
+    println!(
+        "display diff 20k alternating lines: {t:?} ({} hunks)  target < 50ms",
+        h.as_ref().map_or(0, Vec::len)
+    );
 
     let base = make(100_000, usize::MAX, "x");
     let mine = make(100_000, 997, "m");
     let theirs = make(100_000, 1009, "t");
     let (t, r) = best(7, || {
-        merge3(&base, &mine, &theirs, &MergeOptions::default())
+        merge3(
+            &base,
+            &mine,
+            &theirs,
+            &MergeOptions::default(),
+            &CancelToken::new(),
+        )
     });
     println!(
         "merge3 100k lines: {t:?} ({} conflicts)  target < 300ms",
-        r.conflicts.len()
+        r.as_ref().map_or(0, |r| r.conflicts.len())
     );
 }
