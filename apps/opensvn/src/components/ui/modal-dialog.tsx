@@ -21,6 +21,9 @@ export function ModalDialog({
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  // Latest `open` for the native close handler (it fires after the prop already flipped).
+  const openRef = useRef(open);
+  openRef.current = open;
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -28,6 +31,7 @@ export function ModalDialog({
     if (!open && el.open) el.close();
   }, [open]);
   return (
+    // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop click is a pointer shortcut; keyboard close is native Esc (cancel event)
     <dialog
       ref={ref}
       aria-label={label}
@@ -38,7 +42,10 @@ export function ModalDialog({
       onClick={(e) => {
         if (e.target === ref.current) onClose();
       }}
-      onKeyDown={(e) => e.key === "Escape" && onClose()}
+      // Native close without a cancelable `cancel` (e.g. CloseWatcher): sync parent state once.
+      onClose={() => {
+        if (openRef.current) onClose();
+      }}
       className={cn(
         "m-auto overflow-hidden border border-line bg-surface p-0 text-fg shadow-float",
         className,

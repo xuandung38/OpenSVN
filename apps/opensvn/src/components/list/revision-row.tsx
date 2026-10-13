@@ -11,7 +11,11 @@ export interface RevisionRowProps {
   /** Revision exists on the server but is not yet in the working copy. */
   incoming?: boolean;
   selected?: boolean;
+  /** Keyboard-active row of the owning listbox and its DOM id (see VirtualList). */
+  active?: boolean;
+  id?: string;
   onSelect?: (rev: number) => void;
+  onPointerActivate?: () => void;
 }
 
 /** Two-line revision row: first message line (ellipsis) + `rN · author · when` meta. */
@@ -22,19 +26,28 @@ export const RevisionRow = memo(function RevisionRow({
   when,
   incoming = false,
   selected = false,
+  active = false,
+  id,
   onSelect,
+  onPointerActivate,
 }: RevisionRowProps) {
   const firstLine = message.split("\n", 1)[0] ?? "";
   return (
+    // biome-ignore lint/a11y/useFocusableInteractive: roving focus lives on the owning listbox (aria-activedescendant)
+    // biome-ignore lint/a11y/useKeyWithClickEvents: keyboard activation is handled by the listbox (Enter/Space)
     <div
+      id={id}
       role="option"
       aria-selected={selected}
-      tabIndex={-1}
-      onClick={() => onSelect?.(rev)}
-      onKeyDown={(e) => e.key === "Enter" && onSelect?.(rev)}
+      onClick={() => {
+        onPointerActivate?.();
+        onSelect?.(rev);
+      }}
       className={cn(
         "flex h-full cursor-default flex-col justify-center px-2.5 py-[5px]",
         selected ? "bg-sel" : "hover:bg-surface-2",
+        active &&
+          "group-focus-visible:outline-2 group-focus-visible:-outline-offset-2 group-focus-visible:outline-accent",
       )}
     >
       <span className="truncate">

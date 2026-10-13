@@ -54,18 +54,8 @@ export function ChangesSidebar({
 
   const canCommit = checked.size > 0 && message.trim().length > 0;
 
-  return (
+  const changesPanel = (
     <>
-      <Tabs
-        label="Sidebar sections"
-        value={tab}
-        onValueChange={(v) => setTab(v as Tab)}
-        tabs={[
-          { id: "changes", label: "Changes", count: files.length },
-          { id: "history", label: "History" },
-          { id: "incoming", label: "Incoming", count: incomingCount },
-        ]}
-      />
       <div className="flex flex-col gap-1.5 border-b border-line px-2.5 py-2">
         <Input
           aria-label="Filter"
@@ -80,62 +70,96 @@ export function ChangesSidebar({
         </div>
       </div>
       <div className="min-h-0 flex-1">
-        {tab === "changes" &&
-          (visible.length === 0 ? (
-            <EmptyState
-              title="No changes"
-              description="Files you modify in the working copy appear here."
-            />
-          ) : (
-            <VirtualList
-              label="Changed files"
-              className="h-full"
-              count={visible.length}
-              rowHeight={ROW_H}
-              renderRow={(i) => {
-                const f = visible[i];
-                const code = f && statusCode(f.text);
-                if (!f || !code) return null;
-                return (
-                  <FileRow
-                    path={f.path}
-                    status={code}
-                    checked={checked.has(f.path)}
-                    selected={selected === f.path}
-                    lock={f.lock ? (f.lock.mine ? "me" : "other") : undefined}
-                    onToggle={toggle}
-                    onSelect={setSelected}
-                  />
-                );
-              }}
-            />
-          ))}
-        {tab === "history" && (
+        {visible.length === 0 ? (
+          <EmptyState
+            title="No changes"
+            description="Files you modify in the working copy appear here."
+          />
+        ) : (
           <VirtualList
-            label="History"
+            label="Changed files"
             className="h-full"
-            count={log.length}
-            rowHeight={REV_H}
-            renderRow={(i) => {
-              const e = log[i];
-              return e ? (
-                <RevisionRow
-                  rev={e.rev}
-                  message={e.message}
-                  author={e.author ?? "unknown"}
-                  when={relativeTime(e.date)}
+            count={visible.length}
+            rowHeight={ROW_H}
+            onActivate={(i) => {
+              const f = visible[i];
+              if (f) setSelected(f.path);
+            }}
+            onToggle={(i) => {
+              const f = visible[i];
+              if (f) toggle(f.path);
+            }}
+            renderRow={(i, ctx) => {
+              const f = visible[i];
+              const code = f && statusCode(f.text);
+              if (!f || !code) return null;
+              return (
+                <FileRow
+                  id={ctx.id}
+                  active={ctx.active}
+                  onPointerActivate={ctx.activate}
+                  path={f.path}
+                  status={code}
+                  checked={checked.has(f.path)}
+                  selected={selected === f.path}
+                  lock={f.lock ? (f.lock.mine ? "me" : "other") : undefined}
+                  onToggle={toggle}
+                  onSelect={setSelected}
                 />
-              ) : null;
+              );
             }}
           />
         )}
-        {tab === "incoming" && (
-          <EmptyState
-            title="Up to date"
-            description="New revisions on the server appear here before you update."
-          />
-        )}
       </div>
+    </>
+  );
+
+  const historyPanel = (
+    <VirtualList
+      label="History"
+      className="h-full"
+      count={log.length}
+      rowHeight={REV_H}
+      renderRow={(i, ctx) => {
+        const e = log[i];
+        return e ? (
+          <RevisionRow
+            id={ctx.id}
+            active={ctx.active}
+            onPointerActivate={ctx.activate}
+            rev={e.rev}
+            message={e.message}
+            author={e.author ?? "unknown"}
+            when={relativeTime(e.date)}
+          />
+        ) : null;
+      }}
+    />
+  );
+
+  return (
+    <>
+      <Tabs
+        label="Sidebar sections"
+        className="flex-1"
+        value={tab}
+        onValueChange={(v) => setTab(v as Tab)}
+        tabs={[
+          { id: "changes", label: "Changes", count: files.length },
+          { id: "history", label: "History" },
+          { id: "incoming", label: "Incoming", count: incomingCount },
+        ]}
+        panels={{
+          changes: changesPanel,
+          history: historyPanel,
+          incoming: (
+            <EmptyState
+              title="Up to date"
+              description="New revisions on the server appear here before you update."
+            />
+          ),
+        }}
+      />
       <div className="flex flex-col gap-2 border-t border-line bg-surface-2 p-2.5">
         <Textarea
           aria-label="Commit message"

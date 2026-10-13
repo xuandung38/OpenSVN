@@ -14,7 +14,7 @@ export function createQueryClient(): QueryClient {
 /** App-wide providers: theme bootstrap, TanStack Query, backend event bus -> cache, toasts. */
 export function Providers({ children }: { children: ReactNode }) {
   const qc = useMemo(createQueryClient, []);
-  const bus: EventBus = useMemo(() => createEventBus(ipc, qc), [qc]);
+  const bus: EventBus = useMemo(() => createEventBus(ipc(), qc), [qc]);
 
   useEffect(() => {
     applyTheme(readTheme());

@@ -41,7 +41,7 @@ export function AppShell() {
   }
 
   const wcPicker = (item: React.ReactNode) => (
-    <Popover trigger={<span className="contents">{item}</span>}>
+    <Popover trigger={item}>
       <PopoverGroup>Working copies</PopoverGroup>
       {(wcs.data ?? []).map((w) => (
         <button

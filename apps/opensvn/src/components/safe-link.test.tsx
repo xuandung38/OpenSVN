@@ -4,7 +4,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { setExternalOpener } from "../lib/external-link";
 import { isSafeHttpsUrl, SafeLink } from "./ui/safe-link";
 
-afterEach(() => setExternalOpener(() => undefined));
+afterEach(() => setExternalOpener(null));
 
 test.each([
   ["https://example.com/r/1", true],

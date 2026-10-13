@@ -27,12 +27,15 @@ export function SafeLink({
   if (!isSafeHttpsUrl(href)) return <span className={className}>{children}</span>;
   const onClick = (e: MouseEvent) => {
     e.preventDefault();
-    void openExternalUrl(href);
+    openExternalUrl(href).catch((err: unknown) => console.error("open external link failed", err));
   };
   return (
     <a
       href={href}
       onClick={onClick}
+      // Middle-click and drag would bypass onClick and navigate the WebView itself.
+      onAuxClick={(e) => e.preventDefault()}
+      draggable={false}
       rel="noopener noreferrer"
       className={className ?? "text-accent underline"}
     >

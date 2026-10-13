@@ -55,9 +55,16 @@ test("dialog opens, Esc and backdrop request close", async () => {
   );
   const dlg = screen.getByRole("dialog", { name: "Confirm", hidden: true });
   expect(dlg.hasAttribute("open")).toBe(true);
-  await userEvent.keyboard("{Escape}");
+  // Esc surfaces as a cancelable `cancel` event: exactly one onClose, default (native close) prevented.
+  const cancel = new Event("cancel", { cancelable: true });
+  dlg.dispatchEvent(cancel);
+  expect(cancel.defaultPrevented).toBe(true);
+  expect(onClose).toHaveBeenCalledTimes(1);
   dlg.click();
-  expect(onClose).toHaveBeenCalled();
+  expect(onClose).toHaveBeenCalledTimes(2);
+  // Native close while still open (no cancel) syncs parent state once.
+  dlg.dispatchEvent(new Event("close"));
+  expect(onClose).toHaveBeenCalledTimes(3);
 });
 
 test("sidebar width clamps to 220-600 and works from the keyboard", async () => {
