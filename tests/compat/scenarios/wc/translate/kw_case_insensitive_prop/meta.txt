@@ -1,0 +1,10 @@
+svn_version=1.15.0
+prop.svn:keywords=id REV date author url header
+rev=18
+author=alice
+date_micros=1791884710251555
+utc_offset_secs=0
+url=file:///tmp/opensvn-golden/repo/kw_case_insensitive_prop
+root=file:///tmp/opensvn-golden/repo
+tz=UTC
+path=kw_case_insensitive_prop

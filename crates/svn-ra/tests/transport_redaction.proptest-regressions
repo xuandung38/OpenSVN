@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d6b79f620d0a343d0de175a19fba60ca7075c5384b73bdd831fd3e75fefd752c # shrinks to password = "zq#!=A~==A#?A0A-", token = "zqa0A=A=_0A0-A=0", cookie = "zq~aa000_A-AAA_a", lock = "zq00-0-0-aaa0000", user = "aaaa"
