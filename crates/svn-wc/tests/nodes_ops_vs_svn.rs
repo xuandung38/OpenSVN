@@ -580,9 +580,8 @@ fn non_recursive_revert_of_an_operation_root_with_child_operations_is_refused() 
     let b = checkout(&fx.base, &fx.url, "our-side", &[]);
     svn(&a, &["cp", "-q", "d", "dc"]);
     svn(&a, &["rm", "-q", "dc/f1"]);
-    let refused = std::process::Command::new("svn")
+    let refused = svn_command(&a)
         .args(["revert", "dc"])
-        .current_dir(&a)
         .output()
         .expect("svn");
     assert!(!refused.status.success());
