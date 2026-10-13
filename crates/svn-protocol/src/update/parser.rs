@@ -41,6 +41,7 @@ struct Node {
     /// A `txdelta` or `fetch-file` was seen (at most one per file).
     content_seen: bool,
     props_fetch_seen: bool,
+    href_seen: bool,
 }
 
 /// Role of an open XML element; the stack of roles makes end tags match by namespace and name.
@@ -245,6 +246,7 @@ impl UpdateParser {
             md5: None,
             content_seen: false,
             props_fetch_seen: false,
+            href_seen: false,
         });
         Ok(())
     }
@@ -283,8 +285,16 @@ impl UpdateParser {
             });
         }
         if tag.name.is(&Ns::Dav, "href") {
-            if parent == Some(Role::CheckedIn) && self.nodes.last().is_some_and(|n| !n.announced) {
-                self.capture = Capture::Href;
+            if parent == Some(Role::CheckedIn) {
+                if let Some(n) = self.nodes.last_mut() {
+                    if n.href_seen {
+                        return Err(corrupt("checked-in carries more than one href"));
+                    }
+                    n.href_seen = true;
+                    if !n.announced {
+                        self.capture = Capture::Href;
+                    }
+                }
             }
             return Ok(Role::Other);
         }
@@ -476,8 +486,13 @@ impl UpdateParser {
             let Some(node) = self.nodes.pop() else {
                 return Err(corrupt("closing tag without an open entry"));
             };
-            // Skelta answers carry no text: the client must fetch what the server did not send.
-            if node.kind == Kind::File && !self.send_all && !node.content_seen {
+            // Skelta answers carry no text: an added file must be fetched, or it would stay empty.
+            // Opened files that only changed properties keep their text.
+            if node.kind == Kind::File
+                && node.intro == Intro::Add
+                && !self.send_all
+                && !node.content_seen
+            {
                 out.push(UpdateEvent::FetchFile {
                     path: node.path.clone(),
                     href: node.checked_in.clone(),
