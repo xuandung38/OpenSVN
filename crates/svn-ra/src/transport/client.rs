@@ -16,7 +16,7 @@ use super::redact::{RedactedHeaders, redacted_url};
 use super::request::{HttpRequest, HttpResponse};
 use super::retry::{classify_error, error_chain, is_idempotent, is_transient_status};
 use super::tls::{CertProblem, OriginTls, PinAction, TrustStore, make_client_config};
-use crate::auth::{AuthManager, Challenges, HostKey, or_cancel};
+use crate::auth::{AuthManager, Challenges, HostKey, NegotiateProvider, or_cancel};
 
 /// How many certificate prompts one request may trigger before giving up.
 const MAX_TLS_ROUNDS: u8 = 2;
@@ -69,12 +69,23 @@ impl HttpTransport {
         trust: Arc<dyn TrustStore>,
     ) -> Self {
         Self {
-            auth: AuthManager::new(Arc::clone(&prompter)),
+            auth: AuthManager::new(
+                Arc::clone(&prompter),
+                crate::auth::negotiate::system_provider(),
+            ),
             config,
             prompter,
             trust,
             origins: Mutex::default(),
         }
+    }
+
+    /// Replaces the Negotiate (Kerberos SSO) provider; `None` disables Negotiate. By default the
+    /// platform provider is used when the build has one (see [`crate::auth::negotiate`]).
+    #[must_use]
+    pub fn with_negotiate(mut self, provider: Option<Arc<dyn NegotiateProvider>>) -> Self {
+        self.auth.set_negotiate(provider);
+        self
     }
 
     /// Sends a request and returns the response once its headers arrive.
@@ -189,7 +200,7 @@ impl HttpTransport {
         req: &mut HttpRequest,
         cancel: &CancelToken,
     ) -> Result<HttpResponse> {
-        let mut sent = self.auth.prepare(&req.url)?;
+        let mut sent = self.auth.prepare(&req.url, cancel).await?;
         let mut tls_rounds = 0u8;
         let mut round_trips = 0u8;
         let mut per_realm: HashMap<String, u8> = HashMap::new();
@@ -204,7 +215,10 @@ impl HttpTransport {
                     let realm_count = per_realm
                         .entry(challenges.basic_realm.clone().unwrap_or_default())
                         .or_default();
-                    *realm_count += 1;
+                    // A rejected Negotiate token does not use up one of the Basic attempts.
+                    if !sent.is_negotiate() {
+                        *realm_count += 1;
+                    }
                     if round_trips > MAX_AUTH_ROUND_TRIPS || *realm_count > MAX_CHALLENGES_PER_REALM
                     {
                         return Err(SvnError::new(
@@ -225,7 +239,9 @@ impl HttpTransport {
                         .await?;
                 }
                 Ok(resp) => {
-                    self.auth.on_success(&sent);
+                    self.auth
+                        .on_success(&req.url, &sent, &resp.headers, cancel)
+                        .await?;
                     origin.tls.connected();
                     return Ok(resp);
                 }

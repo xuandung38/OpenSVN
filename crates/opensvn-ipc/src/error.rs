@@ -11,6 +11,8 @@ pub enum ErrorCode {
     Network,
     Timeout,
     AuthRequired,
+    /// Single sign-on (Negotiate/Kerberos) failed and the server offers no password fallback.
+    NegotiateFailed,
     Forbidden,
     TlsUntrusted,
     OutOfDate,
@@ -130,6 +132,7 @@ pub fn map_svn_error_code(code: SvnErrorCode) -> (ErrorCode, bool, &'static [Err
         S::Network => (ErrorCode::Network, true, &[A::Retry]),
         S::Timeout => (ErrorCode::Timeout, true, &[A::Retry, A::OpenSettings]),
         S::AuthRequired => (ErrorCode::AuthRequired, false, &[A::SignIn]),
+        S::NegotiateFailed => (ErrorCode::NegotiateFailed, false, &[A::SignIn]),
         S::Forbidden => (ErrorCode::Forbidden, false, &[]),
         S::TlsUntrusted => (ErrorCode::TlsUntrusted, false, &[A::TrustCert]),
         S::OutOfDate => (ErrorCode::OutOfDate, false, &[A::Update]),

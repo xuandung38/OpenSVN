@@ -5,6 +5,7 @@ expression: table
 Network -> "network" retryable=true actions=["retry"]
 Timeout -> "timeout" retryable=true actions=["retry","open-settings"]
 AuthRequired -> "auth-required" retryable=false actions=["sign-in"]
+NegotiateFailed -> "negotiate-failed" retryable=false actions=["sign-in"]
 Forbidden -> "forbidden" retryable=false actions=[]
 TlsUntrusted -> "tls-untrusted" retryable=false actions=["trust-cert"]
 OutOfDate -> "out-of-date" retryable=false actions=["update"]

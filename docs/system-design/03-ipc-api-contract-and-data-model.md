@@ -183,10 +183,11 @@ interface AppError {
   path?: string; retryable: boolean;
   actions?: ('retry' | 'update' | 'cleanup' | 'sign-in' | 'trust-cert' | 'open-lock-dialog' | 'open-settings')[];
 }
-type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'forbidden' | 'tls-untrusted'
+type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'negotiate-failed' | 'forbidden' | 'tls-untrusted'
   | 'out-of-date' | 'locked-by-other' | 'lock-token-invalid' | 'wc-busy' | 'wc-needs-cleanup'
   | 'wc-format-unsupported' | 'not-a-working-copy' | 'conflict-blocks-commit' | 'hook-failed' | 'repository-moved' | 'pristine-not-hydrated' | 'wc-invalid-operation' | 'path-not-found'
   | 'disk-full' | 'permission-denied' | 'file-in-use' | 'cancelled' | 'invalid-argument' | 'internal';
+// negotiate-failed: SSO (Negotiate/Kerberos) thất bại và server không cho Basic; action 'sign-in'
 // invalid-argument: giá trị sai, grant hết hạn/đã dùng, tùy chọn không hỗ trợ (MVP chỉ ghi format 31)
 ```
 
