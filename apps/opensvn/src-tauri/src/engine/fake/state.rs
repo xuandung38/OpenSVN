@@ -210,6 +210,8 @@ impl FakeWc {
             format: self.format,
             store_pristine: self.store_pristine,
             path_in_repo: self.path_in_repo.clone(),
+            // A cancelled fake checkout or update never leaves a partial working copy behind.
+            incomplete: false,
         }
     }
 
