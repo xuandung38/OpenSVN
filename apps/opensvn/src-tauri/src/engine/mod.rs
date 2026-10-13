@@ -5,6 +5,8 @@ pub mod conformance;
 pub mod context;
 pub mod facade;
 pub mod fake;
+#[cfg(feature = "real-engine")]
+pub mod real;
 
 pub use context::{OpContext, ProgressReporter, ProgressUpdate};
 pub use facade::{
