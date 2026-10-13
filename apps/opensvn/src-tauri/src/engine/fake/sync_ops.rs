@@ -1,12 +1,9 @@
 //! Operations that talk to the fake repository: checkout, update, switch, commit, remote status.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use bytes::Bytes;
-use opensvn_ipc::{
-    CheckoutRequest, CommitRequest, Depth, FileKind, FileStatus, RemoteStatus, Rev, UpdateRequest,
-};
+use opensvn_ipc::{CommitRequest, Depth, FileKind, FileStatus, RemoteStatus, Rev, UpdateRequest};
 use svn_ra_api::RaSession;
 use svn_ra_api::fake::{FakeChange, FakeRaSession};
 use svn_types::{ErrorCode, NodeKind, PropChange, RelPath, Revnum, SvnError};
@@ -14,7 +11,7 @@ use svn_types::{ErrorCode, NodeKind, PropChange, RelPath, Revnum, SvnError};
 use super::FakeEngine;
 use super::state::{FakeNode, FakeWc, Sched, rel};
 use crate::engine::context::{OpContext, ProgressUpdate};
-use crate::engine::facade::{RemoteScan, WcInfo, WcRef};
+use crate::engine::facade::{CheckoutPlan, RemoteScan, WcInfo, WcRef};
 
 /// One node of a repository snapshot.
 struct SnapItem {
@@ -115,10 +112,10 @@ impl FakeEngine {
 
     pub(super) async fn do_checkout(
         &self,
-        req: &CheckoutRequest,
+        req: &CheckoutPlan,
         ctx: &OpContext,
     ) -> Result<WcInfo, SvnError> {
-        let root = Path::new(&req.path);
+        let root = req.path.as_path();
         if !root.is_absolute() {
             return Err(SvnError::new(
                 ErrorCode::Internal,

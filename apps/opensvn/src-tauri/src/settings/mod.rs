@@ -1,7 +1,7 @@
 //! Settings service: `settings_get` / `settings_set` with three-state patch semantics.
 //!
 //! Settings that make the app launch a program (external diff/merge tool, editor, terminal) are
-//! deliberately not writable here: a compromised WebView could otherwise point them at an
+//! deliberately not writable through a patch: a compromised WebView could otherwise point them at an
 //! arbitrary executable. They change only through [`SettingsService::set_program`], which the
 //! native file-picker command calls after the user confirmed in a native dialog.
 
@@ -10,7 +10,7 @@ mod validate;
 
 use std::sync::Mutex;
 
-use opensvn_ipc::{AppError, ErrorCode, ExternalDiffTool, ProgramKind, Settings, SettingsPatch};
+use opensvn_ipc::{AppError, ExternalDiffTool, ProgramKind, Settings, SettingsPatch};
 use serde_json::{Map, Value};
 use tokio::sync::watch;
 
@@ -19,7 +19,8 @@ use crate::db::AppDb;
 pub use defaults::{defaults, system_locale};
 
 /// Dotted keys that launch programs. A test asserts this list equals the set of nullable keys of
-/// [`Settings`], so a new program-launching setting cannot be forgotten.
+/// [`Settings`], so a new program-launching setting cannot be forgotten. `SettingsPatch` has none
+/// of them.
 pub const PROGRAM_KEYS: [&str; 4] = [
     "diff.externalTool",
     "diff.mergeTool",
@@ -97,20 +98,13 @@ impl SettingsService {
         self.tx.subscribe()
     }
 
-    /// Applies a patch from the UI. Refuses any key that launches a program.
+    /// Applies a patch from the UI. `SettingsPatch` cannot carry program-launching keys (they
+    /// exist in `Settings` only and unknown keys fail to deserialize), so none can arrive here.
     pub fn apply_patch(&self, patch: &SettingsPatch) -> Result<Settings, AppError> {
         let patch_map = match serde_json::to_value(patch) {
             Ok(Value::Object(m)) => m,
             _ => return Err(AppError::internal("settings patch could not be serialized")),
         };
-        if let Some(key) = PROGRAM_KEYS.iter().find(|k| patch_map.contains_key(**k)) {
-            let mut e = AppError::internal(
-                "This setting starts a program and can only be changed with the file picker.",
-            )
-            .with_detail(*key);
-            e.code = ErrorCode::PermissionDenied;
-            return Err(e);
-        }
         self.change(patch_map)
     }
 

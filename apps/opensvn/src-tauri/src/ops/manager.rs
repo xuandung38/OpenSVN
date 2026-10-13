@@ -24,6 +24,9 @@ pub const HISTORY_LIMIT: usize = 50;
 struct Running {
     handle: OperationHandle,
     cancel: CancelToken,
+    /// Newest progress sample that the throttle held back; flushed when the operation ends so the
+    /// UI never stops short of the last reported state.
+    pending_progress: Arc<Mutex<Option<Progress>>>,
 }
 
 #[derive(Default)]
@@ -102,6 +105,7 @@ impl OperationManager {
             title: title.into(),
         };
         let cancel = CancelToken::new();
+        let pending_progress: Arc<Mutex<Option<Progress>>> = Arc::new(Mutex::new(None));
         {
             let mut st = self.state();
             st.order.push(handle.op_id.0.clone());
@@ -110,6 +114,7 @@ impl OperationManager {
                 Running {
                     handle: handle.clone(),
                     cancel: cancel.clone(),
+                    pending_progress: Arc::clone(&pending_progress),
                 },
             );
         }
@@ -118,16 +123,25 @@ impl OperationManager {
         let events = Arc::clone(&self.inner.events);
         let throttle = Mutex::new(Throttle::new());
         let progress_id = handle.op_id.clone();
+        let pending_for_reporter = Arc::clone(&pending_progress);
         let progress_events = Arc::clone(&events);
         let ctx = OpContext {
             cancel,
             progress: ProgressReporter::new(move |u| {
+                let sample = to_progress(&progress_id, u);
                 let allowed = throttle
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .allow(Instant::now());
+                let mut held = pending_for_reporter
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
                 if allowed {
-                    progress_events.op_progress(&to_progress(&progress_id, u));
+                    *held = None;
+                    drop(held);
+                    progress_events.op_progress(&sample);
+                } else {
+                    *held = Some(sample);
                 }
             }),
         };
@@ -147,6 +161,15 @@ impl OperationManager {
     }
 
     fn finish(&self, handle: &OperationHandle, outcome: Result<OpResult, AppError>) {
+        let held = self.state().running.get(&handle.op_id.0).and_then(|r| {
+            r.pending_progress
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+        });
+        if let Some(last) = held {
+            self.inner.events.op_progress(&last);
+        }
         {
             let mut st = self.state();
             st.running.remove(&handle.op_id.0);

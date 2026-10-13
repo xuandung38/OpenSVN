@@ -15,14 +15,15 @@
 use std::path::{Path, PathBuf};
 
 use opensvn_ipc::{
-    CheckoutRequest, CommitRequest, CopyLocationRequest, Depth, EntryKind, FileStatus, Layout,
-    LogGetRequest, LogTarget, NodeStatus, RemoteEditRequest, RemoteOp, ResolveChoice,
+    CleanupRequest, CommitRequest, CopyLocationRequest, Depth, EntryKind, FileStatus,
+    IgnoreAddRequest, IgnoreScope, Layout, LogGetRequest, LogTarget, NodeStatus, ResolveChoice,
     ResolveRequest, Rev, RevertRequest, UpdateRequest, WcFormat, WcId,
 };
 use svn_types::{ErrorCode, SvnError};
 
 use super::{
-    DiffOptions, EngineFacade, LockScope, LogScope, OpContext, StatusQuery, WcInfo, WcRef,
+    CheckoutPlan, DiffOptions, EditOp, EngineFacade, LockScope, LogScope, OpContext,
+    RemoteEditPlan, StatusQuery, WcInfo, WcRef,
 };
 
 /// What a scenario needs from the engine under test.
@@ -35,6 +36,20 @@ pub trait Harness {
     fn work_dir(&self) -> PathBuf;
     /// Creates or overwrites a file below a working copy root.
     fn write_file(&self, root: &Path, rel: &str, content: &str) -> Result<(), SvnError>;
+    /// Real, empty, writable directory for files the engine writes outside a working copy.
+    fn scratch_dir(&self) -> PathBuf;
+    /// Leaves the lock situation of a crashed or foreign process on `dir` of a working copy,
+    /// as it would be found when the working copy is opened.
+    fn plant_lock(&self, root: &Path, dir: &str, owner: PlantedOwner) -> Result<(), SvnError>;
+}
+
+/// Who owns a planted lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlantedOwner {
+    /// A process that no longer exists (recoverable without the user).
+    DeadProcess,
+    /// A live or unknown process (must be left alone and reported).
+    Foreign,
 }
 
 const ALL: StatusQuery = StatusQuery {
@@ -55,9 +70,9 @@ async fn checkout(h: &dyn Harness, name: &str, rev: Option<Rev>) -> (WcRef, WcIn
     let info = h
         .engine()
         .checkout(
-            &CheckoutRequest {
+            &CheckoutPlan {
                 url: format!("{}/trunk", h.repo_url()),
-                path: root.to_string_lossy().into_owned(),
+                path: root.clone(),
                 rev,
                 depth: Depth::Infinity,
                 sparse: None,
@@ -428,8 +443,8 @@ pub async fn remote_edit_and_copy(h: &dyn Harness) {
     let head = e.repo_info(&url, &ctx()).await.unwrap().youngest_rev;
     let rev = e
         .remote_edit(
-            &RemoteEditRequest {
-                ops: vec![RemoteOp::Mkdir {
+            &RemoteEditPlan {
+                ops: vec![EditOp::Mkdir {
                     url: format!("{url}/trunk/extra"),
                 }],
                 message: "Add extra".into(),
@@ -468,9 +483,9 @@ pub async fn cancellation_and_errors(h: &dyn Harness) {
     cancelled.cancel.cancel();
     let err = e
         .checkout(
-            &CheckoutRequest {
+            &CheckoutPlan {
                 url: format!("{}/trunk", h.repo_url()),
-                path: root.to_string_lossy().into_owned(),
+                path: root.clone(),
                 rev: None,
                 depth: Depth::Infinity,
                 sparse: None,
@@ -490,6 +505,196 @@ pub async fn cancellation_and_errors(h: &dyn Harness) {
     assert_eq!(not_wc.code, ErrorCode::NotAWorkingCopy);
 }
 
+/// Properties, changelists, ignores, moves, depth, cleanup and format upgrade.
+pub async fn working_copy_metadata_operations(h: &dyn Harness) {
+    let e = h.engine();
+    let (wc, _) = checkout(h, "metadata", None).await;
+    let path = |p: &str| vec![p.to_owned()];
+
+    e.props_set(&wc, "README.md", "svn:needs-lock", Some("*"), &ctx())
+        .await
+        .expect("props_set");
+    let st = status(h, &wc).await;
+    let readme = find(&st, "README.md").expect("property change is listed");
+    assert!(readme.needs_lock);
+    assert_eq!(readme.props, opensvn_ipc::PropStatus::Modified);
+    e.props_set(&wc, "README.md", "svn:needs-lock", None, &ctx())
+        .await
+        .expect("props delete");
+    assert!(find(&status(h, &wc).await, "README.md").is_none());
+
+    e.changelist_set(&wc, &path("README.md"), Some("docs"), &ctx())
+        .await
+        .expect("changelist");
+    assert_eq!(
+        find(&status(h, &wc).await, "README.md")
+            .and_then(|s| s.changelist.clone())
+            .as_deref(),
+        Some("docs")
+    );
+    e.changelist_set(&wc, &path("README.md"), None, &ctx())
+        .await
+        .expect("clear changelist");
+    assert!(find(&status(h, &wc).await, "README.md").is_none());
+
+    h.write_file(&wc.root, "build.log", "x\n").expect("write");
+    e.ignore_add(
+        &wc,
+        &IgnoreAddRequest {
+            wc_id: wc.id.clone(),
+            pattern: "*.log".into(),
+            dir: String::new(),
+            scope: IgnoreScope::Local,
+        },
+        &ctx(),
+    )
+    .await
+    .expect("ignore_add");
+    assert!(
+        find(&status(h, &wc).await, "build.log").is_none(),
+        "ignored files are not listed"
+    );
+
+    e.move_path(&wc, "README.md", "GUIDE.md", &ctx())
+        .await
+        .expect("move");
+    let st = status(h, &wc).await;
+    assert_eq!(find(&st, "GUIDE.md").unwrap().text, NodeStatus::Added);
+    assert_eq!(find(&st, "README.md").unwrap().text, NodeStatus::Deleted);
+    e.mark_move(&wc, "README.md", "GUIDE.md", &ctx())
+        .await
+        .expect("mark_move");
+
+    e.cleanup(
+        &wc,
+        &CleanupRequest {
+            wc_id: wc.id.clone(),
+            remove_unversioned: Some(true),
+            remove_ignored: Some(true),
+            vacuum_pristines: Some(false),
+        },
+        &ctx(),
+    )
+    .await
+    .expect("cleanup");
+
+    let (wc2, _) = checkout(h, "depth", None).await;
+    e.set_depth(&wc2, "src", Depth::Empty, &ctx())
+        .await
+        .expect("set_depth");
+    e.upgrade_format(&wc2, 31, &ctx())
+        .await
+        .expect("upgrade_format to the current format");
+}
+
+/// Switch moves a working copy to another URL of the same repository.
+pub async fn switch_to_a_branch(h: &dyn Harness) {
+    let e = h.engine();
+    let url = h.repo_url();
+    e.copy_location(
+        &CopyLocationRequest {
+            from_url: format!("{url}/trunk"),
+            from_rev: None,
+            to_url: format!("{url}/branches/switch-target"),
+            message: "Branch for switch".into(),
+            switch_wc_id: None,
+        },
+        &ctx(),
+    )
+    .await
+    .expect("copy");
+    let (wc, _) = checkout(h, "switch", None).await;
+    let reached = e
+        .switch(&wc, &format!("{url}/branches/switch-target"), None, &ctx())
+        .await
+        .expect("switch");
+    let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
+    assert_eq!(info.base_rev, reached);
+    assert!(
+        info.url.ends_with("/branches/switch-target"),
+        "{}",
+        info.url
+    );
+    assert!(status(h, &wc).await.is_empty());
+}
+
+/// Downloads, revision diffs and blame.
+pub async fn repository_content_tools(h: &dyn Harness) {
+    let e = h.engine();
+    let url = h.repo_url();
+    let out = h.scratch_dir().join("saved-readme.md");
+    e.repo_save(&format!("{url}/trunk/README.md"), None, &out, &ctx())
+        .await
+        .expect("repo_save");
+    assert_eq!(
+        std::fs::read_to_string(&out).expect("saved file"),
+        "hello\n"
+    );
+
+    let head = e.repo_info(&url, &ctx()).await.expect("info").youngest_rev;
+    let diff = e
+        .diff_rev(
+            &format!("{url}/trunk/README.md"),
+            Some(Rev(0)),
+            Rev(1),
+            DiffOptions::default(),
+            &ctx(),
+        )
+        .await
+        .expect("diff_rev");
+    assert!(diff.left.is_none_or(|l| l.content.is_empty()));
+    assert_eq!(diff.right.expect("right").content, "hello\n");
+    assert!(head.0 >= 1);
+
+    let lines = e
+        .blame(&format!("{url}/trunk/README.md"), None, &ctx())
+        .await
+        .expect("blame");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].text, "hello");
+    assert_eq!(lines[0].rev, Rev(1));
+}
+
+/// Opening a working copy recovers dead-owner locks and only reports foreign ones.
+pub async fn open_recovers_dead_locks_and_reports_foreign_ones(h: &dyn Harness) {
+    let e = h.engine();
+    let (wc, _) = checkout(h, "recovery", None).await;
+    let clean = e.open_wc(&wc.root, &ctx()).await.expect("open clean");
+    assert!(clean.recovery.recovered.is_empty() && clean.recovery.needs_user_action.is_empty());
+
+    h.plant_lock(&wc.root, "src", PlantedOwner::DeadProcess)
+        .expect("plant dead");
+    let opened = e.open_wc(&wc.root, &ctx()).await.expect("open after crash");
+    assert_eq!(opened.recovery.recovered, vec!["src".to_owned()]);
+    assert!(opened.recovery.needs_user_action.is_empty());
+    let again = e.open_wc(&wc.root, &ctx()).await.expect("open again");
+    assert!(again.recovery.recovered.is_empty(), "recovery happens once");
+
+    h.plant_lock(&wc.root, "src", PlantedOwner::Foreign)
+        .expect("plant foreign");
+    let opened = e
+        .open_wc(&wc.root, &ctx())
+        .await
+        .expect("open with foreign lock");
+    assert!(
+        opened.recovery.recovered.is_empty(),
+        "a foreign lock is never taken over"
+    );
+    assert_eq!(opened.recovery.needs_user_action, vec!["src".to_owned()]);
+    let again = e.open_wc(&wc.root, &ctx()).await.expect("open once more");
+    assert_eq!(
+        again.recovery.needs_user_action,
+        vec!["src".to_owned()],
+        "still waiting for the user"
+    );
+
+    let err = e
+        .open_wc(&h.work_dir().join("not-a-wc"), &ctx())
+        .await
+        .expect_err("not a wc");
+    assert_eq!(err.code, ErrorCode::NotAWorkingCopy);
+}
+
 /// Runs every scenario against fresh harnesses from `make`.
 pub async fn run_all<H: Harness>(make: impl Fn() -> H) {
     repository_reads(&make()).await;
@@ -499,4 +704,8 @@ pub async fn run_all<H: Harness>(make: impl Fn() -> H) {
     lock_and_unlock(&make()).await;
     remote_edit_and_copy(&make()).await;
     cancellation_and_errors(&make()).await;
+    working_copy_metadata_operations(&make()).await;
+    switch_to_a_branch(&make()).await;
+    repository_content_tools(&make()).await;
+    open_recovers_dead_locks_and_reports_foreign_ones(&make()).await;
 }

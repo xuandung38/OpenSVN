@@ -59,10 +59,10 @@ impl Db {
     /// Opens (creating if needed) a WAL-mode database at `path`.
     pub(crate) fn open(path: &Path, migrations: &[migrations::Migration]) -> Result<Self, DbError> {
         let mut conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
         )?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrations::migrate(&mut conn, migrations)?;
         Ok(Self(Arc::new(Mutex::new(conn))))
     }

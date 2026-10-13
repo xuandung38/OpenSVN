@@ -68,11 +68,13 @@ impl WcRegistry {
         }
     }
 
-    fn actor_for(&self, id: &str) -> Arc<WcActor> {
+    /// One actor per working copy root for the life of the process: removing and re-adding the same
+    /// folder (new id) must not create a second writer on the same wc.db.
+    fn actor_for(&self, root_path: &str) -> Arc<WcActor> {
         let mut actors = self.actors.lock().unwrap_or_else(PoisonError::into_inner);
         Arc::clone(
             actors
-                .entry(id.to_owned())
+                .entry(root_path.to_owned())
                 .or_insert_with(|| Arc::new(WcActor::spawn(self.policy))),
         )
     }
@@ -102,7 +104,7 @@ impl WcRegistry {
                 id: id.clone(),
                 root: PathBuf::from(&row.root_path),
             },
-            actor: self.actor_for(&id.0),
+            actor: self.actor_for(&row.root_path),
             row,
         })
     }
@@ -114,7 +116,7 @@ impl WcRegistry {
         };
         let engine = Arc::clone(&self.engine);
         let info: WcInfo = self
-            .actor_for(&row.id)
+            .actor_for(&row.root_path)
             .read(|| {
                 let (engine, root) = (Arc::clone(&engine), wc.root.clone());
                 async move {
@@ -194,10 +196,6 @@ impl WcRegistry {
         if !self.db.wc_remove(&id.0)? {
             return Err(unknown_wc(id));
         }
-        self.actors
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&id.0);
         self.live
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -209,7 +207,9 @@ impl WcRegistry {
     pub fn rename(&self, id: &WcId, name: &str) -> Result<(), AppError> {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 200 || name.chars().any(char::is_control) {
-            return Err(AppError::internal("The name must be 1 to 200 characters."));
+            return Err(crate::errors::invalid_argument(
+                "The name must be 1 to 200 characters.",
+            ));
         }
         if self.db.wc_rename(&id.0, name)? {
             Ok(())
@@ -224,7 +224,7 @@ impl WcRegistry {
         let row = self.db.wc_get(&id.0)?.ok_or_else(|| unknown_wc(id))?;
         let (engine, root) = (Arc::clone(&self.engine), PathBuf::from(&row.root_path));
         let opened = self
-            .actor_for(&row.id)
+            .actor_for(&row.root_path)
             .write(async move {
                 engine
                     .open_wc(&root, &OpContext::detached())

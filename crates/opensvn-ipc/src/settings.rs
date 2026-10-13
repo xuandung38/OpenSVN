@@ -57,6 +57,8 @@ pub enum ProxySetting {
 
 /// Deserializes a present key (including an explicit `null`) as `Some(..)`; combined with
 /// `#[serde(default)]` an absent key stays `None`. This is what separates "clear" from "unchanged".
+// Used by `nullable` patch keys; none exist right now (program keys are `Settings`-only).
+#[allow(dead_code)]
 fn present_or_absent<'de, T, D>(d: D) -> Result<Option<Option<T>>, D::Error>
 where
     T: Deserialize<'de>,
@@ -143,6 +145,7 @@ settings_structs! {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

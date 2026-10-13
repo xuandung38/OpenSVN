@@ -6,7 +6,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use opensvn_ipc::{AppError, OpResult, OperationHandle, ProgramKind, WorkingCopy};
+use opensvn_ipc::{
+    AppError, GrantKind, OpResult, OperationHandle, PathGrantId, PickRequest, ProgramKind,
+    WorkingCopy,
+};
 use tauri::Manager;
 use tauri::test::MockRuntime;
 
@@ -14,7 +17,21 @@ use crate::app_state::{AppDeps, AppState};
 use crate::engine::FakeEngine;
 use crate::engine::fake::demo_wc_root;
 use crate::ops::events::{Recorded, RecordingEvents};
+use crate::path_grants::{MAIN_WINDOW, PathPicker};
 use crate::programs::ProgramPicker;
+
+/// File dialog double: returns the scripted choice.
+#[derive(Default)]
+pub struct ScriptedPaths {
+    pub choice: Mutex<Option<(PathBuf, GrantKind)>>,
+}
+
+#[async_trait]
+impl PathPicker for ScriptedPaths {
+    async fn pick(&self, _request: &PickRequest) -> Option<(PathBuf, GrantKind)> {
+        self.choice.lock().unwrap().clone()
+    }
+}
 
 /// Dialog double with scripted answers.
 #[derive(Default)]
@@ -42,6 +59,7 @@ pub struct Fixture {
     pub app: tauri::App<MockRuntime>,
     pub events: Arc<RecordingEvents>,
     pub picker: Arc<Scripted>,
+    pub paths: Arc<ScriptedPaths>,
     pub engine: Arc<FakeEngine>,
     _dir: tempfile::TempDir,
 }
@@ -53,11 +71,13 @@ impl Fixture {
         let engine = Arc::new(FakeEngine::demo(delay).await.unwrap());
         let events = Arc::new(RecordingEvents::default());
         let picker = Arc::new(Scripted::default());
+        let paths = Arc::new(ScriptedPaths::default());
         let state = AppState::build(AppDeps {
             data_dir: dir.path().to_path_buf(),
             engine: engine.clone(),
             events: events.clone(),
             picker: picker.clone(),
+            path_picker: paths.clone(),
         })
         .unwrap();
         let app = tauri::test::mock_app();
@@ -66,6 +86,7 @@ impl Fixture {
             app,
             events,
             picker,
+            paths,
             engine,
             _dir: dir,
         }
@@ -77,12 +98,25 @@ impl Fixture {
 
     /// Registers the demo working copy.
     pub async fn add_demo_wc(&self) -> WorkingCopy {
-        crate::commands::wc_add_existing(
-            self.state(),
-            demo_wc_root().to_string_lossy().into_owned(),
-        )
-        .await
-        .unwrap()
+        crate::commands::wc_add_existing(self.state(), self.grant_dir(&demo_wc_root()))
+            .await
+            .unwrap()
+    }
+
+    /// A folder grant for `path`, as the native dialog would mint it.
+    pub fn grant_dir(&self, path: &std::path::Path) -> PathGrantId {
+        self.state()
+            .grants
+            .mint(path.to_path_buf(), GrantKind::Dir, MAIN_WINDOW)
+            .id
+    }
+
+    /// A file grant for `path`.
+    pub fn grant_file(&self, path: &std::path::Path) -> PathGrantId {
+        self.state()
+            .grants
+            .mint(path.to_path_buf(), GrantKind::File, MAIN_WINDOW)
+            .id
     }
 
     /// Waits for the terminal event of `handle` and returns its outcome.

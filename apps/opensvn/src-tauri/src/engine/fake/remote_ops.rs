@@ -6,8 +6,8 @@ use bytes::Bytes;
 use opensvn_ipc::time_fmt::timestamp_to_iso;
 use opensvn_ipc::{
     BlameLine, BranchKind, BranchNode, ChangeAction, ChangedPath, CopyFrom, CopyLocationRequest,
-    EntryKind, FileDiff, Layout, LogEntry, LogGetRequest, LogPage, PathKind, RemoteEditRequest,
-    RemoteOp, RepoEntry, RepoInfo, Rev, Size, TextSide,
+    EntryKind, FileDiff, Layout, LogEntry, LogGetRequest, LogPage, PathKind, RepoEntry, RepoInfo,
+    Rev, Size, TextSide,
 };
 use svn_ra_api::fake::{FakeChange, FakeRaSession};
 use svn_ra_api::{LogRequest, RaSession};
@@ -17,7 +17,7 @@ use super::FakeEngine;
 use super::state::rel;
 use super::text::{is_binary, match_lines, text_side};
 use crate::engine::context::{OpContext, ProgressUpdate};
-use crate::engine::facade::{DiffOptions, LockScope, LogScope, WcRef};
+use crate::engine::facade::{DiffOptions, EditOp, LockScope, LogScope, RemoteEditPlan, WcRef};
 
 /// Largest file `repo_cat` returns inline.
 const CAT_LIMIT: usize = 5 * 1024 * 1024;
@@ -578,7 +578,7 @@ impl FakeEngine {
 
     pub(super) async fn do_remote_edit(
         &self,
-        req: &RemoteEditRequest,
+        req: &RemoteEditPlan,
         ctx: &OpContext,
     ) -> Result<Rev, SvnError> {
         let mut session: Option<FakeRaSession> = None;
@@ -597,24 +597,25 @@ impl FakeEngine {
                 }
             };
             match op {
-                RemoteOp::Mkdir { url } => changes.push(FakeChange::PutDir(at(url)?)),
-                RemoteOp::Delete { url } => changes.push(FakeChange::Delete(at(url)?)),
-                RemoteOp::Upload { url, local_path } => {
+                EditOp::Mkdir { url } => changes.push(FakeChange::PutDir(at(url)?)),
+                EditOp::Delete { url } => changes.push(FakeChange::Delete(at(url)?)),
+                EditOp::Upload { url, local_path } => {
                     let to = at(url)?;
-                    let path = Path::new(local_path);
+                    let path = local_path.as_path();
+                    let shown = path.display();
                     if !path.is_absolute() {
                         return Err(internal("upload path must be absolute"));
                     }
                     let meta = std::fs::metadata(path)
-                        .map_err(|e| SvnError::from_io(format!("read {local_path}"), &e))?;
+                        .map_err(|e| SvnError::from_io(format!("read {shown}"), &e))?;
                     if meta.len() > UPLOAD_LIMIT {
                         return Err(internal("file is too large to upload in this build"));
                     }
                     let data = std::fs::read(path)
-                        .map_err(|e| SvnError::from_io(format!("read {local_path}"), &e))?;
+                        .map_err(|e| SvnError::from_io(format!("read {shown}"), &e))?;
                     changes.push(FakeChange::PutFile(to, Bytes::from(data)));
                 }
-                RemoteOp::Copy {
+                EditOp::Copy {
                     from_url,
                     from_rev,
                     to_url,
@@ -627,7 +628,7 @@ impl FakeEngine {
                             .await?,
                     );
                 }
-                RemoteOp::Rename { from_url, to_url } => {
+                EditOp::Rename { from_url, to_url } => {
                     let from = at(from_url)?;
                     let to = at(to_url)?;
                     let s = session.clone().ok_or_else(|| internal("no repository"))?;

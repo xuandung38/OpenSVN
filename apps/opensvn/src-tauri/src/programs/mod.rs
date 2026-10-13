@@ -29,9 +29,10 @@ pub trait ProgramPicker: Send + Sync {
 
 const MAX_ARGS: usize = 32;
 const MAX_ARG_LEN: usize = 1024;
+const MAX_TOTAL_ARGS: usize = 2048;
 
 fn refuse(msg: impl Into<String>) -> AppError {
-    AppError::internal(msg)
+    crate::errors::invalid_argument(msg)
 }
 
 /// Checks that `path` is something the OS can launch and returns its canonical form.
@@ -72,15 +73,46 @@ fn validate_program(path: &Path) -> Result<PathBuf, AppError> {
     Ok(canonical)
 }
 
+/// Characters that could hide or reorder text in the confirmation dialog: controls (including
+/// newline, DEL and C1), zero-width and bidirectional formatting characters, the BOM.
+fn is_deceptive(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+        )
+}
+
 fn validate_args(args: &[String]) -> Result<(), AppError> {
     if args.len() > MAX_ARGS
         || args
             .iter()
-            .any(|a| a.len() > MAX_ARG_LEN || a.contains('\0'))
+            .any(|a| a.len() > MAX_ARG_LEN || a.chars().any(is_deceptive))
+        || args.iter().map(String::len).sum::<usize>() > MAX_TOTAL_ARGS
     {
         return Err(refuse("The program arguments are not valid."));
     }
     Ok(())
+}
+
+/// What the user confirms: the program, then each argument on its own quoted line, so no argument
+/// can merge into or hide behind another.
+fn command_line_for_dialog(path: &str, args: &[String]) -> String {
+    let mut out = path.to_owned();
+    for a in args {
+        out.push_str("\n  \"");
+        out.push_str(&a.replace('\\', "\\\\").replace('"', "\\\""));
+        out.push('"');
+    }
+    out
+}
+
+/// Windows `canonicalize` returns `\\?\C:\...`, which `cmd.exe` based programs cannot run.
+fn strip_verbatim(path: &str) -> String {
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if rest.len() > 2 && rest.as_bytes()[1] == b':' => rest.to_owned(),
+        _ => path.to_owned(),
+    }
 }
 
 /// Chooses and clears program settings.
@@ -112,11 +144,13 @@ impl ProgramService {
             return Ok(self.settings.get());
         };
         let canonical = validate_program(&picked)?;
-        let path = canonical.to_string_lossy().into_owned();
-        let command_line = std::iter::once(path.as_str())
-            .chain(args.iter().map(String::as_str))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let path = strip_verbatim(&canonical.to_string_lossy());
+        if path.chars().any(is_deceptive) {
+            return Err(refuse(
+                "The program path contains characters that cannot be shown safely.",
+            ));
+        }
+        let command_line = command_line_for_dialog(&path, &args);
         if !self.picker.confirm(kind, &command_line).await {
             return Ok(self.settings.get());
         }

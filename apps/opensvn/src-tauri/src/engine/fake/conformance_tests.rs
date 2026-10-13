@@ -6,20 +6,20 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use opensvn_ipc::{
-    CheckoutRequest, CleanupRequest, CommitRequest, Depth, NodeStatus, Rev, UpdateRequest,
-    WcFormat, WcId,
+    CleanupRequest, CommitRequest, Depth, NodeStatus, Rev, UpdateRequest, WcFormat, WcId,
 };
 use svn_ra_api::fake::{FakeChange, FakeRaSession};
 use svn_types::{ErrorCode, RelPath, SvnError};
 
 use super::{FakeEngine, demo_wc_root};
-use crate::engine::conformance::{self, Harness};
-use crate::engine::{EngineFacade, OpContext, ProgressReporter, StatusQuery, WcRef};
+use crate::engine::conformance::{self, Harness, PlantedOwner};
+use crate::engine::{CheckoutPlan, EngineFacade, OpContext, ProgressReporter, StatusQuery, WcRef};
 
 const URL: &str = "https://svn.test.local/repos/conformance";
 
 struct FakeHarness {
     engine: FakeEngine,
+    scratch: tempfile::TempDir,
 }
 
 fn work_dir() -> PathBuf {
@@ -52,6 +52,7 @@ fn standard_repo() -> FakeRaSession {
 fn harness() -> FakeHarness {
     FakeHarness {
         engine: FakeEngine::empty().with_repo(standard_repo()),
+        scratch: tempfile::tempdir().unwrap(),
     }
 }
 
@@ -68,6 +69,15 @@ impl Harness for FakeHarness {
     fn write_file(&self, root: &Path, rel: &str, content: &str) -> Result<(), SvnError> {
         self.engine.edit_file(root, rel, content.as_bytes())
     }
+    fn scratch_dir(&self) -> PathBuf {
+        self.scratch.path().to_path_buf()
+    }
+    fn plant_lock(&self, root: &Path, dir: &str, owner: PlantedOwner) -> Result<(), SvnError> {
+        match owner {
+            PlantedOwner::DeadProcess => self.engine.simulate_dead_owner_lock(root, dir),
+            PlantedOwner::Foreign => self.engine.simulate_foreign_lock(root, dir),
+        }
+    }
 }
 
 #[tokio::test]
@@ -75,10 +85,10 @@ async fn shared_engine_suite() {
     conformance::run_all(harness).await;
 }
 
-fn checkout_req(path: &Path, rev: Option<Rev>) -> CheckoutRequest {
-    CheckoutRequest {
+fn checkout_req(path: &Path, rev: Option<Rev>) -> CheckoutPlan {
+    CheckoutPlan {
         url: format!("{URL}/trunk"),
-        path: path.to_string_lossy().into_owned(),
+        path: path.to_path_buf(),
         rev,
         depth: Depth::Infinity,
         sparse: None,
@@ -104,6 +114,7 @@ async fn network_phase_cancels_immediately_and_leaves_nothing() {
         engine: FakeEngine::empty()
             .with_repo(standard_repo())
             .with_step_delay(Duration::from_millis(500)),
+        scratch: tempfile::tempdir().unwrap(),
     };
     let (ctx, _) = counting_ctx();
     let cancel = ctx.cancel.clone();
