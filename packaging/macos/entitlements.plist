@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the Developer ID build. OpenSVN is not sandboxed and its
+  WKWebView content is local and static, so no exception is needed: network access, the
+  Keychain and the user's working copies are all reachable from a non-sandboxed process.
+  Add a key here only together with the feature that needs it.
+-->
+<plist version="1.0">
+<dict/>
+</plist>
