@@ -80,12 +80,16 @@ export const commands = {
 	displayName: string,
 	kind: GrantKind,
 } | null, AppError>(__TAURI_INVOKE("path_pick", { request })),
+	/**  Switches the native menu between the Branch and the Location variant. */
+	menuSetLayout: (hasLayout: boolean) => typedError<null, AppError>(__TAURI_INVOKE("menu_set_layout", { hasLayout })),
 	certsList: () => typedError<TrustedCert[], AppError>(__TAURI_INVOKE("certs_list")),
 	/**  Stops trusting a certificate; the next connection asks again. */
 	certsRemove: (key: TrustedCertKey) => typedError<null, AppError>(__TAURI_INVOKE("certs_remove", { key })),
 	/**  Lets the user pick the default checkout folder in a native dialog and stores it. */
 	checkoutRootChoose: () => typedError<Settings, AppError>(__TAURI_INVOKE("checkout_root_choose")),
+	/**  Shows an item of a working copy in the file manager. */
 	revealInOs: (wcId: WcId, path: string) => typedError<null, AppError>(__TAURI_INVOKE("reveal_in_os", { wcId, path })),
+	/**  Opens an item of a working copy with the default app, the editor or the terminal. */
 	openExternal: (wcId: WcId, path: string, openWith: OpenWith) => typedError<null, AppError>(__TAURI_INVOKE("open_external", { wcId, path, openWith })),
 	diagnosticsExport: () => typedError<string, AppError>(__TAURI_INVOKE("diagnostics_export")),
 };
@@ -197,7 +201,14 @@ export type BranchRef = {
 	url: string,
 };
 
-export type CertDecision = "reject" | "acceptOnce" | "acceptAlways";
+export type CertDecision = "reject" | "acceptOnce" | 
+/**  Trust permanently. Valid only for self-signed or unknown-issuer failures. */
+"acceptAlways" | 
+/**
+ *  Replace the pinned certificate of this host and port with the one now presented. Valid
+ *  only when the failure is `changed`.
+ */
+"replacePin";
 
 /**  Why a TLS certificate needs a decision. */
 export type CertFailureInfo = "unknownIssuer" | "selfSigned" | "expired" | "notYetValid" | "hostnameMismatch" | "revoked" | 

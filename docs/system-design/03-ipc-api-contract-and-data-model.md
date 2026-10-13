@@ -141,7 +141,7 @@ type Layout =
 | `repo_list` | `{ url, rev? }` | `RepoEntry[]` |
 | `repo_cat` | `{ url, rev? }` | `TextSide` (giới hạn kích thước; quá lớn → lỗi, dùng `repo_save`) |
 | `repo_save` | `{ url, rev?, grant: PathGrantId }` (file chọn qua `path_pick` kiểu `saveFile`) | `OperationHandle` (ghi thẳng ra đĩa) |
-| `log_get` | `{ target: LogTarget, fromRev?, toRev?, limit, stopOnCopy?, withPaths: true, filter? }` | `{ entries: LogEntry[], nextRev?: Rev }` (cache-first). Phân trang: mới nhất trước; `fromRev` là **cận trên bao gồm** (bỏ trống = HEAD); `entries` có tối đa `limit` phần tử (1–1000); `nextRev` là revision của phần tử đầu tiên của trang kế (bao gồm) nên UI gọi lại với `fromRev = nextRev`; không có `nextRev` nghĩa là hết. `filter` khớp không phân biệt hoa thường trên message và author, và áp dụng trước khi cắt trang |
+| `log_get` | `{ target: LogTarget, fromRev?, toRev?, limit, stopOnCopy?, withPaths: true, filter? }` | `{ entries: LogEntry[], nextRev?: Rev }` (cache-first). Phân trang: mới nhất trước; `fromRev` là **cận trên bao gồm** (bỏ trống = HEAD); `entries` có tối đa `limit` phần tử (1–1000); `nextRev` là revision đầu tiên **chưa được trả về**, nên UI gọi lại với `fromRev = nextRev` (bao gồm); không có `nextRev` nghĩa là hết. `filter` khớp không phân biệt hoa thường trên message và author, và áp dụng trước khi cắt trang |
 | `blame_get` | `{ url, rev? }` | `OperationHandle` → kết quả `{ lines: { rev, author, date, text }[] }` |
 | `lock` / `unlock` | `{ targets: LockTargets, comment?, steal? }` / `{ targets: LockTargets, breakLock? }` | `OperationHandle` |
 | `remote_edit` | `{ ops: RemoteOp[], message }` (mkdir/rename/delete/copy/upload; `upload` dùng `source: PathGrantId`, không nhận đường dẫn thô) | `OperationHandle` |
