@@ -162,6 +162,28 @@ fn under(path: &str, prefix: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// Segments of the decoded absolute `path` below the decoded repository `root`, and whether the
+/// match needed case folding. The exact comparison wins; the case-insensitive fallback exists
+/// for VisualSVN on Windows, where repository names are case-insensitive and the server may
+/// announce `/svn/Repo` for a session opened at `/svn/repo/trunk`.
+fn below_root(root: &str, path: &str) -> Option<(Vec<String>, bool)> {
+    let root: Vec<&str> = root.split('/').filter(|s| !s.is_empty()).collect();
+    let path: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if path.len() < root.len() {
+        return None;
+    }
+    let rest = path[root.len()..].iter().map(|s| (*s).to_owned()).collect();
+    let head = &path[..root.len()];
+    if head == root.as_slice() {
+        return Some((rest, false));
+    }
+    let folded = head
+        .iter()
+        .zip(&root)
+        .all(|(a, b)| a == b || a.to_lowercase() == b.to_lowercase());
+    folded.then_some((rest, true))
+}
+
 /// Appends segments to an encoded base path, percent-encoding each segment.
 fn join_encoded(origin: &Url, base: &str, segments: &[&str]) -> Result<Url> {
     let mut url = origin.clone();
@@ -204,6 +226,14 @@ impl UrlBuilder {
         let rev = norm(&caps.rev_stub)?;
         let rev_root = norm(&caps.rev_root_stub)?;
         let root = norm(&caps.repository_root)?;
+        // The repository root must be the session URL or one of its ancestors; anything else
+        // would let the server steer every public URL (locks, copies) somewhere else.
+        let session_path = decode_path(&norm(session_url.as_url().path())?)?;
+        if below_root(&decode_path(&root)?, &session_path).is_none() {
+            return Err(unsafe_href(
+                "SVN-Repository-Root is not an ancestor of the session URL",
+            ));
+        }
         // Directories that hold the stubs and live inside the public tree: nothing public may
         // be addressed through them except via a recognised stub.
         let mut special_parents: Vec<String> = Vec::new();
@@ -245,6 +275,24 @@ impl UrlBuilder {
             txn_root,
             dec,
         })
+    }
+
+    /// Where `url` lies below the repository root, as a repository-relative path, if it is on
+    /// this session's origin and below the root (with the same case-insensitive fallback as
+    /// the ancestor check). The second value tells whether case folding was needed; callers
+    /// then use [`Self::public`] of the path, which carries the server's spelling of the root.
+    pub fn locate(&self, url: &Url) -> Result<(RelPath, bool)> {
+        if url.origin() != self.origin.origin() {
+            return Err(unsafe_href("URL is on a different origin than the session"));
+        }
+        if url.query().is_some() || url.fragment().is_some() {
+            return Err(unsafe_href("URL with query or fragment"));
+        }
+        let path = decode_path(url.path())?;
+        let (rest, folded) = below_root(&self.dec.root, &path)
+            .ok_or_else(|| unsafe_href("URL is outside the repository root"))?;
+        let rel = rel_from_decoded(&rest.join("/"))?;
+        Ok((rel, folded))
     }
 
     /// URL of the `me` resource.

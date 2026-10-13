@@ -34,14 +34,9 @@ promptable); and every `update/` case delivered over the wire.
   `ListItem::Rejected`, never as an entry.
 - `ok-verbatim`: accepted and returned as plain text; escaping is the UI's job.
 - `reject`: OPTIONS answer refused by `Capabilities` or `UrlBuilder`.
-- `gap-same-origin`: **known gap**, accepted today. The test only proves that every URL built
-  from it stays on the session origin. Flip to `reject` once fixed.
 
 ## Known gaps / not covered
 
-- `options/root-not-prefix`, `options/root-dotdot`: `UrlBuilder::new` does not check that
-  `SVN-Repository-Root` is an ancestor of the session URL (needs a case-insensitive fallback for
-  VisualSVN before it can be strict).
 - No `docker/evil-server/` container yet: the scripted servers in the crate tests cover the same
   answers without Docker. A hostile *repository* (file names / props containing `<script>`, SVG
   with script, symlink `dir -> /tmp`) for UI and working-copy tests is not generated yet.

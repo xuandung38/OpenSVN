@@ -73,6 +73,41 @@ fn xml_values(xml: &str, open: &str, close: &str) -> Vec<String> {
 
 #[tokio::test]
 #[ignore = "needs a mod_dav_svn server: set OPENSVN_DAV_URL"]
+async fn reparented_and_unattended_sessions_match_a_fresh_one() {
+    let Some(root) = root_url() else { return };
+    let cancel = CancelToken::new();
+    let at_root = open(&root).await;
+    let trunk = at_root
+        .reparent(&RepoUrl::parse(&format!("{root}/trunk")).unwrap())
+        .unwrap()
+        .unattended();
+    let fresh = open(&format!("{root}/trunk")).await;
+    assert_eq!(trunk.session_url(), fresh.session_url());
+    assert_eq!(trunk.repos_root(), fresh.repos_root());
+    let names =
+        |v: Vec<svn_types::DirEntry>| v.into_iter().map(|e| e.name).collect::<BTreeSet<_>>();
+    assert_eq!(
+        names(
+            trunk
+                .list(&RelPath::root(), None, Depth::Immediates, &cancel)
+                .await
+                .unwrap()
+        ),
+        names(
+            fresh
+                .list(&RelPath::root(), None, Depth::Immediates, &cancel)
+                .await
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        trunk.youngest_rev(&cancel).await.unwrap(),
+        fresh.youngest_rev(&cancel).await.unwrap()
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs a mod_dav_svn server: set OPENSVN_DAV_URL"]
 async fn session_basics_match_svn_info() {
     let Some(root) = root_url() else { return };
     let trunk = format!("{root}/trunk");
