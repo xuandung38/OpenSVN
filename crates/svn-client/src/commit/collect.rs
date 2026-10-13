@@ -86,9 +86,9 @@ pub struct Harvest {
     /// Committables sorted by repository path.
     pub items: Vec<Committable>,
     /// Every lock token met by the walk (`harvest_status_callback`): those of committed paths,
-    /// of unmodified locked files below the targets, and of every locked node below a deleted
-    /// directory. All are sent with the commit (the server needs the ones below a deleted
-    /// directory) and released afterwards unless the locks are kept.
+    /// of unmodified locked files below the targets, and of every locked node below a deleted or
+    /// replaced directory. All are sent with the commit (the server needs the ones below a
+    /// deleted directory) and released afterwards unless the locks are kept.
     pub locks: Vec<HarvestLock>,
     /// BASE revision of every versioned ancestor directory of an item, by repository path, used
     /// to open the intermediate directories of the commit drive.
@@ -301,23 +301,25 @@ impl Collector<'_> {
         Ok(())
     }
 
-    /// Records the lock tokens of `info`: its own BASE lock, or for the root of a deletion every
-    /// lock at or below it.
+    /// Records the lock tokens of `info`: its own BASE lock, or for the root of a deletion or
+    /// replacement (which deletes the BASE node first) every lock at or below it, like svn's
+    /// `harvest_status_callback` for any item with the delete flag.
     fn gather_locks(&mut self, info: &NodeInfo) -> Result<()> {
-        let found = if info.schedule == Schedule::Deleted && info.op_root {
-            self.db.repos_locks_below(&info.rel)?
-        } else if info.schedule == Schedule::Deleted {
-            Vec::new() // gathered with its deletion root
-        } else {
-            match (&info.base, self.db.repos_lock(&info.rel)?) {
-                (Some(b), Some(l)) => b
-                    .repos_relpath
-                    .clone()
-                    .map(|r| vec![(info.rel.clone(), r, l)])
-                    .unwrap_or_default(),
-                _ => Vec::new(),
-            }
-        };
+        let found =
+            if matches!(info.schedule, Schedule::Deleted | Schedule::Replaced) && info.op_root {
+                self.db.repos_locks_below(&info.rel)?
+            } else if info.schedule == Schedule::Deleted {
+                Vec::new() // gathered with its deletion root
+            } else {
+                match (&info.base, self.db.repos_lock(&info.rel)?) {
+                    (Some(b), Some(l)) => b
+                        .repos_relpath
+                        .clone()
+                        .map(|r| vec![(info.rel.clone(), r, l)])
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                }
+            };
         for (rel, repos_relpath, lock) in found {
             self.locks.insert(
                 rel.clone(),
