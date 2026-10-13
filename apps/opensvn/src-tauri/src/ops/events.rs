@@ -1,14 +1,14 @@
 //! Outbound events (Rust -> UI) behind a trait, so services are testable without a window.
 
 use opensvn_ipc::{
-    Banner, DroppedPaths, Incoming, OpFailed, OpFinished, OperationHandle, Progress,
+    AuthPrompt, Banner, DroppedPaths, Incoming, OpFailed, OpFinished, OperationHandle, Progress,
     RevisionChanged, StatusChanged,
 };
 use tauri_specta::Event;
 
 use crate::events::{
-    FsDropped, OpFailedEvent, OpFinishedEvent, OpProgress, OpStarted, WcBanner, WcIncoming,
-    WcRevisionChanged, WcStatusChanged,
+    AuthPromptEvent, FsDropped, OpFailedEvent, OpFinishedEvent, OpProgress, OpStarted, WcBanner,
+    WcIncoming, WcRevisionChanged, WcStatusChanged,
 };
 
 /// Everything the backend pushes to the UI. Implementations must not block.
@@ -29,6 +29,8 @@ pub trait AppEvents: Send + Sync + 'static {
     fn incoming(&self, incoming: &Incoming);
     /// `wc://banner`
     fn banner(&self, banner: &Banner);
+    /// `auth://prompt`
+    fn auth_prompt(&self, prompt: &AuthPrompt);
     /// `fs://dropped`
     fn dropped(&self, dropped: &DroppedPaths);
 }
@@ -81,6 +83,9 @@ impl<R: tauri::Runtime> AppEvents for TauriEvents<R> {
     fn dropped(&self, d: &DroppedPaths) {
         emit!(self, FsDropped, d, "fs://dropped");
     }
+    fn auth_prompt(&self, p: &AuthPrompt) {
+        emit!(self, AuthPromptEvent, p, "auth://prompt");
+    }
 }
 
 /// One recorded event.
@@ -96,6 +101,7 @@ pub enum Recorded {
     Incoming(Incoming),
     Banner(Banner),
     Dropped(DroppedPaths),
+    Auth(AuthPrompt),
 }
 
 /// Collects events for assertions in tests.
@@ -136,6 +142,7 @@ impl RecordingEvents {
                 Recorded::Incoming(i) => format!("incoming:{}", i.wc_id.0),
                 Recorded::Banner(b) => format!("banner:{}", b.wc_id.0),
                 Recorded::Dropped(d) => format!("dropped:{}", d.grants.len()),
+                Recorded::Auth(p) => format!("auth:{}", p.request_id),
             })
             .collect()
     }
@@ -183,5 +190,8 @@ impl AppEvents for RecordingEvents {
     }
     fn dropped(&self, d: &DroppedPaths) {
         self.push(Recorded::Dropped(d.clone()));
+    }
+    fn auth_prompt(&self, p: &AuthPrompt) {
+        self.push(Recorded::Auth(p.clone()));
     }
 }

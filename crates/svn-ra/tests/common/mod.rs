@@ -398,11 +398,28 @@ pub fn transport_trusting(
         ..TransportConfig::default()
     };
     tweak(&mut config);
-    Arc::new(HttpTransport::new(
-        config,
-        prompter,
-        Arc::new(MemoryTrustStore::new()),
-    ))
+    // Deterministic regardless of the build's Negotiate support or the host's Kerberos tickets.
+    Arc::new(
+        HttpTransport::new(config, prompter, Arc::new(MemoryTrustStore::new()))
+            .with_negotiate(None),
+    )
+}
+
+/// Like [`transport_trusting`] with a scripted Negotiate provider.
+pub fn transport_with_negotiate(
+    ca: &TestCa,
+    prompter: Arc<dyn AuthPrompter>,
+    provider: Arc<dyn svn_ra::auth::NegotiateProvider>,
+) -> Arc<HttpTransport> {
+    let config = TransportConfig {
+        proxy: svn_ra::transport::ProxyConfig::Disabled,
+        extra_root_certs: vec![ca.der()],
+        ..TransportConfig::default()
+    };
+    Arc::new(
+        HttpTransport::new(config, prompter, Arc::new(MemoryTrustStore::new()))
+            .with_negotiate(Some(provider)),
+    )
 }
 
 /// Expected `Authorization` header for `user:pass`.

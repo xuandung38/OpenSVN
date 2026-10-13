@@ -36,6 +36,7 @@ pub struct WcRegistry {
     policy: RetryPolicy,
     actors: Mutex<HashMap<String, Arc<WcActor>>>,
     live: Mutex<HashMap<String, Live>>,
+    open: Mutex<std::collections::BTreeSet<String>>,
 }
 
 fn unknown_wc(id: &WcId) -> AppError {
@@ -65,6 +66,7 @@ impl WcRegistry {
             policy,
             actors: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
+            open: Mutex::new(std::collections::BTreeSet::new()),
         }
     }
 
@@ -86,6 +88,11 @@ impl WcRegistry {
             .get(id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Revisions known to be waiting on the server for a working copy.
+    pub fn incoming_of(&self, id: &WcId) -> u32 {
+        self.live(&id.0).incoming
     }
 
     /// Records the result of a remote check (incoming revisions and when it ran).
@@ -256,6 +263,10 @@ impl WcRegistry {
         if !self.db.wc_remove(&id.0)? {
             return Err(unknown_wc(id));
         }
+        self.open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id.0);
         self.live
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -296,6 +307,24 @@ impl WcRegistry {
         Ok((self.describe(&row).await?, opened.recovery))
     }
 
+    /// Marks a working copy as shown in the UI: it is watched and polled from now on.
+    pub fn mark_open(&self, id: &WcId) {
+        self.open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id.0.clone());
+    }
+
+    /// Ids of the working copies the user has open (watched and polled).
+    pub fn open_ids(&self) -> Vec<WcId> {
+        self.open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|id| WcId(id.clone()))
+            .collect()
+    }
+
     /// Ids of every registered working copy (used to run recovery at app start).
     pub fn ids(&self) -> Result<Vec<WcId>, AppError> {
         Ok(self.db.wc_list()?.into_iter().map(|r| WcId(r.id)).collect())
@@ -304,6 +333,10 @@ impl WcRegistry {
     /// Releases per-working-copy resources. The actor finishes queued writes first.
     pub fn close(&self, id: &WcId) -> Result<(), AppError> {
         self.db.wc_get(&id.0)?.ok_or_else(|| unknown_wc(id))?;
+        self.open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id.0);
         Ok(())
     }
 }

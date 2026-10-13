@@ -243,3 +243,45 @@ async fn a_started_write_keeps_the_caller_waiting_for_its_real_result() {
     let (out, ()) = tokio::join!(write, canceller);
     assert_eq!(out.unwrap(), "finished");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn racing_cancel_never_runs_a_job_whose_caller_was_told_it_was_cancelled() {
+    use svn_types::CancelToken;
+    let actor = Arc::new(WcActor::spawn(quick()));
+    for i in 0..300u64 {
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel = CancelToken::new();
+        let (a, r, c) = (actor.clone(), ran.clone(), cancel.clone());
+        let call = tokio::spawn(async move {
+            a.write_cancellable(
+                async move {
+                    r.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+                &c,
+            )
+            .await
+        });
+        // cancel at a slightly different moment each round
+        for _ in 0..(i % 7) {
+            tokio::task::yield_now().await;
+        }
+        cancel.cancel();
+        let result = call.await.unwrap();
+        // give an abandoned job the chance to (wrongly) run
+        actor.write(async { Ok(()) }).await.unwrap();
+        match result {
+            Ok(()) => assert!(
+                ran.load(Ordering::SeqCst),
+                "round {i}: reported success without running"
+            ),
+            Err(e) => {
+                assert_eq!(e.code, ErrorCode::Cancelled);
+                assert!(
+                    !ran.load(Ordering::SeqCst),
+                    "round {i}: ran although the caller saw a cancel"
+                );
+            }
+        }
+    }
+}

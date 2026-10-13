@@ -366,7 +366,9 @@ impl FakeEngine {
     ) -> Result<RemoteScan, SvnError> {
         let info = self.with_wc(&wc.root, |w| Ok(w.info()))?;
         let session = self.repo_by_root(&info.repo_root_url)?;
-        session.ensure_authenticated(&ctx.cancel).await?;
+        if ctx.interactive {
+            session.ensure_authenticated(&ctx.cancel).await?;
+        }
         self.network_tick(ctx).await?;
         let head = session.youngest_rev(&ctx.cancel).await?;
         let base = session_path(&info.path_in_repo)?;

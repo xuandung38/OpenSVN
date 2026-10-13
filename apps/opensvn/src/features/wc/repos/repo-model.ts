@@ -49,12 +49,15 @@ const MAX_NAME_BYTES = 255;
 const RESERVED = /^(con|prn|aux|nul|conin\$|conout\$|(com|lpt)[0-9¹²³])$/i;
 
 /**
- * Invisible format characters (Unicode Cf): zero-width and bidirectional controls, the BOM, soft
- * hyphen, interlinear annotation and tag characters. A name containing them can display as a
- * different name. Same set as the backend.
+ * Invisible or text-reordering characters: every Unicode format character (Cf: zero-width and
+ * bidirectional controls, the BOM, soft hyphen, Arabic/Syriac prepended marks, interlinear
+ * annotation, musical symbol format controls, tag characters, ...), line and paragraph separators
+ * and blank-looking fillers. A name containing them can display as a different name. Same set as
+ * the backend's `display_text::is_deceptive` (C0/C1 controls are refused separately as "chars").
  */
 const FORMAT_CHARS =
-  /[\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\uFFF9-\uFFFB\u{E0000}-\u{E007F}]/u;
+  // U+034F (combining grapheme joiner) sits outside the class: a class may not mix in combining marks.
+  /\u034F|[\u00AD\u0600-\u0605\u061C\u06DD\u070F\u08E2\u115F\u1160\u17B4\u17B5\u180E\u200B-\u200F\u2028-\u202E\u2060-\u206F\u3164\uFEFF\uFFA0\uFFF9-\uFFFB\u{110BD}\u{110CD}\u{13430}-\u{1343F}\u{1BCA0}-\u{1BCA3}\u{1D173}-\u{1D17A}\u{E0000}-\u{E007F}]/u;
 
 /** Code points some file systems ignore when they compare names. */
 const FS_IGNORABLE = /[\u200C-\u200F\u202A-\u202E\u206A-\u206F\uFEFF]/gu;

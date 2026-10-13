@@ -41,7 +41,7 @@ export const EVENT_NAMES: EventName[] = [
   "auth://prompt",
 ];
 
-/** Native menu events (`menu://commit`, `menu://update`, ...) are free-form and carry no payload. */
+/** Native menu events (`menu://wc.update`, `menu://file.checkout`, ...) carry no payload. */
 export type MenuEventName = `menu://${string}`;
 
 /** Live view of one operation for the Activity panel. */
@@ -68,16 +68,27 @@ export interface EventBus {
   stop(): void;
 }
 
-/** Menu entries the native menu (P08) may emit; listed so the bus can subscribe without wildcards. */
+/**
+ * Native menu items the UI acts on, as emitted by the one native menu (`src-tauri/src/menu.rs`,
+ * `menu://<item id>`); listed so the bus can subscribe without wildcards.
+ */
 export const MENU_EVENTS: readonly MenuEventName[] = [
-  "menu://commit",
-  "menu://update",
-  "menu://refresh",
-  "menu://add-working-copy",
-  "menu://checkout",
-  "menu://switch-repository",
-  "menu://settings",
-  "menu://about",
+  "menu://file.checkout",
+  "menu://file.add-wc",
+  "menu://file.switch-repo",
+  "menu://app.settings",
+  "menu://wc.commit",
+  "menu://wc.update",
+  "menu://wc.check-updates",
+  "menu://sel.lock",
+  "menu://sel.discard",
+  "menu://sel.log",
+  "menu://sel.blame",
+  "menu://branch.switch",
+  "menu://view.changes",
+  "menu://view.history",
+  "menu://view.browse",
+  "menu://view.activity",
 ];
 
 export function createEventBus(adapter: IpcAdapter, qc: QueryClient): EventBus {

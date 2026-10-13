@@ -158,28 +158,33 @@ interface WcEntry {
 | `repo_list` | `{ url, rev? }` | `RepoEntry[]` |
 | `repo_cat` | `{ url, rev? }` | `TextSide` (giới hạn kích thước; quá lớn → lỗi, dùng `repo_save`) |
 | `repo_save` | `{ url, rev?, grant: PathGrantId }` (file chọn qua `path_pick` kiểu `saveFile`) | `OperationHandle` (ghi thẳng ra đĩa) |
-| `log_get` | `{ target: LogTarget, fromRev?, toRev?, limit, stopOnCopy?, withPaths: true, filter? }` | `{ entries: LogEntry[], nextRev?: Rev }` (cache-first). Phân trang: mới nhất trước; `fromRev` là **cận trên bao gồm** (bỏ trống = HEAD); `entries` có tối đa `limit` phần tử (1–1000); `nextRev` là revision đầu tiên **chưa được trả về**, nên lần gọi kế tiếp truyền `fromRev = nextRev` (bao gồm); không có `nextRev` nghĩa là hết. `filter` khớp không phân biệt hoa thường trên message và author, áp dụng trước khi cắt trang |
+| `log_get` | `{ target: LogTarget, fromRev?, toRev?, limit, stopOnCopy?, withPaths: true, filter? }` | `{ entries: LogEntry[], nextRev?: Rev }` (cache-first). Phân trang: mới nhất trước; `fromRev` là **cận trên bao gồm** (bỏ trống = HEAD); `entries` có tối đa `limit` phần tử (1–1000); `nextRev` là revision đầu tiên **chưa được trả về**, nên UI gọi lại với `fromRev = nextRev` (bao gồm); không có `nextRev` nghĩa là hết. `filter` khớp không phân biệt hoa thường trên message và author, và áp dụng trước khi cắt trang |
 | `blame_get` | `{ url, rev? }` | `OperationHandle` → kết quả `{ lines: { rev, author, date, text }[] }` |
 | `lock` / `unlock` | `{ targets: LockTargets, comment?, steal? }` / `{ targets: LockTargets, breakLock? }` | `OperationHandle` |
 | `remote_edit` | `{ ops: RemoteOp[], message }` (mkdir/rename/delete/copy/upload; `upload` dùng `source: PathGrantId`, không nhận đường dẫn thô) | `OperationHandle` |
 | `branches_list` | `{ repoRootUrl }` | `BranchNode[]` (theo layout, cache 60s; rỗng khi `mode: 'none'`) |
 | `layout_get` / `layout_set` | `{ repoUuid }` / `{ repoUuid, layout }` | `Layout` / `void` |
-| `layout_detect` | `{ repoRootUrl, url }` | `{ found: boolean; layout?: Layout; current?: BranchRef }` |
-| `copy_location` | `{ fromUrl, fromRev?, toUrl, message, switchWcId? }` (tạo branch/tag hoặc bản sao bất kỳ) | `OperationHandle` |
+| `layout_detect` | `{ repoRootUrl, url }` | `{ found: boolean; layout?: Layout; current?: BranchRef }` (tìm `trunk` + `branches`/`tags` ở gốc repo → `auto`; hoặc ở một cấp project → `custom` với `/{project}/...`) |
+| `copy_location` | `{ fromUrl, fromRev?, toUrl, message, switchWcId?, fromWc? }` (tạo branch/tag hoặc bản sao bất kỳ; có `fromWc` thì nguồn là working copy kèm thay đổi local và `fromUrl`/`fromRev` bị bỏ qua) | `OperationHandle` |
 
 ### 3.5 Hệ thống
 | Command | Mô tả |
 |---|---|
 | `op_cancel { opId }` | Hủy tác vụ |
 | `op_list` | Tác vụ đang chạy + 50 gần nhất |
-| `auth_respond { requestId, response }` | Trả lời prompt: `{kind:'credentials',username,password,save}`, `{kind:'negotiate'}` (SSO, chỉ khi `offered` có `negotiate`), `{kind:'certificate',decision}` hoặc `{kind:'cancel'}`. Prompt không trả lời sau 5 phút coi như hủy |
+| `auth_respond { requestId, response }` | Trả lời prompt: `{kind:'credentials',username,password,save}`, `{kind:'negotiate'}` (SSO, chỉ khi `offered` có `negotiate`), `{kind:'certificate',decision}` hoặc `{kind:'cancel'}`. Prompt không trả lời sau 5 phút coi như hủy. Rust kiểm `decision` theo lỗi thật (`CertDecision::is_valid_for`): `acceptOnce`/`acceptAlways` chỉ cho `unknown-issuer`/`self-signed`; `replacePin` chỉ cho `changed` (thay pin cũ, transport nhận `ReplacePin`); mọi lỗi khác (hết hạn, sai host, revoked...) chỉ có `reject`. Tổ hợp không hợp lệ bị coi là `reject` và không lưu gì |
 | `accounts_list`, `accounts_sign_out { realm }` | Quản lý credential |
-| `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.language"`, `patch` chỉ chứa khóa cần đổi. `SettingsPatch` **không có** các khóa chạy chương trình (`diff.externalTool`, `diff.mergeTool`, `tools.editor`, `tools.terminal`) và **không có** `general.checkoutRoot` (nơi app ghi; chỉ đổi qua `checkout_root_choose`); khóa lạ bị từ chối khi deserialize |
-| `program_choose { kind, args }`, `program_clear { kind }` | Đặt/xóa chương trình ngoài (`kind`: `diff-tool` \| `merge-tool` \| `editor` \| `terminal`). Rust mở dialog chọn file native rồi dialog xác nhận native (mỗi tham số một dòng, có quote; từ chối ký tự điều khiển/bidi); trả `Settings` mới (không đổi nếu người dùng hủy) |
-| `path_pick { request }` | Dialog native chọn thư mục / file / nơi lưu (`PickRequest`), trả `PathGrantInfo \| null` (xem §3.6) |
-| `reveal_in_os { wcId, path }` | Hiện mục trong trình quản lý file; `path` là relpath trong WC (quy tắc tên như từ server), `""` = thư mục gốc WC. Mục không tồn tại → lỗi. Không thành phần nào dưới gốc WC được là symlink (kể cả symlink trỏ vào trong WC hoặc symlink hỏng), và đích sau khi canonicalize phải nằm trong gốc WC đã canonicalize; đường dẫn canonical được đưa cho trình quản lý file |
-| `open_external { wcId, path, with: 'default' \| 'editor' \| 'terminal' }` | Tích hợp OS |
-| `diagnostics_export` | Tạo gói chẩn đoán zip, trả đường dẫn |
+| `certs_list`, `certs_remove { key: {host, port, sha256} }` | Chứng chỉ đã tin cậy vĩnh viễn (Settings → Certificates); xóa thì lần kết nối sau hỏi lại |
+| `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.language"`, `patch` chỉ chứa khóa cần đổi. `SettingsPatch` **không có** các khóa chạy chương trình (`diff.externalTool`, `diff.mergeTool`, `tools.editor`, `tools.terminal`) và **không có** `general.checkoutRoot` (nơi app ghi; chỉ đổi qua `checkout_root_choose`); khóa lạ bị từ chối với lỗi `invalid-argument` |
+| `program_choose { kind, args }`, `program_clear { kind }` | Đặt/xóa chương trình ngoài (`kind`: `diff-tool` \| `merge-tool` \| `editor` \| `terminal`). Rust mở dialog chọn file native rồi dialog xác nhận native (mỗi tham số một dòng, có quote; từ chối ký tự điều khiển/bidi/vô hình theo quy tắc chung `display_text::is_deceptive`); trả `Settings` mới (không đổi nếu người dùng hủy) |
+| `path_pick { request }` | Dialog native chọn thư mục / file / nơi lưu (`PickRequest`), trả `PathGrantInfo \| null` (xem §3.6). `title` (≤ 120 ký tự) và `suggestedName` (≤ 255, không có `/` `\`, không phải `.`/`..`) không được chứa ký tự điều khiển, bidi hay zero-width, nếu có thì lỗi `invalid-argument`. `displayName` hiện các ký tự đó dạng `\u{XXXX}` |
+| `updater_token_set { token }`, `updater_token_clear`, `updater_token_status` | Token GitHub đọc bản cập nhật: chỉ lưu trong kho credential của OS (Keychain / Credential Manager / Secret Service), không bao giờ vào file, settings hay bộ nhớ dự phòng; không có kho OS thì `set` lỗi. Chỉ ghi, `status` chỉ trả `boolean` |
+| `update_check`, `update_install` | Người dùng chủ động. Trước khi gửi token, mọi endpoint trong `plugins.updater.endpoints` và URL tải về phải là `https://api.github.com/repos/<repo phát hành>/...` (không port, không userinfo, không `..`/ký tự phân cách mã hóa); sai thì `invalid-argument`, không gửi request |
+| `reveal_in_os { wcId, path }` | Hiện mục trong trình quản lý file; `path` là relpath trong WC (quy tắc tên như từ server), `""` = thư mục gốc WC. Mục không tồn tại → lỗi `path-not-found`. Không thành phần nào dưới gốc WC được là symlink (kể cả symlink trỏ vào trong WC hoặc symlink hỏng), và đích sau khi canonicalize phải nằm trong gốc WC đã canonicalize; đường dẫn canonical được đưa cho trình quản lý file |
+| `open_external { wcId, path, with: 'default' \| 'editor' \| 'terminal' }` | `path` là relpath trong WC (kiểm bằng `RelPath`/`safe_join`, phải tồn tại). `with: 'default'` chỉ mở loại tài liệu trong allow-list và thư mục thường, không bao giờ symlink; còn lại từ chối kèm action `reveal-in-file-manager`. `editor`/`terminal` dùng chương trình đã chọn qua `program_choose`, chưa cấu hình thì lỗi kèm action `open-settings` |
+| `diagnostics_preview { options: { hidePaths, hideCommitMessages } }` | Dựng gói chẩn đoán trong bộ nhớ (secret luôn bị gỡ) và trả `{ token, entries: { name, size, content }[] }` để người dùng xem **toàn bộ nội dung** trước khi lưu |
+| `diagnostics_export { token }` | Mở dialog lưu file native, ghi zip đúng nội dung đã xem (token dùng một lần), trả đường dẫn đã lưu hoặc `null` nếu hủy. Không gửi đi đâu |
+| `menu_set_layout { hasLayout }` | Đổi menu native giữa Branch và Location. Menu native (một menu duy nhất, `menu.rs`) phát event `menu://<id>` chỉ cho mục của chính nó (id ví dụ `wc.update`, `file.checkout`, `file.switch-repo`, `app.settings`); mục native (copy, paste, quit) không phát event. UI chạy cùng hành động như phím tắt tương ứng và bỏ qua "echo" khi một lần bấm phím đến cả dạng menu event lẫn keydown |
 
 ### 3.6 Đường dẫn cục bộ ngoài WC: PathGrant
 WebView **không bao giờ** gửi đường dẫn thô cho thao tác đọc/ghi ngoài WC đã đăng ký (thư mục checkout, nơi lưu `repo_save`, file upload, WC cần thêm). Những đường dẫn đó đến từ dialog native (`path_pick`) hoặc kéo-thả native; Rust giữ đường dẫn thật và trả một mã mờ:
@@ -204,10 +209,11 @@ interface AppError {
   path?: string; retryable: boolean;
   actions?: ('retry' | 'update' | 'cleanup' | 'sign-in' | 'trust-cert' | 'open-lock-dialog' | 'open-settings')[];
 }
-type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'forbidden' | 'tls-untrusted'
+type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'negotiate-failed' | 'forbidden' | 'tls-untrusted'
   | 'out-of-date' | 'locked-by-other' | 'lock-token-invalid' | 'wc-busy' | 'wc-needs-cleanup'
   | 'wc-format-unsupported' | 'not-a-working-copy' | 'conflict-blocks-commit' | 'hook-failed' | 'repository-moved' | 'pristine-not-hydrated' | 'wc-invalid-operation' | 'path-not-found'
   | 'disk-full' | 'permission-denied' | 'file-in-use' | 'cancelled' | 'invalid-argument' | 'internal';
+// negotiate-failed: SSO (Negotiate/Kerberos) thất bại và không có Basic để hỏi (server không cho Basic, URL http vì SSO chỉ qua https, token mutual auth sai, hoặc người dùng chọn lại SSO); action 'sign-in'
 // invalid-argument: giá trị sai, grant hết hạn/đã dùng, tùy chọn không hỗ trợ (MVP chỉ ghi format 31)
 ```
 
