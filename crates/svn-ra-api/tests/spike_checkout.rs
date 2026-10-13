@@ -453,3 +453,26 @@ fn null_reporter_accepts_everything() {
     r.finish().expect("finish");
     r.abort().expect("abort");
 }
+
+#[test]
+fn recording_editor_checks_path_against_parent_and_target_revision_order() {
+    let (mut e, log) = RecordingEditor::new();
+    e.set_target_revision(Revnum(3)).expect("before open_root");
+    let root = e.open_root(None).expect("root");
+    assert!(
+        e.add_file(&p("x/y/z"), root, None).is_err(),
+        "not a child of the root"
+    );
+    let dir = e.add_directory(&p("a"), root, None).expect("a");
+    assert!(
+        e.add_file(&p("b/f"), dir, None).is_err(),
+        "wrong parent directory"
+    );
+    assert!(
+        e.delete_entry(&p("c"), None, dir).is_err(),
+        "sibling of the parent, not a child"
+    );
+    e.add_file(&p("a/f"), dir, None).expect("correct child");
+    assert!(e.set_target_revision(Revnum(4)).is_err(), "after open_root");
+    assert_eq!(log.violations().len(), 4);
+}

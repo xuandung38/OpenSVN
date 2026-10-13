@@ -71,7 +71,8 @@ pub struct LogRequest {
 /// One revision of a file as reported by `file_revs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileRev {
-    /// Absolute repository path at that revision.
+    /// Absolute repository path at that revision. Untrusted server text: validate with
+    /// `RelPath::from_server` before any I/O.
     pub path: String,
     /// Revision.
     pub rev: Revnum,
@@ -185,7 +186,9 @@ pub trait RaSession: Send + Sync {
     ) -> Result<()>;
 
     /// Starts a commit. `lock_tokens` are `(path, token)` pairs; the observer is told about the
-    /// transaction before any content is sent and about the revision right after MERGE.
+    /// transaction before any content is sent (an error from the observer deletes the transaction and
+    /// fails this call) and about the revision right after MERGE. The returned editor keeps a clone
+    /// of `cancel` and honors it (see [`CommitEditor`]).
     async fn commit_editor(
         &self,
         message: &str,
@@ -193,6 +196,7 @@ pub trait RaSession: Send + Sync {
         lock_tokens: &[(String, String)],
         keep_locks: bool,
         observer: Arc<dyn CommitObserver>,
+        cancel: &CancelToken,
     ) -> Result<Box<dyn CommitEditor>>;
 
     /// Deletes a leaked server transaction (best effort, idempotent).
