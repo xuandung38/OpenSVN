@@ -164,7 +164,38 @@ pub fn normalize_xml(xml: &str, wc_abspath: &str) -> String {
     if !tail.is_empty() {
         out.push(tail.to_string());
     }
+    sort_entry_runs(&mut out);
     out.join("\n")
+}
+
+/// Sort each contiguous run of `<entry ...>...</entry>` blocks by content. Old svn (1.8) lists
+/// `info --recursive` entries in per-process hash order; blocks start with their `path` attribute
+/// so sorting the block text orders them by path.
+fn sort_entry_runs(tokens: &mut Vec<String>) {
+    let mut result: Vec<String> = Vec::with_capacity(tokens.len());
+    let mut run: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    for tok in tokens.drain(..) {
+        if let Some(block) = current.as_mut() {
+            block.push('\n');
+            block.push_str(&tok);
+            if tok == "</entry>" {
+                run.extend(current.take());
+            }
+        } else if tok.starts_with("<entry ") || tok == "<entry>" {
+            current = Some(tok);
+        } else {
+            run.sort();
+            result.append(&mut run);
+            result.push(tok);
+        }
+    }
+    run.sort();
+    result.append(&mut run);
+    if let Some(unfinished) = current {
+        result.push(unfinished);
+    }
+    *tokens = result;
 }
 
 /// Split off the leading `<...>` tag, honouring quoted attribute values.
@@ -361,6 +392,15 @@ mod tests {
         );
         assert!(n.contains("created"));
         assert!(n.contains("<dated>\nkeep\n</dated>"));
+    }
+
+    #[test]
+    fn entry_blocks_are_ordered_independently_of_listing_order() {
+        let a = "<info><entry kind=\"file\" path=\"b\"><url>u/b</url></entry><entry kind=\"file\" path=\"a\"><url>u/a</url></entry></info>";
+        let b = "<info><entry kind=\"file\" path=\"a\"><url>u/a</url></entry><entry kind=\"file\" path=\"b\"><url>u/b</url></entry></info>";
+        assert_eq!(normalize_xml(a, "/w"), normalize_xml(b, "/w"));
+        let c = b.replace("u/b", "u/changed");
+        assert_ne!(normalize_xml(a, "/w"), normalize_xml(&c, "/w"));
     }
 
     #[test]

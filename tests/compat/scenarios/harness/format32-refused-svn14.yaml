@@ -1,0 +1,12 @@
+# Negative: svn 1.14 only knows working copy format 31, so a format-32 working copy (svn 1.15
+# checkout --compatible-version 1.15) must be refused cleanly with E155021, while svn 1.15 still
+# reads it. The 1.8-1.10 clients are checked the same way in legacy/smoke-*.yaml.
+name: format32-refused-svn14
+description: svn14 refuses a format-32 working copy created by svn15
+server: svn15
+repo: basic
+steps:
+  - { on: svn15, wc: a, svn: [checkout, --compatible-version, "1.15", "{url}/trunk", "."] }
+  - { on: svn14, wc: a, svn: [status], fails_with: E155021 }
+  - { on: svn14, wc: a, svn: [update], fails_with: E155021 }
+  - { on: svn15, wc: a, svn: [status] }

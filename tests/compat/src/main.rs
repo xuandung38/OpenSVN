@@ -9,8 +9,12 @@ use opensvn_compat::scenario::Scenario;
 use opensvn_compat::{default_work_root, repo_root};
 
 /// Collect `.yaml` files from files/directories (recursive), sorted for stable order.
-fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    fn visit(p: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+fn collect(paths: &[PathBuf], include_legacy: bool) -> Result<Vec<PathBuf>> {
+    fn visit(p: &Path, out: &mut Vec<PathBuf>, include_legacy: bool) -> Result<()> {
+        // `legacy/` scenarios need the 1.8-1.10 containers (`up --legacy`); opt-in.
+        if p.is_dir() && p.file_name().is_some_and(|n| n == "legacy") && !include_legacy {
+            return Ok(());
+        }
         if p.is_dir() {
             let mut kids: Vec<PathBuf> = std::fs::read_dir(p)
                 .with_context(|| format!("read_dir {}", p.display()))?
@@ -18,7 +22,7 @@ fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
                 .collect::<std::io::Result<_>>()?;
             kids.sort();
             for k in kids {
-                visit(&k, out)?;
+                visit(&k, out, include_legacy)?;
             }
         } else if p.extension().is_some_and(|e| e == "yaml") {
             out.push(p.to_path_buf());
@@ -27,17 +31,19 @@ fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     }
     let mut out = Vec::new();
     for p in paths {
-        visit(p, &mut out)?;
+        visit(p, &mut out, include_legacy)?;
     }
     Ok(out)
 }
 
 fn run() -> Result<bool> {
-    let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    let mut args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    let include_legacy = args.iter().any(|a| a == "--legacy");
+    args.retain(|a| a != "--legacy");
     if args.is_empty() {
-        bail!("usage: compat-run <scenario.yaml|dir>...");
+        bail!("usage: compat-run [--legacy] <scenario.yaml|dir>...");
     }
-    let files = collect(&args)?;
+    let files = collect(&args, include_legacy)?;
     if files.is_empty() {
         bail!("no .yaml scenarios found");
     }

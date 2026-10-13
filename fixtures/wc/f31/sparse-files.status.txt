@@ -1,0 +1,15 @@
+# svn status -v
+                14       14 fixture      .
+                14       11 fixture      README.txt
+                14        3 fixture      crlf.txt
+                14        3 fixture      keywords.txt
+                14        3 fixture      locked.txt
+                14       10 fixture      many-props.txt
+                14        2 fixture      mixed-eol.txt
+                14       14 fixture      new.txt
+                14        3 fixture      run.sh
+# svn info (subset)
+dir
+14
+files
+^/trunk

@@ -34,6 +34,34 @@ cargo xtask compat down [--purge]
   `target/compat/logs/svn1x/error.log`, request lines in `access.log`.
 - Unit tests (`cargo test -p opensvn-compat`) need no Docker.
 
+## Older Subversion versions (1.8 to 1.10)
+
+Servers (mod_dav_svn) and clients for **1.10.8, 1.9.12 and 1.8.19** live in the compose `legacy`
+profile; they are opt-in to keep the default environment small. Format-31 working copies written by
+1.8+ clients must stay readable by the engine, and by old clients.
+
+```sh
+cargo xtask compat up --legacy        # also starts svn110/svn19/svn18 servers + clients
+cargo xtask compat fixtures --legacy  # fixture repos on every server (dump hashes verified)
+cargo xtask compat run --legacy       # default scenarios plus scenarios/harness/legacy/
+```
+
+- Full scenario set: 1.14.5 and 1.15.0. Per old version only `selfcheck-<tag>` (the image works: two
+  same-version checkouts compare equal on tree/status/info/wcdb) and `smoke-<tag>` (checkout,
+  update, commit, status -u, log, lock/unlock, and a working copy created by svn 1.15 that the old
+  client must `status` and `update`; tree/status compared). Nightly may run everything.
+- Servers: `svn110.test.local:8447`, `svn19.test.local:8446`, `svn18.test.local:8445` (host ports on
+  127.0.0.1). Tags in scenarios: `svn110`, `svn19`, `svn18`.
+- Build notes: 1.8/1.9 need `svn_cv_pycfmt_apr_int64_t=L` passed to `./configure` (the Python-binding
+  probe cannot run against APR 1.7) and have no `--with-lz4`; the image build is serial and uses
+  `make -j2` (override with `SVN_MAKE_JOBS`). Cold compile is about 7-9 minutes per image.
+- `svnadmin` 1.8 writes dump headers in a different order, so `fixtures/repos/expected/*.1.8.sha256`
+  pin its (equivalent) dump separately. 1.8 and 1.9 also cannot read a revprop value from a pipe,
+  so fixtures use temp files.
+- `info --xml --recursive` lists entries in per-process hash order on 1.8, so the normaliser sorts
+  `<entry>` blocks. `dav_cache` differs between a committed and an updated working copy, so smoke
+  scenarios do not compare `wcdb` across those; `selfcheck-<tag>` does on identical operations.
+
 ## Fixture repos
 
 | Repo | Script | Contents |
@@ -61,6 +89,7 @@ steps:
   - { on: svn15, wc: a, sh: "echo x >> README.txt" }
   - { on: engine, wc: b, svn: [checkout, "{url}/trunk", "."] }     # needs an EngineDriver
   - { on: tortoise-manual, wc: c, note: "Update in TortoiseSVN, then press Enter" }
+  - { on: svn14, wc: d, svn: [status], fails_with: E155021 }   # must exit non-zero with this in stderr
 compare:
   - { left: a, right: b, checks: [tree, status, info, wcdb], reader: svn15 }   # reader defaults to svn15
 expect: match                # `mismatch` = negative control: every listed check must find a difference
@@ -75,6 +104,10 @@ appended. Comparisons:
 - `wcdb`: `user_version`, every index/trigger/view, all rows sorted. Only `NODES.last_mod_time`
   is masked (SET/NULL) and skel property columns are canonicalised (svn writes them in hash
   order). A non-empty `WORK_QUEUE` after the steps is a failure.
+
+A step with `fails_with` is a negative step: it passes only if the command exits non-zero and
+stderr contains the text. `format32-refused-svn14.yaml` and the legacy smokes use it to check
+that 1.8-1.14 clients refuse a format-32 working copy with `E155021`.
 
 `selfcheck-must-fail.yaml` is the negative control (`expect: mismatch`): it proves each comparator
 notices a real difference. Run one scenario run at a time (work dir and ports are shared).
@@ -116,7 +149,26 @@ scenarios with a clear error.
 2. Take request/response bodies from `target/compat/logs/svn1x/error.log`.
 3. Anonymise before committing: drop `Authorization`/`Cookie` headers, rewrite hosts to
    `svn.test.local`; `fixtures/check-no-real-hosts.sh` must pass.
-4. Protocol capture set and WC state fixtures are produced in the next milestone.
+4. Whole-session transcripts: `fixtures/protocol/capture.sh` (see below) does all of this.
+
+## Committed fixture sets (M2)
+
+| Set | Generator | Content | Checked by |
+|---|---|---|---|
+| `fixtures/wc/f31/` | `SVN=svn fixtures/wc/make-wc-fixtures.sh 31` | 28 WC states, format 31 (clean, modified text/binary/props, added, deleted, missing, unversioned+ignored, replaced, copied, moved file/dir, text/prop/tree conflict, obstructed add, kind changed, locked, sparse empty/files/immediates, excluded, externals, mixed-rev, switched, changelist, uncommitted merge, Unicode paths) | `cargo test -p opensvn-compat --test wc_fixtures` |
+| `fixtures/wc/f32/` | `SVN=/path/to/svn-1.15 fixtures/wc/make-wc-fixtures.sh 32` | 11 states, format 32 (`--compatible-version 1.15`, one with `--store-pristine no`) | same |
+| `fixtures/protocol/<session>/` | `fixtures/protocol/capture.sh` | HTTPv2 transcripts `NNN-{request,response}.http` for `checkout`, `checkout-skelta`, `update`, `log`, `commit` against Apache + mod_dav_svn | `cargo test -p svn-ra --test fixture_replay` (replayed through the transport against a fake HTTPS server, parsed by svn-protocol) |
+| `fixtures/evil/` | `python3 fixtures/evil/generate.py` | 70 hostile-server cases, see its README | `svn-protocol --test evil_server`, `svn-delta --test evil_svndiff`, `svn-ra --test evil_transport` |
+
+Each WC state is `<state>.tar.zst` (a `wc/` directory) + `<state>.status.txt` (`svn status -v`
+and an `svn info` subset) + a `manifest.json` row. The repository is `fixtures/repos/make-basic.sh`
+plus r11..r14 (incoming changes for the conflict states) at the fixed URL
+`file:///tmp/opensvn-wc-fixtures/repos/basic`. Status files are byte-identical across runs; the
+tarballs are not (wc.db stores local mtimes and lock times), so compare semantically.
+
+Transcripts are reproducible in content, not byte order: svn emits properties and some request
+attributes in per-process hash order, and serf may issue independent requests in either order.
+The replay server therefore matches by method and path, not by sequence alone.
 
 ## Environment verification (to be filled by the lead)
 
