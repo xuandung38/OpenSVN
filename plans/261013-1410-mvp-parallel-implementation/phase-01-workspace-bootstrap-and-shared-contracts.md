@@ -107,11 +107,13 @@ pub trait LockOwnershipStore: Send + Sync {
 ```rust
 #[async_trait] pub trait AuthPrompter: Send + Sync {
   /// Gọi tối đa 1 lần đồng thời cho mỗi OriginKey (single-flight do transport đảm bảo). None = người dùng hủy.
-  async fn credentials(&self, origin: &OriginKey, attempt: u8, offered: &[AuthMethod]) -> Option<Credentials>;
+  async fn credentials(&self, req: &CredentialRequest) -> Option<Credentials>;
   async fn confirm_certificate(&self, info: &CertInfo) -> CertDecision;
 }
 pub struct Credentials { pub username: String, pub password: secrecy::SecretString, pub save: bool, pub method: AuthMethod }
 pub enum AuthMethod { Basic, Negotiate }
+#[non_exhaustive] pub struct CredentialRequest { pub origin: OriginKey, pub attempt: u32, pub offered: Vec<AuthMethod>, pub reason: PromptReason } // CredentialRequest::new(..)
+#[non_exhaustive] pub enum PromptReason { Initial, Rejected, NegotiateFailed }
 pub struct CertInfo { pub host: String, pub port: u16, pub subject: String, pub issuer: String, pub not_before: Timestamp,
                       pub not_after: Timestamp, pub sha256: [u8;32], pub failure: CertFailure }
 pub enum CertFailure { UnknownIssuer, SelfSigned, Expired, NotYetValid, HostnameMismatch, Revoked, Other(String) }
