@@ -20,19 +20,22 @@ mod node_api;
 mod nodes;
 mod ops;
 mod schema;
+mod wc_lock;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
-use svn_types::{Depth, ErrorCode, Result, SvnError};
+use svn_types::{Depth, ErrorCode, RelPath, Result, SvnError};
 
 pub use actual::{ConflictRecord, ConflictTexts};
 pub use connection::{BUSY_TIMEOUT, OpenMode, open_connection, sql_err};
 pub use nodes::{Node, Presence, Props};
 pub use ops::{BaseNode, CommitInfo};
 pub use schema::{FORMAT_MAX_READ, FORMAT_WRITE, check_supported_format, read_user_version};
+pub use wc_lock::{LockOwner, LockState, ObtainMode};
 
 /// Name of the administrative directory.
 pub const ADM_DIR: &str = ".svn";
@@ -84,6 +87,10 @@ pub struct WcDb {
     format: u32,
     store_pristine: bool,
     conn: Mutex<Connection>,
+    /// WC locks obtained through this handle: directory to `levels` (like svn's `owned_locks`).
+    owned_locks: Mutex<BTreeMap<RelPath, i32>>,
+    /// Who records lock ownership (set by the application before locking).
+    lock_owner: Mutex<Option<LockOwner>>,
 }
 
 /// Returns the working copy root containing `path`, searching `path` and then its ancestors for
@@ -237,6 +244,8 @@ impl WcDb {
             format: FORMAT_WRITE,
             store_pristine: true,
             conn: Mutex::new(conn),
+            owned_locks: Mutex::new(BTreeMap::new()),
+            lock_owner: Mutex::new(None),
         })
     }
 
@@ -292,6 +301,8 @@ impl WcDb {
             format,
             store_pristine,
             conn: Mutex::new(conn),
+            owned_locks: Mutex::new(BTreeMap::new()),
+            lock_owner: Mutex::new(None),
         })
     }
 
