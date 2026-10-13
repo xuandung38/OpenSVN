@@ -57,6 +57,8 @@ pub struct WindowApplier<R, W> {
     expected_sha1: Option<[u8; 20]>,
     handle: ApplyHandle,
     finished: bool,
+    /// A window or the end-of-delta check failed: no further windows, no outcome.
+    failed: bool,
 }
 
 impl<R: Read + Seek, W: Write> WindowApplier<R, W> {
@@ -75,6 +77,7 @@ impl<R: Read + Seek, W: Write> WindowApplier<R, W> {
             expected_sha1: None,
             handle: ApplyHandle::default(),
             finished: false,
+            failed: false,
         }
     }
 
@@ -97,8 +100,18 @@ impl<R: Read + Seek, W: Write> WindowApplier<R, W> {
         self.handle.clone()
     }
 
-    /// Applies one window.
+    /// Applies one window. After any error the applier stays failed: later windows are refused
+    /// and no outcome or digest is ever published.
     pub fn apply_window(&mut self, w: &TxDeltaWindow) -> Result<()> {
+        if self.failed {
+            return Err(failed_error());
+        }
+        let result = self.apply_window_inner(w);
+        self.failed = result.is_err();
+        result
+    }
+
+    fn apply_window_inner(&mut self, w: &TxDeltaWindow) -> Result<()> {
         if self.finished {
             return Err(SvnError::new(
                 ErrorCode::Internal,
@@ -124,6 +137,15 @@ impl<R: Read + Seek, W: Write> WindowApplier<R, W> {
     /// Ends the delta: flushes, checks expected digests, publishes the outcome and returns the
     /// output writer's final state through the handle.
     pub fn finish(&mut self) -> Result<ApplyOutcome> {
+        if self.failed {
+            return Err(failed_error());
+        }
+        let result = self.finish_inner();
+        self.failed = result.is_err();
+        result
+    }
+
+    fn finish_inner(&mut self) -> Result<ApplyOutcome> {
         if self.finished {
             return self.handle.outcome().ok_or_else(|| {
                 SvnError::new(ErrorCode::Internal, "delta ended with a failure earlier")
@@ -217,6 +239,13 @@ impl<R: Read + Seek, W: Write> WindowApplier<R, W> {
         }
         Ok(())
     }
+}
+
+fn failed_error() -> SvnError {
+    SvnError::new(
+        ErrorCode::Internal,
+        "delta application already failed; output is incomplete",
+    )
 }
 
 fn range_of(offset: u64, length: u64) -> Option<std::ops::Range<usize>> {

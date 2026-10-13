@@ -12,10 +12,15 @@ fn corrupt(msg: &str) -> SvnError {
 
 /// Incremental base64 decoder. Text may be split anywhere, and ASCII whitespace (line breaks that
 /// XML producers insert) is ignored.
+///
+/// Each call strips whitespace in one pass and decodes the whole run of complete 4-character
+/// groups with a single engine call; at most 3 characters are carried to the next call.
 #[derive(Debug, Default)]
 pub struct Base64Decoder {
-    /// Characters of an incomplete 4-character group.
-    group: Vec<u8>,
+    /// Reusable work area: carried characters followed by the cleaned chunk.
+    work: Vec<u8>,
+    /// Number of leading `work` bytes that are carried characters (always < 4 between calls).
+    carried: usize,
     /// A padded group was seen; nothing but whitespace may follow.
     ended: bool,
 }
@@ -28,29 +33,73 @@ impl Base64Decoder {
 
     /// Decodes the next piece of base64 text, returning the bytes completed so far.
     pub fn feed(&mut self, text: &[u8]) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(text.len() / 4 * 3);
-        for &c in text {
-            if c.is_ascii_whitespace() {
-                continue;
-            }
-            if self.ended {
+        let mut out = Vec::new();
+        self.feed_into(text, &mut out)?;
+        Ok(out)
+    }
+
+    /// Like [`feed`](Self::feed) but appends the decoded bytes to `out`, so a caller can reuse
+    /// one buffer across calls.
+    pub fn feed_into(&mut self, text: &[u8], out: &mut Vec<u8>) -> Result<()> {
+        let tail = text.last().is_some_and(u8::is_ascii_whitespace);
+        let trimmed = if tail {
+            let end = text
+                .iter()
+                .rposition(|c| !c.is_ascii_whitespace())
+                .map_or(0, |i| i + 1);
+            &text[..end]
+        } else {
+            text
+        };
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        if self.ended {
+            return Err(corrupt("base64 data continues after padding"));
+        }
+        // Fast path: nothing carried and no interior whitespace, so decode in place.
+        if self.carried == 0 && !trimmed.iter().any(u8::is_ascii_whitespace) {
+            let full = trimmed.len() / 4 * 4;
+            self.decode_groups(&trimmed[..full], trimmed.len() == full, out)?;
+            self.work.clear();
+            self.work.extend_from_slice(&trimmed[full..]);
+            self.carried = self.work.len();
+            return Ok(());
+        }
+        // Slow path: strip whitespace into the work area behind the carried characters.
+        self.work.truncate(self.carried);
+        for run in trimmed.split(|c| c.is_ascii_whitespace()) {
+            self.work.extend_from_slice(run);
+        }
+        let full = self.work.len() / 4 * 4;
+        let work = std::mem::take(&mut self.work);
+        let res = self.decode_groups(&work[..full], work.len() == full, out);
+        self.work = work;
+        res?;
+        self.work.copy_within(full.., 0);
+        self.carried = self.work.len() - full;
+        self.work.truncate(self.carried);
+        Ok(())
+    }
+
+    /// Decodes whole 4-character groups. `last` tells whether they are the end of the available
+    /// text, the only place padding may appear.
+    fn decode_groups(&mut self, groups: &[u8], last: bool, out: &mut Vec<u8>) -> Result<()> {
+        STANDARD
+            .decode_vec(groups, out)
+            .map_err(|e| corrupt(&format!("invalid base64: {e}")))?;
+        if groups.ends_with(b"=") {
+            if !last {
                 return Err(corrupt("base64 data continues after padding"));
             }
-            self.group.push(c);
-            if self.group.len() == 4 {
-                STANDARD
-                    .decode_vec(&self.group, &mut out)
-                    .map_err(|e| corrupt(&format!("invalid base64: {e}")))?;
-                self.ended = self.group.contains(&b'=');
-                self.group.clear();
-            }
+            self.ended = true;
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Declares end of text; a dangling partial group is `Corrupt`.
     pub fn finish(&mut self) -> Result<()> {
-        if self.group.is_empty() {
+        if self.carried == 0 {
             Ok(())
         } else {
             Err(corrupt("base64 data ends inside a group"))
@@ -62,6 +111,7 @@ impl Base64Decoder {
 #[derive(Debug, Default)]
 pub struct Base64SvndiffDecoder {
     base64: Base64Decoder,
+    scratch: Vec<u8>,
     svndiff: SvndiffDecoder,
 }
 
@@ -73,8 +123,9 @@ impl Base64SvndiffDecoder {
 
     /// Feeds the next piece of base64 text and returns completed windows.
     pub fn feed(&mut self, text: &[u8]) -> Result<Vec<TxDeltaWindow>> {
-        let bytes = self.base64.feed(text)?;
-        self.svndiff.feed(&bytes)
+        self.scratch.clear();
+        self.base64.feed_into(text, &mut self.scratch)?;
+        self.svndiff.feed(&self.scratch)
     }
 
     /// Declares end of text and of the svndiff stream.

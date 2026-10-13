@@ -206,29 +206,69 @@ proptest! {
     }
 }
 
-/// Rough decode throughput probe; run with
+/// Throughput probes with small chunk sizes (the case that used to be quadratic). Run in release:
 /// `cargo test -p svn-delta --release --test properties -- --ignored --nocapture`.
+fn mb_per_s(bytes: usize, start: std::time::Instant) -> f64 {
+    bytes as f64 / start.elapsed().as_secs_f64() / 1e6
+}
+
+fn probe_stream() -> (Vec<u8>, Vec<u8>) {
+    let data: Vec<u8> = (0..32 * 1024 * 1024u32).map(|i| (i % 253) as u8).collect();
+    let stream = SvndiffEncoder::fulltext(SvndiffVersion::V0, &data).unwrap();
+    (data, stream)
+}
+
 #[test]
 #[ignore = "benchmark"]
-fn decode_throughput_v0() {
-    let data: Vec<u8> = (0..64 * 1024 * 1024u32).map(|i| (i % 253) as u8).collect();
-    let stream = SvndiffEncoder::fulltext(SvndiffVersion::V0, &data).unwrap();
-    let start = std::time::Instant::now();
-    let mut dec = SvndiffDecoder::new();
-    let mut total = 0u64;
-    for piece in stream.chunks(64 * 1024) {
-        total += dec
-            .feed(piece)
-            .unwrap()
-            .iter()
-            .map(|w| w.tview_len)
-            .sum::<u64>();
+fn decode_throughput_by_chunk_size() {
+    let (data, stream) = probe_stream();
+    for chunk in [57usize, 4096, 65536] {
+        let start = std::time::Instant::now();
+        let mut dec = SvndiffDecoder::new();
+        let mut total = 0u64;
+        for piece in stream.chunks(chunk) {
+            total += dec
+                .feed(piece)
+                .unwrap()
+                .iter()
+                .map(|w| w.tview_len)
+                .sum::<u64>();
+        }
+        dec.finish().unwrap();
+        let rate = mb_per_s(data.len(), start);
+        println!("svndiff0 chunk {chunk:>6}: {rate:.0} MB/s");
+        assert_eq!(total, data.len() as u64);
+        assert!(rate >= 300.0, "chunk {chunk}: {rate:.0} MB/s < 300");
     }
-    dec.finish().unwrap();
-    let secs = start.elapsed().as_secs_f64();
-    println!(
-        "decoded {total} bytes: {:.0} MB/s",
-        total as f64 / secs / 1e6
-    );
-    assert_eq!(total, data.len() as u64);
+}
+
+#[test]
+#[ignore = "benchmark"]
+fn base64_decode_throughput_with_wrapped_lines() {
+    use base64::Engine;
+    let (data, stream) = probe_stream();
+    let text = base64::engine::general_purpose::STANDARD.encode(&stream);
+    let wrapped: Vec<u8> = text
+        .as_bytes()
+        .chunks(76)
+        .flat_map(|l| l.iter().copied().chain(std::iter::once(b'\n')))
+        .collect();
+    for chunk in [77usize, 4096] {
+        let start = std::time::Instant::now();
+        let mut dec = svn_delta::Base64SvndiffDecoder::new();
+        let mut total = 0u64;
+        for piece in wrapped.chunks(chunk) {
+            total += dec
+                .feed(piece)
+                .unwrap()
+                .iter()
+                .map(|w| w.tview_len)
+                .sum::<u64>();
+        }
+        dec.finish().unwrap();
+        let rate = mb_per_s(data.len(), start);
+        println!("base64+svndiff0 chunk {chunk:>5}: {rate:.0} MB/s (decoded output)");
+        assert_eq!(total, data.len() as u64);
+        assert!(rate >= 100.0, "chunk {chunk}: {rate:.0} MB/s < 100");
+    }
 }
