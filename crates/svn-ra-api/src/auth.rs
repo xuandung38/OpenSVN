@@ -190,9 +190,42 @@ pub trait AuthPrompter: Send + Sync {
     /// [`PromptReason::Rejected`], an unattended one fails with `AuthRequired`.
     ///
     /// Must never show UI. The default has nothing stored.
+    ///
+    /// Stored credentials are offered at most once per origin **per transport** (an
+    /// `HttpTransport` and every session sharing it). Background work (remote status polling,
+    /// cleanup of abandoned transactions) must therefore reuse one long-lived transport: a
+    /// fresh transport per poll would submit a stale stored password on every poll, and with
+    /// a directory server behind the repository that counts towards the account lockout
+    /// threshold without the user ever being asked. [`Self::stored_credentials_rejected`]
+    /// lets the app stop offering a password the server refused, which also protects
+    /// transports created later.
     async fn stored_credentials(&self, req: &CredentialRequest) -> Option<Credentials> {
         let _ = req;
         None
+    }
+
+    /// The server answered 401 to the credentials [`Self::stored_credentials`] returned for
+    /// `req.origin`, in interactive or unattended mode. Called at most once per offer, before
+    /// the transport prompts (interactive) or fails with `AuthRequired` (unattended); `req`
+    /// carries [`PromptReason::Rejected`].
+    ///
+    /// The app should stop returning that password from [`Self::stored_credentials`] until the
+    /// user enters a new one, so later transports do not submit it again. A 403 is not
+    /// reported: mod_dav_svn answers 403 to valid credentials that lack access to a path,
+    /// which says nothing about the password.
+    ///
+    /// **Mark the password stale; do not delete it.** A 401 does not always mean the password
+    /// is wrong: on Apache 2.4 an authenticated user who fails a mod_authz_core `Require`
+    /// rule (for example `Require ldap-group`) also gets 401, unless the server sets
+    /// `AuthzSendForbiddenOnFailure On`. So the app should stop offering it automatically,
+    /// keep it in the store, and re-prompt (pre-filling the user name) when the user next
+    /// acts; a correct password then costs one prompt instead of being lost.
+    ///
+    /// Must never show UI and should return promptly (in-memory bookkeeping): the transport
+    /// does not race this call against cancellation, so that a cancel cannot drop the report;
+    /// a pending cancel takes effect as soon as it returns. The default does nothing.
+    async fn stored_credentials_rejected(&self, req: &CredentialRequest) {
+        let _ = req;
     }
 
     /// Asks whether to trust a certificate that failed verification.
