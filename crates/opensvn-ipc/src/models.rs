@@ -563,3 +563,24 @@ pub struct BlameLine {
     pub date: String,
     pub text: String,
 }
+
+/// A certificate the user chose to trust permanently (Settings > Certificates).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedCert {
+    pub host: String,
+    pub port: u16,
+    pub sha256: String,
+    pub subject: Option<String>,
+    pub expires_at: Option<String>,
+    pub trusted_at: String,
+}
+
+/// Identifies a trusted certificate for removal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedCertKey {
+    pub host: String,
+    pub port: u16,
+    pub sha256: String,
+}

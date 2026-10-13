@@ -125,6 +125,21 @@ plus `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` and `OPEN
 to produce signed `.app.tar.gz` / `.sig` update artifacts. Until then a build with
 `OPENSVN_UPDATER=1` fails by design (verified), and artifacts cannot self-update.
 
+The updater sends the token, so its TLS is never relaxed: `build.rs` fails the build if any
+`tauri*.conf.json` sets a `plugins.updater.dangerous*` option (`dangerousAcceptInvalidCerts`,
+`dangerousAcceptInvalidHostnames`, `dangerousInsecureTransportProtocol`) to anything but `false`,
+and the app refuses to run updates with such a config. Redirects are followed only over `https` to
+`api.github.com`, `objects.githubusercontent.com` and `release-assets.githubusercontent.com`; if
+GitHub moves release assets to another host, add it to `REDIRECT_HOSTS` in `updater.rs`.
+
+## Upgrade notes
+
+* **Working copy lock owners (Linux).** Before the p08 M2 follow-up, `wc_lock_owner` rows stored
+  the owner's start time as wall-clock seconds; they now store ticks since boot. A row written by
+  an older build reads as **dead** on Linux, so a lock it describes can be cleaned up as stale.
+  This only matters if an old build is still running against the same working copy while the new
+  one starts (pre-release: no migration is shipped; quit old builds before upgrading).
+
 ## Provisioning the update token
 
 The app never carries the GitHub token. Updates stay disabled (UI hint, no network calls) until

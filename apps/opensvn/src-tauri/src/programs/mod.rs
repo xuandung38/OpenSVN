@@ -75,15 +75,7 @@ fn validate_program(path: &Path) -> Result<PathBuf, AppError> {
     Ok(canonical)
 }
 
-/// Characters that could hide or reorder text in the confirmation dialog: controls (including
-/// newline, DEL and C1), zero-width and bidirectional formatting characters, the BOM.
-fn is_deceptive(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
-        )
-}
+use crate::display_text::is_deceptive;
 
 fn validate_args(args: &[String]) -> Result<(), AppError> {
     if args.len() > MAX_ARGS
