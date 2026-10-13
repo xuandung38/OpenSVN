@@ -1,0 +1,11 @@
+---
+source: crates/svn-protocol/tests/request_snapshots.rs
+expression: "render(&log_request(&u, Revnum(9), &rel(\"x\"), &all).unwrap())"
+---
+REPORT http://svn.test.local/svn/repo/!svn/rvr/9/x
+Content-Type: text/xml
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+
+<S:log-report xmlns:S="svn:"><S:all-revprops/><S:path></S:path><S:encode-binary-props/></S:log-report>

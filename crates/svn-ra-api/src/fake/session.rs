@@ -16,7 +16,7 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use super::commit_editor::FakeCommitEditor;
 use super::repo::{FakeChange, NodeData, RepoState, children};
 use super::update_drive::drive_update;
-use crate::auth::{AuthMethod, AuthPrompter};
+use crate::auth::{AuthMethod, AuthPrompter, CredentialRequest, PromptReason};
 use crate::commit::{CommitEditor, CommitObserver};
 use crate::session::{
     FileMeta, FileRev, FileRevHandler, LogRequest, RaSession, ReportFn, UpdateRequest,
@@ -148,12 +148,16 @@ impl RaSession for FakeRaSession {
             ));
         };
         let origin = self.origin();
-        for attempt in 0..3u8 {
+        for attempt in 0..3u32 {
             cancel.check()?;
-            let Some(creds) = prompter
-                .credentials(&origin, attempt, &[AuthMethod::Basic])
-                .await
-            else {
+            let reason = if attempt == 0 {
+                PromptReason::Initial
+            } else {
+                PromptReason::Rejected
+            };
+            let request =
+                CredentialRequest::new(origin.clone(), attempt, vec![AuthMethod::Basic], reason);
+            let Some(creds) = prompter.credentials(&request).await else {
                 return Err(SvnError::new(
                     ErrorCode::Cancelled,
                     "authentication cancelled",

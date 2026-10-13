@@ -375,8 +375,9 @@ pub(crate) fn op_delete(conn: &Connection, wc_id: i64, path: &RelPath) -> Result
 /// operation depth) and re-creates the delete layers that the source subtree carries, re-based to
 /// the destination depth (so a locally deleted child is deleted in the copy too).
 ///
-/// Not supported yet (explicit [`ErrorCode::WcFormatUnsupported`]): locally added/copied nodes
-/// inside the source, incomplete / not-present / excluded children, mixed-revision sources.
+/// Mixed-revision sources, not-present and excluded children are copied like svn does (see the
+/// layering comment in the body). Not supported yet (explicit [`ErrorCode::WcFormatUnsupported`]):
+/// locally added/copied nodes inside the source and incomplete children.
 pub(crate) fn op_copy(
     conn: &Connection,
     wc_id: i64,
@@ -427,7 +428,10 @@ pub(crate) fn op_copy(
             return Err(unsupported(format!("copying locally added node '{path}'")));
         };
         match base.presence {
-            Presence::Normal => {}
+            Presence::Normal
+            | Presence::NotPresent
+            | Presence::Excluded
+            | Presence::ServerExcluded => {}
             Presence::BaseDeleted => return Ok(()), // deleted together with the source itself
             other => {
                 return Err(unsupported(format!(
@@ -467,7 +471,6 @@ pub(crate) fn op_copy(
         group.push(row);
     }
     flush(&mut group, &mut plan)?;
-    let root_revision = plan.first().and_then(|p| p.base.revision);
     for p in &plan {
         if p.base.repos_id.is_none() || p.base.repos_relpath.is_none() || p.base.revision.is_none()
         {
@@ -476,26 +479,81 @@ pub(crate) fn op_copy(
                 p.base.relpath
             )));
         }
-        if p.base.revision != root_revision {
-            return Err(unsupported(format!(
-                "copying a mixed-revision tree ('{}' is at r{}, '{src}' at r{})",
-                p.base.relpath,
-                p.base.revision.unwrap_or(0),
-                root_revision.unwrap_or(0)
-            )));
-        }
     }
+    // Mixed revisions, like svn: a live node whose repository location differs from where its
+    // parent's location says it should be starts a layer of its own at its own depth, and the
+    // parent's layer gets a not-present placeholder for it. Its descendants join that layer.
+    // Excluded and not-present children keep their presence inside the parent's layer.
+    let mut layers: std::collections::HashMap<String, (u32, Node)> =
+        std::collections::HashMap::new();
     for p in plan {
         let node = &p.base;
+        let parent_entry = layers.get(parent_text(&p.target).as_deref().unwrap_or(""));
+        let mut layer = parent_entry.map_or(dst_depth, |(l, _)| *l);
+        if node.presence == Presence::Normal
+            && let Some((parent_layer, parent)) = parent_entry
+        {
+            let name = p.target.file_name().unwrap_or_default();
+            let parent_path = parent.repos_relpath.as_deref().unwrap_or("");
+            let expected = if parent_path.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{parent_path}/{name}")
+            };
+            if node.revision != parent.revision
+                || node.repos_id != parent.repos_id
+                || node.repos_relpath.as_deref() != Some(expected.as_str())
+            {
+                conn.execute(
+                    "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
+                     repos_id, repos_path, revision, presence, kind) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'not-present', ?8)",
+                    params![
+                        wc_id,
+                        p.target.as_str(),
+                        parent_layer,
+                        parent_text(&p.target),
+                        node.repos_id,
+                        node.repos_relpath,
+                        node.revision.and_then(|v| i64::try_from(v).ok()),
+                        kind_word(node.kind),
+                    ],
+                )
+                .map_err(sql_err)?;
+                layer = relpath_depth(&p.target);
+            }
+        }
+        if node.presence == Presence::Normal {
+            layers.insert(p.target.as_str().to_owned(), (layer, node.clone()));
+        }
+        if node.presence == Presence::NotPresent {
+            conn.execute(
+                "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
+                 repos_id, repos_path, revision, presence, kind, changed_date) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'not-present', ?8, 0)",
+                params![
+                    wc_id,
+                    p.target.as_str(),
+                    layer,
+                    parent_text(&p.target),
+                    node.repos_id,
+                    node.repos_relpath,
+                    node.revision.and_then(|v| i64::try_from(v).ok()),
+                    kind_word(node.kind),
+                ],
+            )
+            .map_err(sql_err)?;
+            continue;
+        }
         conn.execute(
             "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, repos_id, \
              repos_path, revision, presence, depth, kind, changed_revision, changed_date, \
              changed_author, checksum, properties, symlink_target, moved_here) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'normal', ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?17, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 wc_id,
                 p.target.as_str(),
-                dst_depth,
+                layer,
                 parent_text(&p.target),
                 node.repos_id,
                 node.repos_relpath,
@@ -509,6 +567,7 @@ pub(crate) fn op_copy(
                 node.properties.as_ref().map(encode_props),
                 node.symlink_target,
                 moved_here.then_some(1),
+                node.presence.as_str(),
             ],
         )
         .map_err(sql_err)?;
