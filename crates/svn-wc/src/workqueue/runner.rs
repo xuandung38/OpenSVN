@@ -429,7 +429,8 @@ fn write_atomically(
 /// (no Windows CI).** Elsewhere this is a single `remove_file`.
 fn remove_file_if_present(path: &Path) -> Result<(), WorkQueueError> {
     let mut delay = Duration::from_millis(10);
-    let attempts = if cfg!(windows) { 12 } else { 1 };
+    // Same budget as `rename_replacing` (about ten seconds), like svn's WIN32_RETRY_LOOP.
+    let attempts = if cfg!(windows) { 25 } else { 1 };
     for attempt in 1..=attempts {
         #[cfg(windows)]
         let _ = flags::set_read_write(path);

@@ -47,7 +47,7 @@ Lớp giao thức (dựng request, parse response, delta editor) **không làm I
 ## Consequences
 - Dễ hơn: build 3 desktop OS chỉ cần `cargo`, không cần OpenSSL/APR/serf; mobile sau chỉ thêm target.
 - Khó hơn: tự cài Basic/Negotiate, diff3, svndiff — chấp nhận vì là lõi sản phẩm.
-- **Ngoại lệ thư viện C được phép**: SQLite (`rusqlite` bundled), GSSAPI hệ thống (macOS/Linux, feature `negotiate`), WebKitGTK (runtime Tauri trên Linux). Thêm ngoại lệ mới phải cập nhật ADR này.
+- **Ngoại lệ thư viện C được phép**: SQLite (`rusqlite` bundled), GSSAPI hệ thống (macOS/Linux, feature `negotiate`), WebKitGTK (runtime Tauri trên Linux), `ring` (crypto provider của rustls: C/asm tự chứa biên dịch bằng `cc`, không cần thư viện hệ thống; chỉ chuyển sang `aws-lc-rs` nếu sau này cần FIPS hoặc trao đổi khóa hậu lượng tử). Thêm ngoại lệ mới phải cập nhật ADR này.
 - Xem lại: nếu CA nội bộ không có trong trust store OS (Linux thường thiếu) → cho phép import CA trong app.
 
 ## Action Items
