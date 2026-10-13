@@ -1,0 +1,9 @@
+---
+source: crates/svn-protocol/tests/request_snapshots.rs
+expression: "render(&stat_request(&u, Revnum(12),\n&rel(\"trunk/dir with space/\\u{e9}.txt\")).unwrap())"
+---
+PROPFIND http://svn.test.local/svn/repo/!svn/rvr/12/trunk/dir%20with%20space/%C3%A9.txt
+Depth: 0
+Content-Type: text/xml
+
+<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype xmlns="DAV:"/><getcontentlength xmlns="DAV:"/><deadprop-count xmlns="http://subversion.tigris.org/xmlns/dav/"/><version-name xmlns="DAV:"/><creationdate xmlns="DAV:"/><creator-displayname xmlns="DAV:"/></prop></propfind>
