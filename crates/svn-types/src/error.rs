@@ -39,6 +39,10 @@ pub enum ErrorCode {
     /// location is in the error message; it was validated as an https URL on the same scheme
     /// (`RepoUrl::parse`) before being reported.
     RepositoryMoved,
+    /// The pristine (base text) of a file is not stored locally, as in a format-32 working copy
+    /// made with `--store-pristine=no`. Operations that need it (diff, revert) must first fetch
+    /// the base text from the repository.
+    PristineNotHydrated,
     /// Path does not exist.
     PathNotFound,
     /// Path failed safety validation (traversal, reserved name, symlink).

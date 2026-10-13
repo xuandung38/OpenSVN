@@ -225,7 +225,7 @@ export type Eol = "LF" | "CRLF" | "mixed";
 
 export type ErrorAction = "retry" | "update" | "cleanup" | "sign-in" | "trust-cert" | "open-lock-dialog" | "open-settings";
 
-export type ErrorCode = "network" | "timeout" | "auth-required" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "hook-failed" | "repository-moved" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | "internal";
+export type ErrorCode = "network" | "timeout" | "auth-required" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "hook-failed" | "repository-moved" | "pristine-not-hydrated" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | "internal";
 
 export type ExternalDiffTool = {
 	path: string,

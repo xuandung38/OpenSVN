@@ -23,6 +23,7 @@ fn all_codes() -> Vec<SvnErrorCode> {
         ConflictBlocksCommit,
         HookFailed,
         RepositoryMoved,
+        PristineNotHydrated,
         PathNotFound,
         UnsafePath,
         DiskFull,
@@ -37,8 +38,8 @@ fn all_codes() -> Vec<SvnErrorCode> {
             Network | Timeout | AuthRequired | Forbidden | TlsUntrusted | OutOfDate
             | LockedByOther | LockTokenInvalid | WcBusy | WcNeedsCleanup | WcFormatUnsupported
             | NotAWorkingCopy | ConflictBlocksCommit | HookFailed | RepositoryMoved
-            | PathNotFound | UnsafePath | DiskFull | PermissionDenied | FileInUse | Cancelled
-            | Corrupt | ServerUnsupported | Internal => v.push(c),
+            | PristineNotHydrated | PathNotFound | UnsafePath | DiskFull | PermissionDenied
+            | FileInUse | Cancelled | Corrupt | ServerUnsupported | Internal => v.push(c),
         }
     }
     v
