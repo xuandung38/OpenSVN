@@ -71,10 +71,8 @@ fn decisions_are_validated_against_the_actual_failure() {
         CertFailure::Revoked,
         CertFailure::Other("x".into()),
     ] {
-        assert!(
-            Reject.is_valid_for(&f) && AcceptOnce.is_valid_for(&f),
-            "{f:?}"
-        );
+        assert!(Reject.is_valid_for(&f), "{f:?}");
+        assert!(!AcceptOnce.is_valid_for(&f), "{f:?}");
         assert!(!AcceptAlways.is_valid_for(&f), "{f:?}");
         assert!(!ReplacePin.is_valid_for(&f), "{f:?}");
     }
@@ -145,4 +143,34 @@ async fn fake_session_enforces_decision_validity_for_a_changed_certificate() {
     s.ensure_authenticated(&CancelToken::new())
         .await
         .expect("accepted");
+}
+
+/// Cancels the operation while the user is still looking at the prompt.
+struct CancelsWhileAsking(svn_types::CancelToken);
+
+#[async_trait::async_trait]
+impl svn_ra_api::AuthPrompter for CancelsWhileAsking {
+    async fn credentials(&self, _: &CredentialRequest) -> Option<svn_ra_api::Credentials> {
+        None
+    }
+    async fn confirm_certificate(&self, _: &svn_ra_api::CertInfo) -> svn_ra_api::CertDecision {
+        self.0.cancel();
+        svn_ra_api::CertDecision::AcceptOnce
+    }
+}
+
+#[tokio::test]
+async fn fake_session_honors_cancellation_that_happens_during_the_prompt() {
+    use std::sync::Arc;
+    use svn_ra_api::RaSession;
+    use svn_ra_api::fake::FakeRaSession;
+    let token = svn_types::CancelToken::new();
+    let s = FakeRaSession::new("https://svn.test.local/r", "u")
+        .expect("session")
+        .with_certificate_check(
+            cert(CertFailure::SelfSigned),
+            Arc::new(CancelsWhileAsking(token.clone())),
+        );
+    let err = s.ensure_authenticated(&token).await.expect_err("cancelled");
+    assert_eq!(err.code, svn_types::ErrorCode::Cancelled);
 }

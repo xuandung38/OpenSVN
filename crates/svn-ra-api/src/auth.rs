@@ -135,11 +135,13 @@ pub struct CertInfo {
 /// |---|---|---|---|---|
 /// | `UnknownIssuer`, `SelfSigned` | yes | yes | yes | no |
 /// | `Changed` | yes | **no** | **no** | yes |
-/// | every other failure | yes | yes | no | no |
+/// | every other failure (hostname mismatch, expired, not yet valid, revoked, other, and any failure added later) | yes | **no** | **no** | **no** |
 ///
-/// For a changed certificate the only valid choices are `Reject` and `ReplacePin` (replace the
-/// stored pin after the user confirmed the new fingerprint). `ReplacePin` is valid only for
-/// `Changed`.
+/// Those other failures are hard errors with no override, not even `AcceptOnce`: OpenSVN is
+/// intentionally stricter than the svn command line client. The only valid decision is `Reject`. For a changed
+/// certificate the only valid choices are `Reject` and `ReplacePin` (replace the stored pin after
+/// the user confirmed the new fingerprint). `ReplacePin` is valid only for `Changed`. The check
+/// is an allow-list, so a failure added in the future is rejected until it is listed.
 ///
 /// **The UI is not a trust boundary.** The transport must check the decision against the actual
 /// failure with [`CertDecision::is_valid_for`] and treat an invalid combination as `Reject`,
@@ -149,7 +151,7 @@ pub struct CertInfo {
 pub enum CertDecision {
     /// Refuse the connection. Always valid.
     Reject,
-    /// Trust for this session only. Not valid for `Changed`.
+    /// Trust for this session only. Valid only for `UnknownIssuer` and `SelfSigned`.
     AcceptOnce,
     /// Trust permanently. Valid only for `UnknownIssuer` and `SelfSigned`.
     AcceptAlways,
@@ -161,14 +163,16 @@ impl CertDecision {
     /// Whether this decision is allowed for `failure` (see the table on [`CertDecision`]).
     /// The transport calls this on every decision it receives and rejects invalid ones.
     pub fn is_valid_for(self, failure: &CertFailure) -> bool {
-        match (self, failure) {
-            (Self::Reject, _) => true,
-            (Self::ReplacePin, CertFailure::Changed { .. }) => true,
-            (_, CertFailure::Changed { .. }) | (Self::ReplacePin, _) => false,
-            (Self::AcceptOnce, _) => true,
-            (Self::AcceptAlways, CertFailure::UnknownIssuer | CertFailure::SelfSigned) => true,
-            (Self::AcceptAlways, _) => false,
-        }
+        // Allow-list: anything not named here is invalid, including failures added later.
+        matches!(
+            (self, failure),
+            (Self::Reject, _)
+                | (Self::ReplacePin, CertFailure::Changed { .. })
+                | (
+                    Self::AcceptOnce | Self::AcceptAlways,
+                    CertFailure::UnknownIssuer | CertFailure::SelfSigned
+                )
+        )
     }
 }
 
