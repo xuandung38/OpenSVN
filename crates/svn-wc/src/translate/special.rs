@@ -1,8 +1,9 @@
 //! `svn:special` files. Only symlinks are defined: repo-normal form is `link <target>`.
 
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
-use svn_types::write_file_replacing;
+use svn_types::rename_replacing;
 
 use super::error::TranslateError;
 
@@ -48,19 +49,57 @@ pub fn read_repo_normal(path: &Path) -> Result<Vec<u8>, TranslateError> {
     }
 }
 
-/// Creates the working file for repo-normal `content` at `path`, replacing an existing file or
-/// symlink atomically (a symlink at `path` is replaced, never followed).
+/// Longest first line accepted for a special file. svn only needs the first line to decide
+/// (`link <target>`), and a symlink target cannot exceed a path length anyway; the rest of an
+/// unknown special type is streamed, never buffered.
+pub const MAX_SPECIAL_HEAD: usize = 64 * 1024;
+
+/// Creates the working file for repo-normal `content` at `path`; see [`install_from_reader`].
+pub fn install(path: &Path, content: &[u8]) -> Result<(), TranslateError> {
+    install_from_reader(path, &mut std::io::Cursor::new(content))
+}
+
+/// Creates the working file for the repo-normal special content read from `reader` at `path`,
+/// replacing an existing file or symlink atomically (a symlink at `path` is replaced, never
+/// followed).
+///
+/// Only the first line (at most [`MAX_SPECIAL_HEAD`] bytes) is buffered: if it is
+/// `link <target>` a symlink is created on Unix. Anything else, and everything on platforms
+/// without symlink support, is streamed to a regular file with the full content, as svn does.
 ///
 /// `path` must already have been vetted with `svn_types::safe_join`; this function does not
-/// check ancestor directories. Symlinks become real symlinks on Unix. Elsewhere, and for
-/// unknown special types, the full repo-normal content is written to a regular file, as svn
-/// does when symlinks are unsupported (unverified on Windows: no Windows CI).
-pub fn install(path: &Path, content: &[u8]) -> Result<(), TranslateError> {
+/// check ancestor directories. Unverified on Windows (no Windows CI).
+pub fn install_from_reader(path: &Path, reader: &mut dyn Read) -> Result<(), TranslateError> {
+    let mut reader = BufReader::new(reader);
+    let mut head = Vec::new();
+    reader
+        .by_ref()
+        .take(MAX_SPECIAL_HEAD as u64)
+        .read_until(b'\n', &mut head)
+        .map_err(TranslateError::io("read special content for", path))?;
     #[cfg(unix)]
-    if let SpecialContent::Link(target) = parse(content) {
+    if let SpecialContent::Link(target) = parse(&head) {
+        if head.len() == MAX_SPECIAL_HEAD && head.last() != Some(&b'\n') {
+            return Err(TranslateError::Svn(svn_types::SvnError::new(
+                svn_types::ErrorCode::Corrupt,
+                "special file link target is too long",
+            )));
+        }
         return install_symlink(path, &target);
     }
-    write_file_replacing(path, content)?;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".svn-special")
+        .tempfile_in(dir)
+        .map_err(TranslateError::io("create temp file in", dir))?;
+    tmp.write_all(&head)
+        .map_err(TranslateError::io("write", tmp.path()))?;
+    std::io::copy(&mut reader, &mut tmp).map_err(TranslateError::io("write", tmp.path()))?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(TranslateError::io("sync", tmp.path()))?;
+    let tmp_path = tmp.into_temp_path();
+    rename_replacing(&tmp_path, path)?;
     Ok(())
 }
 
