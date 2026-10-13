@@ -428,3 +428,37 @@ async fn working_copy_edits_and_depth_through_commands() {
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::WcFormatUnsupported);
 }
+
+#[tokio::test]
+async fn log_paging_walks_every_revision_once_newest_first() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let mut from = None;
+    let mut seen = Vec::new();
+    for _ in 0..10 {
+        let page = commands::log_get(
+            f.state(),
+            LogGetRequest {
+                target: LogTarget::Url { url: url("") },
+                from_rev: from,
+                to_rev: None,
+                limit: 3,
+                stop_on_copy: None,
+                with_paths: false,
+                filter: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(page.entries.len() <= 3);
+        seen.extend(page.entries.iter().map(|e| e.rev.0));
+        match page.next_rev {
+            Some(next) => {
+                // nextRev is the first revision not returned yet
+                assert_eq!(next.0, page.entries.last().unwrap().rev.0 - 1);
+                from = Some(next);
+            }
+            None => break,
+        }
+    }
+    assert_eq!(seen, (1..=10).rev().collect::<Vec<u64>>());
+}
