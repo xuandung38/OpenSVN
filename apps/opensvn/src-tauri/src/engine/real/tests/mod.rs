@@ -2,6 +2,7 @@
 //! created by `svn-wc`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod conformance_recovery_tests;
 mod edit_tests;
 mod recovery_tests;
 mod remote_tests;

@@ -678,7 +678,7 @@ async fn a_dropped_working_copy_lock_or_unlock_releases_the_directory_lock() {
     let f = fixture_on(
         repo,
         Arc::new(ScriptedConnector(session.clone())),
-        Arc::new(crate::engine::real::UnwiredRecovery),
+        Arc::new(crate::engine::real::ClientRecovery),
     );
     let (_tmp, root) = make_wc(1);
     add_base_file(&root, "README.md", "trunk/README.md", 1);
