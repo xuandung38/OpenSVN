@@ -1,0 +1,10 @@
+DAV: 1,2
+DAV: version-control,checkout,working-resource
+SVN-Youngest-Rev: 5
+SVN-Repository-UUID: 7462d98e-4071-4508-b797-d2922b5cda8f
+SVN-Repository-Root: /svn/repo
+SVN-Me-Resource: /svn/repo/!svn/.	./me
+SVN-Rev-Root-Stub: /svn/repo/!svn/rvr
+SVN-Rev-Stub: /svn/repo/!svn/rev
+SVN-Txn-Root-Stub: /svn/repo/!svn/txr
+SVN-Txn-Stub: /svn/repo/!svn/txn
