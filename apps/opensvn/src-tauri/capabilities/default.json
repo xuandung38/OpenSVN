@@ -34,6 +34,7 @@
     "allow-accounts-list",
     "allow-accounts-sign-out",
     "allow-settings-get",
+    "allow-engine-capabilities",
     "allow-settings-set",
     "allow-program-choose",
     "allow-program-clear",

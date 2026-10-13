@@ -74,6 +74,9 @@ pub struct WorkingCopy {
     /// Number of new revisions not yet updated.
     pub incoming: u32,
     pub last_checked_at: Option<String>,
+    /// A checkout or update stopped before it finished (cancelled, connection lost): some folders
+    /// are recorded as incomplete. Updating the working copy finishes it.
+    pub incomplete: bool,
 }
 
 /// One row of the repository manager (`wc_entries`): every registered working copy, including
@@ -95,6 +98,20 @@ pub struct WcEntry {
     pub missing: bool,
     /// Why the working copy cannot be read (only when `missing`).
     pub problem: Option<String>,
+    /// A checkout or update stopped before it finished; the UI shows "Incomplete — Update to
+    /// finish". Always `false` when `missing`.
+    pub incomplete: bool,
+}
+
+/// What the running engine supports, so the UI can hide or explain options it would ignore
+/// (`engine_capabilities`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineCapabilities {
+    /// Checkout, update and switch fetch `svn:externals`. When `false` they behave like
+    /// `svn --ignore-externals` whatever `CheckoutRequest.ignore_externals` says
+    /// (https://github.com/xuandung38/OpenSVN/issues/97).
+    pub externals: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]

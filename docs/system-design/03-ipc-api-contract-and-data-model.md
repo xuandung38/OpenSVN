@@ -24,6 +24,7 @@ interface WorkingCopy {
   pathInRepo: string;                                  // vd "/2. Sản xuất/2. Phát triển" (hiển thị khi không có layout)
   incoming: number;                                    // số revision mới chưa update
   lastCheckedAt?: string;
+  incomplete: boolean;                                 // checkout/update dừng giữa chừng (hủy, mất kết nối) → Update để hoàn tất
 }
 
 interface BranchRef { kind: 'trunk' | 'branch' | 'tag' | 'other'; name: string; url: string; }
@@ -118,6 +119,7 @@ interface WcEntry {
   url: string | null;                // null khi không đọc được WC
   addedAt: string; lastOpenedAt: string | null;
   missing: boolean; problem: string | null;  // missing: thư mục mất/bị chuyển → UI đề nghị "Locate…" hoặc "Remove"
+  incomplete: boolean;               // checkout/update chưa xong → UI hiện "Incomplete — Update to finish"; luôn false khi missing
 }
 ```
 
@@ -136,7 +138,7 @@ interface WcEntry {
 ### 3.3 Thao tác ghi trên WC (đều trả `OperationHandle`)
 | Command | Input |
 |---|---|
-| `checkout` | `{ url, dest: PathGrantId, destName: string \| null, rev?, depth: Depth, sparse?: SparseSpec, format: 31 \| 32, storePristine, ignoreExternals }`. Có `destName`: `dest` là thư mục cha, WC được tạo trong thư mục con mới `destName` (một thành phần đường dẫn: không `/` `\\`, không `.`/`..`, không ký tự `<>:"\|?*`/điều khiển, không ký tự định dạng ẩn (Unicode Cf: bidi, zero-width, BOM…), không tên thư mục quản trị `.svn`/`_svn` và các biến thể (hoa/thường, Unicode, dấu chấm/khoảng trắng cuối, `SVN~1`), không tên dành riêng Windows `CON`/`NUL`/`COM0`–`COM9`/`LPT¹`…, không kết thúc bằng dấu chấm/khoảng trắng, ≤ 255 byte; kiểm trước khi dùng grant; lỗi tên là `invalid_argument` với `detail` = tên bị từ chối, khi đó grant chưa bị dùng). Không có `destName`: chính `dest` là gốc WC. Đích đã tồn tại mà không rỗng (hoặc là file/symlink) bị từ chối. Thành công → WC được đăng ký, `op://finished` trả `{ kind: 'checkedOut', wcId, newRev }`; thất bại/hủy → thư mục do lần checkout này tạo được xóa nếu vẫn rỗng |
+| `checkout` | `{ url, dest: PathGrantId, destName: string \| null, rev?, depth: Depth, sparse?: SparseSpec, format: 31 \| 32, storePristine, ignoreExternals }`. Có `destName`: `dest` là thư mục cha, WC được tạo trong thư mục con mới `destName` (một thành phần đường dẫn: không `/` `\\`, không `.`/`..`, không ký tự `<>:"\|?*`/điều khiển, không ký tự định dạng ẩn (Unicode Cf: bidi, zero-width, BOM…), không tên thư mục quản trị `.svn`/`_svn` và các biến thể (hoa/thường, Unicode, dấu chấm/khoảng trắng cuối, `SVN~1`), không tên dành riêng Windows `CON`/`NUL`/`COM0`–`COM9`/`LPT¹`…, không kết thúc bằng dấu chấm/khoảng trắng, ≤ 255 byte; kiểm trước khi dùng grant; lỗi tên là `invalid_argument` với `detail` = tên bị từ chối, khi đó grant chưa bị dùng). Không có `destName`: chính `dest` là gốc WC. Đích đã tồn tại mà không rỗng (hoặc là file/symlink) bị từ chối. Thành công → WC được đăng ký, `op://finished` trả `{ kind: 'checkedOut', wcId, newRev }`; thất bại/hủy sau khi WC đã được tạo (có thư mục quản trị ngay trong đích) → WC dở dang vẫn được đăng ký với `incomplete: true`, Update sẽ hoàn tất; ngược lại thư mục do lần checkout này tạo được xóa nếu vẫn rỗng. `storePristine: false` bị từ chối (`wc-format-unsupported`). `ignoreExternals` chỉ có nghĩa khi `engine_capabilities().externals`; real engine chưa fetch externals (như `svn --ignore-externals`, issue #97) |
 | `update` | `{ wcId, paths?, rev?, depth? }` |
 | `switch` | `{ wcId, url, rev? }` |
 | `commit` | `{ wcId, paths, message, keepLocks, autoAddRemove: true }` |
@@ -175,6 +177,7 @@ interface WcEntry {
 | `auth_respond { requestId, response }` | Trả lời prompt: `{kind:'credentials',username,password,save}`, `{kind:'negotiate'}` (SSO, chỉ khi `offered` có `negotiate`), `{kind:'certificate',decision}` hoặc `{kind:'cancel'}`. Prompt không trả lời sau 5 phút coi như hủy. Rust kiểm `decision` theo lỗi thật (`CertDecision::is_valid_for`): `acceptOnce`/`acceptAlways` chỉ cho `unknown-issuer`/`self-signed`; `replacePin` chỉ cho `changed` (thay pin cũ, transport nhận `ReplacePin`); mọi lỗi khác (hết hạn, sai host, revoked...) chỉ có `reject`. Tổ hợp không hợp lệ bị coi là `reject` và không lưu gì |
 | `accounts_list`, `accounts_sign_out { realm }` | Quản lý credential |
 | `certs_list`, `certs_remove { key: {host, port, sha256} }` | Chứng chỉ đã tin cậy vĩnh viễn (Settings → Certificates); xóa thì lần kết nối sau hỏi lại |
+| `engine_capabilities` | `EngineCapabilities { externals: boolean }`: engine đang chạy hỗ trợ gì. `externals: false` → checkout/update/switch không fetch `svn:externals` (issue #97); UI ẩn tùy chọn "Ignore externals" và ghi chú "Externals are not fetched yet" |
 | `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.language"`, `patch` chỉ chứa khóa cần đổi. `SettingsPatch` **không có** các khóa chạy chương trình (`diff.externalTool`, `diff.mergeTool`, `tools.editor`, `tools.terminal`) và **không có** `general.checkoutRoot` (nơi app ghi; chỉ đổi qua `checkout_root_choose`); khóa lạ bị từ chối với lỗi `invalid-argument` |
 | `program_choose { kind, args }`, `program_clear { kind }` | Đặt/xóa chương trình ngoài (`kind`: `diff-tool` \| `merge-tool` \| `editor` \| `terminal`). Rust mở dialog chọn file native rồi dialog xác nhận native (mỗi tham số một dòng, có quote; từ chối ký tự điều khiển/bidi/vô hình theo quy tắc chung `display_text::is_deceptive`); trả `Settings` mới (không đổi nếu người dùng hủy) |
 | `path_pick { request }` | Dialog native chọn thư mục / file / nơi lưu (`PickRequest`), trả `PathGrantInfo \| null` (xem §3.6). `title` (≤ 120 ký tự) và `suggestedName` (≤ 255, không có `/` `\`, không phải `.`/`..`) không được chứa ký tự điều khiển, bidi hay zero-width, nếu có thì lỗi `invalid-argument`. `displayName` hiện các ký tự đó dạng `\u{XXXX}` |

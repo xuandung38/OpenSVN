@@ -19,6 +19,7 @@ export const mockWorkingCopies: WorkingCopy[] = [
     pathInRepo: "/trunk",
     incoming: 3,
     lastCheckedAt: "2026-10-13T09:00:00Z",
+    incomplete: false,
   },
   {
     id: "wc-docs",
@@ -35,6 +36,7 @@ export const mockWorkingCopies: WorkingCopy[] = [
     pathInRepo: "/",
     incoming: 0,
     lastCheckedAt: null,
+    incomplete: false,
   },
 ];
 

@@ -7,6 +7,12 @@
 //! context's token goes to `svn-client`, which checks it between editor steps and while waiting
 //! for the server. A cancelled or failed checkout leaves the root recorded as incomplete, so a
 //! later update finishes it.
+//!
+//! Externals are never fetched: checkout, update and switch behave like
+//! `svn --ignore-externals` whatever [`CheckoutPlan::ignore_externals`] says, and
+//! [`RealEngine`]'s capabilities report `externals: false` so the UI can say so. The
+//! `svn:externals` property itself is checked out like any other property. Support is tracked in
+//! <https://github.com/xuandung38/OpenSVN/issues/97>.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,6 +46,33 @@ fn trimmed(url: &RepoUrl) -> String {
     url.to_string().trim_end_matches('/').to_owned()
 }
 
+/// Splits a URL path into the repository root part (compared case-insensitively against
+/// `root_path`) and the rest, which is `""` or starts with `/`.
+fn split_root<'a>(path: &'a str, root_path: &str) -> Option<&'a str> {
+    let head = path.get(..root_path.len())?;
+    let rest = &path[root_path.len()..];
+    (head.eq_ignore_ascii_case(root_path) && (rest.is_empty() || rest.starts_with('/')))
+        .then_some(rest)
+}
+
+/// Whether the session opened at `got` is the requested `wanted` URL of the repository rooted at
+/// `root`. Scheme, host and port compare as the URL parser normalized them (case-insensitively).
+/// The repository root part of the path compares case-insensitively, because a server on a
+/// case-insensitive file system (VisualSVN) may spell it differently. The path below the root
+/// compares exactly: repository paths are case-sensitive.
+fn same_location(root: &RepoUrl, wanted: &RepoUrl, got: &RepoUrl) -> bool {
+    let (w, g) = (wanted.as_url(), got.as_url());
+    if w.scheme() != g.scheme()
+        || w.host_str() != g.host_str()
+        || w.port_or_known_default() != g.port_or_known_default()
+    {
+        return false;
+    }
+    let root_path = root.as_url().path().trim_end_matches('/');
+    let rest = |p: &str| split_root(p.trim_end_matches('/'), root_path).map(str::to_owned);
+    matches!((rest(w.path()), rest(g.path())), (Some(a), Some(b)) if a == b)
+}
+
 /// Whether `url` is the repository root `root` or below it (segment by segment).
 fn is_inside(root: &RepoUrl, url: &RepoUrl) -> bool {
     let (root, url) = (trimmed(root), trimmed(url));
@@ -55,9 +88,8 @@ impl RealEngine {
             .connector
             .connect_with(&parsed, &ConnectOptions::at_url(ctx), &ctx.cancel)
             .await?;
-        // A root-anchored session would silently check out or update the wrong tree. The server
-        // may spell the root part differently (case-insensitive servers), hence the case fold.
-        if !trimmed(session.session_url()).eq_ignore_ascii_case(&trimmed(&parsed)) {
+        // A root-anchored session would silently check out or update the wrong tree.
+        if !same_location(session.repos_root(), &parsed, session.session_url()) {
             return Err(SvnError::new(
                 ErrorCode::Internal,
                 format!(
@@ -77,6 +109,8 @@ impl RealEngine {
         client
     }
 
+    /// Checks out `plan.url` into `plan.path`. Externals are never fetched, whatever
+    /// `plan.ignore_externals` says (see the module documentation).
     pub(super) async fn do_checkout(
         &self,
         plan: &CheckoutPlan,
@@ -88,6 +122,13 @@ impl RealEngine {
             return Err(SvnError::new(
                 ErrorCode::WcFormatUnsupported,
                 "only working copy format 31 can be created",
+            ));
+        }
+        if !plan.store_pristine {
+            return Err(SvnError::new(
+                ErrorCode::WcFormatUnsupported,
+                "working copies without pristine copies (format 32) cannot be created yet; \
+                 check out with pristine copies instead",
             ));
         }
         if plan.sparse.as_ref().is_some_and(|s| !s.is_empty()) {
@@ -116,6 +157,7 @@ impl RealEngine {
         wc_read::wc_info(&plan.path, ctx).await
     }
 
+    /// Updates the given paths, all to the same revision. Externals are never fetched.
     pub(super) async fn do_update(
         &self,
         wc: &WcRef,
@@ -203,5 +245,75 @@ impl RealEngine {
             "changing the depth of a working copy folder is not supported yet; check the folder \
              out again with the depth you need",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    fn url(s: &str) -> RepoUrl {
+        RepoUrl::parse(s).unwrap()
+    }
+
+    #[test]
+    fn session_location_folds_case_only_for_scheme_host_and_root() {
+        let root = url("https://svn.example.com/svn/Repo");
+        let same = |wanted: &str, got: &str| same_location(&root, &url(wanted), &url(got));
+        // Host, scheme and the repository root part may differ in case.
+        assert!(same(
+            "HTTPS://SVN.Example.com/SVN/repo/trunk",
+            "https://svn.example.com/svn/Repo/trunk"
+        ));
+        assert!(same(
+            "https://svn.example.com/svn/repo",
+            "https://svn.example.com/svn/Repo"
+        ));
+        assert!(same(
+            "https://svn.example.com:443/svn/Repo/trunk/",
+            "https://svn.example.com/svn/Repo/trunk"
+        ));
+        // The path below the root is case-sensitive.
+        assert!(!same(
+            "https://svn.example.com/svn/Repo/Trunk",
+            "https://svn.example.com/svn/Repo/trunk"
+        ));
+        // A root-anchored session is not the requested URL.
+        assert!(!same(
+            "https://svn.example.com/svn/Repo/trunk",
+            "https://svn.example.com/svn/Repo"
+        ));
+        // Another host, port or scheme, or a path that only shares a prefix with the root.
+        assert!(!same(
+            "https://other.example.com/svn/Repo/trunk",
+            "https://svn.example.com/svn/Repo/trunk"
+        ));
+        assert!(!same(
+            "https://svn.example.com:8443/svn/Repo/trunk",
+            "https://svn.example.com/svn/Repo/trunk"
+        ));
+        assert!(!same(
+            "http://svn.example.com/svn/Repo/trunk",
+            "https://svn.example.com/svn/Repo/trunk"
+        ));
+        assert!(!same(
+            "https://svn.example.com/svn/Repox/trunk",
+            "https://svn.example.com/svn/Repo/trunk"
+        ));
+    }
+
+    #[test]
+    fn a_repository_at_the_server_root_compares_the_whole_path_exactly() {
+        let root = url("https://svn.example.com");
+        let same = |wanted: &str, got: &str| same_location(&root, &url(wanted), &url(got));
+        assert!(same(
+            "https://SVN.example.com/trunk",
+            "https://svn.example.com/trunk"
+        ));
+        assert!(!same(
+            "https://svn.example.com/Trunk",
+            "https://svn.example.com/trunk"
+        ));
     }
 }
