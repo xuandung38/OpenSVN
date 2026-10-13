@@ -280,6 +280,12 @@ impl WcTxn<'_> {
         actual::write_props(self.conn, self.wc_id, path, props)
     }
 
+    /// Sets the working property list of `path` like [`WcDb::set_props`]: the overlay is
+    /// dropped when `props` equals the pristine properties.
+    pub fn set_props(&self, path: &RelPath, props: &Props) -> Result<()> {
+        ops::set_props(self.conn, self.wc_id, path, props)
+    }
+
     /// Adds `conflicts` to the conflict record of `path`: a conflict of a kind that is already
     /// recorded replaces the old one, and the operation info is replaced by `info`. Legacy
     /// conflict columns and the `older/left/right_checksum` columns are left untouched.

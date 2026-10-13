@@ -14,8 +14,6 @@ use svn_wc::workqueue::WorkItem;
 
 use super::collect::{ItemAction, ItemKind};
 use super::journal::{JournalData, JournalItem, JournalMerge};
-use crate::local::content::stat_cache;
-use crate::local::paths::abs_of;
 
 fn bad_digest(what: &str, item: &JournalItem) -> SvnError {
     SvnError::new(
@@ -43,7 +41,7 @@ pub fn finalize(db: &WcDb, journal: &JournalData, data_dir: &Path) -> Result<()>
     let mut work = Vec::new();
     for item in items {
         let rel = RelPath::new(&item.relpath)?;
-        let info = commit_info(db, journal, merged, item, &rel)?;
+        let info = commit_info(journal, merged, item)?;
         if item.kind == ItemKind::File && item.action != ItemAction::Delete {
             work.push(
                 WorkItem::FileCommit {
@@ -69,11 +67,9 @@ pub fn finalize(db: &WcDb, journal: &JournalData, data_dir: &Path) -> Result<()>
 }
 
 fn commit_info(
-    db: &WcDb,
     journal: &JournalData,
     merged: &JournalMerge,
     item: &JournalItem,
-    rel: &RelPath,
 ) -> Result<CommitInfo> {
     let mut info = CommitInfo {
         new_rev: merged.revision,
@@ -85,15 +81,9 @@ fn commit_info(
     if let Some(text) = &item.text {
         let sha1 = Sha1Digest::from_hex(&text.sha1).ok_or_else(|| bad_digest("sha1", item))?;
         info.checksum = Some(sha1.to_svn_string());
-        // The stat cache says "working file equals pristine": only true when the file did not
-        // change since its text was read for the upload.
-        if let Some(read_stat) = text.stat
-            && stat_cache(&abs_of(db, rel)) == Some(read_stat)
-        {
-            info.translated_size = Some(read_stat.0);
-            info.last_mod_time = Some(read_stat.1);
-        }
     }
+    // No stat cache, like `svn_wc__db_global_commit`: the `file-commit` item records it once
+    // it has checked that the working file is what was committed.
     Ok(info)
 }
 
