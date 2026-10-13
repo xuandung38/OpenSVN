@@ -124,11 +124,13 @@ fn atom_int(op: &str, s: &Skel) -> Result<i64, WorkQueueError> {
         .map_err(|_| WorkQueueError::malformed(op, "expected a decimal integer"))
 }
 
-fn arity(op: &str, args: &[Skel], min: usize, max: usize) -> Result<(), WorkQueueError> {
-    if args.len() < min || args.len() > max {
+/// Requires at least `min` arguments. Like svn, which dispatches on the first atom and reads
+/// positionally, extra trailing arguments are ignored (`max` documents the known shapes).
+fn arity(op: &str, args: &[Skel], min: usize, _max: usize) -> Result<(), WorkQueueError> {
+    if args.len() < min {
         return Err(WorkQueueError::malformed(
             op,
-            format!("expected {min}..={max} arguments, found {}", args.len()),
+            format!("expected at least {min} arguments, found {}", args.len()),
         ));
     }
     Ok(())
