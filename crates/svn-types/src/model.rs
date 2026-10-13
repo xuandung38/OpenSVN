@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 
+use crate::display_path::RepoDisplayPath;
 use crate::ids::{Revnum, Timestamp};
 use crate::rel_path::RelPath;
 
@@ -58,8 +59,8 @@ pub struct PropChange {
 /// Repository lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockInfo {
-    /// Locked repository path. Server text: validate with `RelPath::from_server` before any I/O.
-    pub path: String,
+    /// Locked repository path, display only (convert explicitly with `RelPath::from_server`).
+    pub path: RepoDisplayPath,
     /// Lock token.
     pub token: String,
     /// Lock owner.
@@ -110,15 +111,14 @@ pub enum ChangeAction {
 /// One changed path of a log entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedPath {
-    /// Absolute repository path. Untrusted server text: validate with `RelPath::from_server`
-    /// before any I/O.
-    pub path: String,
+    /// Absolute repository path, display only (convert explicitly with `RelPath::from_server`).
+    pub path: RepoDisplayPath,
     /// What happened.
     pub action: ChangeAction,
     /// Node kind.
     pub kind: NodeKind,
-    /// Copy source path (untrusted server text, see `path`) and revision.
-    pub copy_from: Option<(String, Revnum)>,
+    /// Copy source path (display only, see `path`) and revision.
+    pub copy_from: Option<(RepoDisplayPath, Revnum)>,
     /// Whether file text changed.
     pub text_mods: bool,
     /// Whether properties changed.
