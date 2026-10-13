@@ -156,3 +156,20 @@ Two merge commits (main at `9129c5f`, then `437bbdc`). Both sides' behavior is k
 | `pnpm lint` / `typecheck` / `lint:safety` | pass / pass / pass |
 | `pnpm test` | 194/194 pass (26 files) |
 | `pnpm build` + check-dist | pass |
+
+## Round 4: merge of origin/main at `d711448` (#86)
+
+#86 restores the real-engine build on main (`RealEngine::ensure_authenticated`, the new `copy_location` arity) and adds the same `biased;` line this branch had added to `remote_tests.rs`. The merge had no conflicts and there is exactly one `biased;` in that `select!`. The real-engine gates now run.
+
+### Gates (round 4)
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo clippy -p opensvn --features real-engine --all-targets -- -D warnings` | pass |
+| `cargo test -p opensvn -p opensvn-ipc -p svn-types` | 317 pass, 0 fail |
+| `cargo test -p opensvn --features opensvn/real-engine` | 309 pass, 0 fail |
+| `pnpm gen:ipc` | no drift |
+| `pnpm install --frozen-lockfile` / `lint` / `typecheck` / `lint:safety` | pass |
+| `pnpm test` | 194/194 pass (26 files) |
+| `pnpm build` + check-dist | pass |
