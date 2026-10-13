@@ -1,0 +1,5 @@
+{
+  "build": {
+    "beforeDevCommand": "pnpm exec vite build --mode perf && pnpm exec vite preview --mode perf --port 1420 --strictPort --host 127.0.0.1"
+  }
+}
