@@ -876,3 +876,62 @@ async fn cancelled_commit_stops_editing_and_can_still_be_aborted() {
         .expect("cancelled");
     assert_eq!(err.code, ErrorCode::Cancelled);
 }
+
+/// A FIFO makes the upload source block until a writer shows up, so the token can fire while
+/// `apply_text` is awaiting its read.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancel_during_a_pending_read_is_reported_and_nothing_is_applied() {
+    let s = session();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let fifo = tmp.path().join("slow-source");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo")
+            .success()
+    );
+
+    let token = CancelToken::new();
+    let mut ed = s
+        .commit_editor("m", &[], &[], false, Arc::new(Recorder::default()), &token)
+        .await
+        .expect("editor");
+    let root = ed.open_root(None).await.expect("root");
+    let f = ed.add_file(&p("late.txt"), root, None).await.expect("file");
+    let src = ReplayableSource {
+        path: fifo.clone(),
+        translated: true,
+        size: None,
+    };
+    let task = tokio::spawn(async move {
+        let r = ed
+            .apply_text(f, None, src, None, Checksum::Md5([0; 16]))
+            .await;
+        (ed, r)
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!task.is_finished(), "the read must still be pending");
+    token.cancel();
+    // Let the pending read complete after the cancellation.
+    tokio::task::spawn_blocking(move || std::fs::write(&fifo, b"payload"))
+        .await
+        .expect("join")
+        .expect("write fifo");
+
+    let (ed, r) = task.await.expect("task");
+    assert_eq!(
+        r.expect_err("cancelled while reading").code,
+        ErrorCode::Cancelled
+    );
+    ed.abort_edit().await.expect("abort");
+    assert!(s.open_txns().is_empty());
+    assert_eq!(
+        s.check_path(&p("late.txt"), None, &CancelToken::new())
+            .await
+            .expect("kind"),
+        NodeKind::None
+    );
+}

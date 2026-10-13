@@ -208,6 +208,8 @@ impl CommitEditor for FakeCommitEditor {
         let content = tokio::fs::read(&target.path)
             .await
             .map_err(|e| SvnError::from_io(format!("read {}", target.path.display()), &e))?;
+        // The token may have fired while the read was pending: do not touch the transaction.
+        self.cancel.check()?;
         self.apply(FakeChange::PutFile(path.clone(), Bytes::from(content)))?;
         self.touched.push(path);
         Ok(())
