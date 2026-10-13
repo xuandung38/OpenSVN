@@ -2,6 +2,7 @@ import type { Commands, IpcAdapter } from "../adapter";
 import type {
   AppError,
   CopyLocationRequest,
+  EngineCapabilities,
   LockRequest,
   LogGetRequest,
   OperationHandle,
@@ -62,6 +63,16 @@ let opDurationMs = 2000;
 export function setMockOpDuration(ms: number): void {
   opDurationMs = ms;
 }
+/** `total` of simulated progress ticks; `null` mimics an engine that does not count items first. */
+let progressTotal: number | null = 100;
+export function setMockProgressTotal(total: number | null): void {
+  progressTotal = total;
+}
+/** What `engine_capabilities` reports (tests switch it to an engine without externals). */
+let engineCaps: EngineCapabilities = { externals: true };
+export function setMockEngineCapabilities(caps: EngineCapabilities): void {
+  engineCaps = caps;
+}
 /** Operations the user cancelled; their remaining timers do nothing. */
 const cancelled = new Set<string>();
 
@@ -86,8 +97,8 @@ function simulateOp(
         mockEmit("op://progress", {
           opId: handle.opId,
           phase: kind,
-          current: pct,
-          total: 100,
+          current: progressTotal === null ? pct / 25 : pct,
+          total: progressTotal,
           bytesDone: null,
           bytesTotal: null,
           currentPath: null,
@@ -147,6 +158,8 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     return ok(null);
   },
   settingsGet: () => ok(mockSettings),
+  // Like the fake engine; the checkout dialog explains when an engine does not fetch externals.
+  engineCapabilities: () => ok({ ...engineCaps }),
   opList: () => ok([]),
   repoInfo: (url: string) =>
     ok({

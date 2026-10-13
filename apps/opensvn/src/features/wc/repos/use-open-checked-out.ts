@@ -19,6 +19,16 @@ export function useOpenCheckedOut(onSelect: (wcId: string) => void): void {
   const latest = useRef({ onSelect, r, toast });
   latest.current = { onSelect, r, toast };
 
+  // A checkout that stopped half-way may have registered its partial working copy (listed as
+  // incomplete); any failed operation refreshes the list so it shows up.
+  useEffect(
+    () =>
+      bus.on("op://failed", () => {
+        void qc.invalidateQueries({ queryKey: queryKeys.workingCopies });
+      }),
+    [bus, qc],
+  );
+
   useEffect(
     () =>
       bus.on("op://finished", (p) => {

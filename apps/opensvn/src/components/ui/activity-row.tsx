@@ -42,11 +42,16 @@ export function ActivityRow({
         aria-valuenow={pct ?? undefined}
         className="h-1.5 overflow-hidden rounded-full bg-line"
       >
-        <div
-          className="h-full bg-accent"
-          // Width is data-driven; set via CSSOM (allowed under style-src 'self').
-          style={{ width: `${pct ?? 0}%` }}
-        />
+        {pct === null && state === "running" ? (
+          // No total known (e.g. a checkout that does not count its items first): indeterminate.
+          <div data-indeterminate="" className="h-full w-1/3 bg-accent motion-safe:animate-pulse" />
+        ) : (
+          <div
+            className="h-full bg-accent"
+            // Width is data-driven; set via CSSOM (allowed under style-src 'self').
+            style={{ width: `${pct ?? 0}%` }}
+          />
+        )}
       </div>
       <span className="tnum flex items-center justify-end gap-1.5 text-muted-text">
         {pct === null ? "" : `${pct}%`}

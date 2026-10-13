@@ -57,6 +57,17 @@ pub(super) fn describe(db: &WcDb) -> EngineResult<WcInfo> {
         )
         .map_err(sql_err)
     })?;
+    // `svn-client` marks a folder incomplete while a drive fills it and clears the mark when the
+    // drive completes it, so any left over means a checkout or update stopped half-way.
+    let incomplete: bool = db.with_read(|c| {
+        c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM nodes \
+             WHERE wc_id = ?1 AND op_depth = 0 AND presence = 'incomplete')",
+            [wc_id],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)
+    })?;
     let rev_range = match (lo, hi) {
         (Some(lo), Some(hi)) if lo != hi => Some((Rev(revision(lo)?), Rev(revision(hi)?))),
         _ => None,
@@ -76,6 +87,7 @@ pub(super) fn describe(db: &WcDb) -> EngineResult<WcInfo> {
         },
         store_pristine: db.store_pristine(),
         path_in_repo: format!("/{repos_path}"),
+        incomplete,
     })
 }
 
