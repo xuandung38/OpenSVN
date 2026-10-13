@@ -442,11 +442,19 @@ export type FileDiff = {
 	mime: string | null,
 	left: TextSide | null,
 	right: TextSide | null,
-	/**  Only hunks are sent when the file is too large. */
+	/**
+	 *  Optional, only with `too_large`: an engine may send the changed hunks of a file too large
+	 *  to send in full, or nothing (the real engine does not read a side over 5 MB at all). The
+	 *  UI shows the large-file banner (load full / external tool) whenever `too_large` is set and
+	 *  there are no text sides, with or without hunks.
+	 */
 	hunks: Hunk[] | null,
 	propChanges: PropChange[],
 	image: ImageSides | null,
-	/**  Text larger than 5 MB: ask before loading. */
+	/**
+	 *  Text larger than 5 MB: ask before loading (`force_large`). `left`/`right` are omitted;
+	 *  property rows are still sent.
+	 */
 	tooLarge: boolean | null,
 	/**
 	 *  The two sides differ too much to diff within the display budget
@@ -530,6 +538,7 @@ export type LockInfo = {
 	owner: string,
 	comment: string | null,
 	createdAt: string,
+	/**  Always `None` over IPC: engines keep lock tokens to themselves (ownership is `mine`). */
 	token: string | null,
 	mine: boolean,
 };

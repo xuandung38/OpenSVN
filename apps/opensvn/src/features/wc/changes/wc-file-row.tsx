@@ -4,10 +4,13 @@ import { SafeText } from "../../../components/ui/safe-text";
 import { StatusGlyph } from "../../../components/ui/status-glyph";
 import { cn } from "../../../lib/cn";
 import type { StatusCode } from "../../../lib/status";
+import { displayPath } from "../wc-model";
 
 export interface WcFileRowProps {
   id: string;
   path: string;
+  /** Text shown for the working copy root (path `""`). */
+  rootLabel: string;
   glyph: StatusCode;
   checked: boolean;
   selected: boolean;
@@ -28,9 +31,10 @@ export interface WcFileRowProps {
  * needs-lock and out-of-date markers. The path is always rendered as text.
  */
 export const WcFileRow = memo(function WcFileRow(p: WcFileRowProps) {
+  const shown = displayPath(p.path, p.rootLabel);
   const slash = p.path.lastIndexOf("/");
-  const dir = slash >= 0 ? p.path.slice(0, slash + 1) : "";
-  const name = slash >= 0 ? p.path.slice(slash + 1) : p.path;
+  const dir = slash >= 0 ? shown.slice(0, slash + 1) : "";
+  const name = slash >= 0 ? shown.slice(slash + 1) : shown;
   return (
     // biome-ignore lint/a11y/useFocusableInteractive: roving focus lives on the owning listbox (aria-activedescendant)
     // biome-ignore lint/a11y/useKeyWithClickEvents: keyboard activation is handled by the listbox (Enter/Space)
@@ -67,7 +71,7 @@ export const WcFileRow = memo(function WcFileRow(p: WcFileRowProps) {
         className="m-0 h-[14px] w-[14px] accent-[var(--accent)]"
       />
       <StatusGlyph code={p.glyph} />
-      <span className="min-w-0 truncate font-mono text-[12px]" title={p.path}>
+      <span className="min-w-0 truncate font-mono text-[12px]" title={shown}>
         <SafeText as="span" className="text-muted-text">
           {dir}
         </SafeText>
