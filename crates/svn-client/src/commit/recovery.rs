@@ -1,18 +1,37 @@
-//! Crash recovery for commits: finishes or cleans up every journal left in the state directory.
+//! Crash recovery for commits: finishes or cleans up the journals left in the state directory.
 //!
-//! Call it when the application starts, before taking new write locks. A journal that records
-//! a revision is finalized against its working copy; one that only records a server
-//! transaction gets that transaction deleted; one that recorded neither is dropped.
+//! [`recover_commits`] processes every journal (application start, before new write locks are
+//! taken); [`recover_wc_commits`] only those of one working copy (after a failed commit, or when
+//! a working copy is opened).
+//!
+//! Per journal:
+//!
+//! * a revision is recorded: the working copy is finalized, then the journal is removed;
+//! * the `MERGE` may have been sent but no revision is recorded (crash during the `MERGE`, an
+//!   unknown outcome, or a failure while recording the revision): the journal is reconciled with
+//!   the server by [`reconcile`]. Transaction deleted by that call: never merged, the journal is
+//!   dropped. Transaction gone: the log after the journal's start revision is searched for the
+//!   commit (author when known, log message and changed paths); exactly one match is finalized,
+//!   anything else keeps the journal and reports it as needing the user;
+//! * only a transaction is recorded: it is deleted on the server and the journal is dropped;
+//! * nothing reached the server: the journal is dropped.
+//!
+//! A journal whose outcome is unknown is never dropped without that check, and no journal is
+//! dropped because it could not be read: a file of an unknown format version stays untouched,
+//! a corrupt one is moved aside under a new name, an unreadable one stays.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
-use svn_ra_api::RaSession;
-use svn_types::{CancelToken, Result, SvnError};
+use svn_ra_api::{LogRequest, RaSession, TxnAbort};
+use svn_types::{CancelToken, Checksum, ErrorCode, LogEntry, Result, Revnum, SvnError};
 use svn_wc::WcDb;
 
+use super::drive::editor_path;
 use super::finalize::finalize;
-use super::journal::{JournalData, JournalStore};
+use super::journal::{JournalData, JournalLoadError, JournalMerge, JournalStore};
 use crate::local::lock::with_wc_lock;
+use crate::update::repos_relpath_of;
 use crate::wc::run_work_queue;
 
 /// What [`recover_commits`] did.
@@ -22,7 +41,24 @@ pub struct RecoveryReport {
     pub finalized: Vec<String>,
     /// Journals whose server transaction was deleted (or that never reached the server).
     pub aborted: Vec<String>,
-    /// Journals that could not be processed; they are left in place for the next attempt.
+    /// Journals whose commit may or may not exist in the repository and that the log did not
+    /// settle; they stay in place and block new commits of their working copy until resolved.
+    pub needs_user: Vec<(String, SvnError)>,
+    /// Journals that could not be processed; they are left in place for the next attempt (a
+    /// corrupt one is moved aside first).
+    pub failed: Vec<(String, SvnError)>,
+}
+
+/// What [`recover_wc_commits`] did for one working copy.
+#[derive(Debug, Default)]
+pub struct WcCommitRecovery {
+    /// Journals whose commit was merged and is now folded into the working copy.
+    pub finalized: Vec<String>,
+    /// Journals of commits that certainly did not happen; dropped (their transaction deleted).
+    pub aborted: Vec<String>,
+    /// Journals whose commit may or may not exist and that the log did not settle; kept.
+    pub needs_user: Vec<(String, SvnError)>,
+    /// Journals that could not be processed now (no session, network, I/O); kept.
     pub failed: Vec<(String, SvnError)>,
 }
 
@@ -38,78 +74,389 @@ pub async fn recover_commits(
     let mut report = RecoveryReport::default();
     let mut authenticated = false;
     for path in store.list()? {
-        let data = match JournalStore::read(&path) {
+        let data = match JournalStore::load(&path) {
             Ok(d) => d,
             Err(e) => {
-                let id = path.display().to_string();
-                report.failed.push((id, e));
+                report
+                    .failed
+                    .push((path.display().to_string(), load_failure(&store, &path, e)));
                 continue;
             }
         };
         let id = data.id.clone();
-        let outcome = if data.merged.is_some() {
-            finalize_journal(&store, &data, cancel, open_wc).map(|()| true)
-        } else {
-            abort_journal(&store, &data, ra, cancel, &mut authenticated)
-                .await
-                .map(|()| false)
-        };
+        let outcome = process(
+            &store,
+            data,
+            Wc::Opener(open_wc),
+            Some(ra),
+            cancel,
+            &mut authenticated,
+        )
+        .await;
         match outcome {
-            Ok(true) => report.finalized.push(id),
-            Ok(false) => report.aborted.push(id),
+            Ok(Outcome::Finalized) => report.finalized.push(id),
+            Ok(Outcome::Aborted) => report.aborted.push(id),
+            Ok(Outcome::NeedsUser(e)) => report.needs_user.push((id, e)),
             Err(e) => report.failed.push((id, e)),
         }
     }
     Ok(report)
 }
 
+/// Processes the journals of the working copy `db` in `state_dir` (other working copies'
+/// journals are not touched; a corrupt journal, whose working copy cannot be known, is moved
+/// aside and reported).
+///
+/// Without `ra` only what needs no server is done: merged commits are finalized, journals that
+/// never reached the server are dropped, and the rest is reported in `failed` and kept. With a
+/// session it must be authenticated or able to authenticate without a prompt while the working
+/// copy is unlocked: it is used before the working copy lock is taken for finalizing. The
+/// handle must have a lock owner set.
+pub async fn recover_wc_commits(
+    state_dir: &Path,
+    db: &WcDb,
+    ra: Option<&dyn RaSession>,
+    cancel: &CancelToken,
+) -> Result<WcCommitRecovery> {
+    let store = JournalStore::new(state_dir);
+    let mut report = WcCommitRecovery::default();
+    let mut authenticated = false;
+    for path in store.list()? {
+        let data = match JournalStore::load(&path) {
+            Ok(d) if d.wcroot == db.wcroot() => d,
+            Ok(_) => continue,
+            Err(JournalLoadError::UnsupportedVersion { wcroot, error, .. }) => {
+                if wcroot.as_deref() == Some(db.wcroot()) {
+                    report.needs_user.push((path.display().to_string(), error));
+                }
+                continue;
+            }
+            Err(e) => {
+                report
+                    .failed
+                    .push((path.display().to_string(), load_failure(&store, &path, e)));
+                continue;
+            }
+        };
+        let id = data.id.clone();
+        match process(&store, data, Wc::Given(db), ra, cancel, &mut authenticated).await {
+            Ok(Outcome::Finalized) => report.finalized.push(id),
+            Ok(Outcome::Aborted) => report.aborted.push(id),
+            Ok(Outcome::NeedsUser(e)) => report.needs_user.push((id, e)),
+            Err(e) => report.failed.push((id, e)),
+        }
+    }
+    Ok(report)
+}
+
+/// The error reported for a journal file that could not be loaded; a corrupt one is moved
+/// aside first (never deleted).
+fn load_failure(store: &JournalStore, path: &Path, e: JournalLoadError) -> SvnError {
+    match e {
+        JournalLoadError::Corrupt(err) => match store.quarantine(path) {
+            Ok(aside) => SvnError::new(
+                err.code,
+                format!("{}; moved aside to '{}'", err.message, aside.display()),
+            ),
+            Err(q) => err.with_child(q),
+        },
+        other => other.into_error(),
+    }
+}
+
+/// Finalizes every merged journal of the working copy `db` (whose lock the caller holds), so
+/// a commit never starts from a BASE that misses an earlier merged revision.
+///
+/// Refuses (`WcNeedsCleanup`) while a journal of this working copy has an unknown outcome or a
+/// format this build does not know: committing again before it is resolved could commit the
+/// same change twice or build on a BASE that misses a revision. Journals of other working
+/// copies, journals that only name a transaction and unreadable ones are left to recovery.
+pub(crate) fn finalize_pending_for_wc(store: &JournalStore, db: &WcDb) -> Result<()> {
+    for path in store.list()? {
+        let data = match JournalStore::load(&path) {
+            Ok(d) => d,
+            Err(JournalLoadError::UnsupportedVersion {
+                wcroot: Some(w),
+                error,
+                ..
+            }) if w == db.wcroot() => return Err(error),
+            Err(_) => continue,
+        };
+        if data.wcroot != db.wcroot() {
+            continue;
+        }
+        if data.merged.is_some() {
+            finalize(db, &data, &store.data_dir_of(&data.id))?;
+            run_work_queue(db, &CancelToken::new())?;
+            store.remove(&data.id)?;
+        } else if data.merge_sent {
+            return Err(outcome_unknown_blocks(&data));
+        }
+    }
+    Ok(())
+}
+
+fn outcome_unknown_blocks(data: &JournalData) -> SvnError {
+    SvnError::new(
+        ErrorCode::WcNeedsCleanup,
+        format!(
+            "an earlier commit of this working copy (journal '{}', transaction '{}') may or may \
+             not have been applied in the repository; it has to be resolved by commit recovery \
+             (cleanup) before the next commit",
+            data.id,
+            data.txn.as_deref().unwrap_or("?")
+        ),
+    )
+}
+
+/// Working copy of a journal: given, or opened by root path.
+#[derive(Clone, Copy)]
+enum Wc<'a> {
+    Given(&'a WcDb),
+    Opener(&'a (dyn Fn(&Path) -> Result<WcDb> + Sync)),
+}
+
+enum Outcome {
+    Finalized,
+    Aborted,
+    NeedsUser(SvnError),
+}
+
 fn finalize_journal(
     store: &JournalStore,
     data: &JournalData,
+    wc: Wc<'_>,
     cancel: &CancelToken,
-    open_wc: &(dyn Fn(&Path) -> Result<WcDb> + Sync),
 ) -> Result<()> {
-    let db = open_wc(&data.wcroot)?;
+    let opened;
+    let db = match wc {
+        Wc::Given(db) => db,
+        Wc::Opener(open) => {
+            opened = open(&data.wcroot)?;
+            &opened
+        }
+    };
     let data_dir = store.data_dir_of(&data.id);
-    with_wc_lock(&db, cancel, || {
-        finalize(&db, data, &data_dir)?;
-        run_work_queue(&db, cancel)?;
+    with_wc_lock(db, cancel, || {
+        finalize(db, data, &data_dir)?;
+        run_work_queue(db, cancel)?;
         Ok(())
     })?;
     store.remove(&data.id)
 }
 
-/// Finalizes every merged journal of the working copy `db` (whose lock the caller holds), so
-/// a commit never starts from a BASE that misses an earlier merged revision. Journals of other
-/// working copies, unmerged ones and unreadable ones are left to [`recover_commits`].
-pub(crate) fn finalize_pending_for_wc(store: &JournalStore, db: &WcDb) -> Result<()> {
-    for path in store.list()? {
-        let Ok(data) = JournalStore::read(&path) else {
-            continue;
+fn needs_session(data: &JournalData) -> SvnError {
+    SvnError::new(
+        ErrorCode::WcNeedsCleanup,
+        format!(
+            "the interrupted commit '{}' needs a connection to the repository to be resolved",
+            data.id
+        ),
+    )
+}
+
+async fn process(
+    store: &JournalStore,
+    mut data: JournalData,
+    wc: Wc<'_>,
+    ra: Option<&dyn RaSession>,
+    cancel: &CancelToken,
+    authenticated: &mut bool,
+) -> Result<Outcome> {
+    if data.merged.is_some() {
+        finalize_journal(store, &data, wc, cancel)?;
+        return Ok(Outcome::Finalized);
+    }
+    if data.merge_sent {
+        let ra = ra.ok_or_else(|| needs_session(&data))?;
+        authenticate(ra, cancel, authenticated).await?;
+        return match reconcile(&data, ra, cancel).await? {
+            Reconciled::NotCommitted => {
+                store.remove(&data.id)?;
+                Ok(Outcome::Aborted)
+            }
+            Reconciled::Committed(merge) => {
+                data.merged = Some(merge);
+                store.write(&data)?;
+                finalize_journal(store, &data, wc, cancel)?;
+                Ok(Outcome::Finalized)
+            }
+            Reconciled::NoMatch(why) | Reconciled::Ambiguous(why) => {
+                Ok(Outcome::NeedsUser(SvnError::new(
+                    ErrorCode::WcNeedsCleanup,
+                    format!(
+                        "cannot tell whether the commit '{}' (transaction '{}') was applied: \
+                         {why}; check the repository log, then update or revert the working \
+                         copy and remove the journal",
+                        data.id,
+                        data.txn.as_deref().unwrap_or("?")
+                    ),
+                )))
+            }
         };
-        if data.merged.is_none() || data.wcroot != db.wcroot() {
-            continue;
-        }
-        finalize(db, &data, &store.data_dir_of(&data.id))?;
-        run_work_queue(db, &CancelToken::new())?;
-        store.remove(&data.id)?;
+    }
+    if let Some(txn) = &data.txn {
+        let ra = ra.ok_or_else(|| needs_session(&data))?;
+        authenticate(ra, cancel, authenticated).await?;
+        ra.abort_txn(txn).await?;
+    }
+    store.remove(&data.id)?;
+    Ok(Outcome::Aborted)
+}
+
+async fn authenticate(ra: &dyn RaSession, cancel: &CancelToken, done: &mut bool) -> Result<()> {
+    if !*done {
+        ra.ensure_authenticated(cancel).await?;
+        *done = true;
     }
     Ok(())
 }
 
-async fn abort_journal(
-    store: &JournalStore,
+/// What the repository says about a commit whose `MERGE` outcome is unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Reconciled {
+    /// The transaction still existed (deleted now), or no revision was made since the commit
+    /// started: the commit did not happen.
+    NotCommitted,
+    /// Exactly one revision since the commit started matches it.
+    Committed(JournalMerge),
+    /// The transaction is gone and newer revisions exist, but none matches the commit (the log
+    /// message may have been edited, authz may hide paths, or an administrator removed the
+    /// transaction); the reason.
+    NoMatch(String),
+    /// Several revisions match; the reason.
+    Ambiguous(String),
+}
+
+/// Settles a journal whose `MERGE` may have been sent: deletes the transaction if it still
+/// exists (then it was never merged), otherwise searches the revisions made since the commit
+/// started for the commit: same author (when the journal knows it), same log message, same set
+/// of changed paths, and the same text (MD5) for every file whose text was uploaded.
+///
+/// A deletion that races a `MERGE` still running on the server is possible in theory (FSFS
+/// purges the transaction after the revision is written); it is the same window
+/// libsvn_ra_serf leaves when it deletes a transaction after a failed `MERGE`.
+pub(crate) async fn reconcile(
     data: &JournalData,
     ra: &dyn RaSession,
     cancel: &CancelToken,
-    authenticated: &mut bool,
-) -> Result<()> {
-    if let Some(txn) = &data.txn {
-        if !*authenticated {
-            ra.ensure_authenticated(cancel).await?;
-            *authenticated = true;
-        }
-        ra.abort_txn(txn).await?;
+) -> Result<Reconciled> {
+    let Some(txn) = &data.txn else {
+        return Ok(Reconciled::NoMatch(
+            "the journal names no transaction".to_owned(),
+        ));
+    };
+    if ra.abort_txn_checked(txn, cancel).await? == TxnAbort::Deleted {
+        return Ok(Reconciled::NotCommitted);
     }
-    store.remove(&data.id)
+    let Some(start) = data.start_youngest else {
+        return Ok(Reconciled::NoMatch(
+            "the journal does not record the revision the commit started from".to_owned(),
+        ));
+    };
+    let head = ra.youngest_rev(cancel).await?.0;
+    if head <= start {
+        return Ok(Reconciled::NotCommitted);
+    }
+    let Some(message) = data.message.as_deref() else {
+        return Ok(Reconciled::NoMatch(
+            "the journal does not record the log message".to_owned(),
+        ));
+    };
+    let wanted: BTreeSet<&str> = data
+        .items
+        .iter()
+        .map(|i| i.repos_relpath.trim_matches('/'))
+        .collect();
+    let mut candidates: Vec<LogEntry> = Vec::new();
+    let req = LogRequest {
+        paths: Vec::new(),
+        start: Some(Revnum(head)),
+        end: Some(Revnum(start + 1)),
+        limit: None,
+        discover_changed_paths: true,
+        strict_node_history: false,
+    };
+    ra.log(
+        &req,
+        &mut |entry: LogEntry| {
+            let same_author = data
+                .author
+                .as_deref()
+                .is_none_or(|a| entry.author.as_deref() == Some(a));
+            let paths: BTreeSet<&str> = entry
+                .changed_paths
+                .iter()
+                .map(|c| c.path.as_str().trim_matches('/'))
+                .collect();
+            if entry.rev.0 > start
+                && same_author
+                && entry.message.as_deref() == Some(message)
+                && paths == wanted
+            {
+                candidates.push(entry);
+            }
+            Ok(())
+        },
+        cancel,
+    )
+    .await?;
+    let mut found = Vec::new();
+    for entry in candidates {
+        if same_texts(data, ra, entry.rev, cancel).await? {
+            found.push(entry);
+        }
+    }
+    Ok(match found.as_slice() {
+        [one] => Reconciled::Committed(JournalMerge {
+            revision: one.rev.0,
+            date: one.date.map(|d| d.0),
+            author: one.author.clone(),
+        }),
+        [] => Reconciled::NoMatch(format!(
+            "the transaction is gone but none of r{}..r{head} matches the commit",
+            start + 1
+        )),
+        many => Reconciled::Ambiguous(format!(
+            "{} revisions match the commit ({})",
+            many.len(),
+            many.iter()
+                .map(|e| format!("r{}", e.rev.0))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    })
+}
+
+/// Every uploaded text of the journal has the same MD5 in revision `rev` (files outside the
+/// session cannot be checked and are skipped).
+async fn same_texts(
+    data: &JournalData,
+    ra: &dyn RaSession,
+    rev: Revnum,
+    cancel: &CancelToken,
+) -> Result<bool> {
+    let prefix = repos_relpath_of(ra.repos_root(), ra.session_url())?;
+    for item in &data.items {
+        let Some(text) = &item.text else { continue };
+        let Ok(path) = editor_path(&prefix, &item.repos_relpath) else {
+            continue;
+        };
+        let meta = match ra
+            .get_file(&path, Some(rev), &mut tokio::io::sink(), cancel)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) if e.code == ErrorCode::PathNotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let Checksum::Md5(md5) = meta.md5 else {
+            return Ok(false);
+        };
+        let hex: String = md5.iter().map(|b| format!("{b:02x}")).collect();
+        if !hex.eq_ignore_ascii_case(&text.md5) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
