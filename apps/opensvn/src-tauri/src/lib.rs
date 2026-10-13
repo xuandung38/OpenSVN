@@ -62,7 +62,7 @@ const FAKE_ENGINE_SUBDIR: &str = "fake-engine";
 fn build_state<R: tauri::Runtime>(
     app: &tauri::App<R>,
 ) -> Result<AppState, Box<dyn std::error::Error>> {
-    let data_dir = db::current_data_dir()
+    let data_dir = db::current_data_dir(&app.config().identifier)
         .map_err(startup_error)?
         .join(FAKE_ENGINE_SUBDIR);
     let preview = preview::prepare_preview_dir(&data_dir)
