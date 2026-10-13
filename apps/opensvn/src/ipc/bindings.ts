@@ -116,11 +116,26 @@ export type AuthPrompt = {
 	realm: string,
 	url: string,
 	cert: CertSummary | null,
+	/**  Why credentials are requested; `None` for certificate prompts. */
+	reason: AuthPromptReason | null,
+	/**  Failed tries so far in this prompt sequence, starting at 0. */
+	attempt: number,
 };
 
 export type AuthPromptEvent = AuthPrompt;
 
 export type AuthPromptKind = "credentials" | "certificate";
+
+/**  Why credentials are requested (mirrors the transport's prompt reason). */
+export type AuthPromptReason = 
+/**  First request for this origin. */
+"initial" | 
+/**  The server rejected the credentials just offered. */
+"rejected" | 
+/**  Single sign-on failed; the user may fall back to a password. */
+"negotiate-failed" | 
+/**  Stored credentials are no longer valid. */
+"expired";
 
 /**  Response of `auth_respond`'s input (answer to an `auth://prompt`). */
 export type AuthResponse = { kind: "credentials"; username: string; password: SecretText; save: boolean } | { kind: "certificate"; decision: CertDecision } | { kind: "cancel" };
@@ -167,6 +182,11 @@ export type CertSummary = {
 	notAfter: string,
 	sha256: string,
 	failure: string,
+	/**
+	 *  Fingerprint of the previously pinned certificate when the server now presents a different
+	 *  one (`failure` is then `changed`); "always trust" is not offered in that case.
+	 */
+	oldSha256: string | null,
 };
 
 export type ChangeAction = "A" | "M" | "D" | "R";

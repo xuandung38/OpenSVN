@@ -53,6 +53,7 @@ fn build_state<R: tauri::Runtime>(
         engine: default_engine()?,
         events: Arc::new(ops::TauriEvents::new(app.handle().clone())),
         picker: Arc::new(programs::NativeProgramPicker),
+        status_timing: status::StatusTiming::default(),
     })
     .map_err(|e| startup_error(format!("{} {}", e.message, e.detail.unwrap_or_default())))?;
     let demo_root = engine::fake::demo_wc_root();
