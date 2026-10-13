@@ -1,0 +1,10 @@
+---
+source: crates/svn-protocol/tests/request_snapshots_update_commit.rs
+expression: "render(&delete_request(&u, t, &rel(\"trunk/a.txt\"), Some(Revnum(7)),\nlock).unwrap())"
+---
+DELETE http://svn.test.local/svn/repo/!svn/txr/12-ab/trunk/a.txt
+X-SVN-Version-Name: 7
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+If: <http://svn.test.local/svn/repo/trunk/a.txt> (<opaquelocktoken:abc>)

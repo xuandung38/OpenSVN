@@ -83,15 +83,37 @@ M = [
  ("stat-missing", dict(method="OPTIONS", status=401), "errors/auth-401-html"),
  ("stat-missing", dict(method="PROPFIND", status=404), "errors/not-found-404-html"),
 ]
-# Raw transcripts kept for later work (update / commit goldens).
-M += [("checkout", dict(method="REPORT", status=200, path="!svn/me"), "update/checkout-send-all"),
-      ("checkout-skelta", dict(method="REPORT", status=200, path="!svn/me"), "update/checkout-skelta"),
-      ("update", dict(method="REPORT", status=200, path="!svn/me"), "update/update-send-all"),
-      ("status-u", dict(method="REPORT", status=200, path="!svn/me"), "update/status-u"),
+# Update / commit / blame exchanges.
+ME = dict(method="REPORT", status=200, path="!svn/me")
+M += [("checkout", ME, "update/checkout-send-all"),
+      ("checkout-skelta", ME, "update/checkout-skelta"),
+      ("update", ME, "update/update-send-all"),
+      ("status-u", ME, "update/status-u"),
+      ("switch-trunk", ME, "update/switch"),
+      ("update-rich", ME, "update/update-rich"),
+      ("update-rich-skelta", ME, "update/update-rich-skelta"),
+      ("update-mixed", ME, "update/update-mixed"),
+      ("update-sparse", ME, "update/update-sparse"),
+      ("status-u-rich", ME, "update/status-u-rich"),
       ("commit", dict(method="POST", status=201), "commit/create-txn"),
       ("commit", dict(method="MKCOL", status=201), "commit/mkcol"),
       ("commit", dict(method="PUT", status=201, nth=0), "commit/put-new"),
-      ("commit", dict(method="MERGE", status=200), "commit/merge")]
+      ("commit", dict(method="MERGE", status=200), "commit/merge"),
+      ("commit-full", dict(method="POST", status=201), "commit/full-create-txn"),
+      ("commit-full", dict(method="COPY", status=201), "commit/full-copy"),
+      ("commit-full", dict(method="PROPPATCH", status=207, path=r"copy\.txt"), "commit/full-proppatch-copy"),
+      ("commit-full", dict(method="MKCOL", status=201), "commit/full-mkcol"),
+      ("commit-full", dict(method="DELETE", status=204), "commit/full-delete"),
+      ("commit-full", dict(method="PROPPATCH", status=207, path=r"trunk/src$"), "commit/full-proppatch-dir"),
+      ("commit-full", dict(method="PUT", status=201, path=r"fresh/f\.txt"), "commit/full-put-new"),
+      ("commit-full", dict(method="PUT", status=204), "commit/full-put-modify"),
+      ("commit-full", dict(method="PROPPATCH", status=207, path=r"trunk/a\.txt$"), "commit/full-proppatch-file"),
+      ("commit-full", dict(method="PUT", status=201, path=r"fresh/empty\.txt"), "commit/full-put-empty"),
+      ("commit-full", dict(method="MERGE", status=200), "commit/full-merge"),
+      ("commit-with-lock", dict(method="PUT", status=204), "commit/lock-put"),
+      ("commit-with-lock", dict(method="MERGE", status=200), "commit/lock-merge"),
+      ("commit-out-of-date", dict(method="DELETE", status=204), "commit/abort-txn"),
+      ("blame", dict(method="REPORT", status=200, path="rvr"), "file_revs/blame")]
 
 if os.path.isdir(DEST): shutil.rmtree(DEST)
 for step, sel, dest in M:
