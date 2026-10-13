@@ -1,6 +1,6 @@
 //! See the module docs in `mod.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -9,32 +9,58 @@ use opensvn_ipc::{
     AppError, AuthMethodKind, AuthPrompt, AuthPromptKind, AuthPromptReason, AuthResponse,
     CertDecision as IpcDecision, CertFailureInfo, CertSummary, ErrorCode,
 };
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
+use secure_store::{CredentialStore, StoreError};
 use svn_ra_api::{
     AuthMethod, AuthPrompter, CertDecision, CertFailure, CertInfo, CredentialRequest, Credentials,
     PromptReason,
 };
 use svn_types::OriginKey;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
+use super::trust::{AppDbTrustStore, hex};
 use crate::db::{AccountRecord, AppDb};
 use crate::ops::AppEvents;
 
 /// How long a prompt waits for the user before it counts as cancelled.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-/// Removes stored secrets of a signed-out origin (implemented over the OS credential store).
-pub trait CredentialPurge: Send + Sync {
-    /// Deletes the secrets saved for `scheme://host:port` and `realm`.
-    fn purge(&self, scheme: &str, host: &str, port: u16, realm: &str) -> Result<(), AppError>;
+/// Credential store used when the OS has none (for example no Secret Service on Linux): nothing
+/// is stored and saving fails, so passwords never land in a plain file.
+pub struct UnavailableCredentialStore {
+    reason: String,
 }
 
-/// Purger used while no credential store is wired: there is nothing to remove.
-pub struct NoSecretStore;
+impl UnavailableCredentialStore {
+    /// Store that reports `reason` when asked to save.
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
 
-impl CredentialPurge for NoSecretStore {
-    fn purge(&self, _: &str, _: &str, _: u16, _: &str) -> Result<(), AppError> {
-        Ok(())
+impl CredentialStore for UnavailableCredentialStore {
+    fn get(&self, _: &OriginKey, _: &str) -> secure_store::Result<Option<SecretString>> {
+        Ok(None)
+    }
+    fn set(&self, _: &OriginKey, _: &str, _: &SecretString) -> secure_store::Result<()> {
+        Err(StoreError::Unavailable(self.reason.clone()))
+    }
+    fn delete(&self, _: &OriginKey, _: &str) -> secure_store::Result<bool> {
+        Ok(false)
+    }
+}
+
+/// The OS credential store for repository passwords, or [`UnavailableCredentialStore`] when none
+/// is reachable. There is no file or memory fallback.
+pub fn os_credential_store() -> Arc<dyn CredentialStore> {
+    match secure_store::KeyringStore::os_default() {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            tracing::warn!(error = %e, "no OS credential store; repository passwords are not saved");
+            Arc::new(UnavailableCredentialStore::new(e.to_string()))
+        }
     }
 }
 
@@ -43,17 +69,35 @@ struct Pending {
     wants_certificate: bool,
 }
 
-/// Bridges the transport's [`AuthPrompter`] to the UI.
+/// Bridges the transport's [`AuthPrompter`] to the UI and to the saved credentials.
+///
+/// * Saved passwords live in the OS credential store, account metadata (user name, method) in
+///   `app.sqlite`; [`AuthPrompter::stored_credentials`] combines both without showing UI.
+/// * Permanently trusted certificates are served to the transport by [`AppDbTrustStore`].
+/// * A saved password the server rejected is not offered again in this process until the user
+///   saves new credentials for that origin, so background work cannot lock the account by
+///   retrying it.
 pub struct AuthBroker {
     events: Arc<dyn AppEvents>,
     db: AppDb,
-    purge: Arc<dyn CredentialPurge>,
+    secrets: Arc<dyn CredentialStore>,
+    trust: Arc<AppDbTrustStore>,
     timeout: Duration,
     pending: Mutex<HashMap<String, Pending>>,
+    /// Origins whose saved password was handed to the transport and not replaced by a prompt.
+    stored_in_use: Mutex<HashSet<OriginKey>>,
+    /// Origins whose saved password the server rejected.
+    stored_rejected: Mutex<HashSet<OriginKey>>,
+    /// Bumped whenever cached sessions must be dropped (sign-out, certificate removed).
+    invalidations: watch::Sender<u64>,
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn store_error(e: &StoreError) -> AppError {
+    AppError::internal("The system credential store could not be used.").with_detail(e.to_string())
 }
 
 fn failure_info(f: &CertFailure) -> CertFailureInfo {
@@ -93,29 +137,75 @@ fn map_reason(r: PromptReason) -> AuthPromptReason {
 }
 
 impl AuthBroker {
-    /// Broker emitting prompts through `events`, persisting metadata in `db`.
-    pub fn new(events: Arc<dyn AppEvents>, db: AppDb, purge: Arc<dyn CredentialPurge>) -> Self {
-        Self::with_timeout(events, db, purge, PROMPT_TIMEOUT)
+    /// Broker emitting prompts through `events`, persisting metadata in `db` and passwords in
+    /// `secrets`.
+    pub fn new(events: Arc<dyn AppEvents>, db: AppDb, secrets: Arc<dyn CredentialStore>) -> Self {
+        Self::with_timeout(events, db, secrets, PROMPT_TIMEOUT)
     }
 
     /// Like [`AuthBroker::new`] with a custom prompt timeout.
     pub fn with_timeout(
         events: Arc<dyn AppEvents>,
         db: AppDb,
-        purge: Arc<dyn CredentialPurge>,
+        secrets: Arc<dyn CredentialStore>,
         timeout: Duration,
     ) -> Self {
+        let trust = AppDbTrustStore::load(db.clone()).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "could not load trusted certificates");
+            AppDbTrustStore::empty(db.clone())
+        });
         Self {
             events,
             db,
-            purge,
+            secrets,
+            trust: Arc::new(trust),
             timeout,
             pending: Mutex::new(HashMap::new()),
+            stored_in_use: Mutex::default(),
+            stored_rejected: Mutex::default(),
+            invalidations: watch::Sender::new(0),
         }
     }
 
     fn pending(&self) -> std::sync::MutexGuard<'_, HashMap<String, Pending>> {
-        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+        locked(&self.pending)
+    }
+
+    /// Trusted certificates for the transport (loaded at start-up, kept in memory).
+    #[allow(dead_code)] // the real engine's connector (built from `lib.rs` from WP7 on)
+    pub fn trust_store(&self) -> Arc<AppDbTrustStore> {
+        Arc::clone(&self.trust)
+    }
+
+    /// Observes events after which cached repository sessions must be dropped: a sign-out or a
+    /// removed certificate. The value only ever increases.
+    #[allow(dead_code)] // the real engine's connector (built from `lib.rs` from WP7 on)
+    pub fn invalidations(&self) -> watch::Receiver<u64> {
+        self.invalidations.subscribe()
+    }
+
+    fn invalidate(&self) {
+        self.invalidations.send_modify(|n| *n += 1);
+    }
+
+    /// Records that the server rejected the saved password of `origin`: it is not offered again
+    /// until the user saves new credentials for the origin.
+    pub fn stored_credentials_rejected(&self, origin: &OriginKey) {
+        locked(&self.stored_in_use).remove(origin);
+        if locked(&self.stored_rejected).insert(origin.clone()) {
+            tracing::info!(host = %origin.host, "saved password was rejected; not offering it again");
+        }
+    }
+
+    /// Stops trusting a certificate (row and in-memory pin) and drops cached sessions, so the
+    /// next connection asks again. Returns whether it was trusted.
+    pub fn forget_certificate(&self, key: &opensvn_ipc::TrustedCertKey) -> Result<bool, AppError> {
+        let removed = self.db.certs_remove(key)?;
+        self.trust.forget(&key.host, key.port, &key.sha256);
+        if removed {
+            self.invalidate();
+        }
+        Ok(removed)
     }
 
     /// Number of prompts waiting for an answer.
@@ -149,12 +239,45 @@ impl AuthBroker {
         Ok(())
     }
 
-    /// Signs out of a realm: removes account metadata and stored secrets.
+    /// Signs out of a realm: removes account metadata and stored secrets, and drops cached
+    /// sessions (which still hold the credentials) so the next connection asks again.
     pub fn sign_out(&self, realm: &str) -> Result<(), AppError> {
-        for (scheme, host, port) in self.db.account_delete_realm(realm)? {
-            self.purge.purge(&scheme, &host, port, realm)?;
+        let removed = self.db.account_delete_realm(realm)?;
+        self.invalidate();
+        for account in removed {
+            let origin = OriginKey {
+                scheme: account.scheme,
+                host: account.host,
+                port: account.port,
+                realm: realm.to_owned(),
+            };
+            locked(&self.stored_in_use).remove(&origin);
+            locked(&self.stored_rejected).remove(&origin);
+            if let Some(user) = account.username {
+                self.secrets
+                    .delete(&origin, &user)
+                    .map_err(|e| store_error(&e))?;
+            }
         }
         Ok(())
+    }
+
+    /// Saves `password` for `origin` in the credential store (off the async runtime: OS stores
+    /// may block on IPC). Returns whether it was stored.
+    async fn save_secret(&self, origin: &OriginKey, user: &str, password: &SecretString) -> bool {
+        let (store, origin, user) = (Arc::clone(&self.secrets), origin.clone(), user.to_owned());
+        let password = SecretString::from(password.expose_secret().to_owned());
+        match tokio::task::spawn_blocking(move || store.set(&origin, &user, &password)).await {
+            Ok(Ok(())) => true,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "could not save the password");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "credential store worker failed");
+                false
+            }
+        }
     }
 
     /// Emits `prompt` and waits for the answer, the timeout or a drop.
@@ -211,6 +334,14 @@ fn origin_url(o: &OriginKey) -> String {
 #[async_trait]
 impl AuthPrompter for AuthBroker {
     async fn credentials(&self, req: &CredentialRequest) -> Option<Credentials> {
+        // The transport offers saved credentials only before the first prompt of an origin; a
+        // `Rejected` prompt right after that means the server refused the saved password.
+        // TODO(fix/wp0-followups): replace this inference with the `AuthPrompter` hook that
+        // reports a rejected stored credential explicitly (also in unattended mode).
+        let saved_was_in_use = locked(&self.stored_in_use).remove(&req.origin);
+        if saved_was_in_use && req.reason == PromptReason::Rejected {
+            self.stored_credentials_rejected(&req.origin);
+        }
         let prompt = AuthPrompt {
             request_id: crate::ops::new_op_id().0,
             kind: AuthPromptKind::Credentials,
@@ -243,23 +374,74 @@ impl AuthPrompter for AuthBroker {
         } else {
             req.offered[0]
         };
-        if save
-            && let Err(e) = self.db.account_upsert(&AccountRecord {
+        let password = SecretString::from(password.expose().to_owned());
+        if save && method == AuthMethod::Basic {
+            let recorded = self.db.account_upsert(&AccountRecord {
                 scheme: &req.origin.scheme,
                 host: &req.origin.host,
                 port: req.origin.port,
                 realm: &req.origin.realm,
                 username: &username,
-                negotiate: method == AuthMethod::Negotiate,
-            })
-        {
-            tracing::warn!(error = %e, "could not record account metadata");
+                negotiate: false,
+            });
+            match recorded {
+                Ok(()) => {
+                    if self.save_secret(&req.origin, &username, &password).await {
+                        // The user replaced the saved password: it may be offered again.
+                        locked(&self.stored_rejected).remove(&req.origin);
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "could not record account metadata"),
+            }
         }
         Some(Credentials {
             username,
-            password: SecretString::from(password.expose().to_owned()),
+            password,
             save,
             method,
+        })
+    }
+
+    async fn stored_credentials(&self, req: &CredentialRequest) -> Option<Credentials> {
+        if !req.offered.is_empty() && !req.offered.contains(&AuthMethod::Basic) {
+            return None;
+        }
+        let origin = &req.origin;
+        if locked(&self.stored_rejected).contains(origin) {
+            return None;
+        }
+        let (username, negotiate) =
+            match self
+                .db
+                .account_get(&origin.scheme, &origin.host, origin.port, &origin.realm)
+            {
+                Ok(Some(account)) => account,
+                Ok(None) => return None,
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not read account metadata");
+                    return None;
+                }
+            };
+        let username = username.filter(|u| !u.is_empty() && !negotiate)?;
+        let (store, o, u) = (Arc::clone(&self.secrets), origin.clone(), username.clone());
+        let password = match tokio::task::spawn_blocking(move || store.get(&o, &u)).await {
+            Ok(Ok(Some(p))) => p,
+            Ok(Ok(None)) => return None,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "could not read the saved password");
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "credential store worker failed");
+                return None;
+            }
+        };
+        locked(&self.stored_in_use).insert(origin.clone());
+        Some(Credentials {
+            username,
+            password,
+            save: true,
+            method: AuthMethod::Basic,
         })
     }
 

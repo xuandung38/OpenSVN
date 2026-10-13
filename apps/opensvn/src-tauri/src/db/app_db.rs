@@ -211,6 +211,15 @@ impl AppDb {
     }
 }
 
+/// An account removed by [`AppDb::account_delete_realm`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedAccount {
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+}
+
 /// Origin and account fields stored for a saved credential.
 pub struct AccountRecord<'a> {
     pub scheme: &'a str,
@@ -245,16 +254,47 @@ impl AppDb {
         })
     }
 
-    /// Removes the accounts of a realm; returns `(scheme, host, port)` of each removed origin so
-    /// the matching secrets can be purged.
-    pub fn account_delete_realm(&self, realm: &str) -> Result<Vec<(String, String, u16)>, DbError> {
+    /// The saved account of one origin and realm: `(username, negotiate)`.
+    pub fn account_get(
+        &self,
+        scheme: &str,
+        host: &str,
+        port: u16,
+        realm: &str,
+    ) -> Result<Option<(Option<String>, bool)>, DbError> {
+        self.db.with(|c| {
+            Ok(c.query_row(
+                "SELECT username, method FROM account
+                 WHERE scheme = ?1 AND host = ?2 AND port = ?3 AND realm = ?4",
+                params![scheme, host, port, realm],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, String>(1)? == "negotiate",
+                    ))
+                },
+            )
+            .optional()?)
+        })
+    }
+
+    /// Removes the accounts of a realm; returns `(scheme, host, port, username)` of each removed
+    /// origin so the matching secrets can be purged.
+    pub fn account_delete_realm(&self, realm: &str) -> Result<Vec<RemovedAccount>, DbError> {
         self.db.with(|c| {
             let tx = c.transaction()?;
             let origins = {
-                let mut stmt =
-                    tx.prepare("SELECT scheme, host, port FROM account WHERE realm = ?1")?;
-                stmt.query_map(params![realm], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                    .collect::<Result<Vec<_>, _>>()?
+                let mut stmt = tx
+                    .prepare("SELECT scheme, host, port, username FROM account WHERE realm = ?1")?;
+                stmt.query_map(params![realm], |r| {
+                    Ok(RemovedAccount {
+                        scheme: r.get(0)?,
+                        host: r.get(1)?,
+                        port: r.get(2)?,
+                        username: r.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?
             };
             tx.execute("DELETE FROM account WHERE realm = ?1", params![realm])?;
             tx.commit()?;

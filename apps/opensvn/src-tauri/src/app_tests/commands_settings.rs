@@ -99,7 +99,7 @@ async fn checkout_waits_for_sign_in_through_the_prompt_events() {
     use opensvn_ipc::{AuthResponse, Depth, OpResult, Rev, WcFormat};
     use std::sync::Arc;
 
-    use crate::auth::{AuthBroker, NoSecretStore};
+    use crate::auth::AuthBroker;
     use crate::ops::events::Recorded;
 
     let f = Fixture::new(Duration::ZERO).await;
@@ -108,14 +108,15 @@ async fn checkout_waits_for_sign_in_through_the_prompt_events() {
     let broker = Arc::new(AuthBroker::new(
         f.events.clone(),
         crate::db::AppDb::open_in_memory().unwrap(),
-        Arc::new(NoSecretStore),
+        Arc::new(secure_store::MemoryStore::new()),
     ));
     let repo = crate::engine::fake::demo_repo().unwrap();
     let repo = repo.with_required_auth("alice", "pw", Some(broker.clone()));
     let engine = Arc::new(crate::engine::FakeEngine::empty().with_repo(repo));
     let state = crate::app_state::AppState::build(crate::app_state::AppDeps {
         data_dir: tempfile::tempdir().unwrap().keep(),
-        engine,
+        engine: crate::app_state::EngineSource::Ready(engine),
+        credentials: Arc::new(secure_store::MemoryStore::new()),
         events: f.events.clone(),
         picker: f.picker.clone(),
         path_picker: f.paths.clone(),

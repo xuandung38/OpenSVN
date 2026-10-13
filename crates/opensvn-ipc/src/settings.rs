@@ -128,6 +128,9 @@ settings_structs! {
         network_max_connections: u8 = "network.maxConnections",
         network_timeout_sec: u32 = "network.timeoutSec",
         network_proxy: ProxySetting = "network.proxy",
+        /// Kerberos single sign-on (Negotiate) when the server offers it; off falls back to a
+        /// user name and password.
+        network_negotiate: bool = "network.negotiate",
         wc_default_format: WcFormat = "wc.defaultFormat",
         wc_read_subversion_config: bool = "wc.readSubversionConfig",
         cache_max_size_gb: u32 = "cache.maxSizeGb",

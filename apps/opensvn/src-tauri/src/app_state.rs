@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use opensvn_ipc::{AppError, OpResult, OperationHandle, OperationKind, WcId};
 use svn_types::SvnError;
 
-use crate::auth::{AuthBroker, NoSecretStore};
+use crate::auth::AuthBroker;
 use crate::db::{AppDb, CacheDb};
 use crate::diagnostics::DiagnosticsService;
 use crate::engine::{EngineFacade, OpContext, WcRef};
@@ -22,12 +22,43 @@ use crate::status::{IncomingPoller, PollerDeps, StatusPublisher, StatusService, 
 use crate::updater::{SecretStore, UpdateControl};
 use crate::wc::{ResolvedWc, WcRegistry};
 
+/// Services an engine may need, created before it (decision C of the real engine wiring plan):
+/// the broker must exist so the engine's transport can prompt and read saved credentials.
+#[derive(Clone)]
+// Built from `lib.rs` once the real engine becomes the default (WP7); tests construct it already.
+#[allow(dead_code)]
+pub struct EngineServices {
+    /// Credential and certificate prompts, saved credentials and trusted certificates.
+    pub auth: Arc<AuthBroker>,
+    /// Durable app database.
+    pub db: AppDb,
+    /// Data directory (databases, logs, engine state).
+    pub data_dir: std::path::PathBuf,
+    /// Settings with change notification (network settings of the transport).
+    pub settings: Arc<SettingsService>,
+}
+
+/// Builds the engine from the app services.
+pub type EngineBuilder =
+    Box<dyn FnOnce(EngineServices) -> Result<Arc<dyn EngineFacade>, AppError> + Send>;
+
+/// Where the engine comes from.
+pub enum EngineSource {
+    /// An engine that needs nothing from the app (the fake engine, tests).
+    Ready(Arc<dyn EngineFacade>),
+    /// An engine built once the broker, database and settings exist (the real engine).
+    #[allow(dead_code)] // used by `lib.rs` from WP7 on
+    Build(EngineBuilder),
+}
+
 /// Everything needed to build the state; tests substitute the engine, events and dialogs.
 pub struct AppDeps {
     /// Directory holding `app.sqlite` and `cache.sqlite`.
     pub data_dir: std::path::PathBuf,
     /// Engine implementation.
-    pub engine: Arc<dyn EngineFacade>,
+    pub engine: EngineSource,
+    /// Store of saved repository passwords (the OS credential store in the app).
+    pub credentials: Arc<dyn secure_store::CredentialStore>,
     /// Outbound events.
     pub events: Arc<dyn AppEvents>,
     /// Native dialogs for programs.
@@ -107,18 +138,27 @@ impl AppState {
             db.clone(),
             system_locale().as_deref(),
         )?);
-        let wcs = Arc::new(WcRegistry::new(db.clone(), Arc::clone(&deps.engine)));
+        let auth = Arc::new(AuthBroker::new(
+            Arc::clone(&deps.events),
+            db.clone(),
+            deps.credentials,
+        ));
+        let engine = match deps.engine {
+            EngineSource::Ready(engine) => engine,
+            EngineSource::Build(build) => build(EngineServices {
+                auth: Arc::clone(&auth),
+                db: db.clone(),
+                data_dir: deps.data_dir.clone(),
+                settings: Arc::clone(&settings),
+            })?,
+        };
+        let wcs = Arc::new(WcRegistry::new(db.clone(), Arc::clone(&engine)));
         let status = Arc::new(StatusPublisher::new(
-            Arc::clone(&deps.engine),
+            Arc::clone(&engine),
             cache,
             Arc::clone(&deps.events),
         ));
         let watchers = Arc::new(StatusService::new(Arc::clone(&status), deps.status_timing));
-        let auth = Arc::new(AuthBroker::new(
-            Arc::clone(&deps.events),
-            db.clone(),
-            Arc::new(NoSecretStore),
-        ));
         Ok(Self {
             diagnostics: DiagnosticsService::default(),
             opener: deps.opener,
@@ -137,7 +177,7 @@ impl AppState {
             data_dir: deps.data_dir,
             ops: OperationManager::new(Arc::clone(&deps.events)),
             events: deps.events,
-            engine: deps.engine,
+            engine,
             db,
             settings,
             wcs,

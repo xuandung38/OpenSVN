@@ -35,8 +35,8 @@ use std::time::Duration;
 
 use tauri::Manager;
 
-use app_state::{AppDeps, AppState};
-use engine::{EngineFacade, FakeEngine};
+use app_state::{AppDeps, AppState, EngineSource};
+use engine::FakeEngine;
 
 pub use command_names::COMMAND_NAMES;
 pub use command_registry::builder;
@@ -49,10 +49,10 @@ fn startup_error(msg: impl std::fmt::Display) -> Box<dyn std::error::Error> {
 }
 
 /// Builds the engine: the fake engine with demo data until the real engine is registered.
-fn default_engine() -> Result<Arc<dyn EngineFacade>, Box<dyn std::error::Error>> {
+fn default_engine() -> Result<EngineSource, Box<dyn std::error::Error>> {
     let engine = tauri::async_runtime::block_on(FakeEngine::demo(FAKE_STEP_DELAY))
         .map_err(|e| startup_error(format!("fake engine: {e}")))?;
-    Ok(Arc::new(engine))
+    Ok(EngineSource::Ready(Arc::new(engine)))
 }
 
 /// Folder for everything the fake engine's demo data touches. The user's real `app.sqlite` is
@@ -79,6 +79,8 @@ fn build_state<R: tauri::Runtime>(
     AppState::build(AppDeps {
         data_dir,
         engine: default_engine()?,
+        // Repository passwords: OS credential store only (nothing is saved without one).
+        credentials: auth::os_credential_store(),
         events: Arc::new(ops::TauriEvents::new(app.handle().clone())),
         picker: Arc::new(programs::NativeProgramPicker),
         status_timing: status::StatusTiming::default(),
