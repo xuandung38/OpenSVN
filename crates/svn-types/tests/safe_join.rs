@@ -3,7 +3,7 @@
 
 use std::fs;
 
-use svn_types::{ErrorCode, RelPath, safe_join, write_file_replacing};
+use svn_types::{ErrorCode, RelPath, rename_replacing, safe_join, write_file_replacing};
 
 fn rel(s: &str) -> RelPath {
     RelPath::new(s).expect("valid rel path")
@@ -148,5 +148,36 @@ fn write_replaces_regular_file_atomically() {
 fn write_fails_cleanly_without_parent() {
     let dir = tempfile::tempdir().expect("wc");
     let err = write_file_replacing(&dir.path().join("missing/f"), b"x").expect_err("must fail");
+    assert_eq!(err.code, ErrorCode::PathNotFound);
+}
+
+#[test]
+fn rename_replacing_overwrites_a_read_only_destination() {
+    let dir = tempfile::tempdir().expect("wc");
+    let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+    fs::write(&from, b"new").expect("from");
+    fs::write(&to, b"old").expect("to");
+    let mut perms = fs::metadata(&to).expect("meta").permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&to, perms).expect("read-only");
+    rename_replacing(&from, &to).expect("rename");
+    assert_eq!(fs::read(&to).expect("read"), b"new");
+    assert!(!from.exists());
+}
+
+#[test]
+fn rename_replacing_creates_a_new_destination() {
+    let dir = tempfile::tempdir().expect("wc");
+    let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+    fs::write(&from, b"x").expect("from");
+    rename_replacing(&from, &to).expect("rename");
+    assert_eq!(fs::read(&to).expect("read"), b"x");
+}
+
+#[test]
+fn rename_replacing_reports_a_missing_source() {
+    let dir = tempfile::tempdir().expect("wc");
+    let err =
+        rename_replacing(&dir.path().join("nope"), &dir.path().join("to")).expect_err("must fail");
     assert_eq!(err.code, ErrorCode::PathNotFound);
 }

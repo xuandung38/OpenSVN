@@ -1,0 +1,11 @@
+Index: f
+===================================================================
+--- f	(revision 1)
++++ f	(working copy)
+@@ -1,2 +1,3 @@
+ a
+-b
+\ No newline at end of file
++b
++c
+\ No newline at end of file
