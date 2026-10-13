@@ -1,0 +1,51 @@
+HTTP/1.1 200 OK
+Date: Mon, 01 Jan 2024 00:00:00 GMT
+Server: Apache
+Content-Type: text/xml; charset="utf-8"
+Content-Length: 2460
+
+<?xml version="1.0" encoding="utf-8"?>
+<S:log-report xmlns:S="svn:" xmlns:D="DAV:">
+<S:log-item>
+<S:added-path node-kind="file" text-mods="true" prop-mods="true">/trunk/many-props.txt</S:added-path>
+<D:version-name>10</D:version-name>
+<S:date>2024-01-01T10:00:00.000000Z</S:date>
+<D:comment>Add node with many properties</D:comment>
+<D:creator-displayname>fixture</D:creator-displayname>
+</S:log-item>
+<S:log-item>
+<S:added-path copyfrom-path="/trunk/src/app.c" copyfrom-rev="5" node-kind="file" text-mods="false" prop-mods="false">/trunk/src/app-copy.c</S:added-path>
+<D:version-name>6</D:version-name>
+<S:date>2024-01-01T06:00:00.000000Z</S:date>
+<D:comment>Copy app.c</D:comment>
+<D:creator-displayname>fixture</D:creator-displayname>
+</S:log-item>
+<S:log-item>
+<S:added-path copyfrom-path="/trunk/src/main.c" copyfrom-rev="4" node-kind="file" text-mods="false" prop-mods="false">/trunk/src/app.c</S:added-path>
+<S:deleted-path node-kind="file" text-mods="false" prop-mods="false">/trunk/src/main.c</S:deleted-path>
+<D:version-name>5</D:version-name>
+<S:date>2024-01-01T05:00:00.000000Z</S:date>
+<D:comment>Rename main.c to app.c</D:comment>
+<D:creator-displayname>fixture</D:creator-displayname>
+</S:log-item>
+<S:log-item>
+<S:modified-path node-kind="dir" text-mods="false" prop-mods="true">/trunk/with-externals</S:modified-path>
+<D:version-name>4</D:version-name>
+<S:date>2024-01-01T04:00:00.000000Z</S:date>
+<D:comment>Add externals</D:comment>
+<D:creator-displayname>fixture</D:creator-displayname>
+</S:log-item>
+<S:log-item>
+<S:modified-path node-kind="dir" text-mods="false" prop-mods="true">/trunk</S:modified-path>
+<S:modified-path node-kind="file" text-mods="false" prop-mods="true">/trunk/README.txt</S:modified-path>
+<S:modified-path node-kind="file" text-mods="false" prop-mods="true">/trunk/crlf.txt</S:modified-path>
+<S:modified-path node-kind="file" text-mods="false" prop-mods="true">/trunk/data/image.png</S:modified-path>
+<S:modified-path node-kind="file" text-mods="false" prop-mods="true">/trunk/keywords.txt</S:modified-path>
+<S:modified-path node-kind="file" text-mods="false" prop-mods="true">/trunk/locked.txt</S:modified-path>
+<S:modified-path node-kind="file" text-mods="false" prop-mods="true">/trunk/run.sh</S:modified-path>
+<D:version-name>3</D:version-name>
+<S:date>2024-01-01T03:00:00.000000Z</S:date>
+<D:comment>Set properties</D:comment>
+<D:creator-displayname>fixture</D:creator-displayname>
+</S:log-item>
+</S:log-report>
