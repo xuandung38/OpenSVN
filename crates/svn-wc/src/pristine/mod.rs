@@ -478,6 +478,8 @@ impl<I: PristineIndex> PristineStore<I> {
 }
 
 /// Windows refuses to delete read-only files; Unix deletes by directory permission.
+///
+/// Unverified on Windows (no Windows CI).
 #[cfg(windows)]
 fn clear_read_only_for_delete(path: &Path) -> Result<(), PristineError> {
     match fs::metadata(path) {
