@@ -12,7 +12,9 @@ use super::support::{
 };
 use crate::engine::conformance::{self, Harness, PlantedOwner};
 use crate::engine::real::RealEngine;
-use crate::engine::{CheckoutPlan, EngineFacade, LockScope, LogScope, OpContext, WcRef};
+use crate::engine::{
+    CheckoutPlan, DiffOptions, EngineFacade, LockScope, LogScope, OpContext, WcRef,
+};
 
 /// Harness that runs the shared suite against the real engine.
 ///
@@ -639,4 +641,63 @@ async fn branch_urls_are_percent_encoded_and_unsafe_names_skipped() {
         let info = f.engine.repo_info(&n.url, &ctx()).await.unwrap();
         assert_eq!(info.kind, EntryKind::Dir, "{}", n.url);
     }
+}
+
+/// Revision diffs apply the same `svn_diff` display budget as the fake engine: over it the
+/// sides are dropped and `too_complex` is set, unless `full_text` asks for them (external tool).
+#[tokio::test]
+async fn revision_diff_over_the_display_budget_is_flagged_too_complex() {
+    let f = fixture();
+    let numbered = |rev: bool| {
+        let mut v: Vec<usize> = (0..20_000).collect();
+        if rev {
+            v.reverse();
+        }
+        v.iter().map(|i| format!("line {i}\n")).collect::<String>()
+    };
+    f.repo
+        .seed("bob", "Add", &[put("trunk/big.txt", &numbered(false))])
+        .unwrap();
+    f.repo
+        .seed("bob", "Reverse", &[put("trunk/big.txt", &numbered(true))])
+        .unwrap();
+    let url = format!("{URL}/trunk/big.txt");
+    let d = f
+        .engine
+        .diff_rev(&url, None, Rev(3), DiffOptions::default(), &ctx())
+        .await
+        .unwrap();
+    assert_eq!(d.too_complex, Some(true));
+    assert!(d.left.is_none() && d.right.is_none() && !d.binary);
+
+    let full = DiffOptions {
+        full_text: true,
+        ..DiffOptions::default()
+    };
+    let d = f
+        .engine
+        .diff_rev(&url, None, Rev(3), full, &ctx())
+        .await
+        .unwrap();
+    assert_eq!(d.too_complex, None);
+    assert!(d.left.unwrap().content.starts_with("line 0\n"));
+    assert!(d.right.unwrap().content.starts_with("line 19999\n"));
+
+    // A small edit keeps both sides.
+    f.repo
+        .seed("bob", "Small", &[put("trunk/README.md", "hello world\n")])
+        .unwrap();
+    let d = f
+        .engine
+        .diff_rev(
+            &format!("{URL}/trunk/README.md"),
+            None,
+            Rev(4),
+            DiffOptions::default(),
+            &ctx(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(d.too_complex, None);
+    assert_eq!(d.left.unwrap().content, "hello\n");
 }

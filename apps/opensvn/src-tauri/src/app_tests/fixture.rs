@@ -21,7 +21,7 @@ use crate::notify::Notifier;
 use crate::ops::events::{Recorded, RecordingEvents};
 use crate::os_integration::OsOpener;
 use crate::path_grants::{MAIN_WINDOW, PathPicker};
-use crate::programs::ProgramPicker;
+use crate::programs::{ProgramLauncher, ProgramPicker};
 use crate::status::StatusTiming;
 use crate::updater::{MemorySecretStore, UpdateControl, UpdateInfo};
 use secrecy::{ExposeSecret, SecretString};
@@ -144,6 +144,22 @@ impl ProgramPicker for Scripted {
     }
 }
 
+/// Launcher double: records what would have been started, with the staged files' contents.
+#[derive(Default)]
+pub struct RecordingLauncher {
+    pub launched: Mutex<Vec<(PathBuf, Vec<String>)>>,
+}
+
+impl ProgramLauncher for RecordingLauncher {
+    fn launch(&self, program: &std::path::Path, args: &[String]) -> Result<(), AppError> {
+        self.launched
+            .lock()
+            .unwrap()
+            .push((program.to_path_buf(), args.to_vec()));
+        Ok(())
+    }
+}
+
 pub struct Fixture {
     pub app: tauri::App<MockRuntime>,
     pub events: Arc<RecordingEvents>,
@@ -154,6 +170,7 @@ pub struct Fixture {
     pub menu: Arc<RecordingMenu>,
     pub updates: Arc<RecordingUpdates>,
     pub secrets: Arc<MemorySecretStore>,
+    pub launcher: Arc<RecordingLauncher>,
     pub engine: Arc<FakeEngine>,
     _dir: tempfile::TempDir,
 }
@@ -176,6 +193,7 @@ impl Fixture {
         let menu = Arc::new(RecordingMenu::default());
         let updates = Arc::new(RecordingUpdates::default());
         let secrets = Arc::new(MemorySecretStore::default());
+        let launcher = Arc::new(RecordingLauncher::default());
         let state = AppState::build(AppDeps {
             data_dir: dir.path().to_path_buf(),
             engine: engine.clone(),
@@ -188,6 +206,7 @@ impl Fixture {
             menu: menu.clone(),
             updates: updates.clone(),
             secrets: secrets.clone(),
+            launcher: launcher.clone(),
         })
         .unwrap();
         let app = tauri::test::mock_app();
@@ -202,6 +221,7 @@ impl Fixture {
             menu,
             updates,
             secrets,
+            launcher,
             engine,
             _dir: dir,
         }

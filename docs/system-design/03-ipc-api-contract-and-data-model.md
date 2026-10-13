@@ -65,6 +65,7 @@ interface FileDiff {
   propChanges: { name: string; before?: string; after?: string }[];
   image?: { leftUrl?: string; rightUrl?: string };                 // asset:// URL tạm
   tooLarge?: boolean;                                              // > 5MB text → hỏi trước khi tải
+  tooComplex?: boolean;                                            // vượt ngân sách diff hiển thị (svn_diff::DISPLAY_MAX_COST): bỏ left/right, UI mời mở `diff_external`, không thử lại
 }
 interface TextSide { content: string; encoding: string; eol: 'LF' | 'CRLF' | 'mixed'; label: string; }
 interface Hunk { oldStart: number; oldLines: number; newStart: number; newLines: number; lines: string[]; }
@@ -112,6 +113,7 @@ type Layout =
 | `status_refresh` | `{ wcId, paths? }` | `OperationHandle` |
 | `status_remote` | `{ wcId }` | `OperationHandle` (cập nhật `remote` trong FileStatus + `incoming`) |
 | `diff_get` | `{ target: DiffTarget, ignoreWhitespace?, forceLarge? }` | `FileDiff` |
+| `diff_external` | `{ target: DiffTarget }` | `void`. Mở `diff.externalTool` trên hai bản sao chỉ-đọc của hai bên (thư mục riêng `<data>/external-diff/<id>/{left,right}.<ext>`, tên cố định, `ext` chỉ giữ `[A-Za-z0-9]{1,16}`; tự xóa sau 24h, giữ tối đa 32 thư mục / 512 MiB, xóa cũ nhất trước; khi xóa không bao giờ đi theo symlink). Chạy trực tiếp, không qua shell; trong `args`, `{left}`/`{right}` được thay bằng đường dẫn hai bản sao, nếu không có placeholder thì hai đường dẫn được nối vào cuối. Chưa cấu hình → `invalidArgument` + action `openSettings`; file nhị phân → `invalidArgument` |
 | `changelist_set` | `{ wcId, paths, name \| null }` | `void` |
 | `ignore_add` | `{ wcId, pattern, dir, scope: 'svn:ignore' \| 'local' }` | `void` |
 | `mark_move` | `{ wcId, from, to }` | `void` |
@@ -276,7 +278,7 @@ Log theo path dùng `log_path_by_path`; khi khoảng revision chưa nằm trong 
 | `appearance.theme` | `'system' \| 'light' \| 'dark'` | system |
 | `diff.mode` | `'split' \| 'unified'` | split |
 | `diff.ignoreWhitespace` | boolean | false |
-| `diff.externalTool` | `{ path, args } \| null` (chỉ đổi qua `program_choose`) | null |
+| `diff.externalTool` | `{ path, args } \| null` (chỉ đổi qua `program_choose`; `args` có thể chứa `{left}`/`{right}`, xem `diff_external`) | null |
 | `diff.mergeTool` | `{ path, args } \| null` (chỉ đổi qua `program_choose`) | null |
 | `tools.editor` | `{ path, args } \| null` (chỉ đổi qua `program_choose`) | null |
 | `tools.terminal` | `{ path, args } \| null` (chỉ đổi qua `program_choose`) | null |

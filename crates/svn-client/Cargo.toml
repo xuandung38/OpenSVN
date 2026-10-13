@@ -5,8 +5,30 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "High-level working copy operations: checkout, update, switch, status, diff"
 
 [lints]
 workspace = true
 
+[features]
+# Crash-injection points (`fail::fail_point!`); enabled only by tests and the crash suite.
+failpoints = ["dep:fail", "fail/failpoints", "svn-wc/failpoints"]
+
 [dependencies]
+svn-types.workspace = true
+svn-ra-api.workspace = true
+svn-wc.workspace = true
+svn-diff.workspace = true
+svn-delta.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+tempfile.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+md-5.workspace = true
+sha1.workspace = true
+fail = { workspace = true, optional = true }
+
+[dev-dependencies]
+svn-ra-api = { workspace = true, features = ["fake"] }
+opensvn-svn-oracle = { path = "../../tests/svn-oracle" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

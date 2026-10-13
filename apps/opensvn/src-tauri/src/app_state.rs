@@ -16,7 +16,7 @@ use crate::notify::Notifier;
 use crate::ops::{AppEvents, OperationManager};
 use crate::os_integration::OsOpener;
 use crate::path_grants::{PathGrants, PathPicker};
-use crate::programs::{ProgramPicker, ProgramService};
+use crate::programs::{ProgramLauncher, ProgramPicker, ProgramService};
 use crate::settings::{SettingsService, system_locale};
 use crate::status::{IncomingPoller, PollerDeps, StatusPublisher, StatusService, StatusTiming};
 use crate::updater::{SecretStore, UpdateControl};
@@ -46,6 +46,8 @@ pub struct AppDeps {
     pub updates: Arc<dyn UpdateControl>,
     /// Credential store (updater token).
     pub secrets: Arc<dyn SecretStore>,
+    /// Starts external programs (the diff tool).
+    pub launcher: Arc<dyn ProgramLauncher>,
 }
 
 /// Services shared by all commands. Managed by Tauri and injected as `State<AppState>`.
@@ -68,8 +70,6 @@ pub struct AppState {
     pub auth: Arc<AuthBroker>,
     /// Diagnostics preview and export.
     pub diagnostics: DiagnosticsService,
-    /// Directory with the app databases and logs.
-    pub data_dir: std::path::PathBuf,
     /// File watchers of open working copies.
     pub watchers: Arc<StatusService>,
     /// Periodic update check (started after the window exists).
@@ -92,6 +92,10 @@ pub struct AppState {
     pub path_dialog_open: tokio::sync::Mutex<()>,
     /// Program settings (native pick and confirm).
     pub programs: ProgramService,
+    /// Starts external programs (the diff tool).
+    pub launcher: Arc<dyn ProgramLauncher>,
+    /// Data directory (databases, logs); private folders for generated files live under it.
+    pub data_dir: std::path::PathBuf,
 }
 
 impl AppState {
@@ -117,7 +121,6 @@ impl AppState {
         ));
         Ok(Self {
             diagnostics: DiagnosticsService::default(),
-            data_dir: deps.data_dir.clone(),
             opener: deps.opener,
             notifier: deps.notifier,
             menu: deps.menu,
@@ -130,6 +133,8 @@ impl AppState {
             path_picker: deps.path_picker,
             path_dialog_open: tokio::sync::Mutex::new(()),
             programs: ProgramService::new(Arc::clone(&settings), deps.picker),
+            launcher: deps.launcher,
+            data_dir: deps.data_dir,
             ops: OperationManager::new(Arc::clone(&deps.events)),
             events: deps.events,
             engine: deps.engine,

@@ -198,6 +198,7 @@ fn ipc_app(f: &Fixture) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRu
         menu: f.menu.clone(),
         updates: f.updates.clone(),
         secrets: f.secrets.clone(),
+        launcher: f.launcher.clone(),
     })
     .unwrap();
     app.manage(state);

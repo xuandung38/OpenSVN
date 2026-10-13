@@ -61,6 +61,7 @@
     "allow-status-refresh",
     "allow-status-remote",
     "allow-diff-get",
+    "allow-diff-external",
     "allow-changelist-set",
     "allow-ignore-add",
     "allow-mark-move",

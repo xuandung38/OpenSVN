@@ -146,6 +146,15 @@ fn default_app_uses_an_allow_list_not_a_block_list() {
         "x.svg",
         "x.docm",
         "x.xlsm",
+        // Legacy binary office formats can carry macros under an innocent extension; OpenDocument
+        // formats can carry Basic macros; RTF can embed OLE objects.
+        "x.doc",
+        "x.xls",
+        "x.ppt",
+        "x.odt",
+        "x.ods",
+        "x.odp",
+        "x.rtf",
         "Makefile",
         ".txt",
         "x.unknown",

@@ -266,3 +266,23 @@ fn certificate_decisions_use_camel_case_on_the_wire() {
         assert_eq!(serde_json::from_value::<AuthResponse>(v).unwrap(), r);
     }
 }
+
+#[test]
+fn file_diff_flags_too_complex_in_camel_case() {
+    let d = FileDiff {
+        path: "big.txt".into(),
+        binary: false,
+        mime: None,
+        left: None,
+        right: None,
+        hunks: None,
+        prop_changes: vec![],
+        image: None,
+        too_large: None,
+        too_complex: Some(true),
+    };
+    let v = serde_json::to_value(&d).unwrap();
+    assert_eq!(v["tooComplex"], json!(true));
+    assert_eq!(v["left"], json!(null));
+    assert_eq!(serde_json::from_value::<FileDiff>(v).unwrap(), d);
+}

@@ -17,7 +17,7 @@ use super::state::{Sched, rel};
 use crate::engine::context::{OpContext, ProgressUpdate};
 use crate::engine::facade::{DiffOptions, EditOp, LockScope, LogScope, RemoteEditPlan, WcRef};
 use crate::engine::mapping::{self, entry_kind, revnum};
-use crate::engine::text::{is_binary, match_lines, text_side};
+use crate::engine::text::{file_diff, match_lines, text_side};
 
 /// Largest file `repo_cat` returns inline.
 const CAT_LIMIT: usize = 5 * 1024 * 1024;
@@ -182,34 +182,12 @@ impl FakeEngine {
             .map_err(|e| SvnError::from_io(format!("write {}", save_to.display()), &e))
     }
 
-    fn diff_of(
-        path: &str,
-        left: Option<(Vec<u8>, String)>,
-        right: Option<(Vec<u8>, String)>,
-    ) -> FileDiff {
-        let binary = [&left, &right]
-            .iter()
-            .any(|s| s.as_ref().is_some_and(|(d, _)| is_binary(d)));
-        let side = |s: Option<(Vec<u8>, String)>| s.map(|(d, label)| text_side(&d, label));
-        FileDiff {
-            path: path.to_owned(),
-            binary,
-            mime: binary.then(|| "application/octet-stream".to_owned()),
-            left: if binary { None } else { side(left) },
-            right: if binary { None } else { side(right) },
-            hunks: None,
-            prop_changes: Vec::new(),
-            image: None,
-            too_large: None,
-        }
-    }
-
     pub(super) async fn do_diff_wc(
         &self,
         wc: &WcRef,
         path: &str,
         against: Option<Rev>,
-        _opts: DiffOptions,
+        opts: DiffOptions,
         ctx: &OpContext,
     ) -> Result<FileDiff, SvnError> {
         let rp = rel(path)?;
@@ -245,7 +223,7 @@ impl FakeEngine {
             .work
             .as_ref()
             .map(|b| (b.to_vec(), format!("{rp} (working)")));
-        Ok(Self::diff_of(path, left, right))
+        file_diff(path, left, right, opts, ctx)
     }
 
     pub(super) async fn do_diff_rev(
@@ -253,7 +231,7 @@ impl FakeEngine {
         url: &str,
         from: Option<Rev>,
         to: Rev,
-        _opts: DiffOptions,
+        opts: DiffOptions,
         ctx: &OpContext,
     ) -> Result<FileDiff, SvnError> {
         let (session, path) = self.locate(url)?;
@@ -277,7 +255,7 @@ impl FakeEngine {
         };
         let left = read(from).await?.map(|d| (d, format!("{name}@r{from}")));
         let right = read(to.0).await?.map(|d| (d, format!("{name}@r{}", to.0)));
-        Ok(Self::diff_of(&name, left, right))
+        file_diff(&name, left, right, opts, ctx)
     }
 
     pub(super) async fn do_log(

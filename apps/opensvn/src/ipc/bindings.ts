@@ -24,6 +24,12 @@ export const commands = {
 	/**  Checks the repository for newer revisions; announces `wc://incoming` and updates remote info. */
 	statusRemote: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("status_remote", { wcId })),
 	diffGet: (request: DiffGetRequest) => typedError<FileDiff, AppError>(__TAURI_INVOKE("diff_get", { request })),
+	/**
+	 *  Opens `target` in the configured external diff tool (`diff.externalTool`): both sides are
+	 *  written as read-only copies into a private folder and the tool is started on them. Used when a
+	 *  diff is too complex or too large to show, or on request. Binary files are refused.
+	 */
+	diffExternal: (target: DiffTarget) => typedError<null, AppError>(__TAURI_INVOKE("diff_external", { target })),
 	changelistSet: (wcId: WcId, paths: string[], name: string | null) => typedError<null, AppError>(__TAURI_INVOKE("changelist_set", { wcId, paths, name })),
 	ignoreAdd: (request: IgnoreAddRequest) => typedError<null, AppError>(__TAURI_INVOKE("ignore_add", { request })),
 	markMove: (wcId: WcId, from: string, to: string) => typedError<null, AppError>(__TAURI_INVOKE("mark_move", { wcId, from, to })),
@@ -399,6 +405,12 @@ export type FileDiff = {
 	image: ImageSides | null,
 	/**  Text larger than 5 MB: ask before loading. */
 	tooLarge: boolean | null,
+	/**
+	 *  The two sides differ too much to diff within the display budget
+	 *  (`svn_diff::DISPLAY_MAX_COST`). `left`/`right` are then omitted and the UI offers the
+	 *  external diff tool (`diff_external`) instead; it never retries the display diff.
+	 */
+	tooComplex: boolean | null,
 };
 
 export type FileKind = "file" | "dir" | "symlink";
