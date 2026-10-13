@@ -501,3 +501,178 @@ fn commit_folds_changes_into_base_like_svn() {
     };
     assert_rows_equal("commit", &norm(dump_rows(&a)), &norm(dump_rows(&b)));
 }
+
+#[test]
+fn copy_carries_deleted_children_of_the_source() {
+    check(
+        "copy-with-deleted-child",
+        &|_| {},
+        &[&["rm", "-q", "d/f2"], &["cp", "-q", "d", "dc"]],
+        &|db, wc| {
+            rm(wc, "d/f2");
+            db.op_delete(&rp("d/f2"), &[]).expect("rm");
+            cp(&wc.join("d"), &wc.join("dc"));
+            db.op_copy(&rp("d"), &rp("dc"), &[]).expect("cp");
+        },
+    );
+    // Copy of a copy keeps the delete layers of its own deleted child as well.
+    check(
+        "copy-of-copy-with-deleted-child",
+        &|_| {},
+        &[
+            &["cp", "-q", "d", "dc"],
+            &["rm", "-q", "dc/f1"],
+            &["cp", "-q", "dc", "dc2"],
+        ],
+        &|db, wc| {
+            cp(&wc.join("d"), &wc.join("dc"));
+            db.op_copy(&rp("d"), &rp("dc"), &[]).expect("cp");
+            rm(wc, "dc/f1");
+            db.op_delete(&rp("dc/f1"), &[]).expect("rm");
+            cp(&wc.join("dc"), &wc.join("dc2"));
+            db.op_copy(&rp("dc"), &rp("dc2"), &[]).expect("cp");
+        },
+    );
+}
+
+#[test]
+fn recursive_revert_removes_working_layers_of_descendants() {
+    check(
+        "revert-R-descendant-add",
+        &|wc| write(wc, "d/new.txt", "n\n"),
+        &[
+            &["add", "-q", "d/new.txt"],
+            &["rm", "-q", "d/f2"],
+            &["revert", "-q", "-R", "d"],
+        ],
+        &|db, wc| {
+            db.op_add(&rp("d/new.txt"), NodeKind::File, None, &[])
+                .expect("add");
+            rm(wc, "d/f2");
+            db.op_delete(&rp("d/f2"), &[]).expect("rm");
+            db.op_revert(&rp("d"), true, &[]).expect("revert -R");
+            write(wc, "d/f2", "2\n");
+        },
+    );
+}
+
+#[test]
+fn non_recursive_revert_of_an_operation_root_with_child_operations_is_refused() {
+    if skip_without_svn_1_15() {
+        return;
+    }
+    let fx = fixture();
+    let a = checkout(&fx.base, &fx.url, "svn-side", &[]);
+    let b = checkout(&fx.base, &fx.url, "our-side", &[]);
+    svn(&a, &["cp", "-q", "d", "dc"]);
+    svn(&a, &["rm", "-q", "dc/f1"]);
+    let refused = std::process::Command::new("svn")
+        .args(["revert", "dc"])
+        .current_dir(&a)
+        .output()
+        .expect("svn");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("E155038"));
+
+    let db = WcDb::open(&b).expect("open");
+    cp(&b.join("d"), &b.join("dc"));
+    db.op_copy(&rp("d"), &rp("dc"), &[]).expect("cp");
+    rm(&b, "dc/f1");
+    db.op_delete(&rp("dc/f1"), &[]).expect("rm");
+    let err = db.op_revert(&rp("dc"), false, &[]).expect_err("refused");
+    assert_eq!(err.svn_code, Some(155_038));
+    drop(db);
+    assert_rows_equal(
+        "refused revert changes nothing",
+        &dump_rows(&a),
+        &dump_rows(&b),
+    );
+}
+
+#[test]
+fn moving_a_local_copy_is_a_plain_copy_and_children_of_copies_move_like_svn() {
+    check(
+        "move-of-copy",
+        &|_| {},
+        &[
+            &["cp", "-q", "top.txt", "c.txt"],
+            &["mv", "-q", "c.txt", "m.txt"],
+        ],
+        &|db, wc| {
+            fs::copy(wc.join("top.txt"), wc.join("c.txt")).expect("cp");
+            db.op_copy(&rp("top.txt"), &rp("c.txt"), &[]).expect("cp");
+            mv(wc, "c.txt", "m.txt");
+            db.op_move(&rp("c.txt"), &rp("m.txt"), &[]).expect("mv");
+        },
+    );
+    check(
+        "move-child-of-copy",
+        &|_| {},
+        &[&["cp", "-q", "d", "dc"], &["mv", "-q", "dc/f1", "dc/f1b"]],
+        &|db, wc| {
+            cp(&wc.join("d"), &wc.join("dc"));
+            db.op_copy(&rp("d"), &rp("dc"), &[]).expect("cp");
+            mv(wc, "dc/f1", "dc/f1b");
+            db.op_move(&rp("dc/f1"), &rp("dc/f1b"), &[]).expect("mv");
+        },
+    );
+}
+
+#[test]
+fn commit_of_a_replaced_directory_drops_the_old_base_tree() {
+    if skip_without_svn_1_15() {
+        return;
+    }
+    let fx = fixture();
+    let a = checkout(&fx.base, &fx.url, "svn-side", &[]);
+    let b = checkout(&fx.base, &fx.url, "our-side", &[]);
+    svn(&a, &["rm", "-q", "d"]);
+    fs::create_dir(a.join("d")).expect("mkdir");
+    svn(&a, &["add", "-q", "d"]);
+    {
+        let db = WcDb::open(&b).expect("open");
+        rm(&b, "d");
+        db.op_delete(&rp("d"), &[]).expect("rm");
+        fs::create_dir(b.join("d")).expect("mkdir");
+        db.op_add(&rp("d"), NodeKind::Dir, None, &[]).expect("add");
+    }
+    svn(&a, &["commit", "-q", "-m", "replace"]);
+    let (date, author): (i64, String) = open_ro(&a)
+        .query_row(
+            "SELECT changed_date, changed_author FROM nodes WHERE local_relpath = 'd'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("d base");
+    let db = WcDb::open(&b).expect("open");
+    let info = CommitInfo {
+        new_rev: 2,
+        date: Some(date),
+        author: Some(author),
+        ..CommitInfo::default()
+    };
+    db.commit_nodes(&[(rp("d"), info)], &[]).expect("commit");
+    drop(db);
+    assert_rows_equal("commit-replace", &dump_rows(&a), &dump_rows(&b));
+}
+
+#[test]
+fn mixed_revision_copy_is_refused_explicitly() {
+    if skip_without_svn_1_15() {
+        return;
+    }
+    let fx = fixture();
+    let a = checkout(&fx.base, &fx.url, "svn-side", &[]);
+    let other = checkout(&fx.base, &fx.url, "other", &[]);
+    write(&other, "d/f2", "changed\n");
+    svn(&other, &["commit", "-q", "-m", "two"]);
+    svn(&a, &["update", "-q", "d/f2"]); // d@1 contains d/f2@2
+    let db = WcDb::open(&a).expect("open");
+    let err = db.op_copy(&rp("d"), &rp("dc"), &[]).expect_err("mixed");
+    assert_eq!(err.code, svn_types::ErrorCode::WcFormatUnsupported);
+    assert!(err.message.contains("mixed-revision"), "{}", err.message);
+    assert!(
+        db.read_node(&rp("dc")).expect("read").is_none(),
+        "nothing was written"
+    );
+}

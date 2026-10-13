@@ -186,9 +186,20 @@ impl WcDb {
         self.write_with_work(work, |c| actual::clear_conflict(c, self.wc_id, path))
     }
 
-    /// Folds one committed path into BASE (`bump_revisions` after a commit). Process parents
-    /// before children; for a committed delete pass only the root of the deletion.
+    /// Folds one committed path into BASE. Prefer [`WcDb::commit_nodes`] for a whole commit.
     pub fn commit_node(&self, path: &RelPath, info: &CommitInfo, work: &[Skel]) -> Result<()> {
-        self.write_with_work(work, |c| ops::commit_node(c, self.wc_id, path, info))
+        self.commit_nodes(&[(path.clone(), info.clone())], work)
+    }
+
+    /// Post-commit processing of every committed path in ONE transaction (`bump_revisions`): a
+    /// crash can never leave the working copy half-committed. Order the batch parents before
+    /// children; for a committed delete pass only the root of the deletion.
+    pub fn commit_nodes(&self, batch: &[(RelPath, CommitInfo)], work: &[Skel]) -> Result<()> {
+        self.write_with_work(work, |c| {
+            for (path, info) in batch {
+                ops::commit_node(c, self.wc_id, path, info)?;
+            }
+            Ok(())
+        })
     }
 }
