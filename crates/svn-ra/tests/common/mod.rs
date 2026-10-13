@@ -44,6 +44,11 @@ pub struct ScriptedPrompter {
     /// Answer of `stored_credentials` (nothing stored by default).
     pub stored: Mutex<Option<(String, String)>>,
     pub stored_calls: AtomicUsize,
+    /// Every `stored_credentials_rejected` call.
+    pub stored_rejected: Mutex<Vec<svn_ra_api::CredentialRequest>>,
+    /// When set, `stored_credentials_rejected` cancels this token and yields before recording,
+    /// as if the user cancelled while the hook ran.
+    pub cancel_in_rejected_hook: Mutex<Option<svn_types::CancelToken>>,
 }
 
 impl ScriptedPrompter {
@@ -71,6 +76,10 @@ impl ScriptedPrompter {
         let p = Self::default();
         *p.stored.lock().unwrap() = Some((user.into(), pass.into()));
         Arc::new(p)
+    }
+
+    pub fn stored_rejections(&self) -> usize {
+        self.stored_rejected.lock().unwrap().len()
     }
 
     pub fn credential_prompts(&self) -> usize {
@@ -126,6 +135,15 @@ impl AuthPrompter for ScriptedPrompter {
                 save: true,
                 method: AuthMethod::Basic,
             })
+    }
+
+    async fn stored_credentials_rejected(&self, req: &svn_ra_api::CredentialRequest) {
+        let cancel = self.cancel_in_rejected_hook.lock().unwrap().clone();
+        if let Some(cancel) = cancel {
+            cancel.cancel();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        self.stored_rejected.lock().unwrap().push(req.clone());
     }
 
     async fn confirm_certificate(&self, info: &CertInfo) -> CertDecision {

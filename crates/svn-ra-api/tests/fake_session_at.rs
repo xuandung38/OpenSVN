@@ -130,6 +130,35 @@ async fn reads_are_relative_to_the_session_url() {
 }
 
 #[tokio::test]
+async fn session_urls_are_compared_decoded_and_encoded_slashes_are_refused() {
+    let root = repo();
+    let cancel = CancelToken::new();
+    // `%74runk` is `trunk`, and `sub%20dir` matches the decoded `sub dir`.
+    let t = root.at(&url(&format!("{ROOT}/%74runk/sub%20dir"))).unwrap();
+    assert_eq!(
+        t.check_path(&p("b.txt"), None, &cancel).await.unwrap(),
+        NodeKind::File
+    );
+    // An encoded root segment still names the repository.
+    let t = root
+        .at(&url("https://svn.test.local/repos/d%65mo/trunk"))
+        .unwrap();
+    assert_eq!(
+        t.check_path(&p("a.txt"), None, &cancel).await.unwrap(),
+        NodeKind::File
+    );
+    // `%2F` is one segment containing a slash, not two segments: refused.
+    for u in [
+        format!("{ROOT}/trunk%2Fsub%20dir"),
+        format!("{ROOT}/trunk%2fx"),
+        "https://svn.test.local/repos%2Fdemo/trunk".to_owned(),
+    ] {
+        let err = root.at(&url(&u)).err().expect(&u);
+        assert_eq!(err.code, ErrorCode::UnsafePath, "{u}");
+    }
+}
+
+#[tokio::test]
 async fn sessions_outside_the_repository_are_refused() {
     let root = repo();
     for u in [
