@@ -16,6 +16,8 @@
 
 mod actual;
 mod connection;
+mod externals;
+mod misc;
 mod node_api;
 mod nodes;
 mod ops;
@@ -32,6 +34,8 @@ use svn_types::{Depth, ErrorCode, RelPath, Result, SvnError};
 
 pub use actual::{ConflictRecord, ConflictTexts};
 pub use connection::{BUSY_TIMEOUT, OpenMode, open_connection, open_existing, sql_err};
+pub use externals::External;
+pub use misc::LockInfo;
 pub use nodes::{Node, Presence, Props};
 pub use ops::{BaseNode, CommitInfo};
 pub use schema::{FORMAT_MAX_READ, FORMAT_WRITE, check_supported_format, read_user_version};
@@ -353,14 +357,14 @@ impl WcDb {
         self.writable
     }
 
-    fn lock(&self) -> MutexGuard<'_, Connection> {
+    fn conn_guard(&self) -> MutexGuard<'_, Connection> {
         // A panic in another closure cannot corrupt SQLite state, so recover the guard.
         self.conn.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Runs a read-only closure on the connection. Do not hold the result's borrows across calls.
     pub fn with_read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        f(&self.lock())
+        f(&self.conn_guard())
     }
 
     /// Runs `f` inside a `BEGIN IMMEDIATE` transaction; commits on `Ok`, rolls back on `Err`.
@@ -375,7 +379,7 @@ impl WcDb {
                 ),
             ));
         }
-        let mut conn = self.lock();
+        let mut conn = self.conn_guard();
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_err)?;
