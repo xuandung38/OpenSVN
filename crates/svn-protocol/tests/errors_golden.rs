@@ -108,3 +108,48 @@ proptest! {
         let _ = error_from_response(status, &svn_protocol::Headers::new(), &data);
     }
 }
+
+#[test]
+fn hook_failures_and_redirects_have_their_own_codes() {
+    let body = br#"<D:error xmlns:D="DAV:" xmlns:m="http://apache.org/dav/xmlns"><m:human-readable errcode="165001">pre-commit hook: no TODOs allowed</m:human-readable></D:error>"#;
+    let e = error_from_response(500, &svn_protocol::Headers::new(), body);
+    assert_eq!((e.code, e.svn_code), (ErrorCode::HookFailed, Some(165_001)));
+    assert!(e.message.contains("no TODOs allowed"));
+
+    let moved =
+        svn_protocol::Headers::from_pairs([("Location", "https://svn.test.local/new/repo")]);
+    for status in [301, 302, 307, 308] {
+        let e = error_from_response(status, &moved, b"<html>moved</html>");
+        assert_eq!(e.code, ErrorCode::RepositoryMoved, "{status}");
+        assert_eq!(e.svn_code, Some(175_011));
+        assert!(
+            e.message.contains("https://svn.test.local/new/repo"),
+            "{}",
+            e.message
+        );
+    }
+    // An unusable Location is not echoed.
+    for loc in [
+        "javascript:alert(1)",
+        "ftp://x/y",
+        "/relative",
+        "https://a/b\nX-Evil: 1",
+        "",
+    ] {
+        let h = svn_protocol::Headers::from_pairs([("Location", loc)]);
+        let e = error_from_response(302, &h, b"");
+        assert_eq!(e.code, ErrorCode::RepositoryMoved);
+        assert!(
+            !e.message.contains("alert") && !e.message.contains("Evil"),
+            "{}",
+            e.message
+        );
+    }
+    // A D:error body naming the relocation errcode maps the same way.
+    let body = br#"<D:error xmlns:D="DAV:" xmlns:m="http://apache.org/dav/xmlns"><m:human-readable errcode="175011">moved</m:human-readable></D:error>"#;
+    assert_eq!(
+        error_from_response(404, &svn_protocol::Headers::new(), body).code,
+        ErrorCode::RepositoryMoved
+    );
+    assert_eq!(map_http_status(304), ErrorCode::Network);
+}

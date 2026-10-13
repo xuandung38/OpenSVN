@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:file-revs-report xmlns:S="svn:" xmlns:D="DAV:">
+<S:file-rev path="/trunk/a.txt" rev="2">
+<S:rev-prop name="svn:date">2026-10-13T09:45:06.669520Z</S:rev-prop>
+<S:rev-prop name="svn:log">initial: files &amp; props &lt;&amp;&gt; unicode é</S:rev-prop>
+<S:rev-prop name="svn:author">alice</S:rev-prop>
+<S:set-prop name="custom:tag">v&lt;1&gt;&amp;"q"</S:set-prop>
+<S:txdelta>U1ZOAAAADAEMjGhlbGxvCndvcmxkCg==</S:txdelta></S:file-rev>
+<S:file-rev path="/trunk/a.txt" rev="3">
+<S:rev-prop name="svn:log">edit a.txt</S:rev-prop>
+<S:rev-prop name="svn:author">alice</S:rev-prop>
+<S:rev-prop name="svn:date">2026-10-13T09:45:07.190780Z</S:rev-prop>
+<S:txdelta>U1ZOAAAMEQMFDACFbW9yZQo=</S:txdelta></S:file-rev>
+<S:file-rev path="/trunk/a.txt" rev="6">
+<S:rev-prop name="svn:log">second commit: add dir &amp; edit</S:rev-prop>
+<S:rev-prop name="svn:author">alice</S:rev-prop>
+<S:rev-prop name="svn:date">2026-10-13T09:45:15.764184Z</S:rev-prop>
+<S:txdelta>U1ZOAAARGgUEEQCEBQxhbmQg</S:txdelta></S:file-rev>
+<S:file-rev path="/trunk/a.txt" rev="9">
+<S:rev-prop name="svn:date">2026-10-13T09:45:24.198177Z</S:rev-prop>
+<S:rev-prop name="svn:log">first</S:rev-prop>
+<S:rev-prop name="svn:author">alice</S:rev-prop>
+<S:txdelta>U1ZOAAAaHgMEGgCEb25lCg==</S:txdelta></S:file-rev>
+</S:file-revs-report>

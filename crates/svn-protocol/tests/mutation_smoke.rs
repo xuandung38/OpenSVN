@@ -7,19 +7,26 @@ mod common;
 use common::{load, urls};
 use proptest::prelude::*;
 use svn_protocol::ResponseParser;
+use svn_protocol::commit::MergeResponseParser;
+use svn_protocol::file_revs::FileRevsParser;
 use svn_protocol::locks::GetLocksParser;
 use svn_protocol::log::LogParser;
 use svn_protocol::propfind::{ListParser, MultiStatusParser};
+use svn_protocol::update::UpdateParser;
 use svn_protocol::{Headers, error_from_response};
 use svn_types::RelPath;
 
-const CORPUS: [&str; 6] = [
+const CORPUS: [&str; 10] = [
     "log/head-verbose",
     "log/merged-revisions",
     "propfind/list-depth1",
     "propfind/allprop-file",
     "locks/get-locks-report",
     "errors/out-of-date-409",
+    "update/update-rich",
+    "update/checkout-skelta",
+    "file_revs/blame",
+    "commit/full-merge",
 ];
 
 fn drive<P: ResponseParser>(mut p: P, data: &[u8], split: usize) {
@@ -32,6 +39,9 @@ fn drive<P: ResponseParser>(mut p: P, data: &[u8], split: usize) {
 fn run_all(data: &[u8], split: usize) {
     let u = urls();
     drive(LogParser::new(), data, split);
+    drive(UpdateParser::new(u.clone()), data, split);
+    drive(FileRevsParser::new(), data, split);
+    drive(MergeResponseParser::new(), data, split);
     drive(MultiStatusParser::new(), data, split);
     drive(GetLocksParser::new(), data, split);
     drive(
@@ -44,7 +54,7 @@ fn run_all(data: &[u8], split: usize) {
 
 proptest! {
     #[test]
-    fn flipped_bytes(idx in 0usize..6, flips in proptest::collection::vec((0usize..65536, any::<u8>()), 1..8), split in 0usize..65536) {
+    fn flipped_bytes(idx in 0usize..10, flips in proptest::collection::vec((0usize..105536, any::<u8>()), 1..8), split in 0usize..105536) {
         let mut data = load(CORPUS[idx]).resp_body;
         for (pos, byte) in flips {
             let len = data.len();
@@ -54,13 +64,13 @@ proptest! {
     }
 
     #[test]
-    fn truncated(idx in 0usize..6, cut in 0usize..65536, split in 0usize..65536) {
+    fn truncated(idx in 0usize..10, cut in 0usize..105536, split in 0usize..105536) {
         let data = load(CORPUS[idx]).resp_body;
         run_all(&data[..cut % (data.len() + 1)], split);
     }
 
     #[test]
-    fn spliced(idx in 0usize..6, other in 0usize..6, at in 0usize..65536, from in 0usize..65536, split in 0usize..65536) {
+    fn spliced(idx in 0usize..10, other in 0usize..10, at in 0usize..105536, from in 0usize..105536, split in 0usize..105536) {
         let a = load(CORPUS[idx]).resp_body;
         let b = load(CORPUS[other]).resp_body;
         let mut data = a[..at % (a.len() + 1)].to_vec();
