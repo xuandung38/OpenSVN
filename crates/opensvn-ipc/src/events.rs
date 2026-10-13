@@ -90,6 +90,20 @@ pub enum AuthPromptKind {
     Certificate,
 }
 
+/// Why credentials are requested (mirrors the transport's prompt reason).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthPromptReason {
+    /// First request for this origin.
+    Initial,
+    /// The server rejected the credentials just offered.
+    Rejected,
+    /// Single sign-on failed; the user may fall back to a password.
+    NegotiateFailed,
+    /// Stored credentials are no longer valid.
+    Expired,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CertSummary {
@@ -100,6 +114,9 @@ pub struct CertSummary {
     pub not_after: String,
     pub sha256: String,
     pub failure: String,
+    /// Fingerprint of the previously pinned certificate when the server now presents a different
+    /// one (`failure` is then `changed`); "always trust" is not offered in that case.
+    pub old_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -110,4 +127,8 @@ pub struct AuthPrompt {
     pub realm: String,
     pub url: String,
     pub cert: Option<CertSummary>,
+    /// Why credentials are requested; `None` for certificate prompts.
+    pub reason: Option<AuthPromptReason>,
+    /// Failed tries so far in this prompt sequence, starting at 0.
+    pub attempt: u32,
 }
