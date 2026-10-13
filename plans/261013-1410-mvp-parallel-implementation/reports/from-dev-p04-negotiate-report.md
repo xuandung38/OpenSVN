@@ -26,15 +26,17 @@
 - `cargo fmt --all --check`: pass.
 - Scoped clippy `-p svn-types -p svn-ra -p opensvn-ipc -p svn-ra-api --all-targets -D warnings`:
   pass. Also passes for `svn-ra` with `--features negotiate-gssapi`.
-- Workspace clippy: see the PR comment for the result (the shared disk ran full during earlier runs).
+- `cargo clippy --workspace --all-targets -- -D warnings`: pass.
 - Tests `-p svn-types -p svn-ra -p opensvn-ipc -p svn-ra-api`: 173 passed, 0 failed, 1 ignored.
   `svn-ra --features negotiate-gssapi`: 66 passed, 0 failed, 1 ignored (including a real GSSAPI
   no-ticket smoke test).
 - Windows: `cargo clippy -p svn-ra --all-targets --target x86_64-pc-windows-msvc -D warnings` passes.
   `ring`'s C build was stubbed with a no-op CC/AR because there are no MSVC headers here. This is
   type-check only; nothing was linked or run on Windows.
-- `bindings.ts` was edited by hand in specta's output format. `gen_ipc` could not finish because
-  the shared disk ran out of space. CI's bindings diff check will confirm it.
+- `gen_ipc` regenerated `bindings.ts` with no diff.
+- FE (apps/opensvn): biome lint, tsc typecheck and vitest all pass (21 files, 144 tests). An
+  earlier run under heavy CPU load hit 5 s vitest timeouts in the remote/* tests; they pass on
+  rerun.
 
 ## Remaining
 - Real-server verification on Windows/macOS/Linux using the checklist (PO).
