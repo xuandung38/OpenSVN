@@ -45,16 +45,18 @@ Not done, or follow-ups:
 | `cargo fmt --all --check` | pass |
 | `cargo clippy --workspace --all-targets -- -D warnings` | pass (whole workspace, Tauri app included) |
 | `cargo test -p svn-ra` | 95 passed, 0 failed, 3 ignored (compat_write needs Docker) |
-| `cargo test --workspace --exclude opensvn` | 409 passed, 1 failed, 10 ignored. The failure is `transport_auth::cancel_interrupts_a_request_queued_behind_a_prompt` (see below). |
+| `cargo test --workspace --exclude opensvn --no-fail-fast` | 725 passed, 0 failed, 11 ignored (final run) |
+| `cargo test -p opensvn` (Tauri app) | 127 passed, 0 failed |
 
-- `transport_auth::cancel_interrupts_a_request_queued_behind_a_prompt` comes from main (P04) and
-  is timing-flaky under load. It relies on 200 ms sleeps. With a load average around 20 on 4 cores
-  it fails about 1 run in 3 when its whole binary runs. Run on its own it passed 10 of 10. This
-  branch does not touch it.
-- I did not run the `opensvn` app crate tests. The disk is shared with other agents and filled up
-  twice during the build. The app does not depend on `svn-ra`.
+- An earlier workspace run had 1 failure: `transport_auth::cancel_interrupts_a_request_queued_behind_a_prompt`.
+  The test comes from main (P04) and relies on 200 ms sleeps, so it is timing-flaky under load.
+  With a load average around 20 on 4 cores it fails about 1 run in 3. It passed 10 of 10 when run
+  alone, and it passed in the final run. It should be deflaked by waiting on prompter state
+  instead of sleeping. This branch does not touch it.
 - I did not rerun `compat_write`, because there is no Docker daemon here. Instead, the write path
   ran against a real mod_dav_svn 1.14.3 (local Apache, plain HTTP, anonymous): the 10a branch's
   `compat_read::remote_mkdir_through_the_session` commits through `start_commit`, MKCOL and MERGE,
   and it passes.
 - The FE gates do not apply, because no FE files changed.
+- The workspace builds used `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0`, because the disk is
+  shared with other agents and filled up twice.
