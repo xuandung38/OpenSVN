@@ -7,8 +7,10 @@
 //! honours the caller's [`svn_types::CancelToken`].
 
 pub mod checkout;
+pub mod commit;
 pub mod ctx;
 pub mod diff;
+pub mod local;
 pub mod ops;
 pub mod status;
 pub mod update;
