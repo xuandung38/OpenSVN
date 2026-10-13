@@ -26,6 +26,15 @@ pub struct KeywordContext {
 /// `$Id$`/`$Header$`) are always UTC and never consult it.
 pub type UtcOffsetAt<'a> = &'a dyn Fn(i64) -> i32;
 
+/// Resolver for the system time zone (`TZ`, else `/etc/localtime` or the platform zone), the
+/// zone svn uses for `$Date$`. Falls back to UTC when the zone cannot be determined.
+pub fn utc_offset_local(unix_secs: i64) -> i32 {
+    match jiff::Timestamp::from_second(unix_secs) {
+        Ok(ts) => jiff::tz::TimeZone::system().to_offset(ts).seconds(),
+        Err(_) => 0,
+    }
+}
+
 /// Resolver for UTC (offset 0), used for normalisation and tests.
 pub fn utc_offset_zero(_unix_secs: i64) -> i32 {
     0

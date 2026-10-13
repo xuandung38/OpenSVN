@@ -4753,6 +4753,21 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "svn-client"
 version = "0.0.0"
+dependencies = [
+ "bytes",
+ "fail",
+ "md-5",
+ "opensvn-svn-oracle",
+ "sha1",
+ "svn-delta",
+ "svn-diff",
+ "svn-ra-api",
+ "svn-types",
+ "svn-wc",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "svn-delta"
@@ -4856,6 +4871,7 @@ version = "0.0.0"
 dependencies = [
  "fail",
  "ignore",
+ "jiff",
  "md-5",
  "opensvn-svn-oracle",
  "proptest",
