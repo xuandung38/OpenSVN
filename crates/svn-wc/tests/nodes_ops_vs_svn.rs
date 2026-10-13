@@ -594,6 +594,7 @@ fn non_recursive_revert_of_an_operation_root_with_child_operations_is_refused() 
     rm(&b, "dc/f1");
     db.op_delete(&rp("dc/f1"), &[]).expect("rm");
     let err = db.op_revert(&rp("dc"), false, &[]).expect_err("refused");
+    assert_eq!(err.code, svn_types::ErrorCode::WcInvalidOperation);
     assert_eq!(err.svn_code, Some(155_038));
     drop(db);
     assert_rows_equal(
