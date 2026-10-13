@@ -165,7 +165,9 @@ async fn copy_reports_what_the_repository_cannot_do() {
                 to_url: format!("{URL}/branches/b1"),
                 message: "Branch".into(),
                 switch_wc_id: None,
+                from_wc: None,
             },
+            None,
             &ctx(),
         )
         .await
@@ -182,7 +184,9 @@ async fn copy_reports_what_the_repository_cannot_do() {
                 to_url: format!("{URL}/trunk/src"),
                 message: "Branch".into(),
                 switch_wc_id: None,
+                from_wc: None,
             },
+            None,
             &ctx(),
         )
         .await
