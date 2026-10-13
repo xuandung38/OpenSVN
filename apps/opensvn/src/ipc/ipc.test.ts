@@ -8,7 +8,7 @@ import { queryKeys } from "./query-keys";
 test("mock adapter serves working copies and unmocked commands return a typed error", async () => {
   const wcs = await unwrap(mockAdapter.commands.wcList());
   expect(wcs.length).toBeGreaterThan(0);
-  await expect(unwrap(mockAdapter.commands.diagnosticsExport())).rejects.toMatchObject({
+  await expect(unwrap(mockAdapter.commands.diagnosticsExport("token"))).rejects.toMatchObject({
     name: "IpcError",
   });
 });

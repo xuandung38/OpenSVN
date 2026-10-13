@@ -63,3 +63,4 @@ engine-conformance = []
 [dev-dependencies]
 tauri = { workspace = true, features = ["test"] }
 tempfile.workspace = true
+proptest.workspace = true

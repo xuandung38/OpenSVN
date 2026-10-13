@@ -226,3 +226,47 @@ async fn default_checkout_folder_is_chosen_natively() {
     let s = commands::checkout_root_choose(f.state()).await.unwrap();
     assert_eq!(s.general_checkout_root, dir.path().to_string_lossy());
 }
+
+#[tokio::test]
+async fn diagnostics_preview_then_export_through_a_native_save_dialog() {
+    let f = Fixture::new(Duration::ZERO).await;
+    f.add_demo_wc().await;
+    let preview = commands::diagnostics_preview(
+        f.state(),
+        crate::diagnostics::DiagnosticsOptions {
+            hide_paths: true,
+            hide_commit_messages: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(preview.entries.iter().any(|e| e.name == "settings.json"));
+    let wcs = preview
+        .entries
+        .iter()
+        .find(|e| e.name == "working-copies.txt")
+        .unwrap();
+    assert!(wcs.content.contains("<wc-1>") && !wcs.content.contains("opensvn-fake"));
+
+    // cancelled save dialog: nothing written, the preview stays valid
+    assert_eq!(
+        commands::diagnostics_export(f.state(), preview.token.clone())
+            .await
+            .unwrap(),
+        None
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("diag.zip");
+    *f.paths.choice.lock().unwrap() = Some((dest.clone(), opensvn_ipc::GrantKind::File));
+    let saved = commands::diagnostics_export(f.state(), preview.token.clone())
+        .await
+        .unwrap();
+    assert_eq!(saved.as_deref(), Some(dest.to_string_lossy().as_ref()));
+    assert!(std::fs::metadata(&dest).unwrap().len() > 100);
+    assert!(
+        commands::diagnostics_export(f.state(), preview.token)
+            .await
+            .is_err(),
+        "single use"
+    );
+}

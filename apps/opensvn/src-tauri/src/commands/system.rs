@@ -6,9 +6,9 @@ use opensvn_ipc::{
 };
 use tauri::State;
 
-use super::stub;
 use crate::app_state::AppState;
 use crate::boundary::guard;
+use crate::diagnostics::{BundleInputs, DiagnosticsOptions, DiagnosticsPreview};
 
 #[tauri::command]
 #[specta::specta]
@@ -201,5 +201,63 @@ pub async fn menu_set_layout(state: State<'_, AppState>, has_layout: bool) -> Re
     guard(async { state.menu.set_layout_mode(has_layout) }).await
 }
 
-// Returns the path of the created diagnostics zip.
-stub!(diagnostics_export() -> String);
+/// Builds the diagnostics bundle in memory and returns every file's text for review. Nothing is
+/// written yet.
+#[tauri::command]
+#[specta::specta]
+pub async fn diagnostics_preview(
+    state: State<'_, AppState>,
+    options: DiagnosticsOptions,
+) -> Result<DiagnosticsPreview, AppError> {
+    guard(async {
+        let wcs = state
+            .wcs
+            .list()
+            .await?
+            .into_iter()
+            .map(|w| (w.name, w.root_path))
+            .collect();
+        let inputs = BundleInputs {
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            platform: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+            settings: state.settings.get(),
+            working_copies: wcs,
+            home_dir: std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .ok(),
+            logs_dir: Some(state.data_dir.join("logs")),
+        };
+        Ok(state.diagnostics.preview(&inputs, options))
+    })
+    .await
+}
+
+/// Saves the previewed bundle as a zip. The destination is chosen in a native save dialog;
+/// returns the saved path, or `None` when the user cancels the dialog.
+#[tauri::command]
+#[specta::specta]
+pub async fn diagnostics_export(
+    state: State<'_, AppState>,
+    token: String,
+) -> Result<Option<String>, AppError> {
+    guard(async {
+        let Ok(_open) = state.path_dialog_open.try_lock() else {
+            return Err(crate::errors::invalid_argument(
+                "A file picker is already open.",
+            ));
+        };
+        let Some((dest, _)) = state
+            .path_picker
+            .pick(&PickRequest::SaveFile {
+                suggested_name: "opensvn-diagnostics.zip".to_owned(),
+                title: Some("Save diagnostics".to_owned()),
+            })
+            .await
+        else {
+            return Ok(None);
+        };
+        state.diagnostics.export(&token, &dest)?;
+        Ok(Some(dest.to_string_lossy().into_owned()))
+    })
+    .await
+}

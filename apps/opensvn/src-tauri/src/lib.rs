@@ -10,6 +10,7 @@ mod command_names;
 mod command_registry;
 mod commands;
 mod db;
+mod diagnostics;
 pub mod engine;
 mod errors;
 mod events;
@@ -196,12 +197,5 @@ mod tests {
     fn committed_bindings_are_up_to_date() {
         let committed = include_str!("../../src/ipc/bindings.ts");
         assert_eq!(committed, export_to_string(), "run `pnpm gen:ipc`");
-    }
-
-    #[test]
-    fn commands_of_later_services_are_still_stubs() {
-        let err = tauri::async_runtime::block_on(commands::diagnostics_export()).expect_err("stub");
-        assert_eq!(err.code, opensvn_ipc::ErrorCode::Internal);
-        assert_eq!(err.message, "not implemented");
     }
 }

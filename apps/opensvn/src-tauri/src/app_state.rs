@@ -9,6 +9,7 @@ use svn_types::SvnError;
 
 use crate::auth::{AuthBroker, NoSecretStore};
 use crate::db::{AppDb, CacheDb};
+use crate::diagnostics::DiagnosticsService;
 use crate::engine::{EngineFacade, OpContext, WcRef};
 use crate::menu::MenuControl;
 use crate::notify::Notifier;
@@ -60,6 +61,10 @@ pub struct AppState {
     pub status: Arc<StatusPublisher>,
     /// Credential and certificate prompts.
     pub auth: Arc<AuthBroker>,
+    /// Diagnostics preview and export.
+    pub diagnostics: DiagnosticsService,
+    /// Directory with the app databases and logs.
+    pub data_dir: std::path::PathBuf,
     /// File watchers of open working copies.
     pub watchers: Arc<StatusService>,
     /// Periodic update check (started after the window exists).
@@ -102,6 +107,8 @@ impl AppState {
             Arc::new(NoSecretStore),
         ));
         Ok(Self {
+            diagnostics: DiagnosticsService::default(),
+            data_dir: deps.data_dir.clone(),
             opener: deps.opener,
             notifier: deps.notifier,
             menu: deps.menu,
