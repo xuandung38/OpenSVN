@@ -78,13 +78,22 @@ fn reveal_uses_the_resolved_path() {
     assert_eq!(calls.len(), 2);
 }
 
+fn refused_with_reveal(err: &AppError, what: &str) {
+    assert_eq!(err.code, ErrorCode::InvalidArgument, "{what}");
+    assert_eq!(
+        err.actions,
+        Some(vec![ErrorAction::RevealInFileManager]),
+        "{what}: the UI offers reveal instead"
+    );
+}
+
 #[test]
 fn default_app_never_opens_files_that_run_code() {
     let d = wc();
     let r = Recorder::default();
-    for runnable in ["setup.exe", "run.sh"] {
+    for runnable in ["setup.exe", "run.sh", "src/main.rs"] {
         let err = open_external(&r, d.path(), runnable, OpenWith::Default, None, None).unwrap_err();
-        assert_eq!(err.code, ErrorCode::InvalidArgument, "{runnable}");
+        refused_with_reveal(&err, runnable);
     }
     open_external(&r, d.path(), "README.MD", OpenWith::Default, None, None).unwrap();
     open_external(&r, d.path(), "src", OpenWith::Default, None, None).unwrap();
@@ -95,16 +104,142 @@ fn default_app_never_opens_files_that_run_code() {
     );
 }
 
+#[test]
+fn default_app_uses_an_allow_list_not_a_block_list() {
+    let d = wc();
+    let r = Recorder::default();
+    let names = [
+        "notes.TXT",
+        "a.Pdf",
+        "pic.png",
+        "sheet.xlsx",
+        "x.terminal",
+        "x.webloc",
+        "x.inetloc",
+        "x.fileloc",
+        "x.chm",
+        "x.msc",
+        "x.scf",
+        "x.jnlp",
+        "x.appref-ms",
+        "x.application",
+        "x.settingcontent-ms",
+        "x.inf",
+        "x.sct",
+        "x.wsc",
+        "x.xll",
+        "x.library-ms",
+        "x.search-ms",
+        "x.diagcab",
+        "x.iso",
+        "x.img",
+        "x.vhd",
+        "x.vhdx",
+        "x.gadget",
+        "x.ps1xml",
+        "x.psc1",
+        "x.msix",
+        "x.appx",
+        "x.appinstaller",
+        "x.zip",
+        "x.html",
+        "x.svg",
+        "x.docm",
+        "x.xlsm",
+        "Makefile",
+        ".txt",
+        "x.unknown",
+    ];
+    for n in names {
+        std::fs::write(d.path().join(n), b"x").unwrap();
+    }
+    for n in names {
+        let res = open_external(&r, d.path(), n, OpenWith::Default, None, None);
+        let allowed = ["notes.TXT", "a.Pdf", "pic.png", "sheet.xlsx"].contains(&n);
+        match res {
+            Ok(()) => assert!(allowed, "{n} must not open"),
+            Err(e) => {
+                assert!(!allowed, "{n} should open");
+                refused_with_reveal(&e, n);
+            }
+        }
+    }
+    assert_eq!(r.calls.lock().unwrap().len(), 4);
+}
+
+#[test]
+fn trailing_dots_and_spaces_are_refused_before_any_extension_check() {
+    let d = wc();
+    let r = Recorder::default();
+    for bad in [
+        "evil.exe.",
+        "evil.exe ",
+        "dir./a.txt",
+        "notes.txt.",
+        "CON.txt",
+        "a:b.txt",
+    ] {
+        let err = open_external(&r, d.path(), bad, OpenWith::Default, None, None).unwrap_err();
+        assert_ne!(err.code, ErrorCode::PathNotFound, "{bad}: refused by name");
+        let err = reveal_in_os(&r, d.path(), bad).unwrap_err();
+        assert_ne!(err.code, ErrorCode::PathNotFound, "{bad}: refused by name");
+    }
+    assert!(r.calls.lock().unwrap().is_empty());
+    // Even on its own, the allow-list check trims what Windows trims.
+    assert!(!default_app_allowed(Path::new("evil.exe.")));
+    assert!(!default_app_allowed(Path::new("evil.exe ")));
+}
+
+#[test]
+fn folders_that_may_be_bundles_are_refused() {
+    let d = wc();
+    let r = Recorder::default();
+    for b in ["Evil.app", "Thing.prefPane", "v1.2"] {
+        std::fs::create_dir_all(d.path().join(b)).unwrap();
+        let err = open_external(&r, d.path(), b, OpenWith::Default, None, None).unwrap_err();
+        refused_with_reveal(&err, b);
+        reveal_in_os(&r, d.path(), b).unwrap();
+    }
+    assert!(
+        r.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| c.starts_with("reveal "))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinks_are_never_opened_with_the_default_app() {
+    use std::os::unix::fs::symlink;
+    let d = wc();
+    let r = Recorder::default();
+    std::fs::create_dir_all(d.path().join("Evil.app")).unwrap();
+    std::fs::write(d.path().join("x.terminal"), b"x").unwrap();
+    symlink("Evil.app", d.path().join("README.txt")).unwrap();
+    symlink("x.terminal", d.path().join("notes.txt")).unwrap();
+    std::fs::create_dir_all(d.path().join("real")).unwrap();
+    std::fs::write(d.path().join("real/doc.txt"), b"x").unwrap();
+    symlink("real", d.path().join("linked")).unwrap();
+    for n in ["README.txt", "notes.txt", "linked"] {
+        let err = open_external(&r, d.path(), n, OpenWith::Default, None, None).unwrap_err();
+        refused_with_reveal(&err, n);
+    }
+    assert!(r.calls.lock().unwrap().is_empty());
+    open_external(&r, d.path(), "real/doc.txt", OpenWith::Default, None, None).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn an_execute_bit_also_blocks_the_default_app() {
     use std::os::unix::fs::PermissionsExt;
     let d = wc();
-    let f = d.path().join("tool");
+    let f = d.path().join("tool.txt");
     std::fs::write(&f, b"binary").unwrap();
     std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(is_runnable(&f));
-    assert!(!is_runnable(&d.path().join("README.MD")));
+    assert!(!default_app_allowed(&f));
+    assert!(default_app_allowed(&d.path().join("README.MD")));
 }
 
 #[test]

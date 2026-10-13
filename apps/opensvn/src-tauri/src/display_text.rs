@@ -14,7 +14,8 @@
 /// Characters that could hide or reorder displayed text: controls (including newline, tab, DEL
 /// and C1), line and paragraph separators, soft hyphen, Arabic letter mark, Mongolian vowel
 /// separator, zero-width characters, Hangul fillers, bidirectional embeddings, overrides and isolates, invisible
-/// operators, interlinear annotation and the BOM.
+/// operators, interlinear annotation, the BOM, shorthand format controls (U+1BCA0..U+1BCA3) and
+/// tag characters (U+E0000..U+E007F, an invisible-text channel).
 pub fn is_deceptive(c: char) -> bool {
     c.is_control()
         || matches!(
@@ -34,6 +35,8 @@ pub fn is_deceptive(c: char) -> bool {
                 | '\u{FEFF}'
                 | '\u{FFA0}'
                 | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{E0000}'..='\u{E007F}'
         )
 }
 
@@ -68,14 +71,39 @@ mod tests {
     #[test]
     fn bidi_zero_width_separators_and_controls_are_deceptive() {
         for c in [
-            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202A}',
+            '\u{202B}',
+            '\u{202C}',
+            '\u{202D}',
             '\u{202E}', // embeddings, overrides
-            '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', // isolates
-            '\u{200E}', '\u{200F}', '\u{061C}', // marks
-            '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}', // zero width
-            '\u{2028}', '\u{2029}', // separators
-            '\u{00AD}', '\u{180E}', '\u{3164}', // invisible
-            '\n', '\r', '\t', '\u{0}', '\u{7F}', '\u{85}', '\u{9B}', // controls
+            '\u{2066}',
+            '\u{2067}',
+            '\u{2068}',
+            '\u{2069}', // isolates
+            '\u{200E}',
+            '\u{200F}',
+            '\u{061C}', // marks
+            '\u{200B}',
+            '\u{200C}',
+            '\u{200D}',
+            '\u{2060}',
+            '\u{FEFF}', // zero width
+            '\u{2028}',
+            '\u{2029}', // separators
+            '\u{00AD}',
+            '\u{180E}',
+            '\u{3164}', // invisible
+            '\u{E0001}',
+            '\u{E0041}',
+            '\u{E007F}',
+            '\u{1BCA0}', // tags, shorthand format
+            '\n',
+            '\r',
+            '\t',
+            '\u{0}',
+            '\u{7F}',
+            '\u{85}',
+            '\u{9B}', // controls
         ] {
             assert!(is_deceptive(c), "U+{:04X}", u32::from(c));
         }

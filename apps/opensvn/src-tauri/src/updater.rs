@@ -10,6 +10,10 @@
 //!   `plugins.updater.endpoints` config before the check, and the download URL announced by the
 //!   update manifest before the download. Both must be `https`, host exactly `api.github.com`,
 //!   default port, no userinfo, path inside the expected repository.
+//! * Redirects are followed only over `https` to GitHub's API and release asset hosts, and the
+//!   `Authorization` header is marked sensitive. Any updater `dangerous*` TLS option in the config
+//!   fails the build (`build.rs`) and is refused at runtime too.
+//! * `install` re-reads the token: if it was cleared after the check, none is sent.
 
 use std::sync::Arc;
 #[cfg(test)]
@@ -69,6 +73,54 @@ pub fn validate_download_url(url: &Url, repo: &str) -> Result<(), AppError> {
     }
 }
 
+/// Hosts a redirect from the release API may lead to (release asset storage).
+const REDIRECT_HOSTS: &[&str] = &[
+    "api.github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];
+/// Most redirects followed for one request.
+const MAX_REDIRECTS: usize = 5;
+
+/// Whether the updater may follow a redirect to `url` after `hops` earlier redirects: `https`,
+/// default port, no userinfo, one of [`REDIRECT_HOSTS`].
+pub fn redirect_allowed(url: &Url, hops: usize) -> bool {
+    hops < MAX_REDIRECTS
+        && url.scheme() == "https"
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str().is_some_and(|h| REDIRECT_HOSTS.contains(&h))
+}
+
+/// Request headers for the updater: with a token, `Authorization` (marked sensitive so it never
+/// shows in a debug print) and the binary `Accept` GitHub asset downloads need.
+pub fn request_headers(
+    token: Option<&SecretString>,
+) -> Result<reqwest::header::HeaderMap, AppError> {
+    use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
+    let mut h = HeaderMap::new();
+    if let Some(t) = token {
+        let mut v = HeaderValue::try_from(format!("Bearer {}", t.expose_secret()))
+            .map_err(|_| invalid_argument("The update token contains invalid characters."))?;
+        v.set_sensitive(true);
+        h.insert(AUTHORIZATION, v);
+        h.insert(ACCEPT, HeaderValue::from_static("application/octet-stream"));
+    }
+    Ok(h)
+}
+
+/// The updater `dangerous*` options set to anything but `false` in `config`.
+fn dangerous_flags(config: Option<&serde_json::Value>) -> Vec<String> {
+    config
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(k, v)| k.starts_with("dangerous") && **v != serde_json::Value::Bool(false))
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
 /// Reads and validates `plugins.updater.endpoints` (`config` is the `plugins.updater` object).
 /// Every endpoint must pass the same check as the download URL, so the token is only ever sent to
 /// `api.github.com` for the release repository. A missing, empty or invalid list is refused.
@@ -77,6 +129,13 @@ pub fn configured_endpoints(
     repo: &str,
 ) -> Result<Vec<Url>, AppError> {
     let not_configured = || invalid_argument("Updates are not configured in this build.");
+    let dangerous = dangerous_flags(config);
+    if !dangerous.is_empty() {
+        tracing::warn!(?dangerous, "updater TLS options relaxed; updates disabled");
+        return Err(invalid_argument(
+            "Updates are disabled because this build relaxes update security.",
+        ));
+    }
     let list = config
         .and_then(|c| c.get("endpoints"))
         .and_then(serde_json::Value::as_array)
@@ -260,18 +319,23 @@ impl<R: tauri::Runtime> TauriUpdater<R> {
     ) -> Result<tauri_plugin_updater::UpdaterBuilder, AppError> {
         // Endpoints are checked before the builder exists and before any header carries the token.
         let endpoints = self.endpoints.clone()?;
-        let mut b = self
+        let headers = request_headers(token)?;
+        let b = self
             .app
             .updater_builder()
             .endpoints(endpoints)
-            .map_err(updater_error)?;
-        if let Some(t) = token {
-            b = b
-                .header("Authorization", format!("Bearer {}", t.expose_secret()))
-                .map_err(updater_error)?
-                .header("Accept", "application/octet-stream")
-                .map_err(updater_error)?;
-        }
+            .map_err(updater_error)?
+            .headers(headers)
+            .configure_client(|c| {
+                c.https_only(true)
+                    .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                        if redirect_allowed(attempt.url(), attempt.previous().len()) {
+                            attempt.follow()
+                        } else {
+                            attempt.stop()
+                        }
+                    }))
+            });
         Ok(b)
     }
 }
@@ -297,12 +361,14 @@ impl<R: tauri::Runtime> UpdateControl for TauriUpdater<R> {
     }
 
     async fn install(&self, token: Option<SecretString>) -> Result<(), AppError> {
-        let _ = token; // the token is carried by the update object built in `check`
         let update = self.found.lock().await.take();
-        let Some(update) = update else {
+        let Some(mut update) = update else {
             return Err(invalid_argument("Check for updates first."));
         };
         validate_download_url(&update.download_url, RELEASES_REPO)?;
+        // `token` is read from the credential store for this call; the headers the check used are
+        // dropped so a token cleared since then is not sent.
+        update.headers = request_headers(token.as_ref())?;
         update
             .download_and_install(|_, _| {}, || {})
             .await

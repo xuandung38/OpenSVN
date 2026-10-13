@@ -374,7 +374,9 @@ export type EntryKind = "file" | "dir";
 
 export type Eol = "LF" | "CRLF" | "mixed";
 
-export type ErrorAction = "retry" | "update" | "cleanup" | "sign-in" | "trust-cert" | "open-lock-dialog" | "open-settings";
+export type ErrorAction = "retry" | "update" | "cleanup" | "sign-in" | "trust-cert" | "open-lock-dialog" | "open-settings" | 
+/**  The default app was refused for this item; show it in the file manager instead. */
+"reveal-in-file-manager";
 
 export type ErrorCode = "network" | "timeout" | "auth-required" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "hook-failed" | "repository-moved" | "pristine-not-hydrated" | "wc-invalid-operation" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | 
 /**  The request itself is invalid (bad value, expired path grant, unsupported option). */

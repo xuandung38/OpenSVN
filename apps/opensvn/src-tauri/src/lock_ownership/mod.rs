@@ -12,6 +12,9 @@
 //! * the pid is alive with a matching start time but the boot id differs (a clock change moved a
 //!   derived boot time): **unknown**. Unknown owners are never taken over automatically.
 //!
+//! Rows written before the Linux start stamp became ticks since boot hold wall-clock seconds and
+//! classify as **dead** on Linux (see "Upgrade notes" in `docs/deployment-guide.md`).
+//!
 //! Callers pass a canonical `wcroot` (see [`LockOwnershipStore`]); this store also canonicalizes
 //! when the path exists and removes the Windows verbatim prefix so one folder has one key.
 
