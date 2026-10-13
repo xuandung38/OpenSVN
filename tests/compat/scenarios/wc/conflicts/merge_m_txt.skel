@@ -1,0 +1,1 @@
+((merge ((subversion file:///tmp/opensvn-golden-conflicts/repo 36 7e444b77-6317-48f8-a138-53fec01b3b90 m.txt 1 2 file) (subversion file:///tmp/opensvn-golden-conflicts/repo 36 7e444b77-6317-48f8-a138-53fec01b3b90 m.txt 1 3 file))) ((text (m.txt.merge-left.r2 m.txt.working m.txt.merge-right.r3))))

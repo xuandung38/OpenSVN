@@ -1,0 +1,1 @@
+((update ((subversion file:///tmp/opensvn-golden-conflicts/repo 36 7e444b77-6317-48f8-a138-53fec01b3b90 d.txt 1 1 file) (subversion file:///tmp/opensvn-golden-conflicts/repo 36 7e444b77-6317-48f8-a138-53fec01b3b90 d.txt 1 2 none))) ((tree () edited deleted)))
