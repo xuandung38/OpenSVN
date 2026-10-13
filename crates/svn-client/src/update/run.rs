@@ -7,9 +7,10 @@ use svn_types::{CancelToken, Depth, ErrorCode, NodeKind, RelPath, RepoUrl, Resul
 use svn_wc::db::{ObtainMode, WcDb};
 
 use super::editor::UpdateEditor;
+use super::restore;
 use super::reporter::build_report;
 use super::state::UpdateSetup;
-use crate::ctx::{ClientCtx, UpdateSummary};
+use crate::ctx::{ClientCtx, UpdateAction, UpdateEvent, UpdateSummary};
 use crate::wc::{self, adapters};
 
 /// What the drive does to the target.
@@ -100,7 +101,7 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'sta
 }
 
 /// Working copy path of the directory the session URL points to.
-fn anchor_of(db: &WcDb, session: &dyn RaSession) -> Result<RelPath> {
+pub fn anchor_of(db: &WcDb, session: &dyn RaSession) -> Result<RelPath> {
     let (root, uuid) = wc::repos_identity(db)?;
     if uuid != session.uuid() || root.trim_end_matches('/') != root_string(session) {
         return Err(SvnError::new(
@@ -177,6 +178,28 @@ pub async fn drive_update(
         blocking(move || adapters::run_work_queue(&db, &cancel).map(|_| ())).await?;
     }
 
+    // `svn update` first restores versioned items that were removed from disk behind its back.
+    let restored = {
+        let (db, cancel, tc) = (
+            Arc::clone(&db),
+            cancel.clone(),
+            (target_wc.clone(), ctx.config.use_commit_times),
+        );
+        blocking(move || {
+            let restored = restore::queue_missing(&db, &tc.0, tc.1)?;
+            adapters::run_work_queue(&db, &cancel)?;
+            Ok(restored)
+        })
+        .await?
+    };
+    for (path, kind) in &restored {
+        ctx.notify(&UpdateEvent {
+            path: path.clone(),
+            kind: *kind,
+            action: UpdateAction::Restored,
+        });
+    }
+
     let (switch_relpath, mode) = match &params.kind {
         UpdateKind::Update => (None, UpdateMode::Update),
         UpdateKind::Switch(url) => (
@@ -215,8 +238,17 @@ pub async fn drive_update(
         return Err(e);
     }
     let out = outcome.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut events: Vec<UpdateEvent> = restored
+        .into_iter()
+        .map(|(path, kind)| UpdateEvent {
+            path,
+            kind,
+            action: UpdateAction::Restored,
+        })
+        .collect();
+    events.extend(out.events.iter().cloned());
     Ok(UpdateSummary {
         revision: out.revision,
-        events: out.events.clone(),
+        events,
     })
 }

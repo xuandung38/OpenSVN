@@ -8,10 +8,14 @@
 
 pub mod checkout;
 pub mod ctx;
+pub mod diff;
 pub mod ops;
+pub mod status;
 pub mod update;
 pub mod wc;
 
 pub use checkout::checkout;
 pub use ctx::{ClientConfig, ClientCtx, ProgressFn, UpdateAction, UpdateEvent, UpdateSummary};
 pub use ops::{switch, update};
+pub use diff::{DiffOptions, diff};
+pub use status::{StatusOptions, status, status_remote};
