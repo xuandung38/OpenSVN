@@ -1,0 +1,11 @@
+---
+source: crates/svn-protocol/tests/request_snapshots.rs
+expression: render(&options_request(&session_url()).unwrap())
+---
+OPTIONS http://svn.test.local/svn/repo
+Content-Type: text/xml
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+
+<?xml version="1.0" encoding="utf-8"?><D:options xmlns:D="DAV:"><D:activity-collection-set></D:activity-collection-set></D:options>

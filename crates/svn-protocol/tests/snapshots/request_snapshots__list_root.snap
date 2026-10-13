@@ -1,0 +1,9 @@
+---
+source: crates/svn-protocol/tests/request_snapshots.rs
+expression: "render(&list_request(&u, Revnum(0), &RelPath::root()).unwrap())"
+---
+PROPFIND http://svn.test.local/svn/repo/!svn/rvr/0
+Depth: 1
+Content-Type: text/xml
+
+<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype xmlns="DAV:"/><getcontentlength xmlns="DAV:"/><deadprop-count xmlns="http://subversion.tigris.org/xmlns/dav/"/><version-name xmlns="DAV:"/><creationdate xmlns="DAV:"/><creator-displayname xmlns="DAV:"/></prop></propfind>
