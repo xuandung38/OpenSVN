@@ -8,6 +8,8 @@
 use std::path::Path;
 use std::time::Duration;
 
+use rusqlite::functions::FunctionFlags;
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use svn_types::{ErrorCode, Result, SvnError};
 
@@ -50,6 +52,7 @@ pub fn open_connection(path: &Path, mode: OpenMode) -> Result<Connection> {
     let conn = Connection::open_with_flags(path, flags).map_err(sql_err)?;
     conn.busy_timeout(BUSY_TIMEOUT).map_err(sql_err)?;
     apply_pragmas(&conn, mode != OpenMode::ReadOnly)?;
+    register_functions(&conn)?;
     Ok(conn)
 }
 
@@ -75,6 +78,26 @@ fn apply_pragmas(conn: &Connection, writable: bool) -> Result<()> {
          PRAGMA case_sensitive_like = 1;
          PRAGMA temp_store = MEMORY;
          PRAGMA reverse_unordered_selects = ON;",
+    )
+    .map_err(sql_err)
+}
+
+/// Registers `relpath_depth(local_relpath)` exactly like `svn_wc__db_util_open_db`: the number of
+/// path segments (`''` is 0), NULL for anything that is not text.
+fn register_functions(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function(
+        "relpath_depth",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            Ok(match ctx.get_raw(0) {
+                ValueRef::Text(t) => {
+                    let slashes = t.iter().filter(|b| **b == b'/').count();
+                    Some(i64::from(!t.is_empty()) + i64::try_from(slashes).unwrap_or(i64::MAX))
+                }
+                _ => None,
+            })
+        },
     )
     .map_err(sql_err)
 }
