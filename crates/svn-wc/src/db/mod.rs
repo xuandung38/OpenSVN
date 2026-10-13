@@ -29,7 +29,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use svn_types::{Depth, ErrorCode, Result, SvnError};
 
 pub use actual::{ConflictRecord, ConflictTexts};
-pub use connection::{BUSY_TIMEOUT, OpenMode, open_connection, sql_err};
+pub use connection::{BUSY_TIMEOUT, OpenMode, open_connection, open_existing, sql_err};
 pub use nodes::{Node, Presence, Props};
 pub use ops::{BaseNode, CommitInfo};
 pub use schema::{FORMAT_MAX_READ, FORMAT_WRITE, check_supported_format, read_user_version};
@@ -82,6 +82,7 @@ pub struct WcDb {
     wcroot: PathBuf,
     wc_id: i64,
     format: u32,
+    writable: bool,
     store_pristine: bool,
     conn: Mutex<Connection>,
 }
@@ -235,6 +236,7 @@ impl WcDb {
             wcroot: wcroot.to_path_buf(),
             wc_id,
             format: FORMAT_WRITE,
+            writable: true,
             store_pristine: true,
             conn: Mutex::new(conn),
         })
@@ -250,20 +252,29 @@ impl WcDb {
                 format!("working copy database '{}' not found", db_path.display()),
             ));
         }
-        // Probe the format read-only first so an unsupported or newer WC is never touched.
-        let format = {
-            let probe = open_connection(&db_path, OpenMode::ReadOnly)?;
-            let format = read_user_version(&probe)?;
-            check_supported_format(format)?;
-            format
-        };
-        let mode = if format == FORMAT_WRITE {
-            OpenMode::ReadWrite
+        // Probe on a connection that can roll back a hot journal left by a crashed writer (svn
+        // does the same); it falls back to read-only for write-protected files. A rejected WC is
+        // never modified beyond that recovery.
+        let (probe, probe_writable) = open_existing(&db_path)?;
+        let probed = read_user_version(&probe)?;
+        check_supported_format(probed)?;
+        drop(probe);
+        let writable = probed == FORMAT_WRITE && probe_writable;
+        let conn = if writable {
+            open_connection(&db_path, OpenMode::ReadWrite)?
         } else {
-            OpenMode::ReadOnly
+            open_connection(&db_path, OpenMode::ReadOnly)?
         };
-        let conn = open_connection(&db_path, mode)?;
-        if format == FORMAT_WRITE {
+        // The file may have been upgraded or replaced between probe and final open.
+        let format = read_user_version(&conn)?;
+        check_supported_format(format)?;
+        if format != probed {
+            return Err(SvnError::new(
+                ErrorCode::WcBusy,
+                "wc.db changed format while it was being opened; retry",
+            ));
+        }
+        if writable {
             schema::ensure_statistics(&conn)?;
         }
         let wc_id: i64 = conn
@@ -276,13 +287,18 @@ impl WcDb {
             .map_err(sql_err)?
             .ok_or_else(|| SvnError::new(ErrorCode::Corrupt, "wc.db: missing row in WCROOT"))?;
         let store_pristine = if format >= 32 {
-            conn.query_row(
-                "SELECT store_pristine FROM settings WHERE wc_id = ?1",
-                [wc_id],
-                |r| r.get::<_, Option<i64>>(0),
-            )
-            .map_err(sql_err)?
-            .is_none_or(|v| v != 0)
+            let setting: Option<Option<i64>> = conn
+                .query_row(
+                    "SELECT store_pristine FROM settings WHERE wc_id = ?1",
+                    [wc_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(sql_err)?;
+            let setting = setting.ok_or_else(|| {
+                SvnError::new(ErrorCode::Corrupt, "wc.db: missing row in SETTINGS")
+            })?;
+            setting.is_none_or(|v| v != 0)
         } else {
             true
         };
@@ -290,6 +306,7 @@ impl WcDb {
             wcroot: wcroot.to_path_buf(),
             wc_id,
             format,
+            writable,
             store_pristine,
             conn: Mutex::new(conn),
         })
@@ -315,9 +332,9 @@ impl WcDb {
         self.store_pristine
     }
 
-    /// True when this build may write the working copy (format 31 only).
+    /// True when this handle may write: format 31 and a writable database file.
     pub fn is_writable(&self) -> bool {
-        self.format == FORMAT_WRITE
+        self.writable
     }
 
     fn lock(&self) -> MutexGuard<'_, Connection> {
@@ -346,6 +363,12 @@ impl WcDb {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_err)?;
+        if read_user_version(&tx)? != FORMAT_WRITE {
+            return Err(SvnError::new(
+                ErrorCode::WcFormatUnsupported,
+                "the working copy format changed while open; reopen it",
+            ));
+        }
         let value = f(&tx)?;
         failpoint!("wc.txn.before_commit");
         tx.commit().map_err(sql_err)?;

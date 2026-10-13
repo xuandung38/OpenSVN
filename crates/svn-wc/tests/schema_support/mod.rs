@@ -40,9 +40,23 @@ pub fn skip_without_svn_1_15() -> bool {
     false
 }
 
-/// Skips (returns `true`) when svn/svnadmin are unavailable so the suite still passes on
-/// machines without Subversion; CI images that carry svn run the real comparison.
+/// True when `OPENSVN_REQUIRE_SVN=1`: CI images that must have svn >= 1.15 turn a missing or old
+/// svn into a test failure instead of a silent skip.
+fn svn_required() -> bool {
+    std::env::var("OPENSVN_REQUIRE_SVN").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Skips (returns `true`) when svn is unavailable so the suite still passes on machines without
+/// Subversion. With `OPENSVN_REQUIRE_SVN=1` a missing or pre-1.15 svn fails the test instead.
 pub fn skip_without_svn() -> bool {
+    if svn_required() {
+        assert!(
+            svn_is_1_15_or_newer(),
+            "OPENSVN_REQUIRE_SVN is set but svn >= 1.15 is not available (found {:?})",
+            svn_version()
+        );
+        return false;
+    }
     if svn_version().is_none() {
         eprintln!("svn not found on PATH: skipping svn-backed test");
         return true;
@@ -153,11 +167,6 @@ pub fn structure(conn: &Connection) -> BTreeMap<String, String> {
         .collect::<Result<Vec<_>, _>>()
         .expect("rows");
     for (kind, name, tbl, sql) in rows {
-        // Optional planner table created by ANALYZE only when SQLite is built with STAT4; its
-        // presence depends on the SQLite build, not on the svn schema.
-        if name == "sqlite_stat4" {
-            continue;
-        }
         match kind.as_str() {
             "table" => {
                 let mut cols = Vec::new();
@@ -267,6 +276,15 @@ pub fn structure(conn: &Connection) -> BTreeMap<String, String> {
         out.insert("stat1".into(), stats.join("; "));
     }
     out
+}
+
+/// Structure of a wc.db written by svn. `sqlite_stat4` exists there only when svn's own SQLite was
+/// compiled with STAT4, which says nothing about the svn schema, so it is ignored on this side
+/// only; the OpenSVN side must never have it.
+pub fn structure_of_svn_wc(conn: &Connection) -> BTreeMap<String, String> {
+    let mut s = structure(conn);
+    s.remove("table:sqlite_stat4");
+    s
 }
 
 /// Asserts two structures are equal, printing every differing key.

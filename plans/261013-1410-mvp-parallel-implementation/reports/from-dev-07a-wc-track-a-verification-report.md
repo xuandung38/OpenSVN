@@ -91,3 +91,7 @@ Tests that lock these facts in: `crates/svn-wc/tests/{skel_real_blobs,schema_str
 ## Unresolved
 - subst.c, full workqueue item arity, conflicts.c grammar: track B scope (not verified here).
 - svn registers a custom NFD-aware `like()` function with `case_sensitive_like`; not replicated yet. Revisit with the Vietnamese-name APFS test (A2/B3).
+
+## Corrections after review of the schema PR
+- `reverse_unordered_selects` is NOT a normal svn setting: it is compiled in only for SVN_DEBUG builds (sqlite.c). OpenSVN enables it under `debug_assertions` only (section 5 above and the lead's settings note list it as unconditional; treat that row as debug-only).
+- `open` probes with a READ_WRITE connection (falls back to read-only for write-protected files), so a hot journal left by a crashed writer is rolled back like svn does; the `sqlite_stat1` re-install runs in one `BEGIN IMMEDIATE` with a 100 ms busy timeout and is skipped (debug log) when the database is busy.
