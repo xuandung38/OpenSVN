@@ -4,6 +4,7 @@
 mod app_state;
 #[cfg(test)]
 mod app_tests;
+mod auth;
 mod boundary;
 mod command_names;
 mod command_registry;
