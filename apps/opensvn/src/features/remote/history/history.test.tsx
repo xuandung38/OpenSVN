@@ -1,8 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { beforeAll, expect, test, vi } from "vitest";
 import { HOSTILE_NAME, MOCK_REPO_ROOT } from "../../../ipc/mock/remote-data";
-import { renderApp, setupMockIpc, stubLayout } from "../../../test-utils";
+import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../../test-utils";
 import { HistoryScreen } from "./history-screen";
 import { splitLinks } from "./linkified-text";
 import { applyClientFilters, type HistoryFilters, NO_FILTERS } from "./use-history";
@@ -12,6 +11,13 @@ beforeAll(async () => {
   stubLayout();
   await setupMockIpc("en");
 });
+
+// Fake clock: findBy/waitFor budgets count simulated time, not wall-clock time, so the suite stays
+// green when the machine is loaded (these tests used to time out under parallel load).
+const { user } = installFakeClock();
+// The per-test timeout is only a hang guard now; role queries over the rendered list are CPU-bound
+// and can take several wall-clock seconds when the machine is busy.
+vi.setConfig({ testTimeout: 30_000 });
 
 const screenUi = (nav = {}) => (
   <HistoryScreen
@@ -69,7 +75,7 @@ test("shows revisions, hostile text stays inert, selecting shows message and cha
   expect(hostile.textContent).toContain(HOSTILE_NAME);
   expect(container.querySelector("img")).toBeNull();
   const branch = await screen.findByRole("option", { name: /Add feature-x branch/ });
-  await userEvent.click(branch);
+  await user().click(branch);
   const link = await screen.findByRole("link", { name: "https://tracker.example.com/issue/42" });
   expect(link.getAttribute("href")).toBe("https://tracker.example.com/issue/42");
   // The <script> in the message is shown literally.
@@ -81,7 +87,7 @@ test("shows revisions, hostile text stays inert, selecting shows message and cha
 test("text filter is sent to the server and narrows the list", async () => {
   renderApp(screenUi());
   await screen.findByRole("option", { name: /Add feature-x branch/ });
-  await userEvent.type(screen.getByLabelText("Filter revisions"), "feature-x");
+  await user().type(screen.getByLabelText("Filter revisions"), "feature-x");
   await waitFor(() => expect(screen.queryByRole("option", { name: /Update module 5/ })).toBeNull());
   expect(screen.getByRole("option", { name: /Add feature-x branch/ })).toBeTruthy();
 });
@@ -91,7 +97,7 @@ test("author filter lists loaded authors", async () => {
   await screen.findByRole("option", { name: /Add feature-x branch/ });
   const select = screen.getByLabelText("Author") as HTMLSelectElement;
   await waitFor(() => expect(within(select).getAllByRole("option").length).toBeGreaterThan(2));
-  await userEvent.selectOptions(select, "binh");
+  await user().selectOptions(select, "binh");
   const options = screen.getAllByRole("option").filter((o) => o.id);
   expect(options.length).toBeGreaterThan(0);
   for (const o of options) expect(o.textContent).toContain("binh");
@@ -102,28 +108,26 @@ test("keyboard: Down + Enter in the list selects a revision", async () => {
   const list = await screen.findByRole("listbox", { name: "Revisions" });
   await screen.findByRole("option", { name: /Add feature-x branch/ });
   list.focus();
-  await userEvent.keyboard("{ArrowDown}{Enter}");
+  await user().keyboard("{ArrowDown}{Enter}");
   await waitFor(() => expect(screen.getByText("r48212", { selector: "b" })).toBeTruthy());
 });
 
 test("changed path menu offers diff and navigation, and opens the diff sheet", async () => {
   const openInBrowse = vi.fn();
   renderApp(screenUi({ openInBrowse }));
-  await userEvent.click(await screen.findByRole("option", { name: /Fix shadow cascade flicker/ }));
-  await userEvent.click(
+  await user().click(await screen.findByRole("option", { name: /Fix shadow cascade flicker/ }));
+  await user().click(
     await screen.findByRole("button", { name: /Actions: \/trunk\/src\/engine\/renderer\.ts/ }),
   );
-  await userEvent.click(
-    await screen.findByRole("menuitem", { name: "Open file at this revision" }),
-  );
+  await user().click(await screen.findByRole("menuitem", { name: "Open file at this revision" }));
   expect(openInBrowse).toHaveBeenCalledWith(
     `${MOCK_REPO_ROOT}/trunk/src/engine/renderer.ts`,
     48213,
   );
-  await userEvent.click(
+  await user().click(
     screen.getByRole("button", { name: /Actions: \/trunk\/src\/engine\/renderer\.ts/ }),
   );
-  await userEvent.click(await screen.findByRole("menuitem", { name: "Show diff" }));
+  await user().click(await screen.findByRole("menuitem", { name: "Show diff" }));
   expect(
     await screen.findByRole("dialog", { name: "Changes in r48213", hidden: true }),
   ).toBeTruthy();

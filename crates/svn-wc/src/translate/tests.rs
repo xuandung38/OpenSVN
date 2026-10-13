@@ -561,3 +561,11 @@ proptest! {
         prop_assert_eq!(to_repo_normal(&i, &w, false).unwrap(), src.as_bytes());
     }
 }
+
+#[test]
+fn local_offset_resolver_is_a_plausible_offset() {
+    for secs in [0_i64, 1_791_875_546, -86_400] {
+        let off = super::utc_offset_local(secs);
+        assert!((-14 * 3600..=14 * 3600).contains(&off), "{off}");
+    }
+}
