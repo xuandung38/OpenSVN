@@ -135,11 +135,20 @@ pub trait WorkingCopyOps {
 pub trait PristineSource {
     /// Opens the text with this checksum.
     fn open_text(&self, sha1: &Sha1Digest) -> Result<Box<dyn Read>, PristineError>;
+    /// Size in bytes of the text with this checksum, from the pristine table (no file access).
+    fn text_size(&self, sha1: &Sha1Digest) -> Result<u64, PristineError>;
 }
 
 impl<I: PristineIndex> PristineSource for PristineStore<I> {
     fn open_text(&self, sha1: &Sha1Digest) -> Result<Box<dyn Read>, PristineError> {
         PristineStore::open_text(self, sha1).map(|f| Box::new(f) as Box<dyn Read>)
+    }
+
+    fn text_size(&self, sha1: &Sha1Digest) -> Result<u64, PristineError> {
+        self.index()
+            .lookup(sha1)?
+            .map(|row| row.size)
+            .ok_or(PristineError::NotInstalled(*sha1))
     }
 }
 

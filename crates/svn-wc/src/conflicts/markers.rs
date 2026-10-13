@@ -91,7 +91,7 @@ fn parse_bracket(rest: &[u8]) -> Option<Bracket<'_>> {
 
 /// `svn_cstring_match_glob_list` (`apr_fnmatch` with flags 0: `*`, `?`, `[...]` with ranges and
 /// negation, backslash escapes, case sensitive).
-fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
+pub(crate) fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
     match pattern.split_first() {
         None => text.is_empty(),
         Some((b'*', rest)) => (0..=text.len()).any(|i| glob_match(rest, &text[i..])),
