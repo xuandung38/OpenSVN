@@ -89,10 +89,23 @@ async fn editor_panic_is_always_internal_never_cancelled() {
         });
         let handle = EditorWorker::spawn(Box::new(editor), 4);
         let root = handle.open_root(None).await.expect("root");
-        let err = handle.add_directory(&p("d"), root, None).await.expect_err("panicked");
-        assert_eq!(err.code, ErrorCode::Internal, "iteration {i}: {}", err.message);
+        let err = handle
+            .add_directory(&p("d"), root, None)
+            .await
+            .expect_err("panicked");
+        assert_eq!(
+            err.code,
+            ErrorCode::Internal,
+            "iteration {i}: {}",
+            err.message
+        );
         let err = handle.close_edit().await.expect_err("poisoned");
-        assert_eq!(err.code, ErrorCode::Internal, "iteration {i} (close): {}", err.message);
+        assert_eq!(
+            err.code,
+            ErrorCode::Internal,
+            "iteration {i} (close): {}",
+            err.message
+        );
     }
 }
 
@@ -109,8 +122,21 @@ async fn panic_in_a_queued_command_surfaces_as_internal_on_the_next_call() {
         let handle = EditorWorker::spawn(Box::new(editor), 4);
         let root = handle.open_root(None).await.expect("root");
         // Queued without a reply; the worker panics while executing it.
-        let _ = handle.change_dir_prop(root, PropChange { name: "x".into(), value: None }).await;
+        let _ = handle
+            .change_dir_prop(
+                root,
+                PropChange {
+                    name: "x".into(),
+                    value: None,
+                },
+            )
+            .await;
         let err = handle.close_edit().await.expect_err("panicked");
-        assert_eq!(err.code, ErrorCode::Internal, "iteration {i}: {}", err.message);
+        assert_eq!(
+            err.code,
+            ErrorCode::Internal,
+            "iteration {i}: {}",
+            err.message
+        );
     }
 }
