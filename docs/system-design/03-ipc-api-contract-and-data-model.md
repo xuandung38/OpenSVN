@@ -155,13 +155,16 @@ type Layout =
 |---|---|
 | `op_cancel { opId }` | Hủy tác vụ |
 | `op_list` | Tác vụ đang chạy + 50 gần nhất |
-| `auth_respond { requestId, response }` | Trả lời prompt: `{kind:'credentials',username,password,save}`, `{kind:'negotiate'}` (SSO, chỉ khi `offered` có `negotiate`), `{kind:'certificate',decision}` hoặc `{kind:'cancel'}`. Prompt không trả lời sau 5 phút coi như hủy. Chứng chỉ `changed`, hết hạn hay sai host không bao giờ được `acceptAlways` (hạ thành `acceptOnce`) |
+| `auth_respond { requestId, response }` | Trả lời prompt: `{kind:'credentials',username,password,save}`, `{kind:'negotiate'}` (SSO, chỉ khi `offered` có `negotiate`), `{kind:'certificate',decision}` hoặc `{kind:'cancel'}`. Prompt không trả lời sau 5 phút coi như hủy. Rust kiểm `decision` theo lỗi thật (`CertDecision::is_valid_for`): `acceptOnce`/`acceptAlways` chỉ cho `unknown-issuer`/`self-signed`; `replacePin` chỉ cho `changed` (thay pin cũ, transport nhận `ReplacePin`); mọi lỗi khác (hết hạn, sai host, revoked...) chỉ có `reject`. Tổ hợp không hợp lệ bị coi là `reject` và không lưu gì |
 | `accounts_list`, `accounts_sign_out { realm }` | Quản lý credential |
 | `certs_list`, `certs_remove { key: {host, port, sha256} }` | Chứng chỉ đã tin cậy vĩnh viễn (Settings → Certificates); xóa thì lần kết nối sau hỏi lại |
 | `checkout_root_choose` | Dialog native chọn thư mục checkout mặc định, lưu vào `general.checkoutRoot`, trả `Settings` |
 | `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.checkoutRoot"`, `patch` chỉ chứa khóa cần đổi. `SettingsPatch` **không có** các khóa chạy chương trình (`diff.externalTool`, `diff.mergeTool`, `tools.editor`, `tools.terminal`); khóa lạ bị từ chối khi deserialize |
 | `program_choose { kind, args }`, `program_clear { kind }` | Đặt/xóa chương trình ngoài (`kind`: `diff-tool` \| `merge-tool` \| `editor` \| `terminal`). Rust mở dialog chọn file native rồi dialog xác nhận native (mỗi tham số một dòng, có quote; từ chối ký tự điều khiển/bidi); trả `Settings` mới (không đổi nếu người dùng hủy) |
-| `path_pick { request }` | Dialog native chọn thư mục / file / nơi lưu (`PickRequest`), trả `PathGrantInfo \| null` (xem §3.6) |
+| `path_pick { request }` | Dialog native chọn thư mục / file / nơi lưu (`PickRequest`), trả `PathGrantInfo \| null` (xem §3.6). `title` (≤ 120 ký tự) và `suggestedName` (≤ 255, không có `/` `\`, không phải `.`/`..`) không được chứa ký tự điều khiển, bidi hay zero-width, nếu có thì lỗi `invalid-argument`. `displayName` hiện các ký tự đó dạng `\u{XXXX}` |
+| `updater_token_set { token }`, `updater_token_clear`, `updater_token_status` | Token GitHub đọc bản cập nhật: chỉ lưu trong kho credential của OS (Keychain / Credential Manager / Secret Service), không bao giờ vào file, settings hay bộ nhớ dự phòng; không có kho OS thì `set` lỗi. Chỉ ghi, `status` chỉ trả `boolean` |
+| `update_check`, `update_install` | Người dùng chủ động. Trước khi gửi token, mọi endpoint trong `plugins.updater.endpoints` và URL tải về phải là `https://api.github.com/repos/<repo phát hành>/...` (không port, không userinfo, không `..`/ký tự phân cách mã hóa); sai thì `invalid-argument`, không gửi request |
+
 | `reveal_in_os { wcId, path }`, `open_external { wcId, path, with: 'default' \| 'editor' \| 'terminal' }` | Tích hợp OS |
 | `diagnostics_preview { options: { hidePaths, hideCommitMessages } }` | Dựng gói chẩn đoán trong bộ nhớ (secret luôn bị gỡ) và trả `{ token, entries: { name, size, content }[] }` để người dùng xem **toàn bộ nội dung** trước khi lưu |
 | `diagnostics_export { token }` | Mở dialog lưu file native, ghi zip đúng nội dung đã xem (token dùng một lần), trả đường dẫn đã lưu hoặc `null` nếu hủy. Không gửi đi đâu |
