@@ -6,7 +6,11 @@ pub mod inspect;
 use std::path::{Path, PathBuf};
 
 use svn_types::{CancelToken, ErrorCode, RelPath, Result, SvnError, safe_join};
-use svn_wc::db::WcDb;
+use svn_wc::db::{DbWorkingCopyOps, WcDb};
+use svn_wc::skel::Skel;
+use svn_wc::workqueue::WorkItem;
+
+use crate::commit::file_commit::file_commit_fixup;
 
 /// `(repository root URL, UUID)` of the working copy root.
 pub fn repos_identity(db: &WcDb) -> Result<(String, String)> {
@@ -14,11 +18,21 @@ pub fn repos_identity(db: &WcDb) -> Result<(String, String)> {
     Ok((info.repos_root_url, info.repos_uuid))
 }
 
-/// Runs every pending work item of `db` (see [`WcDb::run_work_queue`]); `cancel` is polled
+/// Runs every pending work item of `db` (see [`WcDb::run_work_queue_with`]); `cancel` is polled
 /// between items and the unfinished items stay queued.
+///
+/// `file-commit` items (queued by a commit, possibly left behind by a crash) are handled by
+/// [`crate::commit::file_commit::file_commit_fixup`], so every operation that finishes leftover
+/// work also completes an interrupted commit.
 pub fn run_work_queue(db: &WcDb, cancel: &CancelToken) -> Result<usize> {
     let cancelled = || cancel.is_cancelled();
-    db.run_work_queue(Some(&cancelled))
+    let mut ops = DbWorkingCopyOps::new(db).with_file_commit(file_commit_fixup);
+    db.run_work_queue_with(&mut ops, Some(&cancelled))
+}
+
+/// Serializes `items` for the `WcDb` writers that queue work in their own transaction.
+pub fn skels(items: &[WorkItem]) -> Vec<Skel> {
+    items.iter().map(WorkItem::to_skel).collect()
 }
 
 /// `a/b` for two relative paths (`b` may be the root).
