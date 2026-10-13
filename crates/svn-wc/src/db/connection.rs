@@ -8,6 +8,8 @@
 use std::path::Path;
 use std::time::Duration;
 
+use rusqlite::functions::FunctionFlags;
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use svn_types::{ErrorCode, Result, SvnError};
 
@@ -34,6 +36,8 @@ const SQLITE_IOERR_LOCK: std::ffi::c_int = 3850;
 /// timeout becomes [`ErrorCode::WcBusy`].
 pub fn sql_err(err: rusqlite::Error) -> SvnError {
     use rusqlite::ErrorCode as Sqlite;
+    // Windows-only path, UNVERIFIED: CI is skipped, so this has only been reasoned about and was
+    // last observed failing on Windows before the mapping existed.
     // A sharing violation while another process holds the journal or lock file (typically a
     // Windows peer that does not use svn's TRUNCATE journal mode) is contention, not a failure.
     let sharing_violation = matches!(
@@ -49,7 +53,13 @@ pub fn sql_err(err: rusqlite::Error) -> SvnError {
         Some(Sqlite::PermissionDenied | Sqlite::ReadOnly) => ErrorCode::PermissionDenied,
         _ => ErrorCode::Internal,
     };
-    SvnError::new(code, format!("wc.db: {err}"))
+    let hint = if sharing_violation {
+        " (another process holds the database files; a network filesystem without file locking \
+         support can cause this too, in which case retrying will not help)"
+    } else {
+        ""
+    };
+    SvnError::new(code, format!("wc.db: {err}{hint}"))
 }
 
 /// Opens an existing database for probing and normal use: read/write when the file allows it
@@ -80,6 +90,7 @@ pub fn open_connection(path: &Path, mode: OpenMode) -> Result<Connection> {
     let conn = Connection::open_with_flags(path, flags).map_err(sql_err)?;
     conn.busy_timeout(BUSY_TIMEOUT).map_err(sql_err)?;
     apply_pragmas(&conn, mode != OpenMode::ReadOnly)?;
+    register_functions(&conn)?;
     Ok(conn)
 }
 
@@ -112,4 +123,24 @@ fn apply_pragmas(conn: &Connection, writable: bool) -> Result<()> {
             .map_err(sql_err)?;
     }
     Ok(())
+}
+
+/// Registers `relpath_depth(local_relpath)` exactly like `svn_wc__db_util_open_db`: the number of
+/// path segments (`''` is 0), NULL for anything that is not text.
+fn register_functions(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function(
+        "relpath_depth",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            Ok(match ctx.get_raw(0) {
+                ValueRef::Text(t) => {
+                    let slashes = t.iter().filter(|b| **b == b'/').count();
+                    Some(i64::from(!t.is_empty()) + i64::try_from(slashes).unwrap_or(i64::MAX))
+                }
+                _ => None,
+            })
+        },
+    )
+    .map_err(sql_err)
 }
