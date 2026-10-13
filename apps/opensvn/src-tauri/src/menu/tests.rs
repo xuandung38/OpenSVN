@@ -227,19 +227,151 @@ fn the_native_menu_builds_for_every_os_description() {
     }
 }
 
-#[test]
-fn every_menu_event_the_ui_subscribes_to_is_an_item_of_this_menu() {
+/// Menu ids the UI subscribes to (`MENU_EVENTS` in `src/ipc/events.ts`).
+fn ui_menu_ids() -> HashSet<&'static str> {
     let ts = include_str!("../../../src/ipc/events.ts");
-    let ids: Vec<&str> = ts
-        .split("\"menu://")
+    ts.split("\"menu://")
         .skip(1)
         .filter_map(|rest| rest.split('"').next())
-        .collect();
+        .collect()
+}
+
+#[test]
+fn every_menu_event_the_ui_subscribes_to_is_an_item_of_this_menu() {
+    let ids = ui_menu_ids();
     assert!(ids.len() >= 10, "{ids:?}");
     for id in ids {
         assert!(
             event_for(id).is_some(),
-            "the UI listens to unknown menu id {id}"
+            "the UI listens to unknown or natively handled menu id {id}"
         );
     }
+}
+
+/// The other direction: no item (with or without an accelerator) does nothing when activated.
+/// Each one is either subscribed by the UI or handled natively; predefined items are native roles.
+#[test]
+fn every_item_of_this_menu_is_handled_by_the_ui_or_natively() {
+    let ui = ui_menu_ids();
+    for os in [Os::Darwin, Os::Windows, Os::Linux] {
+        for layout in [true, false] {
+            let spec = menu_spec(os, layout);
+            let mut all = Vec::new();
+            flatten(&spec, &mut all);
+            for e in all {
+                let Entry::Item { id, accel, .. } = e else {
+                    continue;
+                };
+                let native = native_action(id).is_some();
+                let in_ui = ui.contains(id);
+                assert!(
+                    native ^ in_ui,
+                    "{id} (accelerator {accel:?}, {os:?}) must be handled by exactly one of the UI ({in_ui}) or Rust ({native})"
+                );
+                assert_eq!(event_for(id).is_some(), in_ui, "{id}");
+            }
+        }
+    }
+}
+
+#[test]
+fn zoom_steps_like_a_browser_and_stays_in_range() {
+    assert_eq!(next_zoom(100, NativeAction::ZoomIn), 110);
+    assert_eq!(next_zoom(100, NativeAction::ZoomOut), 90);
+    assert_eq!(next_zoom(300, NativeAction::ZoomIn), 300);
+    assert_eq!(next_zoom(50, NativeAction::ZoomOut), 50);
+    assert_eq!(next_zoom(175, NativeAction::ZoomReset), 100);
+    assert_eq!(next_zoom(105, NativeAction::ZoomIn), 110);
+    assert_eq!(next_zoom(105, NativeAction::ZoomOut), 100);
+    for id in [
+        "view.zoom-in",
+        "view.zoom-out",
+        "view.zoom-reset",
+        "app.exit",
+    ] {
+        assert!(native_action(id).is_some(), "{id}");
+        assert_eq!(event_for(id), None, "{id} is not forwarded to the UI");
+    }
+}
+
+/// `SHORTCUTS` in `src/features/wc/shortcuts.ts`: id -> (key, shift, alt).
+fn ui_shortcuts() -> std::collections::HashMap<String, (String, bool, bool)> {
+    let ts = include_str!("../../../src/features/wc/shortcuts.ts");
+    let block = ts
+        .split("export const SHORTCUTS")
+        .nth(1)
+        .and_then(|rest| rest.split("\n};").next())
+        .unwrap();
+    block
+        .lines()
+        .filter_map(|line| {
+            let (id, spec) = line.trim().split_once(": { key: \"")?;
+            let (key, flags) = spec.split_once('"')?;
+            Some((
+                id.to_owned(),
+                (
+                    key.replace("\\\\", "\\"),
+                    flags.contains("shift: true"),
+                    flags.contains("alt: true"),
+                ),
+            ))
+        })
+        .collect()
+}
+
+/// `MENU_ACTIONS` in `src/features/wc/use-wc-shortcuts.ts`: menu id -> action.
+fn ui_menu_actions() -> Vec<(String, String)> {
+    let ts = include_str!("../../../src/features/wc/use-wc-shortcuts.ts");
+    ts.lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("\"menu://")?;
+            let (id, action) = rest.split_once("\": \"")?;
+            Some((id.to_owned(), action.trim_end_matches("\",").to_owned()))
+        })
+        .collect()
+}
+
+fn accel_of(spec: &[Entry], wanted: &str) -> Option<&'static str> {
+    let mut all = Vec::new();
+    flatten(spec, &mut all);
+    all.iter().find_map(|e| match e {
+        Entry::Item { id, accel, .. } if *id == wanted => *accel,
+        _ => None,
+    })
+}
+
+/// The echo suppression needs the native accelerator and the UI's keydown shortcut of one action
+/// to be the same keys, so a key press is recognized from both sides.
+#[test]
+fn ui_shortcuts_use_the_same_keys_as_the_menu_accelerators() {
+    let shortcuts = ui_shortcuts();
+    assert!(shortcuts.len() >= 20, "{shortcuts:?}");
+    let actions = ui_menu_actions();
+    assert_eq!(actions.len(), ui_menu_ids().len(), "{actions:?}");
+    let spec = menu_spec(Os::Linux, true);
+    let mut checked = 0;
+    for (id, action) in &actions {
+        let Some((key, shift, alt)) = shortcuts.get(action) else {
+            continue;
+        };
+        let Some(accel) = accel_of(&spec, id) else {
+            continue;
+        };
+        let parts: Vec<&str> = accel.split('+').collect();
+        let (accel_key, mods) = parts.split_last().unwrap();
+        assert!(
+            accel_key.eq_ignore_ascii_case(key),
+            "{id}: {accel} vs {key}"
+        );
+        assert!(mods.contains(&"Mod"), "{id}: {accel}");
+        assert_eq!(mods.contains(&"Shift"), *shift, "{id}: {accel}");
+        assert_eq!(mods.contains(&"Alt"), *alt, "{id}: {accel}");
+        assert_eq!(
+            mods.len(),
+            1 + usize::from(*shift) + usize::from(*alt),
+            "{id}"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 25, "only {checked} accelerators compared");
 }

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { MoreHorizontal } from "lucide-react";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { DropdownMenu } from "../../../components/ui/dropdown-menu";
 import { EmptyState } from "../../../components/ui/empty-state";
@@ -15,7 +15,7 @@ import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
 import { fileMenuEntries } from "../changes/file-menu";
 import { dialogStrings } from "../dialogs/dialog-strings";
-import { matchShortcut } from "../shortcuts";
+import { useUiCommand } from "../ui-commands";
 import { useWcActions } from "../use-wc-actions";
 import { useWcSession } from "../wc-session";
 import { wcStrings } from "../wc-strings";
@@ -59,20 +59,10 @@ function FileDiffPane({
   const effMode = mode ?? settings.data?.["diff.mode"] ?? "split";
   const effWs = ignoreWs ?? settings.data?.["diff.ignoreWhitespace"] ?? false;
 
-  // Mod+Alt+D / Mod+Alt+W (doc 01 8.4).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (matchShortcut(e, "toggleDiffMode")) {
-        e.preventDefault();
-        setMode(effMode === "split" ? "unified" : "split");
-      } else if (matchShortcut(e, "toggleWhitespace")) {
-        e.preventDefault();
-        setIgnoreWs(!effWs);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [effMode, effWs]);
+  // Mod+Alt+D / Mod+Alt+W and View > Diff mode / Hide whitespace (doc 01 8.4); routed by
+  // `useWcShortcuts`, which drops the key/menu echo so one press toggles once.
+  useUiCommand("toggleDiffMode", () => setMode(effMode === "split" ? "unified" : "split"));
+  useUiCommand("toggleWhitespace", () => setIgnoreWs(!effWs));
 
   const q = useQuery({
     // Under the status key so status events refresh the open diff too.

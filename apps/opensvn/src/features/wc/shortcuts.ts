@@ -22,7 +22,16 @@ export type ShortcutId =
   | "filter"
   | "toggleDiffMode"
   | "toggleWhitespace"
-  | "switch";
+  | "switch"
+  | "closeWc"
+  | "copyPath"
+  | "toggleSidebar"
+  | "reveal"
+  | "terminal"
+  | "editor"
+  | "newBranch"
+  | "newTag"
+  | "showShortcuts";
 
 interface Spec {
   key: string;
@@ -49,6 +58,15 @@ export const SHORTCUTS: Record<ShortcutId, Spec> = {
   toggleDiffMode: { key: "d", alt: true },
   toggleWhitespace: { key: "w", alt: true },
   switch: { key: "b" },
+  closeWc: { key: "w" },
+  copyPath: { key: "c", alt: true },
+  toggleSidebar: { key: "\\" },
+  reveal: { key: "r", shift: true },
+  terminal: { key: "`" },
+  editor: { key: "a", shift: true },
+  newBranch: { key: "n", shift: true },
+  newTag: { key: "t", shift: true },
+  showShortcuts: { key: "/" },
 };
 
 /** True when the keyboard event is the given shortcut (Mod held, modifiers matching exactly). */
