@@ -2,8 +2,8 @@
 
 use opensvn_ipc::{FileKind, NodeStatus, PropStatus, file_status_from_wc};
 use svn_types::{
-    Depth, LockInfo, NodeKind, NodeStatus as S, PropStatus as P, RelPath, RemoteStatus, Revnum,
-    Timestamp, WcStatus,
+    Depth, LockInfo, NodeKind, NodeStatus as S, PropStatus as P, RelPath, RemoteStatus,
+    RepoDisplayPath, Revnum, Timestamp, WcStatus,
 };
 
 fn base() -> WcStatus {
@@ -30,7 +30,7 @@ fn base() -> WcStatus {
 
 fn lock(token: &str) -> LockInfo {
     LockInfo {
-        path: "/a".into(),
+        path: RepoDisplayPath::parse("/a").unwrap(),
         token: token.into(),
         owner: "alice".into(),
         comment: None,
