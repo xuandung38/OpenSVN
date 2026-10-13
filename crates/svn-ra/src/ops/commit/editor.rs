@@ -73,14 +73,20 @@ struct FileState {
 /// [`super::abort_txn`]. That background `DELETE` never prompts for credentials or a
 /// certificate and gives up after a short timeout.
 ///
-/// `close_edit` deletes the transaction after a failure only when the transaction was certainly
-/// not merged: the failure came before the `MERGE` was sent, or the server refused the `MERGE`
-/// definitely (a 4xx other than 408, or a 5xx carrying mod_dav_svn's `D:error` body). If the
-/// `MERGE` was sent and its result is unknown (cancellation, a transport failure, 408/502/504,
-/// a bare 5xx, an unreadable 2xx answer), the transaction is kept and `close_edit`
-/// fails with [`ErrorCode::CommitOutcomeUnknown`], whose message names the transaction. The
-/// caller then checks the repository (youngest revision, or whether the transaction still
-/// exists) before retrying or calling [`super::abort_txn`].
+/// `close_edit` calls [`CommitObserver::on_merge_sending`] right before the `MERGE` (an error
+/// from it deletes the transaction and nothing is merged). After a failure it deletes the
+/// transaction only when the failure came before the `MERGE` was sent, or the server refused
+/// the `MERGE` (a 4xx other than 408, or a 5xx carrying mod_dav_svn's `D:error` body), as
+/// libsvn_ra_serf does. Such a refusal is what the server reports for every ordinary failure
+/// (out of date, locks, hooks, authz), but it does not prove that nothing was merged:
+/// mod_dav_svn can answer a 500 with a `D:error`, or a 404, after the revision was written when
+/// the repository storage fails during the post-commit steps. Callers that journaled the
+/// `MERGE` reconcile with the log before forgetting it. If the `MERGE` was sent and its result
+/// is unknown (cancellation, a transport failure, 408/502/504, a bare 5xx, an unreadable 2xx
+/// answer), the transaction is kept and `close_edit` fails with
+/// [`ErrorCode::CommitOutcomeUnknown`], whose message names the transaction. The caller then
+/// checks the repository (whether the transaction still exists, with
+/// [`super::abort_txn_checked`], and the log) before retrying.
 pub struct HttpCommitEditor {
     wire: RaWire,
     txn: TxnName,
@@ -254,6 +260,9 @@ impl HttpCommitEditor {
             .into());
         }
         let tokens = self.locks.clone();
+        // The caller journals that the MERGE may be in flight; if it cannot, nothing is sent
+        // and the transaction is deleted like any other failure before the MERGE.
+        self.observer.on_merge_sending(&self.txn.name)?;
         // From here on the commit may succeed on the server even if this future is dropped.
         self.settled = true;
         let merged = merge(

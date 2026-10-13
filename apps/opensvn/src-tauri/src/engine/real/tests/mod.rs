@@ -8,3 +8,4 @@ mod recovery_tests;
 mod remote_tests;
 mod scaffold_tests;
 mod support;
+mod wc_status_tests;

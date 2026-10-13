@@ -2,14 +2,25 @@
 //!
 //! One JSON file per commit lives in the application state directory, next to a data directory
 //! holding the repository-normal texts that were uploaded. The file is rewritten atomically
-//! (temp file, fsync, rename, directory fsync) at three points:
+//! (temp file, fsync, rename, directory fsync) at four points:
 //!
-//! 1. before the server transaction exists: the committables and text digests;
+//! 1. before the server transaction exists: the committables, text digests, log message and the
+//!    youngest revision before the commit;
 //! 2. when the transaction is created: its name, so a leaked transaction can be deleted;
-//! 3. right after MERGE: the new revision, so the working copy can be finalized.
+//! 3. right before the `MERGE` is sent (`merge_sent`): from here on the commit may have become a
+//!    revision even when no answer arrives;
+//! 4. right after MERGE: the new revision, so the working copy can be finalized.
 //!
 //! Recovery (`recovery.rs`) reads the journal: a merged one is finalized against the working
-//! copy, one that only names a transaction is aborted on the server, anything else is dropped.
+//! copy; one with `merge_sent` but no revision is reconciled with the server (transaction still
+//! there: deleted and dropped; gone: the log is searched for the commit); one that only names a
+//! transaction is aborted on the server; anything else is dropped.
+//!
+//! Safety rules (shared with the app's former journal): a journal is never deleted because it
+//! could not be read. A file of a format version this build does not know is left untouched
+//! (another build wrote it); a file of a known version that does not parse is corrupt and is
+//! moved aside under a new name, never replacing an earlier one; a file that cannot be read at
+//! all (permissions, I/O) stays where it is.
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -23,9 +34,20 @@ use svn_types::{ErrorCode, Result, SvnError};
 
 use super::collect::{ItemAction, ItemKind};
 
-const FORMAT_VERSION: u32 = 1;
+/// Format version written by this build.
+///
+/// Any change to what is written ([`JournalData`] and the types in it, their serde attributes or
+/// the meaning of a field) MUST bump this, and older versions this build still understands stay
+/// in [`READABLE_VERSIONS`]. A build that meets a version it does not know leaves the file alone,
+/// so a journal from a newer build is never misread (version 2 added `merge_sent`: a version 1
+/// reader would drop such a journal as "never merged").
+const FORMAT_VERSION: u32 = 2;
+/// Versions this build reads (1: before `merge_sent`, `start_youngest`, `message`, `author`).
+const READABLE_VERSIONS: [u32; 2] = [1, 2];
 const JOURNAL_PREFIX: &str = "commit-";
 const JOURNAL_SUFFIX: &str = ".json";
+/// How many quarantined copies of one journal may exist before quarantine refuses.
+const QUARANTINE_SLOTS: usize = 8;
 
 /// Text that was uploaded for a file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -96,9 +118,74 @@ pub struct JournalData {
     /// Committed paths, sorted parents first.
     pub items: Vec<JournalItem>,
     /// Every lock token sent with the commit (committed paths, unmodified locked files met by
-    /// the harvest, locked nodes below deleted directories).
+    /// the harvest, locked nodes below deleted or replaced directories).
     #[serde(default)]
     pub locks: Vec<JournalLock>,
+    /// The `MERGE` may have been sent: until `merged` is set the outcome is unknown and the
+    /// journal must only be dropped once the server shows the commit did not happen.
+    #[serde(default)]
+    pub merge_sent: bool,
+    /// Youngest revision of the repository before the transaction was created: a revision made
+    /// by this commit is newer.
+    #[serde(default)]
+    pub start_youngest: Option<u64>,
+    /// Log message of the commit, to recognize it in the log.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// User name the server records as author, when the caller knows it.
+    #[serde(default)]
+    pub author: Option<String>,
+}
+
+impl JournalData {
+    /// The outcome of the `MERGE` is unknown: it may have been sent and no revision is recorded.
+    pub fn outcome_unknown(&self) -> bool {
+        self.merge_sent && self.merged.is_none()
+    }
+}
+
+/// Why a journal file could not be loaded. Only [`JournalLoadError::Corrupt`] may be moved aside
+/// ([`JournalStore::quarantine`]); no variant allows deleting the file.
+#[derive(Debug)]
+pub enum JournalLoadError {
+    /// The file exists but could not be read (permissions, I/O, another program holding it).
+    /// It stays; the next attempt tries again.
+    Unreadable(SvnError),
+    /// The file is not a journal of any version, or a journal of a known version that does not
+    /// parse: safe to move aside.
+    Corrupt(SvnError),
+    /// A format version this build does not know (written by another build). It stays untouched
+    /// and nothing is done from it.
+    UnsupportedVersion {
+        /// Format version found in the file.
+        version: u64,
+        /// Working copy root named by the file, when it has a readable `wcroot` field.
+        wcroot: Option<PathBuf>,
+        /// Error explaining what the user can do.
+        error: SvnError,
+    },
+}
+
+impl JournalLoadError {
+    /// The underlying error.
+    pub fn error(&self) -> &SvnError {
+        match self {
+            Self::Unreadable(e) | Self::Corrupt(e) | Self::UnsupportedVersion { error: e, .. } => e,
+        }
+    }
+
+    /// The underlying error, owned.
+    pub fn into_error(self) -> SvnError {
+        match self {
+            Self::Unreadable(e) | Self::Corrupt(e) | Self::UnsupportedVersion { error: e, .. } => e,
+        }
+    }
+}
+
+impl std::fmt::Display for JournalLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error().fmt(f)
+    }
 }
 
 /// Directory that stores journals and their data.
@@ -174,27 +261,87 @@ impl JournalStore {
         Ok(())
     }
 
-    /// Reads one journal file.
+    /// Reads one journal file; any [`JournalLoadError`] becomes its error.
     pub fn read(path: &Path) -> Result<JournalData> {
-        let bytes =
-            fs::read(path).map_err(|e| io(format!("read journal '{}'", path.display()), &e))?;
-        let data: JournalData = serde_json::from_slice(&bytes).map_err(|e| {
-            SvnError::new(
-                ErrorCode::Corrupt,
-                format!("journal '{}' is unreadable: {e}", path.display()),
-            )
+        Self::load(path).map_err(JournalLoadError::into_error)
+    }
+
+    /// Reads one journal file and says, on failure, what may be done with it.
+    pub fn load(path: &Path) -> std::result::Result<JournalData, JournalLoadError> {
+        let bytes = fs::read(path).map_err(|e| {
+            JournalLoadError::Unreadable(io(format!("read journal '{}'", path.display()), &e))
         })?;
-        if data.version != FORMAT_VERSION {
-            return Err(SvnError::new(
+        let corrupt = |why: String| {
+            JournalLoadError::Corrupt(SvnError::new(
                 ErrorCode::Corrupt,
-                format!(
-                    "journal '{}' has unsupported version {}",
-                    path.display(),
-                    data.version
+                format!("commit journal '{}' is unreadable: {why}", path.display()),
+            ))
+        };
+        // Every version is a JSON object with a numeric `version`, written atomically: a file
+        // without one is damage, an unknown version is another build's format.
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| corrupt(e.to_string()))?;
+        let Some(version) = value.get("version").and_then(serde_json::Value::as_u64) else {
+            return Err(corrupt("no format version".to_owned()));
+        };
+        if !READABLE_VERSIONS.iter().any(|v| u64::from(*v) == version) {
+            let wcroot = value
+                .get("wcroot")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from);
+            return Err(JournalLoadError::UnsupportedVersion {
+                version,
+                wcroot,
+                error: SvnError::new(
+                    ErrorCode::WcNeedsCleanup,
+                    format!(
+                        "an interrupted commit was recorded by another version of OpenSVN \
+                         (journal format {version}, this version reads up to {FORMAT_VERSION}); \
+                         open the working copy with that version to finish it, or move '{}' \
+                         away to discard it",
+                        path.display()
+                    ),
                 ),
-            ));
+            });
         }
-        Ok(data)
+        serde_json::from_value(value).map_err(|e| corrupt(e.to_string()))
+    }
+
+    /// Moves the corrupt journal file `path` aside so it no longer counts as a journal but stays
+    /// available for diagnosis. The first free name of `<file>.corrupt`, `<file>.corrupt.1`, ...
+    /// is used: an earlier quarantined file is never replaced. Its data directory is kept. On
+    /// failure the file stays where it is.
+    pub fn quarantine(&self, path: &Path) -> Result<PathBuf> {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for n in 0..QUARANTINE_SLOTS {
+            let aside = match n {
+                0 => path.with_file_name(format!("{name}.corrupt")),
+                n => path.with_file_name(format!("{name}.corrupt.{n}")),
+            };
+            match move_no_replace(path, &aside) {
+                Ok(()) => {
+                    sync_dir(&self.dir);
+                    return Ok(aside);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(io(
+                        format!("move '{}' to '{}'", path.display(), aside.display()),
+                        &e,
+                    ));
+                }
+            }
+        }
+        Err(SvnError::new(
+            ErrorCode::WcNeedsCleanup,
+            format!(
+                "no free name to set the commit journal '{}' aside; remove old *.corrupt* files",
+                path.display()
+            ),
+        ))
     }
 
     /// Journal files present, sorted by name (creation order).
@@ -255,8 +402,47 @@ impl JournalStore {
             merged: None,
             items,
             locks,
+            merge_sent: false,
+            start_youngest: None,
+            message: None,
+            author: None,
         }
     }
+}
+
+/// Moves `from` to `to` without ever replacing an existing `to`: fails with
+/// [`std::io::ErrorKind::AlreadyExists`] when something is there, even if it appeared after the
+/// caller looked. `std::fs::rename` cannot be used for this: it silently replaces the target on
+/// Unix and (with `MOVEFILE_REPLACE_EXISTING`) on Windows.
+///
+/// A hard link is created first (`link(2)` / `CreateHardLinkW` both refuse an existing target
+/// atomically), then the original is removed. On file systems without hard links the contents
+/// are copied into a file opened with `create_new` (`O_EXCL` / `CREATE_NEW`), which is just as
+/// exclusive. If the original cannot be removed afterwards the new name is removed again, so on
+/// any error `from` is left as it was.
+fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    match fs::hard_link(from, to) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e),
+        Err(_) => {
+            let data = fs::read(from)?;
+            let mut out = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(to)?;
+            if let Err(e) = out.write_all(&data).and_then(|()| out.sync_all()) {
+                drop(out);
+                let _ = fs::remove_file(to);
+                return Err(e);
+            }
+        }
+    }
+    if let Err(e) = fs::remove_file(from) {
+        let _ = fs::remove_file(to);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Makes a rename durable where the platform allows it (no-op elsewhere).
@@ -303,6 +489,21 @@ impl CommitObserver for JournalObserver {
         self.store.write(&data)
     }
 
+    fn on_merge_sending(&self, _txn: &str) -> Result<()> {
+        let mut data = self
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        data.merge_sent = true;
+        if let Err(e) = self.store.write(&data) {
+            // The MERGE is vetoed; memory keeps matching the file.
+            data.merge_sent = false;
+            return Err(e);
+        }
+        failpoint!("commit.after_merge_sent_marker");
+        Ok(())
+    }
+
     fn on_merged(&self, info: &CommitInfo) -> Result<()> {
         let mut data = self
             .data
@@ -314,12 +515,13 @@ impl CommitObserver for JournalObserver {
             date: info.date.map(|d| d.0),
             author: info.author.clone(),
         });
+        failpoint!("commit.journal_merged_write");
         self.store.write(&data)
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -377,6 +579,83 @@ mod tests {
         store.remove("1-a").expect("remove");
         assert_eq!(store.list().expect("list").len(), 1);
         store.remove("1-a").expect("remove is idempotent");
+    }
+
+    #[test]
+    fn version_1_journals_are_still_read() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("commit-1.json");
+        let v1 = r#"{"version":1,"id":"1","wcroot":"/wc","keep_locks":false,
+            "keep_changelist":false,"txn":"7-x","merged":null,"items":[]}"#;
+        std::fs::write(&path, v1).expect("write");
+        let data = JournalStore::read(&path).expect("v1");
+        assert!(!data.merge_sent && !data.outcome_unknown());
+        assert_eq!(data.txn.as_deref(), Some("7-x"));
+        assert_eq!(data.start_youngest, None);
+    }
+
+    #[test]
+    fn unknown_versions_are_left_alone() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("commit-9.json");
+        let bytes = br#"{"version":9,"wcroot":"/wc","whatever":true}"#;
+        std::fs::write(&path, bytes).expect("write");
+        match JournalStore::load(&path) {
+            Err(JournalLoadError::UnsupportedVersion {
+                version, wcroot, ..
+            }) => {
+                assert_eq!(version, 9);
+                assert_eq!(wcroot, Some(PathBuf::from("/wc")));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(std::fs::read(&path).expect("still there"), bytes);
+    }
+
+    #[test]
+    fn corrupt_journals_are_quarantined_without_replacing() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let store = JournalStore::new(dir.path());
+        let path = store.file_of("x");
+        for (n, junk) in [
+            b"{ nope".as_slice(),
+            b"{\"no\":\"version\"}",
+            b"{\"version\":2}",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            std::fs::write(&path, junk).expect("write");
+            assert!(
+                matches!(JournalStore::load(&path), Err(JournalLoadError::Corrupt(_))),
+                "{n}"
+            );
+            let aside = store.quarantine(&path).expect("quarantine");
+            assert!(!path.exists());
+            assert_eq!(std::fs::read(&aside).expect("kept"), junk, "{n}");
+        }
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("rd")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 3, "earlier quarantined files kept: {names:?}");
+        assert!(
+            store.list().expect("list").is_empty(),
+            "no longer a journal"
+        );
+    }
+
+    #[test]
+    fn journals_that_cannot_be_read_stay() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("commit-d.json");
+        std::fs::create_dir(&path).expect("a directory cannot be read as a file");
+        assert!(matches!(
+            JournalStore::load(&path),
+            Err(JournalLoadError::Unreadable(_))
+        ));
+        assert!(path.exists());
     }
 
     #[test]

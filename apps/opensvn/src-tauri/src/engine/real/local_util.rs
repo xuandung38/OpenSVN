@@ -127,10 +127,54 @@ pub(super) fn open_wc_root(client: &ClientCtx, root: &Path) -> EngineResult<WcDb
 /// absolute location. Refuses traversal (`..`), absolute and drive paths, the administrative
 /// directory and symlinked intermediate directories, so no request path can reach outside the
 /// working copy. The empty path is the root.
+///
+/// Also refuses a path that belongs to another working copy (see [`ensure_own_path`]): an
+/// external, a separate checkout nested inside this one, or anything inside either.
 pub(super) fn target(db: &WcDb, path: &str) -> EngineResult<(RelPath, PathBuf)> {
     let rel = RelPath::new(path).map_err(|e| unsafe_request_path(path, &e))?;
     let abs = safe_join(db.wcroot(), &rel).map_err(|e| unsafe_request_path(path, &e))?;
+    ensure_own_path(db, &rel)?;
     Ok((rel, abs))
+}
+
+/// Fails when `rel`, which this working copy's database does not know, belongs to another
+/// working copy: when any of its prefixes, from its first component down to `rel` itself, is a
+/// working copy root (a directory with its own administrative directory: a fetched external or
+/// a nested checkout) or an external (an `EXTERNALS` row or an `svn:externals` definition, even
+/// one not fetched yet).
+///
+/// Such a path is versioned data of the other working copy. svn would act on it there; this
+/// engine only works on the registered working copy, so it refuses instead of treating the path
+/// as unversioned (and deleting it) or skipping it silently.
+pub(super) fn ensure_own_path(db: &WcDb, rel: &RelPath) -> EngineResult<()> {
+    if rel.is_root() || db.read_node(rel)?.is_some() {
+        return Ok(());
+    }
+    let externals = ExternalPaths::for_path(db, rel)?;
+    let full = rel.as_str();
+    let ends = full
+        .match_indices('/')
+        .map(|(i, _)| i)
+        .chain(std::iter::once(full.len()));
+    for end in ends {
+        let prefix = RelPath::new(&full[..end])?;
+        let kind = if externals.is_external(&prefix) {
+            "an external"
+        } else if is_wc_root_dir(&safe_join(db.wcroot(), &prefix)?) {
+            "a nested"
+        } else {
+            continue;
+        };
+        let inner = if prefix == *rel {
+            format!("'{rel}' is {kind} working copy")
+        } else {
+            format!("'{rel}' belongs to {kind} working copy ('{prefix}')")
+        };
+        return Err(invalid(format!(
+            "{inner}; open that working copy to revert or change it"
+        )));
+    }
+    Ok(())
 }
 
 /// [`target`] for each of `paths`; fails on the first bad one before anything is changed.
@@ -203,7 +247,8 @@ pub(super) fn checked_ignore_pattern(pattern: &str) -> EngineResult<&str> {
 ///
 /// Never returns what is not disposable: externals and the unversioned directories leading to
 /// them (status reports those as [`NodeStatus::External`]) and separate working copies checked
-/// out inside this one. svn's own `cleanup --remove-unversioned` deletes such a nested checkout;
+/// out inside this one. A `rel` inside an external or a nested checkout is refused with an error
+/// ([`ensure_own_path`]). svn's own `cleanup --remove-unversioned` deletes such a nested checkout;
 /// the app deliberately keeps it, since it may hold local edits nothing else knows about.
 pub(super) fn unversioned_items(
     db: &WcDb,
@@ -213,6 +258,9 @@ pub(super) fn unversioned_items(
     ignored: bool,
 ) -> EngineResult<Vec<RelPath>> {
     if db.read_node(rel)?.is_none() {
+        // Never dispose of another working copy's data: refuse a path inside an external or a
+        // nested checkout (callers have normally refused it already, through `target`).
+        ensure_own_path(db, rel)?;
         let abs = safe_join(db.wcroot(), rel)?;
         let disposable = unversioned
             && abs.symlink_metadata().is_ok()

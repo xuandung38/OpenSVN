@@ -21,7 +21,7 @@ use svn_types::{
 use super::support::{
     Fixture, OLD_BOOT, StaticConnector, URL, UUID, ctx, fixture_on, plant_lock_row, put,
 };
-use crate::engine::facade::{EngineFacade, WcRef};
+use crate::engine::facade::{EngineFacade, StatusQuery, WcRef};
 use crate::engine::real::{UnwiredRecovery, read_local_ignores};
 
 /// Repository with `README.md` and `src/main.rs` at its root (revision 1).
@@ -365,18 +365,155 @@ async fn revert_removing_unversioned_keeps_externals_and_nested_checkouts() {
         .revert(&wc, &revert_req(&wc, &[""], Some(true)), &ctx())
         .await
         .expect("revert root");
-    // Named directly as targets they are kept too.
+    // Named directly as targets they are refused, and kept.
+    for target in ["ext", "deep/x/ext", "nested", "junk/inner"] {
+        let err = e
+            .engine()
+            .revert(&wc, &revert_req(&wc, &[target], Some(true)), &ctx())
+            .await
+            .expect_err(target);
+        assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{target}");
+        assert!(
+            err.message.contains("open that working copy"),
+            "{target}: {}",
+            err.message
+        );
+    }
+    // A directory leading to an external is this working copy's; it is kept as it is.
     e.engine()
-        .revert(
-            &wc,
-            &revert_req(&wc, &["ext", "deep", "nested", "junk/inner"], Some(true)),
-            &ctx(),
-        )
+        .revert(&wc, &revert_req(&wc, &["deep"], Some(true)), &ctx())
         .await
-        .expect("revert named");
+        .expect("revert the directory leading to an external");
     assert_working_copies_kept(&wc);
     assert!(!wc.root.join("scratch.txt").exists());
     assert!(wc.root.join("debug.o").exists(), "ignored items stay");
+}
+
+/// Revert of `rel` with `remove_unversioned` fails with the "other working copy" error and
+/// leaves `kept` (relative to the working copy root) on disk with its content.
+async fn assert_revert_refused(e: &Env, wc: &WcRef, rel: &str, kept: &str) {
+    let before = std::fs::read(wc.root.join(kept)).unwrap();
+    let err = e
+        .engine()
+        .revert(wc, &revert_req(wc, &[rel], Some(true)), &ctx())
+        .await
+        .expect_err(rel);
+    assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{rel}");
+    assert!(
+        err.message.contains("open that working copy"),
+        "{rel}: {}",
+        err.message
+    );
+    assert_eq!(
+        std::fs::read(wc.root.join(kept)).unwrap(),
+        before,
+        "{kept} kept after reverting {rel}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reverting_a_path_inside_an_external_or_nested_checkout_is_refused() {
+    let e = env();
+    let wc = wc_with_externals(&e, "inside-other-wc").await;
+    write(&wc.root, "ext/src/main.rs", "edited in the external\n");
+    assert_revert_refused(&e, &wc, "ext/README.md", "ext/README.md").await;
+    assert_revert_refused(&e, &wc, "ext/src", "ext/src/main.rs").await;
+    assert_revert_refused(&e, &wc, "deep/x/ext/README.md", "deep/x/ext/README.md").await;
+    assert_revert_refused(&e, &wc, "nested/README.md", "nested/README.md").await;
+    assert_revert_refused(&e, &wc, "junk/inner/src", "junk/inner/src/main.rs").await;
+    assert_revert_refused(&e, &wc, "junk/inner/README.md", "junk/inner/README.md").await;
+    // Without `remove_unversioned` too: nothing is skipped silently.
+    let err = e
+        .engine()
+        .revert(&wc, &revert_req(&wc, &["nested/README.md"], None), &ctx())
+        .await
+        .expect_err("plain revert inside a nested checkout");
+    assert!(err.message.contains("'nested'"), "{}", err.message);
+    assert_working_copies_kept(&wc);
+    // The rest of an unversioned directory is still this working copy's.
+    e.engine()
+        .revert(
+            &wc,
+            &revert_req(&wc, &["junk/scratch.txt"], Some(true)),
+            &ctx(),
+        )
+        .await
+        .expect("revert an unversioned file beside a nested checkout");
+    assert!(!wc.root.join("junk/scratch.txt").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn other_operations_refuse_paths_inside_an_external_or_nested_checkout() {
+    let e = env();
+    let wc = wc_with_externals(&e, "ops-other-wc").await;
+    let eng = e.engine();
+    write(&wc.root, "ext/new.txt", "x\n");
+    let err = eng
+        .add_paths(&wc, &paths(&["ext/new.txt"]), &ctx())
+        .await
+        .expect_err("add inside an external");
+    assert_eq!(err.code, ErrorCode::WcInvalidOperation);
+    let err = eng
+        .delete_paths(&wc, &paths(&["nested/README.md"]), false, &ctx())
+        .await
+        .expect_err("delete inside a nested checkout");
+    assert_eq!(err.code, ErrorCode::WcInvalidOperation);
+    let err = eng
+        .move_path(&wc, "README.md", "ext/moved.md", &ctx())
+        .await
+        .expect_err("move into an external");
+    assert_eq!(err.code, ErrorCode::WcInvalidOperation);
+    assert!(wc.root.join("README.md").exists());
+    assert_working_copies_kept(&wc);
+}
+
+/// A directory defined by `svn:externals` but not fetched (no administrative directory) is
+/// protected by the definition alone: status shows it as an external, cleanup and revert keep
+/// it and a path inside it is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_defined_but_unfetched_external_directory_is_kept() {
+    let e = env();
+    let wc = e.checkout("unfetched-ext").await;
+    e.engine()
+        .props_set(
+            &wc,
+            "src",
+            "svn:externals",
+            Some("^/lib vendor/lib\n"),
+            &ctx(),
+        )
+        .await
+        .expect("propset");
+    write(&wc.root, "src/vendor/lib/user.txt", "precious\n");
+    write(&wc.root, "scratch.txt", "x\n");
+    assert!(!wc.root.join("src/vendor/lib/.svn").exists());
+    assert_eq!(
+        text_of(&e.status(&wc).await, "src/vendor"),
+        Some(NodeStatus::External)
+    );
+    assert_revert_refused(
+        &e,
+        &wc,
+        "src/vendor/lib/user.txt",
+        "src/vendor/lib/user.txt",
+    )
+    .await;
+    assert_revert_refused(&e, &wc, "src/vendor/lib", "src/vendor/lib/user.txt").await;
+    // Reverting `src` itself would also revert its (local) definition, so only the unversioned
+    // directory leading to the external is named.
+    e.engine()
+        .revert(&wc, &revert_req(&wc, &["src/vendor"], Some(true)), &ctx())
+        .await
+        .expect("revert the directory leading to the external");
+    e.engine()
+        .cleanup(&wc, &cleanup_req(&wc, true, true), &ctx())
+        .await
+        .expect("cleanup");
+    assert_eq!(
+        std::fs::read_to_string(wc.root.join("src/vendor/lib/user.txt")).unwrap(),
+        "precious\n"
+    );
+    assert!(!wc.root.join("scratch.txt").exists(), "cleanup did run");
 }
 
 #[cfg(unix)]
@@ -456,6 +593,21 @@ async fn working_copy_metadata_operations() {
     assert!(
         find(&st, "build.log").is_none(),
         "ignored files are not listed"
+    );
+    let listed = eng
+        .status(
+            &wc,
+            StatusQuery {
+                include_ignored: false,
+                include_unversioned: true,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("engine status");
+    assert!(
+        !listed.iter().any(|f| f.path == "build.log"),
+        "the engine's status applies the local ignore list: {listed:?}"
     );
     assert!(
         find(&st, "").is_none(),
@@ -1064,10 +1216,16 @@ mod oracle {
 
     fn assert_externals_kept(r: &Repo, wc: &WcRef) {
         let st = r.status(wc);
+        assert!(!st.iter().any(|l| l.contains("scratch.txt")), "{st:?}");
+        assert_externals_intact(r, wc);
+    }
+
+    /// The external, the nested checkout and their local edits are as `externals_wc` made them.
+    fn assert_externals_intact(r: &Repo, wc: &WcRef) {
+        let st = r.status(wc);
         for line in ["X       ext", "M       ext/main.rs", "?       nested"] {
             assert!(st.iter().any(|l| l == line), "{line:?} in {st:?}");
         }
-        assert!(!st.iter().any(|l| l.contains("scratch.txt")), "{st:?}");
         assert_eq!(
             std::fs::read_to_string(wc.root.join("ext/main.rs")).unwrap(),
             "edited in the external\n"
@@ -1113,6 +1271,65 @@ mod oracle {
         assert_externals_kept(&r, &wc);
         assert!(wc.root.join("debug.o").exists(), "ignored items stay");
         assert!(wc.root.join("fext").exists(), "file external kept");
+    }
+
+    /// Revert with `remove_unversioned` of `rel`, which svn would revert inside the external or
+    /// nested working copy, is refused and deletes nothing.
+    async fn assert_svn_revert_refused(f: &Fixture, wc: &WcRef, rel: &str, kept: &str) {
+        let before = std::fs::read(wc.root.join(kept)).unwrap();
+        let err = (&f.engine as &dyn EngineFacade)
+            .revert(wc, &revert_req(wc, &[rel], Some(true)), &ctx())
+            .await
+            .expect_err(rel);
+        assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{rel}");
+        assert!(
+            err.message.contains("open that working copy"),
+            "{rel}: {}",
+            err.message
+        );
+        assert_eq!(std::fs::read(wc.root.join(kept)).unwrap(), before, "{kept}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revert_of_a_file_inside_an_svn_external_is_refused() {
+        let Some(r) = Repo::new() else { return };
+        let f = engine();
+        let wc = externals_wc(&r, "in-ext");
+        assert_svn_revert_refused(&f, &wc, "ext/main.rs", "ext/main.rs").await;
+        assert_externals_intact(&r, &wc);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revert_of_a_file_inside_a_nested_checkout_is_refused() {
+        let Some(r) = Repo::new() else { return };
+        let f = engine();
+        let wc = externals_wc(&r, "in-nested");
+        assert_svn_revert_refused(&f, &wc, "nested/README.md", "nested/README.md").await;
+        assert_externals_intact(&r, &wc);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revert_of_a_directory_inside_a_checkout_hidden_in_an_unversioned_directory_is_refused()
+    {
+        let Some(r) = Repo::new() else { return };
+        let f = engine();
+        let wc = r.checkout("in-hidden");
+        std::fs::create_dir_all(wc.root.join("u")).unwrap();
+        r.svn(
+            &wc.root.join("u"),
+            &["checkout", "-q", &format!("{}/trunk", r.url), "inner"],
+        );
+        write(
+            &wc.root,
+            "u/inner/src/main.rs",
+            "edited in the hidden checkout\n",
+        );
+        assert_svn_revert_refused(&f, &wc, "u/inner/src", "u/inner/src/main.rs").await;
+        let inner = r.svn(&wc.root.join("u/inner"), &["status"]);
+        assert!(
+            inner.lines().any(|l| l == "M       src/main.rs"),
+            "hidden checkout intact: {inner}"
+        );
     }
 
     trait TapSort {

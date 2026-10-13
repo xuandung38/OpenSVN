@@ -10,7 +10,7 @@ mod update_drive;
 mod update_plan;
 
 pub use recording_editor::{EditorEvent, RecordingEditor, RecordingLog};
-pub use repo::{FakeChange, Node, NodeData, Revision, Tree};
+pub use repo::{FakeChange, FakeMergeFault, Node, NodeData, Revision, Tree};
 pub use session::FakeRaSession;
 
 use svn_types::{Depth, RelPath, RepoUrl, Reporter, Result, Revnum};

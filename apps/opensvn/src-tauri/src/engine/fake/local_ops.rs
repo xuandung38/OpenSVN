@@ -3,7 +3,8 @@
 use std::path::Path;
 
 use opensvn_ipc::{
-    CleanupRequest, Depth, FileKind, IgnoreAddRequest, ResolveChoice, ResolveRequest, RevertRequest,
+    CleanupRequest, Depth, FileKind, IgnoreAddRequest, IgnoreScope, ResolveChoice, ResolveRequest,
+    RevertRequest,
 };
 use svn_types::{ErrorCode, RelPath, SvnError};
 
@@ -49,9 +50,30 @@ impl FakeEngine {
         }
         let dir = rel(&req.dir)?;
         self.with_wc(root, |wc| {
-            wc.node(&dir)?;
-            if !wc.ignores.iter().any(|p| p == pattern) {
-                wc.ignores.push(pattern.to_owned());
+            let node = wc.node(&dir)?;
+            match req.scope {
+                // A property of the directory, committed like any other property change.
+                IgnoreScope::SvnIgnore => {
+                    if node.kind != FileKind::Dir || !node.is_versioned() {
+                        return Err(bad_arg("svn:ignore can only be set on a versioned folder"));
+                    }
+                    let node = wc.node_mut(&dir)?;
+                    let current = node.props.get("svn:ignore").cloned().unwrap_or_default();
+                    if !current.lines().any(|l| l.trim() == pattern) {
+                        let mut value = current;
+                        if !value.is_empty() && !value.ends_with('\n') {
+                            value.push('\n');
+                        }
+                        value.push_str(pattern);
+                        value.push('\n');
+                        node.props.insert("svn:ignore".to_owned(), value);
+                    }
+                }
+                IgnoreScope::Local => {
+                    if !wc.ignores.iter().any(|p| p == pattern) {
+                        wc.ignores.push(pattern.to_owned());
+                    }
+                }
             }
             Ok(())
         })
@@ -243,24 +265,22 @@ impl FakeEngine {
 
     pub(super) fn do_cleanup(&self, root: &Path, req: &CleanupRequest) -> Result<(), SvnError> {
         self.with_wc(root, |wc| {
-            let ignored = wc.ignores.clone();
             let drop_unversioned = req.remove_unversioned.unwrap_or(false);
             let drop_ignored = req.remove_ignored.unwrap_or(false);
-            wc.nodes.retain(|p, n| {
-                if n.sched != Sched::Unversioned {
-                    return true;
-                }
-                let name = p.file_name().unwrap_or("");
-                let is_ignored = ignored.iter().any(|g| match g.split_once('*') {
-                    None => g == name,
-                    Some((a, b)) => name.starts_with(a) && name.ends_with(b),
-                });
-                !(if is_ignored {
-                    drop_ignored
-                } else {
-                    drop_unversioned
+            let doomed: Vec<RelPath> = wc
+                .nodes
+                .iter()
+                .filter(|(p, n)| {
+                    n.sched == Sched::Unversioned
+                        && if wc.ignored(p) {
+                            drop_ignored
+                        } else {
+                            drop_unversioned
+                        }
                 })
-            });
+                .map(|(p, _)| p.clone())
+                .collect();
+            wc.nodes.retain(|p, _| !doomed.contains(p));
             Ok(())
         })
     }

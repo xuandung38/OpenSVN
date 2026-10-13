@@ -6,12 +6,14 @@ use crate::ids::{Rev, Size};
 use crate::models::{FileKind, FileStatus, LockInfo, NodeStatus, PropStatus, RemoteStatus};
 use crate::time_fmt::timestamp_to_iso;
 
+/// IPC view of a lock. The token never crosses the IPC boundary: whether the lock is this
+/// working copy's own is reported as `mine`, and the token stays in the engine.
 fn map_lock(lock: &svn_types::LockInfo, mine: bool) -> LockInfo {
     LockInfo {
         owner: lock.owner.clone(),
         comment: lock.comment.clone(),
         created_at: timestamp_to_iso(lock.created),
-        token: Some(lock.token.clone()),
+        token: None,
         mine,
     }
 }

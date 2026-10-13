@@ -4,11 +4,13 @@
 //!   (`remote`, `blame`, `layout`, `remote_edit`, `locks`).
 //! * Opening a working copy reads `wc.db` through `svn-wc` and runs crash recovery (`wc_read`,
 //!   `recovery`, `journal`).
+//! * Status, working copy diff and remote status run through `svn-client` (`wc_status`, with the
+//!   type mapping in `wc_map`).
 //! * Local working copy edits (revert, add/delete/move, cleanup, resolve, ignore, properties,
 //!   changelists) run through `svn-client` (`local`, `local_util`); marking an external move and
 //!   changing the format are refused with a user-facing error until `svn-client` supports them.
-//! * The other operations that need the `svn-client` working copy layer (checkout, status, diff,
-//!   update, switch, commit, depth, remote status) are not wired yet and fail with
+//! * The other operations that need the `svn-client` working copy layer (checkout, update,
+//!   switch, commit, depth) are not wired yet and fail with
 //!   [`ErrorCode::Internal`] carrying a `not wired` message. Each one delegates to a `do_*` method
 //!   in its own file (`wc_status`, `sync`, `commit`, `local`), so wiring one area later touches
 //!   only that file.
@@ -46,6 +48,7 @@ mod remote;
 mod remote_edit;
 mod sync;
 mod text;
+mod wc_map;
 mod wc_status;
 
 use crate::engine::text::percent_decode;
@@ -78,6 +81,10 @@ pub trait SessionConnector: Send + Sync {
     /// The default ignores `options` and calls [`SessionConnector::connect`], so the session is
     /// rooted at the repository root; connectors that can anchor a session at `url` or open it
     /// without prompting override this.
+    ///
+    /// Real connectors MUST override it: the default cannot honor `options.interactive`, so a
+    /// background call (`interactive == false`) on a connector that keeps the default may still
+    /// prompt for credentials. Only in-memory test connectors may rely on the default.
     async fn connect_with(
         &self,
         url: &RepoUrl,
@@ -174,7 +181,7 @@ impl RealEngine {
 
     /// Context for `svn-client` operations: working copy locks are recorded as owned by this
     /// process, with default client configuration and no progress sink.
-    pub fn client_ctx(&self, ctx: &OpContext) -> svn_client::ClientCtx {
+    pub(crate) fn client_ctx(&self, ctx: &OpContext) -> svn_client::ClientCtx {
         let _ = ctx; // progress and configuration are mapped by the packages that wire operations
         svn_client::ClientCtx::new(self.lock_owner())
     }

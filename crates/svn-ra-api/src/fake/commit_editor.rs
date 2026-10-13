@@ -11,7 +11,7 @@ use svn_types::{
     PropChange, RelPath, RepoDisplayPath, RepoUrl, Result, Revnum, SvnError, Timestamp,
 };
 
-use super::repo::{FakeChange, Node, RepoState, Tree, apply_change};
+use super::repo::{FakeChange, FakeMergeFault, Node, RepoState, Tree, apply_change};
 use crate::commit::{CommitEditor, CommitInfo, CommitObserver, ReplayableSource};
 
 pub(super) struct FakeCommitEditor {
@@ -48,6 +48,14 @@ fn err(code: ErrorCode, msg: impl Into<String>) -> SvnError {
     SvnError::new(code, msg)
 }
 
+/// The error of a `MERGE` whose answer was lost.
+fn lost_merge(txn: &str) -> SvnError {
+    err(
+        ErrorCode::CommitOutcomeUnknown,
+        format!("the result of merging transaction '{txn}' is unknown (injected)"),
+    )
+}
+
 impl FakeCommitEditor {
     fn id(&mut self) -> u32 {
         self.next_id += 1;
@@ -70,10 +78,15 @@ impl FakeCommitEditor {
 
     /// Rejects edits to nodes changed after `base_rev` and to locks held without a token.
     fn check_open(&self, path: &RelPath, base_rev: Option<Revnum>) -> Result<()> {
-        let node = self
-            .tree
-            .get(path)
-            .ok_or_else(|| err(ErrorCode::PathNotFound, format!("{path} not found")))?;
+        // svn reports a node missing from the transaction (deleted on the server) as out of
+        // date: E155011 wrapping E160013 (`fixup_commit_error`).
+        let node = self.tree.get(path).ok_or_else(|| {
+            err(
+                ErrorCode::OutOfDate,
+                format!("'{path}' is out of date: not found in the repository"),
+            )
+            .with_svn_code(160_013)
+        })?;
         if let Some(b) = base_rev
             && node.created_rev > b
         {
@@ -219,8 +232,13 @@ impl FakeCommitEditor {
     }
 
     fn require_new(&self, path: &RelPath) -> Result<()> {
+        // Added on the server too: svn reports E155011 wrapping E160020 (path already exists).
         if self.tree.contains_key(path) {
-            return Err(err(ErrorCode::Internal, format!("{path} already exists")));
+            return Err(err(
+                ErrorCode::OutOfDate,
+                format!("'{path}' is out of date: it already exists in the repository"),
+            )
+            .with_svn_code(160_020));
         }
         Ok(())
     }
@@ -383,6 +401,15 @@ impl CommitEditor for FakeCommitEditor {
             guard(&this.state).txns.remove(&this.txn);
             return Err(e);
         }
+        if let Err(e) = this.observer.on_merge_sending(&this.txn) {
+            // The journal refused: no MERGE without its record.
+            guard(&this.state).txns.remove(&this.txn);
+            return Err(e);
+        }
+        let fault = guard(&this.state).merge_fault.take();
+        if fault == Some(FakeMergeFault::LostBeforeMerge) {
+            return Err(lost_merge(&this.txn));
+        }
         let info = {
             let mut st = guard(&this.state);
             if !st.txns.remove(&this.txn) {
@@ -425,6 +452,9 @@ impl CommitEditor for FakeCommitEditor {
                 post_commit_err: None,
             }
         };
+        if fault == Some(FakeMergeFault::LostAfterMerge) {
+            return Err(lost_merge(&this.txn));
+        }
         if let Err(e) = this.observer.on_merged(&info) {
             let mut e2 = SvnError::new(
                 e.code,
