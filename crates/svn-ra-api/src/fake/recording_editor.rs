@@ -181,11 +181,19 @@ fn live(s: &mut Shared, call: &str) -> Result<()> {
 }
 
 /// A new child may only be created under the innermost open directory (depth-first walk).
-fn check_parent(s: &mut Shared, parent: DirId, call: &str) -> Result<()> {
+fn check_parent(s: &mut Shared, parent: DirId, path: &RelPath, call: &str) -> Result<()> {
     if s.stack.last() != Some(&parent) {
         return Err(violation(
             s,
             format!("{call} under {parent:?}, which is not the innermost open directory"),
+        ));
+    }
+    // The path must be a direct child of the parent directory it is announced under.
+    let expected = s.dirs.get(&parent).map(|d| d.path.clone());
+    if path.parent() != expected {
+        return Err(violation(
+            s,
+            format!("{call}({path}) is not a child of {parent:?}"),
         ));
     }
     Ok(())
@@ -198,7 +206,7 @@ fn new_id(s: &mut Shared) -> u32 {
 
 fn open_dir(s: &mut Shared, call: &str, path: &RelPath, parent: DirId) -> Result<DirId> {
     live(s, call)?;
-    check_parent(s, parent, call)?;
+    check_parent(s, parent, path, call)?;
     let id = DirId(new_id(s));
     s.dirs.insert(
         id,
@@ -213,7 +221,7 @@ fn open_dir(s: &mut Shared, call: &str, path: &RelPath, parent: DirId) -> Result
 
 fn open_file(s: &mut Shared, call: &str, path: &RelPath, parent: DirId) -> Result<FileId> {
     live(s, call)?;
-    check_parent(s, parent, call)?;
+    check_parent(s, parent, path, call)?;
     let id = FileId(new_id(s));
     s.files.insert(
         id,
@@ -263,6 +271,12 @@ impl DeltaEditor for RecordingEditor {
     fn set_target_revision(&mut self, rev: Revnum) -> Result<()> {
         let mut s = self.g();
         live(&mut s, "set_target_revision")?;
+        if s.root_opened {
+            return Err(violation(
+                &mut s,
+                "set_target_revision after open_root".into(),
+            ));
+        }
         s.events.push(EditorEvent::SetTargetRevision(rev));
         Ok(())
     }
@@ -290,7 +304,7 @@ impl DeltaEditor for RecordingEditor {
     fn delete_entry(&mut self, path: &RelPath, _rev: Option<Revnum>, parent: DirId) -> Result<()> {
         let mut s = self.g();
         live(&mut s, "delete_entry")?;
-        check_parent(&mut s, parent, "delete_entry")?;
+        check_parent(&mut s, parent, path, "delete_entry")?;
         s.contents.retain(|k, _| !k.starts_with(path));
         s.events.push(EditorEvent::DeleteEntry(path.clone()));
         Ok(())
@@ -370,7 +384,7 @@ impl DeltaEditor for RecordingEditor {
     fn absent_directory(&mut self, path: &RelPath, parent: DirId) -> Result<()> {
         let mut s = self.g();
         live(&mut s, "absent_directory")?;
-        check_parent(&mut s, parent, "absent_directory")?;
+        check_parent(&mut s, parent, path, "absent_directory")?;
         s.events.push(EditorEvent::AbsentDirectory(path.clone()));
         Ok(())
     }
@@ -445,7 +459,7 @@ impl DeltaEditor for RecordingEditor {
     fn absent_file(&mut self, path: &RelPath, parent: DirId) -> Result<()> {
         let mut s = self.g();
         live(&mut s, "absent_file")?;
-        check_parent(&mut s, parent, "absent_file")?;
+        check_parent(&mut s, parent, path, "absent_file")?;
         s.events.push(EditorEvent::AbsentFile(path.clone()));
         Ok(())
     }

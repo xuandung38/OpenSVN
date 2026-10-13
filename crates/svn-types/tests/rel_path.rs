@@ -51,10 +51,34 @@ fn rejects_backslash_colon_nul_and_controls() {
 
 #[test]
 fn rejects_admin_dir_any_case_any_depth() {
-    for s in [".svn", ".SVN", ".sVn/pristine", "a/.svn/wc.db", "a/b/.Svn"] {
+    for s in [
+        ".svn",
+        ".SVN",
+        ".sVn/pristine",
+        "a/.svn/wc.db",
+        "a/b/.Svn",
+        // Unicode case folding: LATIN SMALL LETTER LONG S folds to s.
+        ".\u{017F}vn/wc.db",
+        ".\u{017F}VN",
+        // NFKC: fullwidth forms.
+        "\u{FF0E}svn",
+        ".\u{FF53}\u{FF56}\u{FF4E}",
+        // Ignorable code points that file systems drop.
+        ".s\u{200C}vn",
+        ".\u{FEFF}svn",
+        ".sv\u{202E}n",
+        // NTFS short name of the admin directory.
+        "SVN~1",
+        "svn~12/x",
+        "a/Svn~3",
+        "\u{FF33}\u{FF36}\u{FF2E}~1",
+    ] {
         assert!(rejected(s), "{s:?} must be rejected");
     }
     assert!(RelPath::from_server(".svnignore").is_ok());
+    for ok in ["svn~", "svn~x", "svn~1a", "xsvn~1", "svn-1", "k.svn"] {
+        assert!(RelPath::from_server(ok).is_ok(), "{ok:?} must be accepted");
+    }
     assert!(RelPath::from_server("svn").is_ok());
 }
 
@@ -80,10 +104,39 @@ fn rejects_windows_reserved_names_on_every_platform() {
     ] {
         assert!(rejected(s), "{s:?} must be rejected");
     }
-    for s in [
-        "COM0", "COM10", "LPT", "CONSOLE", "NULL", "xCON", "a.CON", "COMM1",
-    ] {
+    for s in ["COM10", "LPT", "CONSOLE", "NULL", "xCON", "a.CON", "COMM1"] {
         assert!(RelPath::from_server(s).is_ok(), "{s:?} must be accepted");
+    }
+}
+
+#[test]
+fn rejects_windows_invalid_characters_and_zero_devices() {
+    for s in [
+        "a<b", "a>b", "a\"b", "a|b", "a?b", "a*b", "COM0", "lpt0.txt",
+    ] {
+        assert!(rejected(s), "{s:?} must be rejected");
+    }
+}
+
+#[test]
+fn every_constructor_rejects_separators_drives_and_absolute_paths() {
+    for s in [
+        "a\\b",
+        "..\\..\\evil",
+        "C:\\Windows",
+        "C:",
+        "c:/x",
+        "a/C:",
+        "\\\\srv\\share\\f",
+        "//srv/share/f",
+        "/abs/path",
+        "a:b",
+    ] {
+        assert!(RelPath::new(s).is_err(), "new({s:?}) must be rejected");
+        assert!(
+            RelPath::root().child(s).is_err(),
+            "child({s:?}) must be rejected"
+        );
     }
 }
 
@@ -111,7 +164,6 @@ fn normalizes_to_nfc() {
 #[test]
 fn internal_constructor_is_lenient_about_names_but_not_structure() {
     assert!(RelPath::new("").expect("root").is_root());
-    assert!(RelPath::new("a:b").is_ok());
     assert!(RelPath::new("CON").is_ok());
     assert!(RelPath::new("a/../b").is_err());
     assert!(RelPath::new("/a").is_err());

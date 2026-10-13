@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wc-close"
+description = "Enables the wc_close command without any pre-configured scope."
+commands.allow = ["wc_close"]
+
+[[permission]]
+identifier = "deny-wc-close"
+description = "Denies the wc_close command without any pre-configured scope."
+commands.deny = ["wc_close"]
