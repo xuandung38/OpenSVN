@@ -36,6 +36,8 @@ const SQLITE_IOERR_LOCK: std::ffi::c_int = 3850;
 /// timeout becomes [`ErrorCode::WcBusy`].
 pub fn sql_err(err: rusqlite::Error) -> SvnError {
     use rusqlite::ErrorCode as Sqlite;
+    // Windows-only path, UNVERIFIED: CI is skipped, so this has only been reasoned about and was
+    // last observed failing on Windows before the mapping existed.
     // A sharing violation while another process holds the journal or lock file (typically a
     // Windows peer that does not use svn's TRUNCATE journal mode) is contention, not a failure.
     let sharing_violation = matches!(
@@ -51,7 +53,13 @@ pub fn sql_err(err: rusqlite::Error) -> SvnError {
         Some(Sqlite::PermissionDenied | Sqlite::ReadOnly) => ErrorCode::PermissionDenied,
         _ => ErrorCode::Internal,
     };
-    SvnError::new(code, format!("wc.db: {err}"))
+    let hint = if sharing_violation {
+        " (another process holds the database files; a network filesystem without file locking \
+         support can cause this too, in which case retrying will not help)"
+    } else {
+        ""
+    };
+    SvnError::new(code, format!("wc.db: {err}{hint}"))
 }
 
 /// Opens an existing database for probing and normal use: read/write when the file allows it
