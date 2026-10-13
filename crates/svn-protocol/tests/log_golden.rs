@@ -59,15 +59,15 @@ fn assert_matches_svn_cli(name: &str) {
             "{name} r{}",
             row.rev
         );
-        let mut ours: Vec<_> = e
+        let mut ours: Vec<_> = item
             .changed_paths
             .iter()
             .map(|p| {
                 (
                     action_letter(p.action).to_owned(),
                     kind_word(p.kind).to_owned(),
-                    p.path.clone(),
-                    p.copy_from.as_ref().map(|c| c.0.clone()),
+                    p.path.as_str().to_owned(),
+                    p.copy_from.as_ref().map(|c| c.0.as_str().to_owned()),
                     p.copy_from.as_ref().map(|c| c.1.0.to_string()),
                 )
             })
@@ -126,22 +126,20 @@ fn copy_source_is_reported() {
     let all = parse_log(&load("log/root-with-copy").resp_body).unwrap();
     let copied = all
         .iter()
-        .flat_map(|i| &i.entry.changed_paths)
+        .flat_map(|i| &i.changed_paths)
         .find(|p| p.copy_from.is_some())
         .expect("the capture contains a copy");
     assert_eq!(copied.action, ChangeAction::Added);
-    assert_eq!(copied.path, "/branches/b1");
-    assert_eq!(
-        copied.copy_from.as_ref().unwrap(),
-        &("/trunk/src".to_owned(), Revnum(4))
-    );
+    assert_eq!(copied.path.as_str(), "/branches/b1");
+    let (src, rev) = copied.copy_from.as_ref().unwrap();
+    assert_eq!((src.as_str(), *rev), ("/trunk/src", Revnum(4)));
 }
 
 #[test]
 fn entry_without_changed_paths_or_message() {
     let items = parse_log(&load("log/single-rev-no-paths").resp_body).unwrap();
     assert_eq!(items.len(), 1);
-    assert!(items[0].entry.changed_paths.is_empty());
+    assert!(items[0].changed_paths.is_empty());
     assert_eq!(items[0].entry.message, None);
     assert_eq!(items[0].entry.rev, Revnum(2));
 }
@@ -204,7 +202,9 @@ fn hostile_or_broken_documents_are_errors() {
         r#"<S:added-path node-kind="file">/trunk/aux.c</S:added-path><D:version-name>1</D:version-name>"#,
     );
     assert_eq!(
-        parse_log(ok.as_bytes()).unwrap()[0].entry.changed_paths[0].path,
+        parse_log(ok.as_bytes()).unwrap()[0].changed_paths[0]
+            .path
+            .as_str(),
         "/trunk/aux.c"
     );
 }
@@ -242,4 +242,26 @@ proptest! {
     fn arbitrary_garbage_never_panics(data in proptest::collection::vec(any::<u8>(), 0..400)) {
         let _ = parse_log(&data);
     }
+}
+
+#[test]
+fn display_paths_are_lenient_but_stay_out_of_the_contract_until_asked() {
+    use svn_protocol::RepoDisplayPath;
+    let items = parse_log(&load("log/head-verbose").resp_body).unwrap();
+    assert!(
+        items.iter().all(|i| i.entry.changed_paths.is_empty()),
+        "paths live only in the display-only field"
+    );
+    let item = items
+        .into_iter()
+        .find(|i| i.entry.rev == Revnum(2))
+        .unwrap();
+    let n = item.changed_paths.len();
+    let entry = item.into_log_entry();
+    assert_eq!(entry.changed_paths.len(), n);
+    assert!(entry.changed_paths.iter().all(|p| p.path.starts_with('/')));
+    // Windows-reserved and colon names display fine, and need an explicit step to become a RelPath.
+    let p = RepoDisplayPath::parse("/trunk/aux.c:stream").unwrap();
+    assert!(svn_types::RelPath::from_server(p.as_str().trim_start_matches('/')).is_err());
+    assert!(RepoDisplayPath::parse("/a/../b").is_err());
 }

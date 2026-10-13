@@ -19,7 +19,7 @@ fn rel(p: &str) -> RelPath {
 fn lock_response() {
     let f = load("locks/lock-ok");
     let lock = parse_lock_response(&rel("trunk/a.txt"), &f.head(), &f.resp_body).unwrap();
-    assert_eq!(lock.path, "/trunk/a.txt");
+    assert_eq!(lock.path.as_str(), "/trunk/a.txt");
     assert_eq!(lock.owner, "alice");
     assert_eq!(lock.comment.as_deref(), Some("locking <it>"));
     assert!(lock.token.starts_with("opaquelocktoken:"));
@@ -99,7 +99,7 @@ fn get_lock_propfind() {
     let lock = parse_get_lock_response(&rel("trunk/a.txt"), &f.head(), &f.resp_body)
         .unwrap()
         .unwrap();
-    assert_eq!(lock.path, "/trunk/a.txt");
+    assert_eq!(lock.path.as_str(), "/trunk/a.txt");
     assert_eq!(lock.owner, "alice");
     assert_eq!(lock.comment.as_deref(), Some("locking <it>"));
     assert!(lock.token.starts_with("opaquelocktoken:"));
@@ -135,7 +135,7 @@ fn get_locks_report() {
     let f = load("locks/get-locks-report");
     let locks = parse_get_locks(&f.resp_body).unwrap();
     assert_eq!(locks.len(), 1);
-    assert_eq!(locks[0].path, "/trunk/a.txt");
+    assert_eq!(locks[0].path.as_str(), "/trunk/a.txt");
     assert_eq!(locks[0].owner, "alice");
     assert_eq!(locks[0].comment.as_deref(), Some("locking <it>"));
     assert!(locks[0].token.starts_with("opaquelocktoken:"));
