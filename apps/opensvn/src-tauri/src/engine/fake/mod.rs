@@ -146,6 +146,9 @@ impl EngineFacade for FakeEngine {
     }
 
     async fn ensure_authenticated(&self, wc: &WcRef, ctx: &OpContext) -> EngineResult<()> {
+        if !ctx.interactive {
+            return Ok(()); // background work never prompts
+        }
         let root = self.with_wc(&wc.root, |w| Ok(w.repo_root_url.clone()))?;
         self.repo_by_root(&root)?
             .ensure_authenticated(&ctx.cancel)

@@ -60,6 +60,7 @@ pub async fn wc_rename(
 pub async fn wc_open(state: State<'_, AppState>, wc_id: WcId) -> Result<WorkingCopy, AppError> {
     guard(async {
         let wc = state.open_wc(&wc_id).await?;
+        state.wcs.mark_open(&wc_id);
         let resolved = state.wcs.resolve(&wc_id)?;
         let publisher = std::sync::Arc::clone(&state.status);
         let scan = resolved.clone();
@@ -169,22 +170,7 @@ pub async fn status_remote(
             Some(wc_id.clone()),
             title,
             move |ctx| async move {
-                let wc = resolved.wc.clone();
-                let scan = resolved
-                    .actor
-                    .read(|| {
-                        let (engine, wc, ctx) =
-                            (std::sync::Arc::clone(&engine), wc.clone(), ctx.clone());
-                        async move {
-                            engine
-                                .status_remote(&wc, &ctx)
-                                .await
-                                .map_err(|e| AppError::from(&e))
-                        }
-                    })
-                    .await?;
-                wcs.set_incoming(&wc_id, scan.incoming);
-                publisher.apply_remote(&wc_id, &scan).await?;
+                crate::status::run_remote_check(&engine, &publisher, &wcs, &resolved, &ctx).await?;
                 Ok(OpResult::Done)
             },
         ))

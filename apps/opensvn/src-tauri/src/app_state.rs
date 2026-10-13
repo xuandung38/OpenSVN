@@ -2,7 +2,7 @@
 
 use std::future::Future;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use opensvn_ipc::{AppError, OpResult, OperationHandle, OperationKind, WcId};
 use svn_types::SvnError;
@@ -14,7 +14,7 @@ use crate::ops::{AppEvents, OperationManager};
 use crate::path_grants::{PathGrants, PathPicker};
 use crate::programs::{ProgramPicker, ProgramService};
 use crate::settings::{SettingsService, system_locale};
-use crate::status::{StatusPublisher, StatusService, StatusTiming};
+use crate::status::{IncomingPoller, PollerDeps, StatusPublisher, StatusService, StatusTiming};
 use crate::wc::{ResolvedWc, WcRegistry};
 
 /// Everything needed to build the state; tests substitute the engine, events and dialogs.
@@ -53,6 +53,8 @@ pub struct AppState {
     pub auth: Arc<AuthBroker>,
     /// File watchers of open working copies.
     pub watchers: Arc<StatusService>,
+    /// Periodic update check (started after the window exists).
+    pub poller: Mutex<Option<IncomingPoller>>,
     /// Path grants minted by native dialogs and drops.
     pub grants: Arc<PathGrants>,
     /// Native file and folder dialogs.
@@ -85,6 +87,7 @@ impl AppState {
             Arc::new(NoSecretStore),
         ));
         Ok(Self {
+            poller: Mutex::new(None),
             auth,
             watchers,
             grants: Arc::new(PathGrants::new()),
@@ -189,6 +192,25 @@ impl AppState {
         self.ops.spawn(kind, None, title, move |ctx| async move {
             f(engine, ctx).await.map_err(|e| AppError::from(&e))
         })
+    }
+
+    /// Starts the periodic update check, replacing a running one. `period` overrides the setting
+    /// (tests).
+    pub fn start_poller(&self, period: Option<std::time::Duration>) {
+        let poller = IncomingPoller::start(PollerDeps {
+            engine: Arc::clone(&self.engine),
+            publisher: Arc::clone(&self.status),
+            wcs: Arc::clone(&self.wcs),
+            settings: self.settings.subscribe(),
+            period_override: period,
+        });
+        let mut slot = self
+            .poller
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(old) = slot.replace(poller) {
+            old.stop();
+        }
     }
 
     /// Opens a working copy (engine recovery included). Locks that need the user (foreign or

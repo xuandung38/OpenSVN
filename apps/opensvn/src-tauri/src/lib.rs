@@ -86,6 +86,7 @@ async fn finish_startup<R: tauri::Runtime>(handle: tauri::AppHandle<R>) {
         let _ = state.wcs.add_existing(&demo_root.to_string_lossy()).await;
     }
     state.recover_all().await;
+    state.start_poller(None);
 }
 
 /// The generated app context (config, capabilities, assets). The macro may expand only once per
