@@ -114,15 +114,33 @@ impl RealEngine {
     }
 }
 
-/// Working copy write lock on one directory, held by an open handle.
+/// Working copy write lock on one directory, held by an open handle. Released by
+/// [`HeldDir::release`]; when the operation is cancelled or its future dropped before that, the
+/// guard releases the lock on drop, so an abandoned lock/unlock never leaves the directory locked.
 struct HeldDir {
     db: Arc<WcDb>,
     dir: RelPath,
+    /// Still to be released (cleared by `release`).
+    armed: bool,
 }
 
 impl HeldDir {
-    async fn release(self) -> EngineResult<()> {
-        blocking(move || self.db.wc_lock_release(&self.dir)).await
+    async fn release(mut self) -> EngineResult<()> {
+        self.armed = false;
+        let (db, dir) = (self.db.clone(), self.dir.clone());
+        blocking(move || db.wc_lock_release(&dir)).await
+    }
+}
+
+impl Drop for HeldDir {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // A short local database write; run in place so the lock is gone when the drop returns.
+        if let Err(e) = self.db.wc_lock_release(&self.dir) {
+            tracing::warn!(dir = %self.dir, error = %e, "could not release an abandoned lock");
+        }
     }
 }
 
@@ -147,7 +165,11 @@ impl RealEngine {
             let db = Arc::new(open_db(&root)?);
             db.set_lock_owner(owner);
             db.wc_lock_obtain(&dir, 0, ObtainMode::Normal)?;
-            Ok(HeldDir { db, dir })
+            Ok(HeldDir {
+                db,
+                dir,
+                armed: true,
+            })
         })
         .await
     }

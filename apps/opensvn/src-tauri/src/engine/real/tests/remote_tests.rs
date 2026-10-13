@@ -643,6 +643,77 @@ async fn branch_urls_are_percent_encoded_and_unsafe_names_skipped() {
     }
 }
 
+/// Drives `op` until the working copy write lock is taken, then drops it mid-operation.
+async fn drop_while_the_directory_is_locked<F: std::future::Future>(root: &Path, op: F) {
+    let mut op = Box::pin(op);
+    for _ in 0..500 {
+        tokio::select! {
+            _ = &mut op => panic!("the operation was expected to hang"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+        }
+        if count_rows(root, "wc_lock") == 1 {
+            drop(op);
+            // Dropped while the lock was still being taken, the guard is dropped by the database
+            // thread as soon as that finishes: allow it a moment.
+            for _ in 0..500 {
+                if count_rows(root, "wc_lock") == 0 {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("the directory lock outlived the dropped operation");
+        }
+    }
+    panic!("the directory lock was never taken");
+}
+
+#[tokio::test]
+async fn a_dropped_working_copy_lock_or_unlock_releases_the_directory_lock() {
+    use std::sync::Arc;
+
+    use super::support::{ScriptedConnector, ScriptedSession, fixture_on, standard_repo};
+    let repo = standard_repo();
+    let session = Arc::new(ScriptedSession::new(repo.clone(), None));
+    let f = fixture_on(
+        repo,
+        Arc::new(ScriptedConnector(session.clone())),
+        Arc::new(crate::engine::real::UnwiredRecovery),
+    );
+    let (_tmp, root) = make_wc(1);
+    add_base_file(&root, "README.md", "trunk/README.md", 1);
+    let scope = LockScope::Wc {
+        wc: wc_ref(&root),
+        paths: vec!["README.md".into()],
+    };
+    session
+        .hang_locks
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    drop_while_the_directory_is_locked(&root, f.engine.lock(&scope, None, false, &ctx())).await;
+    assert_eq!(
+        count_rows(&root, "wc_lock"),
+        0,
+        "released by the lock guard"
+    );
+    assert_eq!(count_rows(&root, "lock"), 0);
+
+    drop_while_the_directory_is_locked(&root, f.engine.unlock(&scope, false, &ctx())).await;
+    assert_eq!(
+        count_rows(&root, "wc_lock"),
+        0,
+        "released by the unlock guard"
+    );
+
+    // The directory is usable again: a normal lock and unlock go through.
+    session
+        .hang_locks
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    f.engine.lock(&scope, None, false, &ctx()).await.unwrap();
+    assert_eq!(count_rows(&root, "lock"), 1);
+    f.engine.unlock(&scope, false, &ctx()).await.unwrap();
+    assert_eq!(count_rows(&root, "wc_lock"), 0);
+}
+
 /// Revision diffs apply the same `svn_diff` display budget as the fake engine: over it the
 /// sides are dropped and `too_complex` is set, unless `full_text` asks for them (external tool).
 #[tokio::test]
