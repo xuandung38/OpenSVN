@@ -3,7 +3,7 @@ resolver = "3"
 # Glob members: new crates join without editing this file. The app crate is listed explicitly
 # because cargo rejects a glob that matches nothing. xtask and tests/compat are the dev tooling
 # crates (compat harness).
-members = ["crates/*", "apps/opensvn/src-tauri", "xtask", "tests/compat"]
+members = ["crates/*", "apps/opensvn/src-tauri", "xtask", "tests/compat", "tests/svn-oracle"]
 
 [workspace.package]
 version = "0.0.0"
@@ -68,8 +68,15 @@ notify = "=8.2.0"
 
 # network and credentials
 reqwest = { version = "=0.13.5", default-features = false }
+rustls = { version = "=0.23.45", default-features = false }
 rustls-platform-verifier = "=0.7.1"
+sha2 = "=0.11.0"
+x509-parser = "=0.18.1"
+tracing-subscriber = { version = "=0.3.23", default-features = false }
 keyring-core = "=1.0.1"
+apple-native-keyring-store = "=1.0.2"
+windows-native-keyring-store = "=1.1.0"
+zbus-secret-service-keyring-store = "=1.0.1"
 
 # desktop app and IPC contract (specta is pre-release: keep the exact pins in step)
 # `common-controls-v6` is off: it makes every Windows binary that links tauri (including unit test
@@ -88,4 +95,10 @@ proptest = "=1.12.0"
 # Failpoints are inert unless a crate enables its own `failpoints` feature (`fail/failpoints`).
 fail = "=0.5.1"
 insta = "=1.49.0"
+wiremock = "=0.6.5"
+rcgen = "=0.14.10"
+tokio-rustls = { version = "=0.26.5", default-features = false }
+http-body-util = "=0.1.5"
+hyper = "=1.12.0"
+hyper-util = "=0.1.21"
 criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
