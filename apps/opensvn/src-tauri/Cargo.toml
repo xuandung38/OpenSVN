@@ -91,6 +91,9 @@ real-engine = ["dep:svn-wc", "dep:svn-client", "dep:svn-delta", "dep:md-5", "dep
 negotiate-gssapi = ["svn-ra/negotiate-gssapi"]
 # Exposes `engine::conformance`, the engine-independent test suite every `EngineFacade` must pass.
 engine-conformance = []
+# Crash-injection points of the working copy layer, for the real engine's crash recovery tests
+# (`cargo test -p opensvn --features failpoints`). Never enabled in a release build.
+failpoints = ["real-engine", "svn-client/failpoints"]
 
 [dev-dependencies]
 # Paused clock for deterministic select-ordering tests.
@@ -105,3 +108,7 @@ http-body-util.workspace = true
 rcgen.workspace = true
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 tokio-rustls = { workspace = true, features = ["ring", "tls12"] }
+# Native svn 1.15 for the real engine's oracle tests (skipped when it is missing).
+opensvn-svn-oracle = { path = "../../../tests/svn-oracle" }
+# Configures the failpoints of the `failpoints` feature in tests (inert without it).
+fail.workspace = true

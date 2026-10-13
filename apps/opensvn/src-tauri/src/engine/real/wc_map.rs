@@ -128,6 +128,7 @@ mod tests {
             size: Some(3),
             remote: None,
             switched: false,
+            file_external: false,
             depth: Depth::Unknown,
             base_rev: Some(Revnum(1)),
         }

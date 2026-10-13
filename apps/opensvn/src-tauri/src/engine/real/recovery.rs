@@ -6,67 +6,65 @@
 //!    dead **and** the `.svn/tmp/opensvn-lock-*` marker of that exact row (directory and levels)
 //!    exists. Every other row (svn CLI, TortoiseSVN, an unknown owner, a record without marker)
 //!    stays and is reported for the user to decide.
-//! 2. When no foreign lock is left, unfinished work queue items are run.
-//! 3. An interrupted commit is cleaned up from its journal: a leaked server transaction is
-//!    deleted, a merged commit is finalized in the working copy (only when no foreign lock and no
-//!    unfinished work is left).
+//! 2. When no foreign lock is left, unfinished work queue items are run under the working copy
+//!    lock ([`RecoveryHooks::run_work_queue`]; [`ClientRecovery`] in the app).
+//! 3. Interrupted commits of this working copy are settled from the `svn-client` commit
+//!    journals below `<state_dir>/commit-journals/` ([`svn_client::commit::recover_wc_commits`])
+//!    over an unattended session (opening never prompts): a merged commit is finalized, a leaked
+//!    transaction deleted, a commit whose `MERGE` outcome is unknown looked up in the log.
+//!    Whatever cannot be settled stays on disk and is reported for the user. Nothing is done
+//!    while a foreign lock or unfinished work is left.
 //!
-//! Recovery that needs the working copy layer goes through [`RecoveryHooks`]; a hook that fails
-//! leaves the work in place and reports the working copy for the user to clean up.
+//! The commit journal of earlier app builds (`<state_dir>/commit-journal/<sha1>.json`) is no
+//! longer read: a file left for this working copy is moved aside to `<file>.legacy` (never
+//! deleted) and the working copy is reported for the user, who checks the repository log.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use svn_types::{ErrorCode, LockOwnershipStore, RepoUrl, SvnError};
+use sha1::{Digest, Sha1};
+use svn_client::commit::WcCommitRecovery;
+use svn_client::commit::journal::{JournalLoadError, JournalStore};
+use svn_ra_api::RaSession;
+use svn_types::{ErrorCode, LockOwnershipStore, RepoUrl};
 use svn_wc::WcDb;
 use svn_wc::db::{LockOwner, sql_err};
 
-use super::RealEngine;
-use super::journal::{JournalLoadError, JournalPhase, JournalRecord};
 use super::wc_read::{blocking, describe, open_db};
+use super::{ConnectOptions, RealEngine};
 use crate::engine::context::OpContext;
 use crate::engine::facade::{EngineResult, RecoveryReport, WcOpened};
 
-/// Steps of crash recovery that need the working copy layer (`svn-client`).
+/// Directory below the state directory that holds the `svn-client` commit journals.
+const JOURNAL_DIR: &str = "commit-journals";
+/// Directory of the commit journal written by earlier app builds.
+const LEGACY_JOURNAL_DIR: &str = "commit-journal";
+/// How many set-aside copies of one legacy journal may exist.
+const LEGACY_SLOTS: usize = 8;
+
+/// Steps of crash recovery that need the working copy layer.
 #[async_trait]
 pub trait RecoveryHooks: Send + Sync {
-    /// Runs the unfinished work queue items of `db`. `Ok` means the queue is empty afterwards.
-    async fn run_work_queue(&self, db: &WcDb, ctx: &OpContext) -> EngineResult<()>;
-
-    /// Brings the working copy up to date for a commit the server merged as `record`'s revision.
-    async fn finalize_commit(
-        &self,
-        db: &WcDb,
-        record: &JournalRecord,
-        ctx: &OpContext,
-    ) -> EngineResult<()>;
+    /// Runs the unfinished work queue items of `db` (whose lock owner is set). `Ok` means the
+    /// queue is empty afterwards.
+    async fn run_work_queue(&self, db: &Arc<WcDb>, ctx: &OpContext) -> EngineResult<()>;
 }
 
-/// Hooks used until the working copy layer is wired: both steps fail, so the working copy is
-/// reported for cleanup and its work stays on disk untouched.
+/// Recovery through `svn-client`: the work queue runs under the working copy write lock.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct UnwiredRecovery;
+pub struct ClientRecovery;
 
 #[async_trait]
-impl RecoveryHooks for UnwiredRecovery {
-    async fn run_work_queue(&self, _db: &WcDb, _ctx: &OpContext) -> EngineResult<()> {
-        Err(SvnError::new(
-            ErrorCode::Internal,
-            "not wired: running the work queue needs the svn-client working copy operations",
-        ))
-    }
-
-    async fn finalize_commit(
-        &self,
-        _db: &WcDb,
-        _record: &JournalRecord,
-        _ctx: &OpContext,
-    ) -> EngineResult<()> {
-        Err(SvnError::new(
-            ErrorCode::Internal,
-            "not wired: finalizing a commit needs the svn-client working copy operations",
-        ))
+impl RecoveryHooks for ClientRecovery {
+    async fn run_work_queue(&self, db: &Arc<WcDb>, ctx: &OpContext) -> EngineResult<()> {
+        let (db, cancel) = (db.clone(), ctx.cancel.clone());
+        blocking(move || {
+            svn_client::local::lock::with_wc_lock(&db, &cancel, || {
+                svn_client::wc::run_work_queue(&db, &cancel).map(|_| ())
+            })
+        })
+        .await
     }
 }
 
@@ -133,6 +131,130 @@ fn queue_is_pending(db: &WcDb) -> EngineResult<bool> {
     })
 }
 
+/// What the commit journals hold for one working copy.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct JournalScan {
+    /// A journal of this working copy, or a file whose working copy cannot be known (unreadable,
+    /// corrupt, unknown format without a root): recovery has something to do or to report.
+    relevant: bool,
+    /// One of them may need the repository (no revision recorded, or not readable here).
+    needs_session: bool,
+}
+
+/// Looks at the journals in `dir` without changing anything.
+fn scan_journals(dir: &Path, wcroot: &Path) -> EngineResult<JournalScan> {
+    let store = JournalStore::new(dir);
+    let mut scan = JournalScan::default();
+    for path in store.list()? {
+        match JournalStore::load(&path) {
+            Ok(data) if data.wcroot == wcroot => {
+                scan.relevant = true;
+                scan.needs_session |= data.merged.is_none();
+            }
+            Ok(_) => {}
+            Err(JournalLoadError::UnsupportedVersion {
+                wcroot: Some(other),
+                ..
+            }) if other != wcroot => {}
+            Err(_) => scan.relevant = true,
+        }
+    }
+    Ok(scan)
+}
+
+/// Path of the legacy journal file of the working copy at `wcroot` (the name earlier builds
+/// derived from the canonical root path).
+fn legacy_journal_file(state_dir: &Path, wcroot: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(wcroot).unwrap_or_else(|_| wcroot.to_path_buf());
+    let digest = Sha1::digest(canonical.to_string_lossy().as_bytes());
+    let name: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    state_dir
+        .join(LEGACY_JOURNAL_DIR)
+        .join(format!("{name}.json"))
+}
+
+/// Moves `from` to `to` without ever replacing an existing `to` (hard link, then removal of the
+/// original; a copy into a `create_new` file where hard links are not available). On any error
+/// `from` is left as it was.
+fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    match std::fs::hard_link(from, to) {
+        Ok(()) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            return Err(e);
+        }
+        Err(_) => {
+            let data = std::fs::read(from)?;
+            let mut out = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(to)?;
+            if let Err(e) = out.write_all(&data).and_then(|()| out.sync_all()) {
+                drop(out);
+                let _ = std::fs::remove_file(to);
+                return Err(e);
+            }
+        }
+    }
+    if let Err(e) = std::fs::remove_file(from) {
+        let _ = std::fs::remove_file(to);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Sets the legacy journal `file` aside under the first free name of `<file>.legacy`,
+/// `<file>.legacy.1`, ... Returns the new name; on failure the file stays where it is.
+fn set_legacy_aside(file: &Path) -> std::io::Result<PathBuf> {
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    for n in 0..LEGACY_SLOTS {
+        let aside = match n {
+            0 => file.with_file_name(format!("{name}.legacy")),
+            n => file.with_file_name(format!("{name}.legacy.{n}")),
+        };
+        match move_no_replace(file, &aside) {
+            Ok(()) => return Ok(aside),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "no free name to set the legacy commit journal aside",
+    ))
+}
+
+/// Folds what commit recovery did into the open report: a finalized commit is a recovery; a
+/// journal that stays (outcome unknown, or not processable now) needs the user.
+fn apply_commit_recovery(outcome: &WcCommitRecovery, report: &mut RecoveryReport) {
+    for id in &outcome.aborted {
+        tracing::info!(journal = %id, "interrupted commit cleaned up; it never became a revision");
+    }
+    for id in &outcome.finalized {
+        tracing::info!(journal = %id, "interrupted commit finalized in the working copy");
+    }
+    if !outcome.finalized.is_empty() {
+        add_once(&mut report.recovered, ROOT);
+    }
+    for (id, e) in &outcome.needs_user {
+        tracing::warn!(journal = %id, error = %e, "interrupted commit needs the user");
+    }
+    for (id, e) in &outcome.failed {
+        tracing::warn!(journal = %id, error = %e, "interrupted commit not settled yet; kept");
+    }
+    if !outcome.needs_user.is_empty() || !outcome.failed.is_empty() {
+        add_once(&mut report.needs_user_action, ROOT);
+    }
+}
+
 impl RealEngine {
     pub(super) async fn open_wc_with_recovery(
         &self,
@@ -154,7 +276,7 @@ impl RealEngine {
                 recovery: RecoveryReport::default(),
             });
         }
-        let recovery = self.recover(&db, ctx).await?;
+        let recovery = self.recover(&db, &info.repo_root_url, ctx).await?;
         Ok(WcOpened { info, recovery })
     }
 
@@ -166,7 +288,18 @@ impl RealEngine {
         }
     }
 
-    async fn recover(&self, db: &Arc<WcDb>, ctx: &OpContext) -> EngineResult<RecoveryReport> {
+    /// Directory of the `svn-client` commit journals: the `CommitContext::state_dir` of commits
+    /// and the directory commit recovery reads.
+    pub fn commit_journal_dir(&self) -> PathBuf {
+        self.state_dir.join(JOURNAL_DIR)
+    }
+
+    async fn recover(
+        &self,
+        db: &Arc<WcDb>,
+        repo_root_url: &str,
+        ctx: &OpContext,
+    ) -> EngineResult<RecoveryReport> {
         let (handle, owner) = (db.clone(), self.lock_owner());
         let locks = blocking(move || recover_locks(&handle, owner)).await?;
         let mut report = RecoveryReport {
@@ -180,8 +313,15 @@ impl RealEngine {
         } else {
             !self.recover_work_queue(db, &mut report, ctx).await?
         };
-        self.recover_commit(db, &mut report, locks.foreign_held || work_left, ctx)
-            .await?;
+        self.migrate_legacy_journal(db.wcroot(), &mut report);
+        self.recover_commits(
+            db,
+            repo_root_url,
+            &mut report,
+            locks.foreign_held || work_left,
+            ctx,
+        )
+        .await?;
         Ok(report)
     }
 
@@ -211,109 +351,99 @@ impl RealEngine {
         }
     }
 
-    /// Cleans up after an interrupted commit using its journal. `wc_busy` (a foreign lock or
-    /// unfinished work items) keeps a merged commit from being finalized.
-    async fn recover_commit(
+    /// Sets the journal earlier builds left for this working copy aside (never deleted): this
+    /// build cannot tell from it whether its commit was applied, so the user is asked to check.
+    fn migrate_legacy_journal(&self, wcroot: &Path, report: &mut RecoveryReport) {
+        let file = legacy_journal_file(&self.state_dir, wcroot);
+        if std::fs::symlink_metadata(&file).is_err() {
+            return;
+        }
+        match set_legacy_aside(&file) {
+            Ok(aside) => tracing::warn!(
+                aside = %aside.display(),
+                "commit journal of an earlier app version set aside; check the repository log \
+                 for the interrupted commit"
+            ),
+            Err(e) => tracing::error!(
+                error = %e,
+                file = %file.display(),
+                "commit journal of an earlier app version could not be set aside; left in place"
+            ),
+        }
+        add_once(&mut report.needs_user_action, ROOT);
+    }
+
+    /// Settles the interrupted commits of this working copy from their journals. `wc_busy` (a
+    /// foreign lock or unfinished work items) keeps everything in place for the next open.
+    async fn recover_commits(
         &self,
         db: &Arc<WcDb>,
+        repo_root_url: &str,
         report: &mut RecoveryReport,
         wc_busy: bool,
         ctx: &OpContext,
     ) -> EngineResult<()> {
-        let wc_root = db.wcroot();
-        let record = match self.journals.load(wc_root) {
-            Ok(Some(record)) => record,
-            Ok(None) => return Ok(()),
-            Err(JournalLoadError::Unreadable(e)) => {
-                // Possibly temporary (permissions, another program holding the file): the
-                // journal stays and the next open tries again.
-                tracing::warn!(error = %e, "commit journal could not be read; kept for the next open");
-                add_once(&mut report.needs_user_action, ROOT);
-                return Ok(());
-            }
-            Err(JournalLoadError::UnsupportedVersion { version, error }) => {
-                // Another app version knows what this journal means; this one must not act on it
-                // or move it. Commits stay blocked with the same explanation.
-                tracing::error!(error = %error, version, "commit journal of an unknown format left untouched");
-                add_once(&mut report.needs_user_action, ROOT);
-                return Ok(());
-            }
-            Err(JournalLoadError::Corrupt(e)) => {
-                // A damaged journal would block every later commit: it is moved aside (kept for
-                // diagnosis) and the user is told that a commit was interrupted. It is never
-                // deleted: when it cannot be moved it stays and keeps blocking commits.
-                match self.journals.quarantine(wc_root) {
-                    Ok(aside) => tracing::warn!(
-                        error = %e,
-                        aside = %aside.display(),
-                        "corrupt commit journal set aside"
-                    ),
-                    Err(q) => tracing::error!(
-                        error = %e,
-                        quarantine_error = %q,
-                        "corrupt commit journal could not be set aside; left in place"
-                    ),
-                }
+        let dir = self.commit_journal_dir();
+        let scan = {
+            let (dir, wcroot) = (dir.clone(), db.wcroot().to_path_buf());
+            blocking(move || scan_journals(&dir, &wcroot)).await
+        };
+        let scan = match scan {
+            Ok(scan) => scan,
+            Err(e) => {
+                tracing::warn!(error = %e, "commit journals could not be listed");
                 add_once(&mut report.needs_user_action, ROOT);
                 return Ok(());
             }
         };
-        match &record.phase {
-            JournalPhase::Started => self.clear_journal(wc_root),
-            JournalPhase::TxnCreated { txn } => match self.abort_txn(&record, txn, ctx).await {
-                Ok(()) => self.clear_journal(wc_root),
+        if !scan.relevant {
+            return Ok(());
+        }
+        if wc_busy {
+            tracing::warn!("interrupted commit waits until the working copy is free");
+            add_once(&mut report.needs_user_action, ROOT);
+            return Ok(());
+        }
+        // Opening never prompts: without a usable session only what needs no server is done,
+        // the rest is reported and retried on the next open.
+        let session = if scan.needs_session {
+            match self.unattended_session(repo_root_url, ctx).await {
+                Ok(s) => Some(s),
                 Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
-                Err(e) if e.code == ErrorCode::PathNotFound => {
-                    // The server no longer knows the transaction: it expired, was removed, or
-                    // was merged right before the crash. Retrying can never succeed, so the
-                    // journal goes; whether the commit landed is for the user to check.
-                    tracing::warn!(error = %e, txn, "the abandoned transaction is gone");
-                    self.clear_journal(wc_root);
-                    add_once(&mut report.needs_user_action, ROOT);
-                }
                 Err(e) => {
-                    // Network or sign-in problems are temporary: the journal stays, the next
-                    // open tries again. The working copy itself is untouched.
-                    tracing::warn!(error = %e, txn, "could not delete the abandoned transaction");
+                    tracing::warn!(error = %e, "no repository session for commit recovery");
+                    None
                 }
-            },
-            JournalPhase::Merged { rev } if wc_busy => {
-                tracing::warn!(rev, "merged commit waits until the working copy is free");
-                add_once(&mut report.needs_user_action, ROOT);
             }
-            JournalPhase::Merged { rev } => {
-                match self.recovery.finalize_commit(db, &record, ctx).await {
-                    Ok(()) => {
-                        self.clear_journal(wc_root);
-                        add_once(&mut report.recovered, ROOT);
-                    }
-                    Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
-                    Err(e) => {
-                        tracing::warn!(error = %e, rev, "merged commit is not finalized yet");
-                        add_once(&mut report.needs_user_action, ROOT);
-                    }
-                }
+        } else {
+            None
+        };
+        let outcome =
+            svn_client::commit::recover_wc_commits(&dir, db, session.as_deref(), &ctx.cancel).await;
+        ctx.check()?;
+        match outcome {
+            Ok(outcome) => apply_commit_recovery(&outcome, report),
+            Err(e) => {
+                tracing::warn!(error = %e, "commit recovery failed");
+                add_once(&mut report.needs_user_action, ROOT);
             }
         }
         Ok(())
     }
 
-    async fn abort_txn(
+    /// Session at the repository root that fails with `auth-required` instead of prompting.
+    async fn unattended_session(
         &self,
-        record: &JournalRecord,
-        txn: &str,
+        repo_root_url: &str,
         ctx: &OpContext,
-    ) -> EngineResult<()> {
-        let url = RepoUrl::parse(&record.repo_root_url)?;
-        let session = self.connector.connect(&url, &ctx.cancel).await?;
-        // Sign in first, so a prompt never happens in the middle of the delete.
-        session.ensure_authenticated(&ctx.cancel).await?;
-        session.abort_txn(txn).await
-    }
-
-    fn clear_journal(&self, wc_root: &Path) {
-        if let Err(e) = self.journals.clear(wc_root) {
-            tracing::warn!(error = %e, "could not remove the commit journal");
-        }
+    ) -> EngineResult<Arc<dyn RaSession>> {
+        let url = RepoUrl::parse(repo_root_url)?;
+        let options = ConnectOptions {
+            interactive: false,
+            ..ConnectOptions::root(ctx)
+        };
+        self.connector
+            .connect_with(&url, &options, &ctx.cancel)
+            .await
     }
 }

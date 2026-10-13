@@ -23,6 +23,7 @@ fn base() -> WcStatus {
         size: Some(42),
         remote: None,
         switched: false,
+        file_external: false,
         depth: Depth::Infinity,
         base_rev: Some(Revnum(5)),
     }
@@ -94,6 +95,11 @@ fn status_edge_cases() {
     assert_eq!(
         file_status_from_wc(&s).expect("listed").text,
         NodeStatus::Obstructed
+    );
+    s.text = S::External;
+    assert_eq!(
+        file_status_from_wc(&s).expect("listed").text,
+        NodeStatus::External
     );
     s.text = S::Excluded;
     assert!(file_status_from_wc(&s).is_none());

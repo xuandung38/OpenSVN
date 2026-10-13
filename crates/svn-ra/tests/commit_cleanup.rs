@@ -247,6 +247,11 @@ async fn checked_abort_tells_deleted_from_gone() {
         (400, 404, Some(TxnAbort::Gone)),
         (400, 400, None),
         (500, 404, None),
+        // Forbidden (authz) says nothing about the transaction: never taken as "gone".
+        (403, 404, None),
+        (404, 403, None),
+        (403, 403, None),
+        (404, 500, None),
     ] {
         let (ca, srv) = server_by_path(move |m, path| match (m.as_str(), path) {
             ("DELETE", TXN_PATH) => Reply::status(plain),
