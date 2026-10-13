@@ -239,7 +239,7 @@ pub(crate) fn record_fileinfo(
 // ---------------------------------------------------------------------------------------------
 
 /// `(local_relpath = ?2 OR strict descendant of ?2)`: the node and its subtree.
-fn scope_sql() -> String {
+pub(crate) fn scope_sql() -> String {
     format!(
         "(local_relpath = ?2 OR {})",
         strict_descendant("local_relpath", "?2")

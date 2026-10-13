@@ -145,6 +145,9 @@ pub struct DiffOptions {
     pub ignore_whitespace: bool,
     /// Return full text even above the size limit.
     pub force_large: bool,
+    /// Return both text sides even when the diff exceeds the display budget (`too_complex`).
+    /// Set by `diff_external`, which hands the sides to an external tool instead of diffing them.
+    pub full_text: bool,
 }
 
 /// Outcome of a remote status check.
