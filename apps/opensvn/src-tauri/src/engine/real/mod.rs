@@ -7,8 +7,9 @@
 //! * Operations that need the `svn-client` working copy layer (checkout, status, diff, update,
 //!   switch, commit, revert, add/delete/move, cleanup, depth, format upgrade, resolve, ignore,
 //!   properties, changelists, remote status) are not wired yet and fail with
-//!   [`ErrorCode::Internal`] carrying a `not wired` message; each one is a single method in this
-//!   file, so wiring it later does not touch the rest.
+//!   [`ErrorCode::Internal`] carrying a `not wired` message. Each one delegates to a `do_*` method
+//!   in its own file (`wc_status`, `sync`, `commit`, `local`), so wiring one area later touches
+//!   only that file.
 //!
 //! Repositories are reached through a [`SessionConnector`], so the same engine runs against the
 //! HTTP transport in the app and against the in-memory repository in tests.
@@ -32,13 +33,17 @@ use super::facade::{
 };
 
 mod blame;
+mod commit;
 mod journal;
 mod layout;
+mod local;
 mod locks;
 mod recovery;
 mod remote;
 mod remote_edit;
+mod sync;
 mod text;
+mod wc_status;
 
 use crate::engine::text::percent_decode;
 mod wc_read;
@@ -63,6 +68,58 @@ pub trait SessionConnector: Send + Sync {
         url: &RepoUrl,
         cancel: &CancelToken,
     ) -> Result<Arc<dyn RaSession>, SvnError>;
+
+    /// Connects to the repository containing `url` with explicit options.
+    ///
+    /// The default ignores `options` and calls [`SessionConnector::connect`], so the session is
+    /// rooted at the repository root; connectors that can anchor a session at `url` or open it
+    /// without prompting override this.
+    async fn connect_with(
+        &self,
+        url: &RepoUrl,
+        options: &ConnectOptions,
+        cancel: &CancelToken,
+    ) -> Result<Arc<dyn RaSession>, SvnError> {
+        let _ = options;
+        self.connect(url, cancel).await
+    }
+}
+
+/// Where a session opened by [`SessionConnector::connect_with`] is anchored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Anchor {
+    /// At the repository root (`session_url() == repos_root()`), as [`SessionConnector::connect`].
+    #[default]
+    Root,
+    /// At the requested URL (checkout, update, switch and remote status run against it).
+    Url,
+}
+
+/// Options of [`SessionConnector::connect_with`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectOptions {
+    /// Where the session is anchored.
+    pub anchor: Anchor,
+    /// False for background work: the session must fail with `auth-required` instead of prompting.
+    pub interactive: bool,
+}
+
+impl ConnectOptions {
+    /// Root-anchored session with the interactivity of `ctx`.
+    pub fn root(ctx: &OpContext) -> Self {
+        Self {
+            anchor: Anchor::Root,
+            interactive: ctx.interactive,
+        }
+    }
+
+    /// Session anchored at the requested URL with the interactivity of `ctx`.
+    pub fn at_url(ctx: &OpContext) -> Self {
+        Self {
+            anchor: Anchor::Url,
+            interactive: ctx.interactive,
+        }
+    }
 }
 
 /// Everything the real engine needs from the app.
@@ -99,6 +156,13 @@ impl RealEngine {
             journals: JournalStore::new(config.state_dir),
             recovery: config.recovery,
         }
+    }
+
+    /// Context for `svn-client` operations: working copy locks are recorded as owned by this
+    /// process, with default client configuration and no progress sink.
+    pub fn client_ctx(&self, ctx: &OpContext) -> svn_client::ClientCtx {
+        let _ = ctx; // progress and configuration are mapped by the packages that wire operations
+        svn_client::ClientCtx::new(self.lock_owner())
     }
 
     /// Opens a session for `url` and returns it with the path of `url` below the repository root.
@@ -184,170 +248,138 @@ impl EngineFacade for RealEngine {
 
     async fn status(
         &self,
-        _wc: &WcRef,
-        _query: StatusQuery,
-        _ctx: &OpContext,
+        wc: &WcRef,
+        query: StatusQuery,
+        ctx: &OpContext,
     ) -> EngineResult<Vec<FileStatus>> {
-        Err(not_wired("status"))
+        self.do_status(wc, query, ctx).await
     }
 
     async fn diff_wc(
         &self,
-        _wc: &WcRef,
-        _path: &str,
-        _against: Option<Rev>,
-        _opts: DiffOptions,
-        _ctx: &OpContext,
+        wc: &WcRef,
+        path: &str,
+        against: Option<Rev>,
+        opts: DiffOptions,
+        ctx: &OpContext,
     ) -> EngineResult<FileDiff> {
-        Err(not_wired("diff_wc"))
+        self.do_diff_wc(wc, path, against, opts, ctx).await
     }
 
     async fn changelist_set(
         &self,
-        _wc: &WcRef,
-        _paths: &[String],
-        _name: Option<&str>,
-        _ctx: &OpContext,
+        wc: &WcRef,
+        paths: &[String],
+        name: Option<&str>,
+        ctx: &OpContext,
     ) -> EngineResult<()> {
-        Err(not_wired("changelist_set"))
+        self.do_changelist_set(wc, paths, name, ctx).await
     }
 
     async fn ignore_add(
         &self,
-        _wc: &WcRef,
-        _req: &IgnoreAddRequest,
-        _ctx: &OpContext,
+        wc: &WcRef,
+        req: &IgnoreAddRequest,
+        ctx: &OpContext,
     ) -> EngineResult<()> {
-        Err(not_wired("ignore_add"))
+        self.do_ignore_add(wc, req, ctx).await
     }
 
     async fn mark_move(
         &self,
-        _wc: &WcRef,
-        _from: &str,
-        _to: &str,
-        _ctx: &OpContext,
+        wc: &WcRef,
+        from: &str,
+        to: &str,
+        ctx: &OpContext,
     ) -> EngineResult<()> {
-        Err(not_wired("mark_move"))
+        self.do_mark_move(wc, from, to, ctx).await
     }
 
-    async fn resolve(
-        &self,
-        _wc: &WcRef,
-        _req: &ResolveRequest,
-        _ctx: &OpContext,
-    ) -> EngineResult<()> {
-        Err(not_wired("resolve"))
+    async fn resolve(&self, wc: &WcRef, req: &ResolveRequest, ctx: &OpContext) -> EngineResult<()> {
+        self.do_resolve(wc, req, ctx).await
     }
 
     async fn props_set(
         &self,
-        _wc: &WcRef,
-        _path: &str,
-        _name: &str,
-        _value: Option<&str>,
-        _ctx: &OpContext,
+        wc: &WcRef,
+        path: &str,
+        name: &str,
+        value: Option<&str>,
+        ctx: &OpContext,
     ) -> EngineResult<()> {
-        Err(not_wired("props_set"))
+        self.do_props_set(wc, path, name, value, ctx).await
     }
 
-    async fn checkout(&self, _plan: &CheckoutPlan, ctx: &OpContext) -> EngineResult<WcInfo> {
-        // Cancellation wins over everything else, as for every wired operation.
-        ctx.check()?;
-        Err(not_wired("checkout"))
+    async fn checkout(&self, plan: &CheckoutPlan, ctx: &OpContext) -> EngineResult<WcInfo> {
+        self.do_checkout(plan, ctx).await
     }
 
-    async fn status_remote(&self, _wc: &WcRef, _ctx: &OpContext) -> EngineResult<RemoteScan> {
-        Err(not_wired("status_remote"))
+    async fn status_remote(&self, wc: &WcRef, ctx: &OpContext) -> EngineResult<RemoteScan> {
+        self.do_status_remote(wc, ctx).await
     }
 
-    async fn update(
-        &self,
-        _wc: &WcRef,
-        _req: &UpdateRequest,
-        _ctx: &OpContext,
-    ) -> EngineResult<Rev> {
-        Err(not_wired("update"))
+    async fn update(&self, wc: &WcRef, req: &UpdateRequest, ctx: &OpContext) -> EngineResult<Rev> {
+        self.do_update(wc, req, ctx).await
     }
 
     async fn switch(
         &self,
-        _wc: &WcRef,
-        _url: &str,
-        _rev: Option<Rev>,
-        _ctx: &OpContext,
+        wc: &WcRef,
+        url: &str,
+        rev: Option<Rev>,
+        ctx: &OpContext,
     ) -> EngineResult<Rev> {
-        Err(not_wired("switch"))
+        self.do_switch(wc, url, rev, ctx).await
     }
 
-    async fn commit(
-        &self,
-        _wc: &WcRef,
-        _req: &CommitRequest,
-        _ctx: &OpContext,
-    ) -> EngineResult<Rev> {
-        Err(not_wired("commit"))
+    async fn commit(&self, wc: &WcRef, req: &CommitRequest, ctx: &OpContext) -> EngineResult<Rev> {
+        self.do_commit(wc, req, ctx).await
     }
 
-    async fn revert(
-        &self,
-        _wc: &WcRef,
-        _req: &RevertRequest,
-        _ctx: &OpContext,
-    ) -> EngineResult<()> {
-        Err(not_wired("revert"))
+    async fn revert(&self, wc: &WcRef, req: &RevertRequest, ctx: &OpContext) -> EngineResult<()> {
+        self.do_revert(wc, req, ctx).await
     }
 
-    async fn add_paths(
-        &self,
-        _wc: &WcRef,
-        _paths: &[String],
-        _ctx: &OpContext,
-    ) -> EngineResult<()> {
-        Err(not_wired("add_paths"))
+    async fn add_paths(&self, wc: &WcRef, paths: &[String], ctx: &OpContext) -> EngineResult<()> {
+        self.do_add_paths(wc, paths, ctx).await
     }
 
     async fn delete_paths(
         &self,
-        _wc: &WcRef,
-        _paths: &[String],
-        _keep_local: bool,
-        _ctx: &OpContext,
+        wc: &WcRef,
+        paths: &[String],
+        keep_local: bool,
+        ctx: &OpContext,
     ) -> EngineResult<()> {
-        Err(not_wired("delete_paths"))
+        self.do_delete_paths(wc, paths, keep_local, ctx).await
     }
 
     async fn move_path(
         &self,
-        _wc: &WcRef,
-        _from: &str,
-        _to: &str,
-        _ctx: &OpContext,
+        wc: &WcRef,
+        from: &str,
+        to: &str,
+        ctx: &OpContext,
     ) -> EngineResult<()> {
-        Err(not_wired("move_path"))
+        self.do_move_path(wc, from, to, ctx).await
     }
 
-    async fn cleanup(
-        &self,
-        _wc: &WcRef,
-        _req: &CleanupRequest,
-        _ctx: &OpContext,
-    ) -> EngineResult<()> {
-        Err(not_wired("cleanup"))
+    async fn cleanup(&self, wc: &WcRef, req: &CleanupRequest, ctx: &OpContext) -> EngineResult<()> {
+        self.do_cleanup(wc, req, ctx).await
     }
 
     async fn set_depth(
         &self,
-        _wc: &WcRef,
-        _path: &str,
-        _depth: Depth,
-        _ctx: &OpContext,
+        wc: &WcRef,
+        path: &str,
+        depth: Depth,
+        ctx: &OpContext,
     ) -> EngineResult<()> {
-        Err(not_wired("set_depth"))
+        self.do_set_depth(wc, path, depth, ctx).await
     }
 
-    async fn upgrade_format(&self, _wc: &WcRef, _to: u8, _ctx: &OpContext) -> EngineResult<()> {
-        Err(not_wired("upgrade_format"))
+    async fn upgrade_format(&self, wc: &WcRef, to: u8, ctx: &OpContext) -> EngineResult<()> {
+        self.do_upgrade_format(wc, to, ctx).await
     }
 
     async fn repo_info(&self, url: &str, ctx: &OpContext) -> EngineResult<RepoInfo> {
@@ -440,11 +472,10 @@ impl EngineFacade for RealEngine {
         from_wc: Option<&WcRef>,
         ctx: &OpContext,
     ) -> EngineResult<Rev> {
-        if from_wc.is_some() {
-            ctx.check()?;
-            return Err(not_wired("copy_location from a working copy"));
+        match from_wc {
+            Some(wc) => self.do_copy_location_from_wc(req, wc, ctx).await,
+            None => self.do_copy_location(req, ctx).await,
         }
-        self.do_copy_location(req, ctx).await
     }
 
     async fn branches_list(
