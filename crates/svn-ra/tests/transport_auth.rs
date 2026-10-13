@@ -371,13 +371,33 @@ async fn cancel_interrupts_a_request_queued_behind_a_prompt() {
         let (t, url, c) = (Arc::clone(&t), srv.url("/a"), owner_cancel.clone());
         tokio::spawn(async move { t.send(get(url), &c).await.map(|_| ()) })
     };
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait until the owner really is in the prompt (a fixed sleep raced the TLS handshake on a
+    // busy machine, letting the second request become the prompt owner).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while prompter.credential_prompts() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first request never prompted"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let queued_cancel = CancelToken::new();
     let queued = {
         let (t, url, c) = (Arc::clone(&t), srv.url("/b"), queued_cancel.clone());
         tokio::spawn(async move { t.send(get(url), &c).await.map(|_| ()) })
     };
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait until the server has answered the second request (401): from then on it only waits
+    // behind the owner's prompt, so the cancel below hits it while queued.
+    while !srv.requests().iter().any(|r| r.path == "/b") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the second request never reached the server"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Let it handle the 401 and reach the prompt queue (cancelling slightly earlier still has to
+    // end in `Cancelled`, so this is not a correctness wait).
+    tokio::task::yield_now().await;
     queued_cancel.cancel();
     let err = tokio::time::timeout(Duration::from_secs(1), queued)
         .await

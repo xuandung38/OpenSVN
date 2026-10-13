@@ -168,6 +168,16 @@ impl EngineFacade for RealEngine {
         wc_read::wc_info(root, ctx).await
     }
 
+    async fn ensure_authenticated(&self, wc: &WcRef, ctx: &OpContext) -> EngineResult<()> {
+        if !ctx.interactive {
+            return Ok(()); // background work never prompts
+        }
+        let info = wc_read::wc_info(&wc.root, ctx).await?;
+        self.locate_repo_path(&info.repo_root_url, &RelPath::root(), ctx)
+            .await
+            .map(|_| ())
+    }
+
     async fn open_wc(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcOpened> {
         self.open_wc_with_recovery(root, ctx).await
     }
@@ -424,7 +434,16 @@ impl EngineFacade for RealEngine {
         self.do_remote_edit(plan, ctx).await
     }
 
-    async fn copy_location(&self, req: &CopyLocationRequest, ctx: &OpContext) -> EngineResult<Rev> {
+    async fn copy_location(
+        &self,
+        req: &CopyLocationRequest,
+        from_wc: Option<&WcRef>,
+        ctx: &OpContext,
+    ) -> EngineResult<Rev> {
+        if from_wc.is_some() {
+            ctx.check()?;
+            return Err(not_wired("copy_location from a working copy"));
+        }
         self.do_copy_location(req, ctx).await
     }
 
