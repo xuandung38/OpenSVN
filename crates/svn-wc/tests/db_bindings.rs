@@ -9,7 +9,7 @@ use svn_wc::conflicts::{
     Conflict, ConflictSkel, Operation, OperationInfo, Origin, PropConflict, TextConflict,
     TreeAction, TreeConflict, TreeReason,
 };
-use svn_wc::db::{BaseNode, DbWorkingCopyOps, NewWc, Presence, WcDb};
+use svn_wc::db::{BaseNode, CommitInfo, DbWorkingCopyOps, LockInfo, NewWc, Presence, WcDb};
 use svn_wc::pristine::{PristineIndex, Sha1Digest};
 use svn_wc::workqueue::{WorkItem, WorkingCopyOps};
 
@@ -349,4 +349,56 @@ fn moved_from_finds_the_move_source() {
     db.op_move(&rp("a.txt"), &rp("b.txt"), &[]).expect("move");
     assert_eq!(db.moved_from(&rp("b.txt")).expect("q"), Some(rp("a.txt")));
     assert_eq!(db.moved_from(&rp("a.txt")).expect("q"), None);
+}
+
+#[test]
+fn txn_lock_cache_and_commit_node_join_one_transaction() {
+    let (_tmp, db) = new_wc();
+    let a = rp("a.txt");
+    db.base_add(&a, &base_file("a.txt", 1, None), &[])
+        .expect("base_add");
+    let lock = LockInfo {
+        token: "opaquelocktoken:1".into(),
+        owner: Some("me".into()),
+        comment: None,
+        date: Some(5),
+    };
+    assert_eq!(
+        db.with_txn(|t| t.lock_add(&rp("missing"), &lock))
+            .expect_err("no BASE")
+            .code,
+        ErrorCode::PathNotFound
+    );
+    db.with_txn(|t| t.lock_add(&a, &lock)).expect("lock_add");
+    assert_eq!(db.repos_lock(&a).expect("lock"), Some(lock.clone()));
+
+    // Rolled back together: the lock survives and BASE keeps r1.
+    let info = CommitInfo {
+        new_rev: 2,
+        ..CommitInfo::default()
+    };
+    db.with_txn(|t| {
+        t.lock_remove(&a)?;
+        t.commit_node(&a, &info)?;
+        Err::<(), _>(svn_types::SvnError::new(ErrorCode::Internal, "abort"))
+    })
+    .expect_err("aborted");
+    assert!(db.repos_lock(&a).expect("lock").is_some());
+    assert_eq!(
+        db.read_node(&a).expect("read").expect("node").revision,
+        Some(1)
+    );
+
+    for _ in 0..2 {
+        db.with_txn(|t| {
+            t.lock_remove(&a)?;
+            t.commit_node(&a, &info)
+        })
+        .expect("commit, repeatable");
+    }
+    assert!(db.repos_lock(&a).expect("lock").is_none());
+    assert_eq!(
+        db.read_node(&a).expect("read").expect("node").revision,
+        Some(2)
+    );
 }
