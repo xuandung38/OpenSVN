@@ -91,3 +91,16 @@ Tests that lock these facts in: `crates/svn-wc/tests/{skel_real_blobs,schema_str
 ## Unresolved
 - subst.c, full workqueue item arity, conflicts.c grammar: track B scope (not verified here).
 - svn registers a custom NFD-aware `like()` function with `case_sensitive_like`; not replicated yet. Revisit with the Vietnamese-name APFS test (A2/B3).
+
+## A2 findings (nodes, wc_lock) — verified against svn 1.15.0 behaviour
+- Working-layer row shapes (checked row-for-row by `tests/nodes_ops_vs_svn.rs`): `op_depth` of an add/delete/copy = number of segments of the
+  operation root; added rows get `changed_date = 0`; delete inserts `base-deleted` rows for the node and every present descendant at
+  `op_depth = depth(root)` and removes higher layers below it; deleting inside a copied tree layers over the copy rows; replace = same-`op_depth`
+  `INSERT OR REPLACE`; copy copies pristine props to NODES and local edits to the copy's ACTUAL; move = copy with `moved_here=1` + delete layer with
+  `moved_to` on the root only; revert removes whole layers rooted at the node and keeps changelist membership; delete clears local props/conflicts but keeps changelist.
+- Commit: BASE row gets `revision=changed_revision=new_rev`; copy children keep their own `changed_*`; committed delete leaves a `not-present` BASE row with `changed_date=0`;
+  changelists are dropped unless `--keep-changelists`; svn also fills `translated_size`/`last_mod_time` from the working file (caller does it via `record_fileinfo`).
+- WC_LOCK: `locked_levels` L on dir D covers D and descendants up to L levels below (-1 = all); obtain checks node exists (except root), empty work queue (normal mode),
+  foreign rows below (ignoring those deeper than `levels`), and the nearest row at/above that reaches the dir. An svn commit holds the root lock for its whole duration
+  (observed with a sleeping pre-commit hook); `svn commit` refuses to run while our row exists (E155004).
+- Ownership is outside wc.db; risk noted in `wc_lock.rs` docs: a dead record plus a later svn lock on the same directory is indistinguishable from the stale row.
