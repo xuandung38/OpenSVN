@@ -195,63 +195,97 @@ pub async fn diff_get(
         let opts = DiffOptions {
             ignore_whitespace: request.ignore_whitespace.unwrap_or(false),
             force_large: request.force_large.unwrap_or(false),
+            full_text: false,
         };
-        match request.target {
-            DiffTarget::Wc { wc_id, path } => {
-                state
-                    .wc_read(&wc_id, move |engine, wc| {
-                        let path = path.clone();
-                        async move {
-                            engine
-                                .diff_wc(
-                                    &wc,
-                                    &path,
-                                    None,
-                                    opts,
-                                    &crate::engine::OpContext::detached(),
-                                )
-                                .await
-                        }
-                    })
-                    .await
-            }
-            DiffTarget::WcVsRev { wc_id, path, rev } => {
-                state
-                    .wc_read(&wc_id, move |engine, wc| {
-                        let path = path.clone();
-                        async move {
-                            engine
-                                .diff_wc(
-                                    &wc,
-                                    &path,
-                                    Some(rev),
-                                    opts,
-                                    &crate::engine::OpContext::detached(),
-                                )
-                                .await
-                        }
-                    })
-                    .await
-            }
-            DiffTarget::Rev { url, rev } => state
-                .engine
-                .diff_rev(&url, None, rev, opts, &crate::engine::OpContext::detached())
-                .await
-                .map_err(|e| AppError::from(&e)),
-            DiffTarget::Range { url, from, to } => state
-                .engine
-                .diff_rev(
-                    &url,
-                    Some(from),
-                    to,
-                    opts,
-                    &crate::engine::OpContext::detached(),
-                )
-                .await
-                .map_err(|e| AppError::from(&e)),
-        }
+        fetch_diff(&state, request.target, opts).await
     })
     .await
+}
+
+/// Opens `target` in the configured external diff tool (`diff.externalTool`): both sides are
+/// written as read-only copies into a private folder and the tool is started on them. Used when a
+/// diff is too complex or too large to show, or on request. Binary files are refused.
+#[tauri::command]
+#[specta::specta]
+pub async fn diff_external(state: State<'_, AppState>, target: DiffTarget) -> Result<(), AppError> {
+    guard(open_external_diff(&state, target)).await
+}
+
+pub(crate) async fn open_external_diff(
+    state: &AppState,
+    target: DiffTarget,
+) -> Result<(), AppError> {
+    use crate::programs::external_diff::{STALE_AFTER, expand_args, stage_sides, sweep_stale};
+    // Fails before any engine work when no tool is configured.
+    let (program, args) = state.programs.external_diff_tool()?;
+    let opts = DiffOptions {
+        ignore_whitespace: false,
+        force_large: true,
+        full_text: true,
+    };
+    let diff = fetch_diff(state, target, opts).await?;
+    if diff.binary {
+        return Err(crate::errors::invalid_argument(
+            "Binary files cannot be opened in the external diff tool.",
+        )
+        .with_path(diff.path));
+    }
+    // Non-binary means valid UTF-8 (`is_binary` treats anything else as binary), and text sides
+    // are built from those bytes unchanged, so the staged copies are the file's exact bytes.
+    // TODO(p15): files in other text encodings are reported as binary and refused here; stage
+    // the raw bytes once the engines expose them for external diffs.
+    let side = |s: &Option<opensvn_ipc::TextSide>| {
+        s.as_ref()
+            .map_or(Vec::new(), |t| t.content.clone().into_bytes())
+    };
+    let (left, right) = (side(&diff.left), side(&diff.right));
+    let root =
+        crate::preview::prepare_private_dir(&state.data_dir, crate::preview::EXTERNAL_DIFF_DIR)?;
+    sweep_stale(&root, STALE_AFTER);
+    let (l, r) = stage_sides(&root, &diff.path, &left, &right)?;
+    let args = expand_args(&args, &l.to_string_lossy(), &r.to_string_lossy());
+    state.launcher.launch(&program, &args)
+}
+
+/// Runs a diff for any target: working copy targets go through the working copy's actor.
+async fn fetch_diff(
+    state: &AppState,
+    target: DiffTarget,
+    opts: DiffOptions,
+) -> Result<FileDiff, AppError> {
+    let detached = crate::engine::OpContext::detached;
+    match target {
+        DiffTarget::Wc { wc_id, path } => {
+            state
+                .wc_read(&wc_id, move |engine, wc| {
+                    let path = path.clone();
+                    async move { engine.diff_wc(&wc, &path, None, opts, &detached()).await }
+                })
+                .await
+        }
+        DiffTarget::WcVsRev { wc_id, path, rev } => {
+            state
+                .wc_read(&wc_id, move |engine, wc| {
+                    let path = path.clone();
+                    async move {
+                        engine
+                            .diff_wc(&wc, &path, Some(rev), opts, &detached())
+                            .await
+                    }
+                })
+                .await
+        }
+        DiffTarget::Rev { url, rev } => state
+            .engine
+            .diff_rev(&url, None, rev, opts, &detached())
+            .await
+            .map_err(|e| AppError::from(&e)),
+        DiffTarget::Range { url, from, to } => state
+            .engine
+            .diff_rev(&url, Some(from), to, opts, &detached())
+            .await
+            .map_err(|e| AppError::from(&e)),
+    }
 }
 
 #[tauri::command]

@@ -40,7 +40,9 @@ export const settingsStrings = defineStrings({
     externalTool: "External diff/merge tool",
     noExternalTool: "None configured",
     externalToolNote:
-      "Running an external program can only be set with the native file picker and a confirmation (not available yet).",
+      "The program is chosen in the system file picker and confirmed before it is saved. {left} and {right} in its arguments stand for the two versions.",
+    chooseProgram: "Choose…",
+    clearProgram: "Clear",
     webRevisionUrl: "Revision URL template (VisualSVN web)",
     webFileUrl: "File/folder URL template (VisualSVN web)",
     templateHelp:
@@ -98,7 +100,9 @@ export const settingsStrings = defineStrings({
     externalTool: "Công cụ diff/merge ngoài",
     noExternalTool: "Chưa cấu hình",
     externalToolNote:
-      "Chương trình ngoài chỉ đặt được bằng hộp thoại chọn file của hệ điều hành kèm xác nhận (chưa có).",
+      "Chương trình được chọn bằng hộp thoại chọn file của hệ điều hành và phải xác nhận trước khi lưu. {left} và {right} trong tham số là hai phiên bản.",
+    chooseProgram: "Chọn…",
+    clearProgram: "Xóa",
     webRevisionUrl: "Mẫu URL revision (VisualSVN web)",
     webFileUrl: "Mẫu URL file/thư mục (VisualSVN web)",
     templateHelp:
