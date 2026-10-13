@@ -127,6 +127,10 @@ fn store(failure: &Failure, err: &SvnError) {
     }
 }
 
+fn finished_error() -> SvnError {
+    SvnError::new(ErrorCode::Cancelled, "editor already finished")
+}
+
 fn panic_error() -> SvnError {
     SvnError::new(ErrorCode::Internal, "delta editor panicked")
 }
@@ -142,36 +146,36 @@ fn run_worker(
     failure: &Failure,
 ) {
     let mut sinks: HashMap<FileId, Box<dyn WindowSink>> = HashMap::new();
-    let mut finished = false;
     while let Some(cmd) = rx.blocking_recv() {
-        if finished {
-            // Poisoned or already closed: reject anything still queued.
-            let err = stored(failure)
-                .unwrap_or_else(|| SvnError::new(ErrorCode::Internal, "editor already finished"));
-            reject(cmd, &err);
-            continue;
-        }
         let is_close = matches!(cmd, Command::CloseEdit { .. } | Command::AbortEdit { .. });
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             execute(editor.as_mut(), &mut sinks, cmd)
         }));
-        match outcome {
-            Ok(Ok(())) => finished = is_close,
+        let finished = match outcome {
+            Ok(Ok(())) => is_close,
             Ok(Err(e)) => {
                 store(failure, &e);
                 abort_quietly(editor.as_mut());
-                finished = true;
+                true
             }
             Err(_) => {
                 store(failure, &panic_error());
-                finished = true; // the editor is in an unknown state, do not call it again
+                true // the editor is in an unknown state, do not call it again
             }
+        };
+        if finished {
+            // Senders held by in-flight text deltas would keep the channel open forever.
+            // Close it so their sends fail fast, and answer whatever is still queued.
+            rx.close();
+            let err = stored(failure).unwrap_or_else(finished_error);
+            while let Ok(cmd) = rx.try_recv() {
+                reject(cmd, &err);
+            }
+            return;
         }
     }
-    if !finished {
-        // Driver dropped the handle without closing: leave the working copy restartable.
-        abort_quietly(editor.as_mut());
-    }
+    // Every sender is gone without close/abort: leave the working copy restartable.
+    abort_quietly(editor.as_mut());
 }
 
 fn abort_quietly(editor: &mut dyn DeltaEditor) {
@@ -295,8 +299,7 @@ pub struct WindowSender {
 }
 
 fn gone(failure: &Failure) -> SvnError {
-    stored(failure)
-        .unwrap_or_else(|| SvnError::new(ErrorCode::Internal, "editor worker terminated"))
+    stored(failure).unwrap_or_else(finished_error)
 }
 
 async fn send(tx: &mpsc::Sender<Command>, failure: &Failure, cmd: Command) -> Result<()> {
