@@ -60,7 +60,18 @@ Branch `feat/p06-fixtures-m2` (from `origin/main` 7e418f6). Draft PR.
 
 ## Gates (local, this branch)
 
-See the PR body for the counts of the final run.
+- `cargo fmt --all --check`: pass.
+- `cargo clippy -p svn-protocol -p svn-delta -p svn-ra -p opensvn-compat --all-targets -- -D warnings`:
+  pass. This is scoped to the touched crates, not the whole workspace, because the shared sandbox
+  disk was nearly full. The app/tauri crates were not touched.
+- `cargo test --no-fail-fast -p svn-protocol -p svn-delta -p svn-ra -p opensvn-compat`:
+  44 suites, **352 passed, 0 failed, 8 ignored** (Docker-only).
+- `fixtures/check-no-real-hosts.sh`: clean.
+- Flaky test outside this change: `svn-ra transport_auth::cancel_interrupts_a_request_queued_behind_a_prompt`
+  failed in 3 of 5 isolated runs (`credential_prompts()` was 2, expected 1). The queued request
+  also prompts after the owner is cancelled, or the timing is too tight. This PR touches no
+  svn-ra source, so it belongs to the P04 owner.
+- No FE gates: nothing under apps/ changed.
 
 ## Not done
 
