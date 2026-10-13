@@ -38,6 +38,7 @@ mod journal;
 mod layout;
 mod local;
 mod locks;
+mod progress;
 mod recovery;
 mod remote;
 mod remote_edit;
