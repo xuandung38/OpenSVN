@@ -21,6 +21,8 @@ pub const COMMAND_NAMES: &[&str] = &[
     "accounts_sign_out",
     "settings_get",
     "settings_set",
+    "program_choose",
+    "program_clear",
     "reveal_in_os",
     "open_external",
     "diagnostics_export",

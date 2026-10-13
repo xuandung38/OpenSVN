@@ -1,0 +1,179 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use opensvn_ipc::{AppError, ErrorCode, OpId, OpResult, OperationKind, WcId};
+
+use super::events::RecordingEvents;
+use super::manager::HISTORY_LIMIT;
+use super::*;
+use crate::engine::ProgressUpdate;
+
+fn manager() -> (OperationManager, Arc<RecordingEvents>) {
+    let events = Arc::new(RecordingEvents::default());
+    (OperationManager::new(events.clone()), events)
+}
+
+async fn wait_for(events: &RecordingEvents, prefix: &str, id: &OpId) {
+    let want = format!("{prefix}:{}", id.0);
+    for _ in 0..500 {
+        if events.names().contains(&want) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("event {want} not seen; got {:?}", events.names());
+}
+
+#[tokio::test]
+async fn emits_started_before_finished_and_returns_handle_immediately() {
+    let (m, events) = manager();
+    let started = Instant::now();
+    let h = m.spawn(
+        OperationKind::Update,
+        Some(WcId("w".into())),
+        "Update w",
+        |_ctx| async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            Ok(OpResult::Done)
+        },
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "handle must not wait for the work"
+    );
+    assert_eq!(events.names()[0], format!("started:{}", h.op_id.0));
+    wait_for(&events, "finished", &h.op_id).await;
+    assert_eq!(events.names().len(), 2);
+}
+
+#[tokio::test]
+async fn op_ids_are_uuid_v7_and_unique() {
+    let a = new_op_id();
+    let b = new_op_id();
+    assert_ne!(a, b);
+    let parsed = uuid::Uuid::parse_str(&a.0).unwrap();
+    assert_eq!(parsed.get_version_num(), 7);
+}
+
+#[tokio::test]
+async fn failure_emits_failed_with_the_error() {
+    let (m, events) = manager();
+    let h = m.spawn(OperationKind::Commit, None, "Commit", |_| async {
+        Err(AppError::internal("nope"))
+    });
+    wait_for(&events, "failed", &h.op_id).await;
+}
+
+#[tokio::test]
+async fn panic_fails_only_that_operation() {
+    let (m, events) = manager();
+    let bad = m.spawn(OperationKind::Update, None, "bad", |_| async {
+        if true {
+            panic!("engine bug");
+        }
+        Ok(OpResult::Done)
+    });
+    wait_for(&events, "failed", &bad.op_id).await;
+    let good = m.spawn(OperationKind::Update, None, "good", |_| async {
+        Ok(OpResult::Done)
+    });
+    wait_for(&events, "finished", &good.op_id).await;
+}
+
+#[tokio::test]
+async fn cancel_reaches_the_work_in_well_under_a_second() {
+    let (m, events) = manager();
+    let h = m.spawn(
+        OperationKind::Checkout,
+        None,
+        "Checkout",
+        |ctx| async move {
+            ctx.cancel.cancelled().await;
+            Err(AppError::from(&svn_types::SvnError::new(
+                svn_types::ErrorCode::Cancelled,
+                "cancelled",
+            )))
+        },
+    );
+    let t = Instant::now();
+    m.cancel(&h.op_id).unwrap();
+    wait_for(&events, "failed", &h.op_id).await;
+    assert!(t.elapsed() < Duration::from_secs(1));
+    // cancelling again (finished) is fine; an unknown id is not
+    m.cancel(&h.op_id).unwrap();
+    assert!(m.cancel(&OpId("nope".into())).is_err());
+}
+
+#[tokio::test]
+async fn progress_is_throttled_to_ten_per_second() {
+    let (m, events) = manager();
+    let h = m.spawn(OperationKind::Update, None, "Update", |ctx| async move {
+        let start = Instant::now();
+        // report as fast as possible for ~350 ms
+        while start.elapsed() < Duration::from_millis(350) {
+            ctx.progress.report(ProgressUpdate {
+                phase: "network".into(),
+                current: Some(1),
+                ..ProgressUpdate::default()
+            });
+            tokio::task::yield_now().await;
+        }
+        Ok(OpResult::Done)
+    });
+    wait_for(&events, "finished", &h.op_id).await;
+    let n = events.progress().len();
+    assert!(
+        (1..=5).contains(&n),
+        "expected about 4 progress events in 350 ms, got {n}"
+    );
+    assert!(events.progress().iter().all(|p| p.op_id == h.op_id));
+}
+
+#[tokio::test]
+async fn list_shows_running_then_last_fifty_finished() {
+    let (m, events) = manager();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let running = m.spawn(
+        OperationKind::Update,
+        Some(WcId("w1".into())),
+        "long",
+        |_| async move {
+            let _ = release_rx.await;
+            Ok(OpResult::Done)
+        },
+    );
+    let mut last = None;
+    for i in 0..60 {
+        let h = m.spawn(OperationKind::Log, None, format!("op {i}"), |_| async {
+            Ok(OpResult::Done)
+        });
+        last = Some(h);
+    }
+    wait_for(&events, "finished", &last.unwrap().op_id).await;
+    // let every short operation finish
+    for _ in 0..200 {
+        if m.list().len() == 1 + HISTORY_LIMIT {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let list = m.list();
+    assert_eq!(list.len(), 1 + HISTORY_LIMIT);
+    assert_eq!(
+        list[0].op_id, running.op_id,
+        "running operations come first"
+    );
+    assert_eq!(list[1].title, "op 59", "newest finished first");
+    let _ = release_tx.send(());
+}
+
+#[test]
+fn error_code_is_cancelled_for_engine_cancel() {
+    let e = AppError::from(&svn_types::SvnError::new(
+        svn_types::ErrorCode::Cancelled,
+        "x",
+    ));
+    assert_eq!(e.code, ErrorCode::Cancelled);
+}

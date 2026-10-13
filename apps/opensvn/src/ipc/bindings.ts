@@ -9,10 +9,19 @@ export const commands = {
 	wcAddExisting: (path: string) => typedError<WorkingCopy, AppError>(__TAURI_INVOKE("wc_add_existing", { path })),
 	wcRemove: (wcId: WcId) => typedError<null, AppError>(__TAURI_INVOKE("wc_remove", { wcId })),
 	wcRename: (wcId: WcId, name: string) => typedError<null, AppError>(__TAURI_INVOKE("wc_rename", { wcId, name })),
+	/**
+	 *  Opens a working copy and refreshes its status in the background; the Changes tab shows the
+	 *  cached snapshot immediately and receives the delta as `wc://status-changed`.
+	 */
 	wcOpen: (wcId: WcId) => typedError<WorkingCopy, AppError>(__TAURI_INVOKE("wc_open", { wcId })),
 	wcClose: (wcId: WcId) => typedError<null, AppError>(__TAURI_INVOKE("wc_close", { wcId })),
+	/**
+	 *  Status from the engine, or from the snapshot while a write is running on the working copy
+	 *  (the running operation in `op_list` is the "updating" indicator).
+	 */
 	statusGet: (request: StatusGetRequest) => typedError<FileStatus[], AppError>(__TAURI_INVOKE("status_get", { request })),
 	statusRefresh: (wcId: WcId, paths: string[] | null) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("status_refresh", { wcId, paths })),
+	/**  Checks the repository for newer revisions; announces `wc://incoming` and updates remote info. */
 	statusRemote: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("status_remote", { wcId })),
 	diffGet: (request: DiffGetRequest) => typedError<FileDiff, AppError>(__TAURI_INVOKE("diff_get", { request })),
 	changelistSet: (wcId: WcId, paths: string[], name: string | null) => typedError<null, AppError>(__TAURI_INVOKE("changelist_set", { wcId, paths, name })),
@@ -36,6 +45,7 @@ export const commands = {
 	repoCat: (url: string, rev: number | null) => typedError<TextSide, AppError>(__TAURI_INVOKE("repo_cat", { url, rev })),
 	repoSave: (url: string, rev: number | null, saveTo: string) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("repo_save", { url, rev, saveTo })),
 	logGet: (request: LogGetRequest) => typedError<LogPage, AppError>(__TAURI_INVOKE("log_get", { request })),
+	/**  Result arrives as `op://finished` with a blame payload. */
 	blameGet: (url: string, rev: number | null) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("blame_get", { url, rev })),
 	lock: (request: LockRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("lock", { request })),
 	unlock: (request: UnlockRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("unlock", { request })),
@@ -51,7 +61,15 @@ export const commands = {
 	accountsList: () => typedError<Account[], AppError>(__TAURI_INVOKE("accounts_list")),
 	accountsSignOut: (realm: string) => typedError<null, AppError>(__TAURI_INVOKE("accounts_sign_out", { realm })),
 	settingsGet: () => typedError<Settings, AppError>(__TAURI_INVOKE("settings_get")),
+	/**  Applies a partial update. Keys that launch programs are refused here; see `program_choose`. */
 	settingsSet: (patch: SettingsPatch_Deserialize) => typedError<Settings, AppError>(__TAURI_INVOKE("settings_set", { patch })),
+	/**
+	 *  Opens a native file picker for a program setting and stores it after the user confirmed the
+	 *  command line in a native dialog. Returns the settings unchanged when the user cancels.
+	 */
+	programChoose: (kind: ProgramKind, args: string[]) => typedError<Settings, AppError>(__TAURI_INVOKE("program_choose", { kind, args })),
+	/**  Removes a configured program. */
+	programClear: (kind: ProgramKind) => typedError<Settings, AppError>(__TAURI_INVOKE("program_clear", { kind })),
 	revealInOs: (wcId: WcId, path: string) => typedError<null, AppError>(__TAURI_INVOKE("reveal_in_os", { wcId, path })),
 	openExternal: (wcId: WcId, path: string, openWith: OpenWith) => typedError<null, AppError>(__TAURI_INVOKE("open_external", { wcId, path, openWith })),
 	diagnosticsExport: () => typedError<string, AppError>(__TAURI_INVOKE("diagnostics_export")),
@@ -398,9 +416,21 @@ export type OperationHandle = {
 	title: string,
 };
 
-export type OperationKind = "checkout" | "update" | "switch" | "commit" | "revert" | "cleanup" | "lock" | "unlock" | "status-remote" | "log" | "blame" | "remote-edit" | "set-depth" | "upgrade" | "merge";
+export type OperationKind = "checkout" | "update" | "switch" | "commit" | "revert" | "cleanup" | "lock" | "unlock" | "status-remote" | "log" | "blame" | "remote-edit" | "set-depth" | "upgrade" | "merge" | 
+/**  Local status rescan (`status_refresh`). */
+"status-refresh" | "add" | "delete" | "move" | 
+/**  Server-side copy (`copy_location`). */
+"copy" | 
+/**  Download of a repository file to disk (`repo_save`). */
+"save";
 
 export type PathKind = "file" | "dir" | "unknown";
+
+/**
+ *  Settings that make the app launch a program. They are changed only through a native file
+ *  picker plus confirmation (`program_choose` / `program_clear`), never through `settings_set`.
+ */
+export type ProgramKind = "diff-tool" | "merge-tool" | "editor" | "terminal";
 
 export type Progress = {
 	opId: OpId,
@@ -505,6 +535,12 @@ export type Settings = {
 	"integrations.webFileUrl": string,
 	/**  `null` when no external tool is configured. */
 	"diff.externalTool": ExternalDiffTool | null,
+	/**  Same shape as `diff.externalTool`. `null` when not configured. */
+	"diff.mergeTool": ExternalDiffTool | null,
+	/**  Editor used by "open with editor". `null` when not configured. */
+	"tools.editor": ExternalDiffTool | null,
+	/**  Terminal used by "open terminal here". `null` when not configured. */
+	"tools.terminal": ExternalDiffTool | null,
 };
 
 /**  Partial update: absent keys are left unchanged; nullable keys accept `null` to clear. */
@@ -529,6 +565,12 @@ export type SettingsPatch_Deserialize = {
 	"integrations.webFileUrl"?: string | null,
 	/**  `null` when no external tool is configured. */
 	"diff.externalTool"?: ExternalDiffTool | null,
+	/**  Same shape as `diff.externalTool`. `null` when not configured. */
+	"diff.mergeTool"?: ExternalDiffTool | null,
+	/**  Editor used by "open with editor". `null` when not configured. */
+	"tools.editor"?: ExternalDiffTool | null,
+	/**  Terminal used by "open terminal here". `null` when not configured. */
+	"tools.terminal"?: ExternalDiffTool | null,
 };
 
 /**  Partial update: absent keys are left unchanged; nullable keys accept `null` to clear. */
@@ -550,6 +592,12 @@ export type SettingsPatch_Serialize = {
 	"integrations.webFileUrl"?: string | null,
 	/**  `null` when no external tool is configured. */
 	"diff.externalTool"?: ExternalDiffTool | null,
+	/**  Same shape as `diff.externalTool`. `null` when not configured. */
+	"diff.mergeTool"?: ExternalDiffTool | null,
+	/**  Editor used by "open with editor". `null` when not configured. */
+	"tools.editor"?: ExternalDiffTool | null,
+	/**  Terminal used by "open terminal here". `null` when not configured. */
+	"tools.terminal"?: ExternalDiffTool | null,
 };
 
 /**  Byte size; same wire/TS treatment as [`Rev`]. */

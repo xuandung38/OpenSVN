@@ -5,9 +5,10 @@ use tauri_specta::{Builder, collect_commands, collect_events};
 use crate::commands::*;
 use crate::events::*;
 
-/// Builds the specta/tauri-specta registry (commands + events).
-pub fn builder() -> Builder<tauri::Wry> {
-    Builder::<tauri::Wry>::new()
+/// Builds the specta/tauri-specta registry (commands + events) for runtime `R` (`Wry` in the app,
+/// the mock runtime in tests).
+pub fn builder<R: tauri::Runtime>() -> Builder<R> {
+    Builder::<R>::new()
         .commands(collect_commands![
             wc_list,
             wc_add_existing,
@@ -56,6 +57,8 @@ pub fn builder() -> Builder<tauri::Wry> {
             accounts_sign_out,
             settings_get,
             settings_set,
+            program_choose,
+            program_clear,
             reveal_in_os,
             open_external,
             diagnostics_export,
