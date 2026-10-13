@@ -519,7 +519,9 @@ impl RaSession for FakeRaSession {
         lock_tokens: &[(String, String)],
         keep_locks: bool,
         observer: Arc<dyn CommitObserver>,
+        cancel: &CancelToken,
     ) -> Result<Box<dyn CommitEditor>> {
+        cancel.check()?;
         let (txn, tree, base_head) = {
             let mut st = self.guard();
             let txn = format!("{}-fake", st.next_txn);
@@ -531,7 +533,11 @@ impl RaSession for FakeRaSession {
                 .ok_or_else(|| SvnError::new(ErrorCode::Internal, "no revisions"))?;
             (txn, head.tree.clone(), st.youngest())
         };
-        observer.on_txn_created(&txn);
+        if let Err(e) = observer.on_txn_created(&txn) {
+            // The journal refused the transaction: delete it and send nothing.
+            self.guard().txns.remove(&txn);
+            return Err(e);
+        }
         let author = rev_props
             .iter()
             .find(|p| p.name == "svn:author")
@@ -548,6 +554,7 @@ impl RaSession for FakeRaSession {
             message: message.to_owned(),
             lock_tokens: lock_tokens.to_vec(),
             keep_locks,
+            cancel: cancel.clone(),
             tree,
             base_head,
             changed: Vec::new(),
