@@ -429,9 +429,8 @@ fn svn_refuses_to_run_write_commands_while_the_engine_holds_the_lock() {
     db.wc_lock_obtain(&RelPath::root(), -1, ObtainMode::Normal)
         .expect("lock");
 
-    let out = std::process::Command::new("svn")
+    let out = svn_command(&w)
         .args(["commit", "-m", "x"])
-        .current_dir(&w)
         .output()
         .expect("svn");
     assert!(!out.status.success());
@@ -467,9 +466,8 @@ fn engine_detects_and_respects_a_lock_held_by_a_running_svn() {
     std::fs::write(w.join("f.txt"), "x\n").expect("write");
     svn(&w, &["add", "-q", "f.txt"]);
 
-    let mut child = std::process::Command::new("svn")
+    let mut child = svn_command(&w)
         .args(["commit", "-q", "-m", "slow"])
-        .current_dir(&w)
         .spawn()
         .expect("spawn svn");
     let db = WcDb::open(&w).expect("open");
@@ -548,9 +546,8 @@ fn svn_cleanup_after_a_crash_then_a_new_svn_lock_is_never_taken_over() {
     dead.store(true, std::sync::atomic::Ordering::SeqCst);
     svn(&w, &["cleanup"]); // clears the row and (we rely on it) .svn/tmp
 
-    let mut child = std::process::Command::new("svn")
+    let mut child = svn_command(&w)
         .args(["commit", "-q", "-m", "slow"])
-        .current_dir(&w)
         .spawn()
         .expect("spawn svn");
     let db = WcDb::open(&w).expect("open");
