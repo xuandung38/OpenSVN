@@ -12,7 +12,7 @@ use svn_wc::WcDb;
 
 use super::super::RecoveryHooks;
 use super::super::UnwiredRecovery;
-use super::super::journal::{JournalPhase, JournalRecord, JournalStore};
+use super::super::journal::{JournalLoadError, JournalPhase, JournalRecord, JournalStore};
 use super::support::{
     OLD_BOOT, ScriptedConnector, ScriptedSession, URL, add_base_dir, add_base_file, count_rows,
     ctx, fixture, fixture_on, fixture_with, make_wc, plant_dead_app_lock, plant_lock_row,
@@ -311,7 +311,7 @@ async fn journals_are_per_working_copy_and_do_not_overlap() {
 }
 
 #[tokio::test]
-async fn an_unreadable_journal_does_not_block_opening() {
+async fn a_corrupt_journal_is_set_aside_and_does_not_block_opening() {
     let f = fixture();
     let (_tmp, root) = make_wc(1);
     let journal = f.engine.journals.begin(&root, URL).unwrap();
@@ -327,7 +327,8 @@ async fn an_unreadable_journal_does_not_block_opening() {
     let err = JournalStore::new(f.state.path().to_path_buf())
         .load(&root)
         .unwrap_err();
-    assert_eq!(err.code, ErrorCode::Corrupt);
+    assert!(matches!(err, JournalLoadError::Corrupt(_)), "{err:?}");
+    assert_eq!(err.error().code, ErrorCode::Corrupt);
 
     let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
     assert_eq!(
@@ -500,4 +501,165 @@ async fn a_merged_commit_is_not_finalized_over_unfinished_work() {
     assert_eq!(hooks.finalized.load(Ordering::SeqCst), 0);
     assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
     assert!(f.engine.journals.load(&root).unwrap().is_some());
+}
+
+/// Path of the only journal file of the fixture's state directory.
+fn journal_file(f: &super::support::Fixture) -> std::path::PathBuf {
+    let dir = f.state.path().join("commit-journal");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    files.pop().unwrap()
+}
+
+/// Names below the journal directory, sorted.
+fn journal_dir_listing(f: &super::support::Fixture) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(f.state.path().join("commit-journal"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Fixture with finishing hooks and a journal file of `root` holding `contents`.
+fn fixture_with_journal(
+    contents: &[u8],
+) -> (
+    super::support::Fixture,
+    Arc<Finishing>,
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let hooks = Arc::new(Finishing::default());
+    let f = fixture_with(hooks.clone());
+    let (tmp, root) = make_wc(1);
+    drop(f.engine.journals.begin(&root, URL).unwrap());
+    let file = journal_file(&f);
+    std::fs::write(&file, contents).unwrap();
+    (f, hooks, tmp, root, file)
+}
+
+#[tokio::test]
+async fn a_current_format_journal_that_does_not_parse_is_set_aside() {
+    let (f, hooks, _tmp, root, file) = fixture_with_journal(br#"{"version":1,"phase":"exploded"}"#);
+    let err = f.engine.journals.load(&root).unwrap_err();
+    assert!(matches!(err, JournalLoadError::Corrupt(_)), "{err:?}");
+
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    assert!(!file.exists());
+    assert_eq!(
+        std::fs::read(file.with_extension("json.corrupt")).unwrap(),
+        br#"{"version":1,"phase":"exploded"}"#
+    );
+    assert_eq!(hooks.finalized.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_journal_of_an_unknown_format_is_kept_untouched_and_not_finalized() {
+    let contents = format!(
+        r#"{{"version":2,"wc_root":"x","repo_root_url":"{URL}","phase":"merged","rev":2,"extra":true}}"#
+    );
+    let (f, hooks, _tmp, root, file) = fixture_with_journal(contents.as_bytes());
+    match f.engine.journals.load(&root).unwrap_err() {
+        JournalLoadError::UnsupportedVersion { version, .. } => assert_eq!(version, 2),
+        other => panic!("expected an unsupported version, got {other:?}"),
+    }
+    let before = journal_dir_listing(&f);
+
+    for _ in 0..2 {
+        let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+        assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+        assert!(opened.recovery.recovered.is_empty());
+    }
+    assert_eq!(hooks.finalized.load(Ordering::SeqCst), 0, "never finalized");
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        contents.as_bytes(),
+        "untouched"
+    );
+    assert_eq!(journal_dir_listing(&f), before, "not moved aside");
+
+    let err = f.engine.journals.begin(&root, URL).unwrap_err();
+    assert_eq!(err.code, ErrorCode::WcNeedsCleanup);
+    assert!(
+        err.message.contains("journal format 2"),
+        "the refusal explains itself: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_journal_that_cannot_be_read_is_kept_for_the_next_open() {
+    let (f, hooks, _tmp, root, file) = fixture_with_journal(b"");
+    // Something that exists but cannot be read as a file: a directory in its place.
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    std::fs::write(file.join("inside"), b"keep").unwrap();
+    let err = f.engine.journals.load(&root).unwrap_err();
+    assert!(matches!(err, JournalLoadError::Unreadable(_)), "{err:?}");
+    let before = journal_dir_listing(&f);
+
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    assert_eq!(journal_dir_listing(&f), before, "nothing moved or removed");
+    assert_eq!(std::fs::read(file.join("inside")).unwrap(), b"keep");
+
+    // Once readable again, the next open recovers it as usual.
+    std::fs::remove_dir_all(&file).unwrap();
+    let journal = f.engine.journals.begin(&root, URL).unwrap();
+    journal
+        .on_merged(&svn_ra_api::CommitInfo {
+            revision: svn_types::Revnum(2),
+            date: None,
+            author: None,
+            post_commit_err: None,
+        })
+        .unwrap();
+    drop(journal);
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.recovered, vec![String::new()]);
+    assert_eq!(hooks.finalized.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn an_earlier_quarantined_journal_is_never_replaced() {
+    let (f, _hooks, _tmp, root, file) = fixture_with_journal(b"garbage");
+    std::fs::write(file.with_extension("json.corrupt"), b"older").unwrap();
+
+    f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert!(!file.exists());
+    assert_eq!(
+        std::fs::read(file.with_extension("json.corrupt")).unwrap(),
+        b"older"
+    );
+    assert_eq!(
+        std::fs::read(file.with_extension("json.corrupt.1")).unwrap(),
+        b"garbage"
+    );
+}
+
+#[tokio::test]
+async fn a_corrupt_journal_that_cannot_be_set_aside_stays_in_place() {
+    let (f, _hooks, _tmp, root, file) = fixture_with_journal(b"garbage");
+    // Every quarantine slot is taken: setting it aside fails.
+    std::fs::write(file.with_extension("json.corrupt"), b"old").unwrap();
+    for n in 1..8 {
+        std::fs::write(file.with_extension(format!("json.corrupt.{n}")), b"old").unwrap();
+    }
+    let before = journal_dir_listing(&f);
+
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    assert_eq!(std::fs::read(&file).unwrap(), b"garbage", "never deleted");
+    assert_eq!(journal_dir_listing(&f), before);
+    assert_eq!(
+        f.engine.journals.begin(&root, URL).unwrap_err().code,
+        ErrorCode::WcNeedsCleanup,
+        "commits stay blocked until the user looks"
+    );
 }
