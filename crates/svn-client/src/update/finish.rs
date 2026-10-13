@@ -153,13 +153,17 @@ impl UpdateEditor {
             .as_ref()
             .and_then(|b| b.properties.clone())
             .unwrap_or_default();
-        let actual = if d.added || d.base.is_none() {
+        // A shadowed directory (deleted or replaced locally, or below an obstruction) only moves
+        // BASE on; its working properties are not merged into.
+        let shadowed = d.shadow.is_some();
+        let actual = if shadowed {
+            old_pristine.clone()
+        } else if d.added || d.base.is_none() {
             Vec::new()
         } else {
             db.actual_props(&d.wc)?
         };
         let pm = merge_props(&old_pristine, &d.prop_changes, &actual);
-        let shadowed = d.shadow.is_some();
         let mut work: Vec<Skel> = Vec::new();
         let mut conflicts = Vec::new();
         let mut action = None;
@@ -220,7 +224,7 @@ impl UpdateEditor {
         }
         db.with_txn(|t| {
             t.base_add(&d.wc, &node)?;
-            if d.base.is_some() || overlay.is_some() {
+            if !shadowed && (d.base.is_some() || overlay.is_some()) {
                 t.set_actual_props(&d.wc, overlay.as_ref())?;
             }
             if !conflicts.is_empty() {
