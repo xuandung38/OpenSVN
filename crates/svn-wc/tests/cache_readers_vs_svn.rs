@@ -54,7 +54,7 @@ fn lock_cache_matches_svn_info() {
     let (_tmp, base, url) = fixture();
     let wc = checkout(&base, &url, "wc", &[]);
     let db = WcDb::open(&wc).expect("open");
-    assert_eq!(db.lock(&rp("top.txt")).expect("lock"), None);
+    assert_eq!(db.repos_lock(&rp("top.txt")).expect("lock"), None);
     svn(&wc, &["lock", "-q", "-m", "editing", "top.txt"]);
     let info = svn_out(&wc, &["info", "top.txt"]);
     let token = info
@@ -63,15 +63,18 @@ fn lock_cache_matches_svn_info() {
         .expect("svn info shows a lock token")
         .trim()
         .to_string();
-    let lock = db.lock(&rp("top.txt")).expect("lock").expect("locked");
+    let lock = db
+        .repos_lock(&rp("top.txt"))
+        .expect("lock")
+        .expect("locked");
     assert_eq!(lock.token, token);
     assert_eq!(lock.comment.as_deref(), Some("editing"));
     assert!(lock.owner.is_some());
     assert!(lock.date.is_some_and(|d| d > 0));
     // The lock belongs to the repository location, not to a path in the working copy.
-    assert_eq!(db.lock(&rp("e")).expect("lock"), None);
+    assert_eq!(db.repos_lock(&rp("e")).expect("lock"), None);
     svn(&wc, &["unlock", "-q", "top.txt"]);
-    assert_eq!(db.lock(&rp("top.txt")).expect("lock"), None);
+    assert_eq!(db.repos_lock(&rp("top.txt")).expect("lock"), None);
 }
 
 #[test]
@@ -127,6 +130,8 @@ fn externals_match_the_rows_svn_wrote() {
     assert_eq!(defined[1].repos_uuid, uuid);
     assert_eq!(defined[1].def_repos_relpath, def_rel);
 
+    assert_eq!(dir_ext.def_revision, None);
+    assert_eq!(dir_ext.def_operational_revision, None);
     assert_eq!(db.externals_under(&rp("")).expect("under").len(), 2);
     assert_eq!(
         db.externals_under(&rp("d/ext-dir")).expect("under").len(),
@@ -175,6 +180,7 @@ fn dav_cache_and_inherited_props_are_decoded_from_the_base_row() {
     assert_eq!(db.inherited_props(&rp("g")).expect("read"), None);
 
     // dav_cache is written by the RA layer over http; stand in with a well-formed blob.
+    // Follow-up: replace with a real blob once the compat harness has its Apache fixtures.
     assert_eq!(db.dav_cache(&rp("g")).expect("none"), None);
     drop(db);
     let rw = rusqlite::Connection::open(sub.join(".svn/wc.db")).expect("open rw");
@@ -192,5 +198,88 @@ fn dav_cache_and_inherited_props_are_decoded_from_the_base_row() {
             b"svn:wc:ra_dav:version-url".to_vec(),
             b"/v/1/d/sub/g".to_vec()
         )]
+    );
+}
+
+#[test]
+fn pinned_external_revisions_are_numbers() {
+    if skip_without_svn() {
+        return;
+    }
+    let (_tmp, base, url) = fixture();
+    let wc = checkout(&base, &url, "wc", &[]);
+    // A value starting with `-r` would be parsed as an option, so pass it through a file.
+    fs::write(
+        base.join("ext.txt"),
+        format!("{url}/e@1 pinned\n-r1 {url}/top.txt rev-only\n"),
+    )
+    .expect("write");
+    svn(
+        &wc,
+        &["propset", "-q", "-F", "../ext.txt", "svn:externals", "d"],
+    );
+    svn(&wc, &["update", "-q"]);
+    let db = WcDb::open(&wc).expect("open");
+    let ext = db
+        .external(&rp("d/pinned"))
+        .expect("read")
+        .expect("external");
+    // `url@1` pins peg and node revision.
+    assert_eq!(ext.def_revision, Some(1));
+    assert_eq!(ext.def_operational_revision, Some(1));
+    // `-r1 url` pins only the node revision.
+    let rev_only = db
+        .external(&rp("d/rev-only"))
+        .expect("read")
+        .expect("external");
+    assert_eq!(rev_only.def_revision, Some(1));
+    assert_eq!(rev_only.def_operational_revision, None);
+}
+
+#[test]
+fn symlink_and_unknown_external_kinds_are_read() {
+    if skip_without_svn() {
+        return;
+    }
+    let (_tmp, base, url) = fixture();
+    let wc = checkout(&base, &url, "wc", &[]);
+    svn(
+        &wc,
+        &[
+            "propset",
+            "-q",
+            "svn:externals",
+            &format!("{url}/e ext-dir\n"),
+            "d",
+        ],
+    );
+    svn(&wc, &["update", "-q"]);
+    // svn only writes these kinds from upgrade and `svn_wc__db_external_add_symlink`.
+    let rw = rusqlite::Connection::open(wc.join(".svn/wc.db")).expect("open rw");
+    for (name, kind) in [("link-ext", "symlink"), ("odd-ext", "unknown")] {
+        rw.execute(
+            "INSERT INTO externals (wc_id, local_relpath, parent_relpath, repos_id, presence, kind, \
+             def_local_relpath, def_repos_relpath) \
+             SELECT wc_id, 'd/' || ?1, 'd', repos_id, presence, ?2, def_local_relpath, def_repos_relpath \
+             FROM externals WHERE local_relpath = 'd/ext-dir'",
+            [name, kind],
+        )
+        .expect("insert");
+    }
+    drop(rw);
+    let db = WcDb::open(&wc).expect("open");
+    let kinds: Vec<_> = db
+        .externals_defined_in(&rp("d"))
+        .expect("read")
+        .into_iter()
+        .map(|e| (e.local_relpath.as_str().to_string(), e.kind))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("d/ext-dir".to_string(), NodeKind::Dir),
+            ("d/link-ext".to_string(), NodeKind::Symlink),
+            ("d/odd-ext".to_string(), NodeKind::Unknown),
+        ]
     );
 }

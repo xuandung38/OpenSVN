@@ -46,7 +46,7 @@ fn base_blob(
 impl WcDb {
     /// Cached repository lock of the BASE node at `path`, matched by repository location like
     /// svn does (`LOCK.repos_id/repos_relpath` against the node's).
-    pub fn lock(&self, path: &RelPath) -> Result<Option<LockInfo>> {
+    pub fn repos_lock(&self, path: &RelPath) -> Result<Option<LockInfo>> {
         self.with_read(|c| {
             c.query_row(
                 "SELECT l.lock_token, l.lock_owner, l.lock_comment, l.lock_date \
