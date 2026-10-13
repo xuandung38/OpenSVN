@@ -1,0 +1,39 @@
+# Smoke subset for Subversion 1.8.19: checkout, update, commit, status, log, lock, and a working
+# copy created by svn 1.15 (format 31) that the svn18 client must be able to read, update and commit from;
+# a format-32 working copy must be refused with E155021.
+name: smoke-svn18
+description: svn18 server and client round trip plus cross-read of an svn15 working copy
+server: svn18
+repo: basic
+fresh_repo: true
+steps:
+  - { on: svn18, wc: a, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn18, wc: b, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: c, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn18, wc: a, sh: "echo changed >> README.txt && printf 'new\\n' > added.txt" }
+  - { on: svn18, wc: a, svn: [add, added.txt] }
+  - { on: svn18, wc: a, svn: [status, -u] }
+  - { on: svn18, wc: a, svn: [commit, -m, "smoke change"] }
+  - { on: svn18, wc: a, svn: [log, -l, "3", -v] }
+  - { on: svn18, wc: a, svn: [lock, locked.txt, -m, smoke] }
+  - { on: svn18, wc: a, svn: [unlock, locked.txt] }
+  - { on: svn18, wc: a, svn: [update] }
+  - { on: svn18, wc: b, svn: [update] }
+  # The old client reads and updates a working copy made by svn 1.15.
+  - { on: svn18, wc: c, svn: [status] }
+  - { on: svn18, wc: c, svn: [update] }
+  # The old client commits from the working copy made by svn 1.15 (format 31).
+  - { on: svn18, wc: c, sh: "echo from-svn15-wc >> README.txt" }
+  - { on: svn18, wc: c, svn: [commit, -m, "old client commit from svn15 wc"] }
+  - { on: svn18, wc: a, svn: [update] }
+  - { on: svn18, wc: b, svn: [update] }
+  - { on: svn18, wc: c, svn: [update] }
+  # Negative: a format-32 working copy (svn 1.15 --compatible-version 1.15) must be refused
+  # cleanly with E155021 (unsupported working copy format), never misread or modified.
+  - { on: svn15, wc: d, svn: [checkout, --compatible-version, "1.15", "{url}/trunk", "."] }
+  - { on: svn18, wc: d, svn: [status], fails_with: E155021 }
+  - { on: svn18, wc: d, svn: [update], fails_with: E155021 }
+  - { on: svn15, wc: d, svn: [status] }
+compare:
+  - { left: a, right: b, checks: [tree, status, info], reader: svn18 }
+  - { left: a, right: c, checks: [tree, status, info], reader: svn18 }
