@@ -4,19 +4,42 @@
 //! working copy from this process are serialized through it, and cross-process contention is
 //! absorbed by the 10 s busy timeout svn uses. Write transactions are `BEGIN IMMEDIATE` and must
 //! stay short: never hold [`WcDb::with_write`] across network I/O.
+//!
+//! Durability: unlike svn (`synchronous=OFF`) our write connection runs `synchronous=FULL`, so a
+//! committed transaction survives power loss; the rollback-journal mode (`TRUNCATE`, never WAL),
+//! locking mode and 10 s busy timeout stay identical to svn so svn/TortoiseSVN keep sharing the
+//! file.
+//!
+//! Failpoints (feature `failpoints`): `wc.txn.before_commit` fires after the closure succeeded and
+//! before COMMIT (the transaction rolls back), `wc.txn.after_commit` fires after COMMIT but before
+//! the caller learns about it; both turn the configured `return` action into an error.
 
+mod actual;
 mod connection;
+mod externals;
+mod misc;
+mod node_api;
+mod nodes;
+mod ops;
 mod schema;
+mod wc_lock;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
-use svn_types::{Depth, ErrorCode, Result, SvnError};
+use svn_types::{Depth, ErrorCode, RelPath, Result, SvnError};
 
+pub use actual::{ConflictRecord, ConflictTexts};
 pub use connection::{BUSY_TIMEOUT, OpenMode, open_connection, open_existing, sql_err};
+pub use externals::External;
+pub use misc::LockInfo;
+pub use nodes::{Node, Presence, Props};
+pub use ops::{BaseNode, CommitInfo};
 pub use schema::{FORMAT_MAX_READ, FORMAT_WRITE, check_supported_format, read_user_version};
+pub use wc_lock::{LockCleanup, LockOwner, LockState, ObtainMode};
 
 /// Name of the administrative directory.
 pub const ADM_DIR: &str = ".svn";
@@ -41,7 +64,26 @@ pub struct NewWc {
     pub depth: Depth,
 }
 
+/// Evaluates a failpoint that injects an `Err` into the enclosing `Result` function; compiled
+/// out unless the `failpoints` feature is enabled.
+#[cfg(feature = "failpoints")]
+macro_rules! failpoint {
+    ($name:literal) => {
+        fail::fail_point!($name, |_| Err(SvnError::new(
+            ErrorCode::Internal,
+            concat!("failpoint ", $name)
+        )));
+    };
+}
+
+#[cfg(not(feature = "failpoints"))]
+macro_rules! failpoint {
+    ($name:literal) => {};
+}
+
 /// Handle to one working copy's `wc.db`.
+///
+/// The write connection uses `synchronous=FULL` (svn uses OFF); see the module documentation.
 #[derive(Debug)]
 pub struct WcDb {
     wcroot: PathBuf,
@@ -50,6 +92,13 @@ pub struct WcDb {
     writable: bool,
     store_pristine: bool,
     conn: Mutex<Connection>,
+    /// WC locks obtained through this handle: directory to `levels` (like svn's `owned_locks`).
+    owned_locks: Mutex<BTreeMap<RelPath, i32>>,
+    /// Who records lock ownership (set by the application before locking).
+    lock_owner: Mutex<Option<LockOwner>>,
+    /// Serializes obtain/release/steal/cleanup of this handle (check, row, record and marker
+    /// must not interleave between threads).
+    lock_gate: Mutex<()>,
 }
 
 /// Returns the working copy root containing `path`, searching `path` and then its ancestors for
@@ -204,6 +253,9 @@ impl WcDb {
             writable: true,
             store_pristine: true,
             conn: Mutex::new(conn),
+            owned_locks: Mutex::new(BTreeMap::new()),
+            lock_owner: Mutex::new(None),
+            lock_gate: Mutex::new(()),
         })
     }
 
@@ -274,6 +326,9 @@ impl WcDb {
             writable,
             store_pristine,
             conn: Mutex::new(conn),
+            owned_locks: Mutex::new(BTreeMap::new()),
+            lock_owner: Mutex::new(None),
+            lock_gate: Mutex::new(()),
         })
     }
 
@@ -302,14 +357,14 @@ impl WcDb {
         self.writable
     }
 
-    fn lock(&self) -> MutexGuard<'_, Connection> {
+    fn conn_guard(&self) -> MutexGuard<'_, Connection> {
         // A panic in another closure cannot corrupt SQLite state, so recover the guard.
         self.conn.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Runs a read-only closure on the connection. Do not hold the result's borrows across calls.
     pub fn with_read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        f(&self.lock())
+        f(&self.conn_guard())
     }
 
     /// Runs `f` inside a `BEGIN IMMEDIATE` transaction; commits on `Ok`, rolls back on `Err`.
@@ -324,7 +379,7 @@ impl WcDb {
                 ),
             ));
         }
-        let mut conn = self.lock();
+        let mut conn = self.conn_guard();
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_err)?;
@@ -335,7 +390,9 @@ impl WcDb {
             ));
         }
         let value = f(&tx)?;
+        failpoint!("wc.txn.before_commit");
         tx.commit().map_err(sql_err)?;
+        failpoint!("wc.txn.after_commit");
         Ok(value)
     }
 }

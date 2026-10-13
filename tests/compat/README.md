@@ -97,22 +97,12 @@ Linux server reachable over the network.
 
 ### Native svn oracle for unit tests in other crates
 
-For fast per-crate tests that only need a local `svn`/`svnadmin` (file:// repositories), use
-`opensvn_compat::oracle` (add `opensvn-compat` as a dev-dependency) instead of calling
-`Command::new("svn")`:
-
-```rust
-use opensvn_compat::oracle::{MinVersion, Oracle};
-let Some(oracle) = Oracle::resolve(MinVersion::V1_15)? else { return Ok(()) }; // skipped
-oracle.svnadmin().args(["create", path]).status()?;
-oracle.svn().args(["checkout", url, wc]).status()?;
-```
-
-Environment: `OPENSVN_SVN_BIN` / `OPENSVN_SVNADMIN_BIN` (default `svn` / `svnadmin` on PATH);
-`OPENSVN_REQUIRE_SVN=1` turns a missing or too-old binary into `Err` instead of a skip (CI sets it).
-`MinVersion::V1_15` is the default; ask for `V1_14` only for 1.14-specific behaviour. The same
-crate exports the normalisers: `wcdb_dump::dump_sqlite` / `dump_wc_db`, `compare::snapshot_tree` /
-`diff_trees`, `skel::canonical`.
+Fast per-crate tests that only need a local `svn`/`svnadmin` (file:// repositories) use the
+standalone crate `tests/svn-oracle` (`opensvn-svn-oracle`, no engine dependencies) as a
+dev-dependency instead of calling `Command::new("svn")`; see its crate docs for the API and the
+`OPENSVN_SVN_BIN`, `OPENSVN_SVNADMIN_BIN` and `OPENSVN_REQUIRE_SVN` contract.
+`OPENSVN_REQUIRE_SVN=1` makes only a *missing* svn fatal; an svn older than the test's
+`MinVersion` always skips with a message (Windows only has SlikSVN 1.14.5).
 
 ### Engine steps
 
