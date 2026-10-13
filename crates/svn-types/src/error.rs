@@ -11,6 +11,11 @@ pub enum ErrorCode {
     Timeout,
     /// Credentials are required or were rejected.
     AuthRequired,
+    /// Negotiate (Kerberos single sign-on) was offered by the server but could not be used: no
+    /// ticket, no SPN for the host, the server rejected the ticket, mutual authentication failed,
+    /// or this build has no Negotiate support. Only returned when the server offers no Basic
+    /// fallback; otherwise the user is prompted with `PromptReason::NegotiateFailed`.
+    NegotiateFailed,
     /// Server refused the operation (authorization).
     Forbidden,
     /// TLS certificate is not trusted.

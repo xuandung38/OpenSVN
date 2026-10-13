@@ -241,7 +241,15 @@ pub fn redact_text(text: &str) -> Cow<'_, str> {
     let b = redact_headers_in_text(&a);
     let c = redact_lock_tokens(&b);
     let d = redact_secret_pairs(&c);
-    if matches!((&a, &b, &c, &d), (Cow::Borrowed(_), Cow::Borrowed(_), Cow::Borrowed(_), Cow::Borrowed(_))) {
+    if matches!(
+        (&a, &b, &c, &d),
+        (
+            Cow::Borrowed(_),
+            Cow::Borrowed(_),
+            Cow::Borrowed(_),
+            Cow::Borrowed(_)
+        )
+    ) {
         return Cow::Borrowed(text);
     }
     Cow::Owned(d.into_owned())
