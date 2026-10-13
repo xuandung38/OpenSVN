@@ -548,8 +548,10 @@ pub(crate) fn op_copy(
         conn.execute(
             "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, repos_id, \
              repos_path, revision, presence, depth, kind, changed_revision, changed_date, \
-             changed_author, checksum, properties, symlink_target, moved_here) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?17, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             changed_author, checksum, properties, symlink_target, moved_here, translated_size, \
+             last_mod_time) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?17, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+             ?18, ?19)",
             params![
                 wc_id,
                 p.target.as_str(),
@@ -568,6 +570,9 @@ pub(crate) fn op_copy(
                 node.symlink_target,
                 moved_here.then_some(1),
                 node.presence.as_str(),
+                // The stat cache travels with the row (STMT_INSERT_WORKING_NODE_COPY_FROM).
+                node.translated_size,
+                node.last_mod_time,
             ],
         )
         .map_err(sql_err)?;
