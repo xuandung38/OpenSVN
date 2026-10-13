@@ -181,6 +181,8 @@ pub enum AuthResponse {
     Certificate {
         decision: CertDecision,
     },
+    /// Use single sign-on (only valid when the prompt offered `negotiate`).
+    Negotiate,
     Cancel,
 }
 
