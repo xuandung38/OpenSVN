@@ -9,7 +9,12 @@ import { EmptyState } from "../components/ui/empty-state";
 import { Popover, PopoverGroup } from "../components/ui/popover";
 import { SegmentedControl } from "../components/ui/segmented-control";
 import { StatusBar, StatusBarItem } from "../components/ui/status-bar";
+import { Tabs } from "../components/ui/tabs";
 import { useToast } from "../components/ui/toast";
+import { BranchPopoverContent } from "../features/remote/branch/branch-popover";
+import { CreateBranchTagDialog } from "../features/remote/branch/create-branch-tag-dialog";
+import { RemotePane, type RemoteView } from "../features/remote/remote-pane";
+import { SettingsSheet } from "../features/remote/settings/settings-sheet";
 import { useLog, useOperations, useStatus, useUpdate, useWorkingCopies } from "../ipc/queries";
 import { applyTheme, readTheme, type ThemeChoice } from "../lib/theme";
 
@@ -24,6 +29,9 @@ export function AppShell() {
   const update = useUpdate();
   const toast = useToast();
   const [showActivity, setShowActivity] = useState(true);
+  const [view, setView] = useState<"changes" | RemoteView>("changes");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [createKind, setCreateKind] = useState<"branch" | "tag" | "location" | null>(null);
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
 
   const files = status.data ?? [];
@@ -80,6 +88,16 @@ export function AppShell() {
           }
           onToggleActivity={() => setShowActivity((v) => !v)}
           wrapWorkingCopy={wcPicker}
+          onOpenSettings={() => setSettingsOpen(true)}
+          wrapLocation={
+            current
+              ? (item) => (
+                  <Popover trigger={item}>
+                    <BranchPopoverContent wc={current} onCreate={setCreateKind} />
+                  </Popover>
+                )
+              : undefined
+          }
         />
       }
       banner={
@@ -101,10 +119,45 @@ export function AppShell() {
         />
       }
       main={
-        <EmptyState
-          title="Select a file"
-          description="Pick a changed file in the sidebar to see its diff here."
-        />
+        <div className="flex h-full min-h-0 flex-col">
+          <Tabs
+            label="Views"
+            className="shrink-0"
+            value={view}
+            onValueChange={(v) => setView(v as "changes" | RemoteView)}
+            tabs={[
+              { id: "changes", label: "Changes" },
+              { id: "history", label: "History" },
+              { id: "browse", label: "Browse" },
+            ]}
+          />
+          <div className="min-h-0 flex-1">
+            {view === "changes" && (
+              <EmptyState
+                title="Select a file"
+                description="Pick a changed file in the sidebar to see its diff here."
+              />
+            )}
+            {current && (
+              <RemotePane
+                view={view === "changes" ? null : view}
+                onViewChange={setView}
+                wc={current}
+              />
+            )}
+          </div>
+          <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+          {createKind && current && (
+            <CreateBranchTagDialog
+              kind={createKind}
+              sourceUrl={current.url}
+              sourceName={current.branch?.name ?? current.url}
+              repoRootUrl={current.repoRootUrl}
+              wcId={current.id}
+              onClose={() => setCreateKind(null)}
+            />
+          )}
+        </div>
       }
       activity={showActivity ? <ActivityPanel ops={ops} /> : undefined}
       statusBar={

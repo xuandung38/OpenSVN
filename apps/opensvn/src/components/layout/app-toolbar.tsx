@@ -1,4 +1,4 @@
-import { Activity, Boxes, GitBranch, RefreshCw } from "lucide-react";
+import { Activity, Boxes, GitBranch, RefreshCw, Settings } from "lucide-react";
 import type { ReactNode } from "react";
 import { ToolbarItem } from "../ui/toolbar-item";
 
@@ -12,6 +12,7 @@ export interface AppToolbarProps {
   activityCount: number;
   onUpdate: () => void;
   onToggleActivity: () => void;
+  onOpenSettings?: () => void;
   /** Popover/menu wrappers injected by the caller (e.g. Popover around the item). */
   wrapWorkingCopy?: (item: ReactNode) => ReactNode;
   wrapLocation?: (item: ReactNode) => ReactNode;
@@ -56,6 +57,16 @@ export function AppToolbar(p: AppToolbarProps) {
         onClick={p.onToggleActivity}
         className="min-w-0 border-r-0 border-l border-line"
       />
+      {p.onOpenSettings && (
+        <ToolbarItem
+          icon={<Settings size={18} />}
+          label=""
+          value="Settings"
+          aria-label="Settings"
+          onClick={p.onOpenSettings}
+          className="min-w-0 border-r-0 border-l border-line"
+        />
+      )}
     </div>
   );
 }

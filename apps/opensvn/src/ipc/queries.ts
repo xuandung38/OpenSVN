@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Banner, CommitRequest, UpdateRequest, WcId } from "./bindings";
 import { ipc, unwrap } from "./client";
-import type { OpState } from "./events";
+import type { OpOutcome, OpState } from "./events";
 import { queryKeys } from "./query-keys";
 
 export function useWorkingCopies() {
@@ -84,4 +84,15 @@ export function useCommit() {
     mutationFn: (req: CommitRequest) => unwrap(ipc().commands.commit(req)),
     onSuccess: (_h, req) => qc.invalidateQueries({ queryKey: queryKeys.status(req.wcId) }),
   });
+}
+
+/** Final outcome of one operation (result or error), `undefined` while it is still running. */
+export function useOperationOutcome(opId: string | undefined): OpOutcome | undefined {
+  const { data } = useQuery<Record<string, OpOutcome>>({
+    queryKey: queryKeys.opOutcomes,
+    enabled: false,
+    initialData: {},
+    queryFn: () => ({}),
+  });
+  return opId ? data[opId] : undefined;
 }
