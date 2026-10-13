@@ -52,6 +52,9 @@ pub struct OpContext {
     pub cancel: CancelToken,
     /// Where to report progress.
     pub progress: ProgressReporter,
+    /// False for background work (periodic checks): the engine must not prompt the user and fails
+    /// with `auth-required` instead when credentials are missing.
+    pub interactive: bool,
 }
 
 impl OpContext {
@@ -60,6 +63,15 @@ impl OpContext {
         Self {
             cancel: CancelToken::new(),
             progress: ProgressReporter::noop(),
+            interactive: true,
+        }
+    }
+
+    /// Context for unattended work: like [`OpContext::detached`] but never prompts.
+    pub fn background() -> Self {
+        Self {
+            interactive: false,
+            ..Self::detached()
         }
     }
 

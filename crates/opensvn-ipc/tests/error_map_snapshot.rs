@@ -11,6 +11,7 @@ fn all_codes() -> Vec<SvnErrorCode> {
         Network,
         Timeout,
         AuthRequired,
+        NegotiateFailed,
         Forbidden,
         TlsUntrusted,
         OutOfDate,
@@ -31,18 +32,18 @@ fn all_codes() -> Vec<SvnErrorCode> {
         PermissionDenied,
         FileInUse,
         Cancelled,
+        CommitOutcomeUnknown,
         Corrupt,
         ServerUnsupported,
         Internal,
     ] {
         match c {
-            Network | Timeout | AuthRequired | Forbidden | TlsUntrusted | OutOfDate
-            | LockedByOther | LockTokenInvalid | WcBusy | WcNeedsCleanup | WcFormatUnsupported
-            | NotAWorkingCopy | ConflictBlocksCommit | HookFailed | RepositoryMoved
-            | PristineNotHydrated | WcInvalidOperation | PathNotFound | UnsafePath | DiskFull
-            | PermissionDenied | FileInUse | Cancelled | Corrupt | ServerUnsupported | Internal => {
-                v.push(c)
-            }
+            Network | Timeout | AuthRequired | NegotiateFailed | Forbidden | TlsUntrusted
+            | OutOfDate | LockedByOther | LockTokenInvalid | WcBusy | WcNeedsCleanup
+            | WcFormatUnsupported | NotAWorkingCopy | ConflictBlocksCommit | HookFailed
+            | RepositoryMoved | PristineNotHydrated | WcInvalidOperation | PathNotFound
+            | UnsafePath | DiskFull | PermissionDenied | FileInUse | Cancelled
+            | CommitOutcomeUnknown | Corrupt | ServerUnsupported | Internal => v.push(c),
         }
     }
     v
