@@ -22,6 +22,15 @@ use serde::Deserialize;
 /// Which implementation performs a step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum Actor {
+    /// svn CLI 1.8.19 in a container (legacy profile).
+    #[serde(rename = "svn18")]
+    Svn18,
+    /// svn CLI 1.9.12 in a container (legacy profile).
+    #[serde(rename = "svn19")]
+    Svn19,
+    /// svn CLI 1.10.8 in a container (legacy profile).
+    #[serde(rename = "svn110")]
+    Svn110,
     /// svn CLI 1.14.5 in a container.
     #[serde(rename = "svn14")]
     Svn14,
@@ -39,6 +48,15 @@ pub enum Actor {
 /// Server/client Subversion version selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum SvnVersion {
+    /// Subversion 1.8.19 (legacy profile).
+    #[serde(rename = "svn18")]
+    V18,
+    /// Subversion 1.9.12 (legacy profile).
+    #[serde(rename = "svn19")]
+    V19,
+    /// Subversion 1.10.8 (legacy profile).
+    #[serde(rename = "svn110")]
+    V110,
     /// Subversion 1.14.5.
     #[serde(rename = "svn14")]
     V14,
@@ -51,8 +69,25 @@ impl SvnVersion {
     /// Short tag used in compose service names, e.g. `svn15`.
     pub fn tag(self) -> &'static str {
         match self {
+            Self::V18 => "svn18",
+            Self::V19 => "svn19",
+            Self::V110 => "svn110",
             Self::V14 => "svn14",
             Self::V15 => "svn15",
+        }
+    }
+}
+
+impl Actor {
+    /// The svn version this actor runs, for actors that are svn CLIs.
+    pub fn svn_version(self) -> Option<SvnVersion> {
+        match self {
+            Self::Svn18 => Some(SvnVersion::V18),
+            Self::Svn19 => Some(SvnVersion::V19),
+            Self::Svn110 => Some(SvnVersion::V110),
+            Self::Svn14 => Some(SvnVersion::V14),
+            Self::Svn15 => Some(SvnVersion::V15),
+            Self::Engine | Self::TortoiseManual => None,
         }
     }
 }
