@@ -50,3 +50,15 @@ name = "href_vetting"
 path = "fuzz_targets/href_vetting.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "update_parser"
+path = "fuzz_targets/update_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "file_revs"
+path = "fuzz_targets/file_revs.rs"
+test = false
+doc = false

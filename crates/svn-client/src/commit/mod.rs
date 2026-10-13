@@ -15,6 +15,7 @@
 
 pub mod collect;
 pub mod drive;
+pub mod file_commit;
 pub mod finalize;
 pub mod journal;
 pub mod recovery;
@@ -35,7 +36,7 @@ use self::drive::{DriveContext, DriveItem, PreparedText, drive};
 use self::journal::{JournalItem, JournalObserver, JournalStore, JournalText};
 use crate::local::content::{detranslate_to_file, stat_cache};
 use crate::local::paths::{abs_of, rel_of};
-use crate::local::wc_adapters::{pristine_store, run_work_queue};
+use crate::wc::run_work_queue;
 
 pub use self::recovery::{RecoveryReport, recover_commits};
 
@@ -324,7 +325,7 @@ fn prepare_items(
     items: &[collect::Committable],
     data_dir: &Path,
 ) -> Result<Vec<DriveItem>> {
-    let store = pristine_store(db);
+    let store = db.pristine_store();
     let mut out = Vec::with_capacity(items.len());
     for (n, item) in items.iter().enumerate() {
         let mut di = DriveItem {

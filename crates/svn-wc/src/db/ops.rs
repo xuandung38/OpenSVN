@@ -239,7 +239,7 @@ pub(crate) fn record_fileinfo(
 // ---------------------------------------------------------------------------------------------
 
 /// `(local_relpath = ?2 OR strict descendant of ?2)`: the node and its subtree.
-fn scope_sql() -> String {
+pub(crate) fn scope_sql() -> String {
     format!(
         "(local_relpath = ?2 OR {})",
         strict_descendant("local_relpath", "?2")
@@ -652,8 +652,7 @@ pub(crate) fn op_revert(
                 .map_err(sql_err)?;
             if nested {
                 return Err(SvnError::new(
-                    // No closer user-facing code exists; the caller should retry recursively.
-                    ErrorCode::WcFormatUnsupported,
+                    ErrorCode::WcInvalidOperation,
                     format!("can't revert '{path}' without reverting children"),
                 )
                 .with_svn_code(155_038));

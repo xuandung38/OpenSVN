@@ -76,6 +76,23 @@ pub struct NodeInstallInfo {
     pub has_lock: bool,
 }
 
+impl NodeInstallInfo {
+    /// Keyword context svn builds for the node in `svn_wc__expand_keywords`.
+    pub fn keyword_context(&self) -> KeywordContext {
+        KeywordContext {
+            rev: Some(self.changed_rev.unwrap_or(-1)),
+            url: Some(format!(
+                "{}/{}",
+                self.repos_root_url,
+                uri_encode(&self.repos_relpath)
+            )),
+            repos_root_url: Some(self.repos_root_url.clone()),
+            date_micros: self.changed_date_micros,
+            author: self.changed_author.clone(),
+        }
+    }
+}
+
 /// Database-backed operations used by work items.
 ///
 /// **Crash idempotency contract:** a work item can run again after a crash that happened after
@@ -90,7 +107,13 @@ pub trait WorkingCopyOps {
     fn actual_props(&self, relpath: &str) -> Result<BTreeMap<String, Vec<u8>>, WorkQueueError>;
     /// Inputs for `sync-file-flags`; `None` when the node is not a normal/added file.
     fn sync_flags_input(&self, relpath: &str) -> Result<Option<SyncInput>, WorkQueueError>;
-    /// Writes the `.prej` property reject file recorded in the node's conflict data.
+    /// Writes the `.prej` property reject file recorded in the node's conflict data; the text
+    /// comes from `conflicts::prej::prej_text`.
+    ///
+    /// `legacy` is the property conflict skel that svn 1.7 and 1.8 stored in the work item. It
+    /// is not supported: an implementation must fail with a clear error telling the user to
+    /// finish the interrupted operation with `svn cleanup` using the client that created the
+    /// working copy, and must not silently write nothing.
     fn write_prop_reject_file(
         &mut self,
         relpath: &str,
@@ -195,10 +218,10 @@ impl<'a> WorkQueueRunner<'a> {
         resolve_operand(&self.config.wc_root, relpath, false)
     }
 
-    /// Like [`operand`](Self::operand) for read-only SOURCES (`file-install` source,
-    /// `file-translate` source), which may also be a stored pristine text
-    /// (`.svn/pristine/<xx>/<sha1>.svn-base`, as svn 1.14 and TortoiseSVN 1.14 queue them).
-    fn source_operand(&self, relpath: &str) -> Result<PathBuf, WorkQueueError> {
+    /// Like [`operand`](Self::operand) for the `file-translate` source, which may also be a
+    /// stored pristine text (`.svn/pristine/<xx>/<sha1>.svn-base`, as svn 1.14 and
+    /// TortoiseSVN 1.14 queue them). No other operand may name a pristine.
+    fn translate_source_operand(&self, relpath: &str) -> Result<PathBuf, WorkQueueError> {
         resolve_operand(&self.config.wc_root, relpath, true)
     }
 
@@ -273,17 +296,7 @@ impl<'a> WorkQueueRunner<'a> {
 
     /// Keyword context svn builds for a node in `svn_wc__expand_keywords`.
     fn keyword_context(info: &NodeInstallInfo) -> KeywordContext {
-        KeywordContext {
-            rev: Some(info.changed_rev.unwrap_or(-1)),
-            url: Some(format!(
-                "{}/{}",
-                info.repos_root_url,
-                uri_encode(&info.repos_relpath)
-            )),
-            repos_root_url: Some(info.repos_root_url.clone()),
-            date_micros: info.changed_date_micros,
-            author: info.changed_author.clone(),
-        }
+        info.keyword_context()
     }
 
     fn translate_info(info: &NodeInstallInfo) -> TranslateInfo {
@@ -297,7 +310,7 @@ impl<'a> WorkQueueRunner<'a> {
         relpath: &str,
     ) -> Result<Box<dyn Read>, WorkQueueError> {
         if let Some(src) = source {
-            let path = self.source_operand(src)?;
+            let path = self.operand(src)?;
             return Ok(Box::new(
                 File::open(&path).map_err(WorkQueueError::io("open", &path))?,
             ));
@@ -360,7 +373,7 @@ impl<'a> WorkQueueRunner<'a> {
     }
 
     fn file_translate(&mut self, local: &str, src: &str, dst: &str) -> Result<(), WorkQueueError> {
-        let (src_abs, dst_abs) = (self.source_operand(src)?, self.operand(dst)?);
+        let (src_abs, dst_abs) = (self.translate_source_operand(src)?, self.operand(dst)?);
         // Keyword values come from the node's database row, but the properties that select the
         // translation are the *actual* ones (`svn_wc__get_translate_info` with props = NULL).
         let info = self.ops.install_info(local)?;

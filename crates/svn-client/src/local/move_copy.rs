@@ -9,7 +9,7 @@ use svn_wc::workqueue::WorkItem;
 use super::lock::write_op;
 use super::paths::{abs_of, rel_of};
 use super::state::{Schedule, is_versioned, node_info, subtree};
-use super::wc_adapters::skels;
+use crate::wc::skels;
 
 fn invalid(msg: impl Into<String>) -> SvnError {
     SvnError::new(ErrorCode::WcInvalidOperation, msg)

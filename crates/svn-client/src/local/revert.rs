@@ -10,7 +10,7 @@ use svn_wc::workqueue::WorkItem;
 use super::lock::write_op;
 use super::paths::{abs_of, rel_of};
 use super::state::{Schedule, node_info, props_modified, subtree, text_modified};
-use super::wc_adapters::skels;
+use crate::wc::skels;
 
 /// Options of [`revert`].
 #[derive(Debug, Clone, Copy, Default)]

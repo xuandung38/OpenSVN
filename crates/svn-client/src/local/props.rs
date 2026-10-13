@@ -10,7 +10,7 @@ use svn_wc::workqueue::WorkItem;
 use super::lock::write_op;
 use super::paths::abs_of;
 use super::state::{Schedule, node_info};
-use super::wc_adapters::skels;
+use crate::wc::skels;
 
 const FILE_ONLY: &[&str] = &[
     "svn:executable",
