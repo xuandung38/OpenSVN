@@ -30,6 +30,8 @@ pub(crate) async fn log(
         limit: req.limit,
         discover_changed_paths: req.discover_changed_paths,
         strict_node_history: req.strict_node_history,
+        // TODO(ra-api): `svn_ra_api::LogRequest` has no fields for merged revisions (`-g`) or a
+        // revision-property selection yet; add them there and pass them through here.
         include_merged_revisions: false,
         revprops: LogRevprops::Default,
         paths: req.paths.clone(),
