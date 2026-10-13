@@ -11,11 +11,13 @@ mod command_registry;
 mod commands;
 mod db;
 mod diagnostics;
+mod display_text;
 pub mod engine;
 mod errors;
 mod events;
 mod layout;
 pub mod lock_ownership;
+mod logging;
 mod menu;
 mod notify;
 mod ops;
@@ -66,6 +68,9 @@ fn build_state<R: tauri::Runtime>(
     let data_dir = db::current_data_dir(&app.config().identifier)
         .map_err(startup_error)?
         .join(FAKE_ENGINE_SUBDIR);
+    // First thing: every later log line goes through the redacting sinks. The diagnostics bundle
+    // reads the same folder.
+    logging::init(&data_dir.join("logs"));
     let preview = preview::prepare_preview_dir(&data_dir)
         .map_err(|e| startup_error(format!("{} {}", e.message, e.detail.unwrap_or_default())))?;
     app.asset_protocol_scope()
@@ -81,8 +86,8 @@ fn build_state<R: tauri::Runtime>(
         opener: Arc::new(os_integration::SystemOpener),
         menu: Arc::new(menu::TauriMenu::new(app.handle().clone())),
         updates: Arc::new(updater::TauriUpdater::new(app.handle().clone())),
-        // In memory until the OS credential store crate is wired in.
-        secrets: Arc::new(updater::MemorySecretStore::default()),
+        // OS credential store only; refuses to save when none is reachable (no fallback).
+        secrets: updater::os_secret_store(),
         notifier: Arc::new(notify::TauriNotifier::new(app.handle().clone())),
     })
     .map_err(|e| startup_error(format!("{} {}", e.message, e.detail.unwrap_or_default())))
