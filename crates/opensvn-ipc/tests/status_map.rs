@@ -69,7 +69,10 @@ fn lock_and_remote_lock_ownership() {
     let r = f.remote.expect("remote");
     assert!(r.out_of_date);
     assert_eq!(r.remote_rev.map(|v| v.0), Some(9));
-    assert!(r.remote_lock.expect("remote lock").mine);
+    let rl = r.remote_lock.expect("remote lock");
+    assert!(rl.mine);
+    assert_eq!(l.token, None, "lock tokens never cross IPC");
+    assert_eq!(rl.token, None, "lock tokens never cross IPC");
 
     s.remote = Some(RemoteStatus {
         out_of_date: false,

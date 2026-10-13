@@ -127,25 +127,67 @@ pub fn external_targets(value: &[u8]) -> Vec<String> {
     out
 }
 
+/// True on platforms whose default filesystems compare names case-insensitively (APFS and HFS+
+/// on macOS, NTFS on Windows). There a definition `EXT` occupies an on-disk `ext`, so external
+/// paths are matched case-insensitively; on a case-sensitive volume of such a platform this only
+/// protects more, never less.
+pub const CASE_INSENSITIVE_FS: bool = cfg!(any(target_os = "macos", target_os = "ios", windows));
+
 /// Working copy paths occupied by externals: the rows of the `EXTERNALS` table (written by the
 /// svn that fetched them) and the targets of `svn:externals` definitions (pristine or local) on
 /// versioned directories. The property is read too because a working copy whose externals were
 /// fetched by another client may lack rows; recognising a defined path that svn would show as
 /// `?` errs on the side of never deleting an external.
-#[derive(Debug, Default, Clone)]
-pub struct ExternalPaths(BTreeSet<String>);
+///
+/// A definition line [`external_targets`] cannot read is skipped, so its path is not known here.
+/// That is acceptable because callers that delete anything also refuse every directory holding
+/// its own administrative directory ([`is_wc_root_dir`]): an external svn has fetched is always
+/// such a directory, whether or not its definition could be parsed.
+#[derive(Debug, Clone)]
+pub struct ExternalPaths {
+    /// Paths, case-folded when `fold` is set.
+    paths: BTreeSet<String>,
+    /// Match case-insensitively ([`CASE_INSENSITIVE_FS`] by default).
+    fold: bool,
+}
+
+impl Default for ExternalPaths {
+    fn default() -> Self {
+        Self::new(CASE_INSENSITIVE_FS)
+    }
+}
 
 impl ExternalPaths {
+    /// No paths; `case_insensitive` selects how paths are compared.
+    pub fn new(case_insensitive: bool) -> Self {
+        Self {
+            paths: BTreeSet::new(),
+            fold: case_insensitive,
+        }
+    }
+
+    fn key(&self, p: &str) -> String {
+        if self.fold {
+            p.to_lowercase()
+        } else {
+            p.to_owned()
+        }
+    }
+
+    /// Records `path` as an external.
+    pub fn insert(&mut self, path: &RelPath) {
+        let k = self.key(path.as_str());
+        self.paths.insert(k);
+    }
+
     /// The recorded externals of the working copy plus the definitions on the ancestors of
     /// `path` (`path` itself and what is below it are added with
     /// [`ExternalPaths::add_defined_in`] while walking).
     pub fn for_path(db: &WcDb, dir: &RelPath) -> Result<Self> {
-        let mut me = Self(
-            db.externals_under(&RelPath::root())?
-                .into_iter()
-                .map(|e| e.local_relpath.as_str().to_owned())
-                .collect(),
-        );
+        let mut me = Self::default();
+        for e in db.externals_under(&RelPath::root())? {
+            me.insert(&e.local_relpath);
+        }
         let mut cur = dir.parent();
         while let Some(p) = cur {
             if db.read_node(&p)?.is_some() {
@@ -167,25 +209,43 @@ impl ExternalPaths {
                 if let Ok(t) = RelPath::new(&t)
                     && let Ok(full) = join_rel(dir, &t)
                 {
-                    self.0.insert(full.as_str().to_owned());
+                    self.insert(&full);
                 }
             }
         }
         Ok(())
     }
 
+    /// True when `rel` is itself an external.
+    pub fn is_external(&self, rel: &RelPath) -> bool {
+        !rel.is_root() && self.paths.contains(&self.key(rel.as_str()))
+    }
+
+    /// True when `rel` is an external or lies inside one: `rel` or one of its ancestors is an
+    /// external. Such a path belongs to the external's own working copy.
+    pub fn within(&self, rel: &RelPath) -> bool {
+        let mut cur = Some(rel.clone());
+        while let Some(p) = cur {
+            if self.is_external(&p) {
+                return true;
+            }
+            cur = p.parent();
+        }
+        false
+    }
+
     /// True when `rel` is an external or an unversioned directory leading to one (svn's
     /// `is_external_path`).
     pub fn covers(&self, rel: &RelPath) -> bool {
-        let p = rel.as_str();
-        if p.is_empty() {
+        if rel.is_root() {
             return false;
         }
-        if self.0.contains(p) {
+        let p = self.key(rel.as_str());
+        if self.paths.contains(&p) {
             return true;
         }
         let prefix = format!("{p}/");
-        self.0
+        self.paths
             .range(prefix.clone()..)
             .next()
             .is_some_and(|e| e.starts_with(&prefix))
@@ -237,15 +297,44 @@ mod tests {
 
     #[test]
     fn covers_externals_and_their_ancestors() {
-        let mut e = ExternalPaths::default();
-        e.0.insert("deep/x/ext".into());
-        e.0.insert("lib".into());
         let r = |s: &str| RelPath::new(s).expect("path");
+        let mut e = ExternalPaths::new(false);
+        e.insert(&r("deep/x/ext"));
+        e.insert(&r("lib"));
         assert!(e.covers(&r("lib")));
         assert!(e.covers(&r("deep")));
         assert!(e.covers(&r("deep/x")));
         assert!(!e.covers(&r("deep/y")));
         assert!(!e.covers(&r("li")));
         assert!(!e.covers(&r("lib2")));
+    }
+
+    #[test]
+    fn within_matches_externals_and_what_is_inside_them() {
+        let r = |s: &str| RelPath::new(s).expect("path");
+        let mut e = ExternalPaths::new(false);
+        e.insert(&r("deep/x/ext"));
+        assert!(e.within(&r("deep/x/ext")));
+        assert!(e.within(&r("deep/x/ext/src/main.rs")));
+        assert!(
+            !e.within(&r("deep/x")),
+            "a directory leading to it is not inside"
+        );
+        assert!(!e.within(&r("deep/x/ext2")));
+        assert!(!e.within(&RelPath::root()));
+    }
+
+    #[test]
+    fn case_folding_matches_regardless_of_case() {
+        let r = |s: &str| RelPath::new(s).expect("path");
+        let mut folded = ExternalPaths::new(true);
+        folded.insert(&r("Lib/EXT"));
+        assert!(folded.is_external(&r("lib/ext")));
+        assert!(folded.within(&r("LIB/Ext/a.txt")));
+        assert!(folded.covers(&r("lib")));
+        let mut exact = ExternalPaths::new(false);
+        exact.insert(&r("Lib/EXT"));
+        assert!(!exact.is_external(&r("lib/ext")));
+        assert!(!exact.covers(&r("lib")));
     }
 }

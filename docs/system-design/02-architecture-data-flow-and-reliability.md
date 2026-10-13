@@ -97,11 +97,11 @@ UI Commit(paths, message) ─► ensure_authenticated ─► WcActor.write ─�
  ─► kiểm tra: không conflict, không out-of-date cục bộ rõ ràng
  ─► ghi commit journal (state_dir của app) ─► POST !svn/me (create-txn) → journal ghi txn ─► với mỗi path: PUT svndiff fulltext từ file đọc lại được
                                          / MKCOL / DELETE / COPY / PROPPATCH (song song có giới hạn)
- ─► MERGE (gửi lock tokens, release-locks theo tùy chọn) ─► nhận new revision → journal ghi rev
+ ─► journal ghi merge_sent (kèm youngest rev lúc bắt đầu + log message) ─► MERGE (gửi lock tokens, release-locks theo tùy chọn) ─► nhận new revision → journal ghi rev
  ─► transaction wc.db: cập nhật NODES base_rev, checksum, PRISTINE, xóa lock nếu nhả ─► xóa journal
  ─► lỗi giữa chừng ─► DELETE txn trên server, WC không đổi
 ```
-Tính atomic: server chỉ có revision mới sau MERGE thành công; WC chỉ cập nhật sau khi nhận revision. Crash sau MERGE trước khi cập nhật WC → lần mở sau đọc commit journal có rev → **finalize** WC theo journal (không để file "A" giả hay tree conflict add-vs-add). Journal chỉ có txn → `abort_txn` dọn txn rò.
+Tính atomic: server chỉ có revision mới sau MERGE thành công; WC chỉ cập nhật sau khi nhận revision. Crash sau MERGE trước khi cập nhật WC → lần mở sau đọc commit journal có rev → **finalize** WC theo journal (không để file "A" giả hay tree conflict add-vs-add). Journal chỉ có txn → `abort_txn` dọn txn rò. Journal có `merge_sent` nhưng chưa có rev (crash khi MERGE đang bay, `CommitOutcomeUnknown`, hoặc ghi rev vào journal thất bại) → **không bao giờ** xóa journal/abort mù: `abort_txn_checked` — txn còn (`Deleted`) ⇒ chưa commit, bỏ journal; txn đã mất (`Gone`) ⇒ tìm trong log từ youngest-lúc-bắt-đầu+1..HEAD theo author (nếu biết) + message + tập changed paths + MD5 nội dung, đúng một kết quả ⇒ finalize, còn lại ⇒ giữ journal, báo người dùng. Trong lúc đó commit mới trên WC đó bị từ chối (`WcNeedsCleanup`). Journal không đọc được: version lạ ⇒ để nguyên; hỏng ⇒ dời sang `.corrupt[.n]` (không ghi đè); lỗi I/O ⇒ giữ nguyên.
 
 **Incoming poller**: mỗi N phút (mặc định 10) với WC đang mở: `PROPFIND`/`OPTIONS` lấy youngest rev → nếu > base → `log` khoảng mới (scope WC) → badge `Update ↓N`.
 

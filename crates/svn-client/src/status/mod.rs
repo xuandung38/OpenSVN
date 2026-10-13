@@ -11,7 +11,9 @@ use std::sync::Arc;
 use svn_ra_api::RaSession;
 use svn_types::{CancelToken, Depth, ErrorCode, Result, SvnError, WcStatus};
 
-pub use externals::{EXTERNALS_PROP, ExternalPaths, external_targets, is_wc_root_dir};
+pub use externals::{
+    CASE_INSENSITIVE_FS, EXTERNALS_PROP, ExternalPaths, external_targets, is_wc_root_dir,
+};
 pub use ignore::{DEFAULT_GLOBAL_IGNORES, fnmatch};
 pub use local::local_status;
 pub use remote::{RemoteChange, RemoteInfo};

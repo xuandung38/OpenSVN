@@ -27,7 +27,7 @@ svn-ra-api.workspace = true
 svn-types.workspace = true
 svn-wc.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["fs", "rt", "sync"] }
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync"] }
 tracing.workspace = true
 fail = { workspace = true, optional = true }
 
