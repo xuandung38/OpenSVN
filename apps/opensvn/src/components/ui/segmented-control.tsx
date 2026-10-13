@@ -31,8 +31,8 @@ export function SegmentedControl<V extends string>({
           className={cn(
             "cursor-pointer border-0 px-3 py-1.5",
             o.value === value
-              ? "bg-accent-soft font-semibold text-accent"
-              : "bg-transparent text-muted",
+              ? "bg-accent-soft font-semibold text-accent-text"
+              : "bg-transparent text-muted-text",
           )}
         >
           {o.label}

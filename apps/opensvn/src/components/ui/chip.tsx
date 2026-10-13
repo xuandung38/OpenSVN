@@ -14,8 +14,8 @@ export function Chip({
       className={cn(
         "cursor-pointer rounded-[10px] border px-2 py-0.5 text-[11px]",
         on
-          ? "border-transparent bg-accent-soft text-accent"
-          : "border-line bg-transparent text-muted",
+          ? "border-transparent bg-accent-soft text-accent-text"
+          : "border-line bg-transparent text-muted-text",
         className,
       )}
       {...rest}

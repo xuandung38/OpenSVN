@@ -75,7 +75,7 @@ export const FileRow = memo(function FileRow({
       />
       <StatusGlyph code={status} />
       <span className="min-w-0 truncate font-mono text-[12px]" title={path}>
-        <SafeText as="span" className="text-muted">
+        <SafeText as="span" className="text-muted-text">
           {dir}
         </SafeText>
         <SafeText as="span" className="text-fg">

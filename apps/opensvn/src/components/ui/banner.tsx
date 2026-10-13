@@ -21,7 +21,7 @@ export function Banner({
         tone === "danger" ? "bg-bad-soft" : "bg-warn-soft",
       )}
     >
-      <b className={tone === "danger" ? "text-bad" : "text-warn"}>{title}</b>
+      <b className={tone === "danger" ? "text-bad-text" : "text-warn-text"}>{title}</b>
       <span className="min-w-0 flex-1 truncate">{children}</span>
       {actions && <span className="flex gap-1.5">{actions}</span>}
     </div>

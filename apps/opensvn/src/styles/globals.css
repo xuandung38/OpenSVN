@@ -21,6 +21,12 @@
   --color-info: var(--info);
   --color-add-bg: var(--add-bg);
   --color-del-bg: var(--del-bg);
+  --color-muted-text: var(--muted-text);
+  --color-accent-text: var(--accent-text);
+  --color-ok-text: var(--ok-text);
+  --color-warn-text: var(--warn-text);
+  --color-bad-text: var(--bad-text);
+  --color-info-text: var(--info-text);
   --color-on-accent: var(--on-accent);
   --color-on-bad: var(--on-bad);
   --color-on-warn: var(--on-warn);

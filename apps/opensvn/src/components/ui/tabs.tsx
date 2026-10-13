@@ -40,13 +40,13 @@ export function Tabs({
             key={t.id}
             value={t.id}
             className={cn(
-              "-mb-px flex-1 cursor-pointer border-0 border-b-2 border-transparent bg-transparent px-2 py-[7px] text-muted",
+              "-mb-px flex-1 cursor-pointer border-0 border-b-2 border-transparent bg-transparent px-2 py-[7px] text-muted-text",
               "data-[state=active]:border-accent data-[state=active]:font-semibold data-[state=active]:text-fg",
             )}
           >
             {t.label}
             {t.count !== undefined && (
-              <span className="tnum ml-1.5 rounded-[9px] bg-surface-2 px-1.5 text-[11px] text-muted">
+              <span className="tnum ml-1.5 rounded-[9px] bg-surface-2 px-1.5 text-[11px] text-muted-text">
                 {t.count}
               </span>
             )}

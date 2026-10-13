@@ -51,10 +51,10 @@ export const RevisionRow = memo(function RevisionRow({
       )}
     >
       <span className="truncate">
-        {incoming && <span className="mr-1 text-accent">↓ not updated</span>}
+        {incoming && <span className="mr-1 text-accent-text">↓ not updated</span>}
         <SafeText>{firstLine}</SafeText>
       </span>
-      <span className="tnum truncate text-[11px] text-muted">
+      <span className="tnum truncate text-[11px] text-muted-text">
         <span className="font-mono">r{rev}</span> · <SafeText>{author}</SafeText> · {when}
       </span>
     </div>

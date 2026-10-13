@@ -19,7 +19,7 @@ export function ActivityRow({ title, percent, state, onCancel }: ActivityRowProp
     <div
       className={cn(
         "grid grid-cols-[20px_1fr_160px_70px] items-center gap-2 px-3.5 py-1",
-        failed && "text-bad",
+        failed && "text-bad-text",
       )}
     >
       <span aria-hidden="true" className="font-mono">
@@ -40,13 +40,13 @@ export function ActivityRow({ title, percent, state, onCancel }: ActivityRowProp
           style={{ width: `${pct ?? 0}%` }}
         />
       </div>
-      <span className="tnum flex items-center justify-end gap-1.5 text-muted">
+      <span className="tnum flex items-center justify-end gap-1.5 text-muted-text">
         {pct === null ? "" : `${pct}%`}
         {state === "running" && onCancel && (
           <button
             type="button"
             onClick={onCancel}
-            className="cursor-pointer border-0 bg-transparent text-accent"
+            className="cursor-pointer border-0 bg-transparent text-accent-text"
           >
             Cancel
           </button>
