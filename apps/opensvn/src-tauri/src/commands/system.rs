@@ -53,9 +53,14 @@ pub async fn settings_get(state: State<'_, AppState>) -> Result<Settings, AppErr
 /// Argument of `settings_set`. Exported to TypeScript as `SettingsPatch`, but a patch that does not
 /// parse (unknown or program-launching key, wrong type) is reported as an `AppError` by the
 /// command instead of Tauri's raw string error.
-#[derive(Debug, specta::Type)]
-#[specta(transparent)]
-pub struct PatchArg(#[specta(type = SettingsPatch)] Result<SettingsPatch, String>);
+#[derive(Debug)]
+pub struct PatchArg(Result<SettingsPatch, String>);
+
+impl specta::Type for PatchArg {
+    fn definition(types: &mut specta::Types) -> specta::datatype::DataType {
+        <SettingsPatch as specta::Type>::definition(types)
+    }
+}
 
 impl From<SettingsPatch> for PatchArg {
     fn from(p: SettingsPatch) -> Self {
