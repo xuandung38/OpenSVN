@@ -63,6 +63,21 @@ impl WcDb {
         self.with_read(|c| actual::read_conflict(c, self.wc_id, path))
     }
 
+    /// The node whose `moved_to` names `path` (the source of a local move to `path`), if any.
+    pub fn moved_from(&self, path: &RelPath) -> Result<Option<RelPath>> {
+        let found: Option<String> = self.with_read(|c| {
+            c.query_row(
+                "SELECT local_relpath FROM nodes WHERE wc_id = ?1 AND moved_to = ?2 \
+                 ORDER BY op_depth LIMIT 1",
+                rusqlite::params![self.wc_id, path.as_str()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)
+        })?;
+        found.map(|p| RelPath::new(&p)).transpose()
+    }
+
     /// Pending work queue items in queue order as `(id, skel)`.
     pub fn work_items(&self) -> Result<Vec<(i64, Skel)>> {
         self.with_read(|c| {
@@ -116,6 +131,18 @@ impl WcDb {
         completed_id: Option<i64>,
         fileinfo: &[(RelPath, FileInfo)],
     ) -> Result<Option<(i64, Skel)>> {
+        self.wq_record_and_fetch_next_raw(completed_id, fileinfo)?
+            .map(|(id, blob)| Ok((id, Skel::parse(&blob)?)))
+            .transpose()
+    }
+
+    /// [`wq_record_and_fetch_next`](Self::wq_record_and_fetch_next) returning the stored bytes
+    /// of the next item unparsed (the work queue runner decodes them itself).
+    pub(crate) fn wq_record_and_fetch_next_raw(
+        &self,
+        completed_id: Option<i64>,
+        fileinfo: &[(RelPath, FileInfo)],
+    ) -> Result<Option<(i64, Vec<u8>)>> {
         self.with_write(|tx| {
             if let Some(id) = completed_id {
                 tx.execute("DELETE FROM work_queue WHERE id = ?1", [id])
@@ -135,16 +162,13 @@ impl WcDb {
                 }
             }
             failpoint!("wc.wq.after_fileinfo");
-            let next: Option<(i64, Vec<u8>)> = tx
-                .query_row(
-                    "SELECT id, work FROM work_queue ORDER BY id LIMIT 1",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()
-                .map_err(sql_err)?;
-            next.map(|(id, blob)| Ok((id, Skel::parse(&blob)?)))
-                .transpose()
+            tx.query_row(
+                "SELECT id, work FROM work_queue ORDER BY id LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(sql_err)
         })
     }
 
