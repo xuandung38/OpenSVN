@@ -7,11 +7,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use async_trait::async_trait;
 use bytes::Bytes;
 use svn_types::{
-    CancelToken, ChangedPath, Checksum, DirId, ErrorCode, FileId, PropChange, RelPath, Result,
-    Revnum, SvnError, Timestamp,
+    CancelToken, ChangeAction, ChangedPath, Checksum, DirId, ErrorCode, FileId, NodeKind,
+    PropChange, RelPath, RepoDisplayPath, RepoUrl, Result, Revnum, SvnError, Timestamp,
 };
 
-use super::repo::{FakeChange, RepoState, Tree, apply_change};
+use super::repo::{FakeChange, Node, RepoState, Tree, apply_change};
 use crate::commit::{CommitEditor, CommitInfo, CommitObserver, ReplayableSource};
 
 pub(super) struct FakeCommitEditor {
@@ -32,6 +32,8 @@ pub(super) struct FakeCommitEditor {
     pub files: HashMap<FileId, RelPath>,
     pub next_id: u32,
     pub touched: Vec<RelPath>,
+    /// Repository root URL, to resolve copy sources.
+    pub root: RepoUrl,
 }
 
 fn guard(state: &Mutex<RepoState>) -> MutexGuard<'_, RepoState> {
@@ -103,6 +105,75 @@ impl FakeCommitEditor {
         apply_change(&mut self.tree, rev, &change, &mut self.changed)
     }
 
+    /// Adds `path` as a copy of the node named by the URL `from` at `rev`, with its subtree:
+    /// the copy root is new in this revision, the copied children keep their last-changed
+    /// revisions (they share the source's node revisions, as in FSFS).
+    fn copy(&mut self, path: &RelPath, from: &str, rev: Revnum, kind: NodeKind) -> Result<()> {
+        let new_rev = Revnum(self.base_head.0 + 1);
+        let (src, nodes) = {
+            let st = guard(&self.state);
+            let (_, r) = st.revision(Some(rev))?;
+            let src = r
+                .tree
+                .keys()
+                .find(|k| {
+                    self.root.join(k).is_ok_and(|u| {
+                        u.as_url().as_str().trim_end_matches('/') == from.trim_end_matches('/')
+                    })
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    err(
+                        ErrorCode::PathNotFound,
+                        format!("copy source {from}@{} not found", rev.0),
+                    )
+                })?;
+            let nodes: Vec<(RelPath, Node)> = r
+                .tree
+                .iter()
+                .filter(|(k, _)| k.starts_with(&src))
+                .map(|(k, n)| (k.clone(), n.clone()))
+                .collect();
+            (src, nodes)
+        };
+        if nodes.first().map(|(_, n)| n.kind()) != Some(kind) {
+            return Err(err(
+                ErrorCode::Internal,
+                format!("copy source {from} is not a {kind:?}"),
+            ));
+        }
+        for (k, mut n) in nodes {
+            let suffix = k
+                .as_str()
+                .strip_prefix(src.as_str())
+                .unwrap_or("")
+                .trim_start_matches('/');
+            let target = if suffix.is_empty() {
+                n.created_rev = new_rev;
+                path.clone()
+            } else {
+                RelPath::new(&format!("{path}/{suffix}"))?
+            };
+            self.tree.insert(target, n);
+        }
+        self.changed.push(ChangedPath {
+            path: RepoDisplayPath::from_rel(path),
+            action: ChangeAction::Added,
+            kind,
+            copy_from: Some((RepoDisplayPath::from_rel(&src), rev)),
+            text_mods: false,
+            prop_mods: false,
+        });
+        let mut parent = path.parent();
+        while let Some(p) = parent {
+            if let Some(n) = self.tree.get_mut(&p) {
+                n.created_rev = new_rev;
+            }
+            parent = p.parent();
+        }
+        Ok(())
+    }
+
     fn require_new(&self, path: &RelPath) -> Result<()> {
         if self.tree.contains_key(path) {
             return Err(err(ErrorCode::Internal, format!("{path} already exists")));
@@ -129,14 +200,11 @@ impl CommitEditor for FakeCommitEditor {
     ) -> Result<DirId> {
         self.cancel.check()?;
         self.dir_path(parent)?;
-        if copy_from.is_some() {
-            return Err(err(
-                ErrorCode::ServerUnsupported,
-                "fake repository does not support copies",
-            ));
-        }
         self.require_new(path)?;
-        self.apply(FakeChange::PutDir(path.clone()))?;
+        match copy_from {
+            Some((from, rev)) => self.copy(path, from, rev, NodeKind::Dir)?,
+            None => self.apply(FakeChange::PutDir(path.clone()))?,
+        }
         self.touched.push(path.clone());
         let id = DirId(self.id());
         self.dirs.insert(id, path.clone());
@@ -165,15 +233,12 @@ impl CommitEditor for FakeCommitEditor {
     ) -> Result<FileId> {
         self.cancel.check()?;
         self.dir_path(parent)?;
-        if copy_from.is_some() {
-            return Err(err(
-                ErrorCode::ServerUnsupported,
-                "fake repository does not support copies",
-            ));
-        }
         self.require_new(path)?;
         self.check_lock(path)?;
-        self.apply(FakeChange::PutFile(path.clone(), Bytes::new()))?;
+        match copy_from {
+            Some((from, rev)) => self.copy(path, from, rev, NodeKind::File)?,
+            None => self.apply(FakeChange::PutFile(path.clone(), Bytes::new()))?,
+        }
         self.touched.push(path.clone());
         let id = FileId(self.id());
         self.files.insert(id, path.clone());

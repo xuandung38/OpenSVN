@@ -38,9 +38,6 @@ pub struct JournalText {
     pub size: u64,
     /// File name of the saved text inside the commit's data directory.
     pub data: String,
-    /// Size and mtime (APR microseconds) of the working file when the text was read; the stat
-    /// cache is only stored after the commit when the file still has them.
-    pub stat: Option<(i64, i64)>,
 }
 
 /// One committed path.
@@ -323,7 +320,6 @@ mod tests {
                 md5: "11".repeat(16),
                 size: 3,
                 data: "0.txt".into(),
-                stat: Some((3, 9)),
             }),
             lock_token: Some("opaquelocktoken:x".into()),
         }

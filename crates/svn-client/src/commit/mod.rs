@@ -10,8 +10,10 @@
 //! * the post-commit update of all committed paths is one database transaction.
 //!
 //! Failpoints (feature `failpoints`): `commit.after_txn_created` fires once the server
-//! transaction exists and `commit.after_merge_before_finalize` after MERGE, before the working
-//! copy is touched; both turn the configured `return` action into an error.
+//! transaction exists, `commit.after_merge_before_finalize` after MERGE, before the working
+//! copy is touched, and `commit.after_finalize_before_queue` once the rows and the `file-commit`
+//! work items are committed but before they ran; all turn the configured `return` action into an
+//! error.
 
 pub mod collect;
 pub mod drive;
@@ -34,7 +36,7 @@ use svn_wc::pristine::PristineIndex;
 use self::collect::{CollectOptions, ItemAction, collect};
 use self::drive::{DriveContext, DriveItem, PreparedText, drive};
 use self::journal::{JournalItem, JournalObserver, JournalStore, JournalText};
-use crate::local::content::{detranslate_to_file, stat_cache};
+use crate::local::content::detranslate_to_file;
 use crate::local::paths::{abs_of, rel_of};
 use crate::wc::run_work_queue;
 
@@ -298,6 +300,7 @@ async fn commit_locked(
 
     let journal = observer.snapshot();
     finalize::finalize(db, &journal, &data_dir)?;
+    failpoint!("commit.after_finalize_before_queue");
     run_work_queue(db, ctx.cancel)?;
     store.remove(&id)?;
     Ok(Some(CommitResult {
@@ -334,7 +337,6 @@ fn prepare_items(
         };
         if item.needs_text && item.action != ItemAction::Delete {
             let abs = abs_of(db, &item.relpath);
-            let stat = stat_cache(&abs);
             let name = format!("{n}.txt");
             let dest = data_dir.join(&name);
             let digest = detranslate_to_file(db, &item.relpath, &abs, &dest)?;
@@ -366,7 +368,6 @@ fn prepare_items(
                     md5: digest.md5.to_hex(),
                     size: digest.size,
                     data: name,
-                    stat,
                 },
             });
         }

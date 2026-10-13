@@ -157,7 +157,16 @@ pub(crate) fn propset_locked(
         }
     }
     let mut props = db.actual_props(rel)?;
+    let old = props
+        .iter()
+        .find(|(k, _)| k.as_slice() == name.as_bytes())
+        .map(|(_, v)| v.clone());
     props.retain(|(k, _)| k.as_slice() != name.as_bytes());
+    // Changing how the file is translated invalidates its stat cache, so the next status reads
+    // the file again (`propset_internal`'s `clear_recorded_info`).
+    let clear_recorded_info = !is_dir
+        && matches!(name, "svn:eol-style" | "svn:keywords")
+        && old.as_deref() != value.as_deref();
     if let Some(v) = value {
         props.push((name.as_bytes().to_vec(), v));
     }
@@ -168,7 +177,13 @@ pub(crate) fn propset_locked(
             relpath: rel.as_str().to_owned(),
         });
     }
-    db.set_props(rel, &props, &skels(&work))
+    db.with_txn(|t| {
+        t.set_props(rel, &props)?;
+        if clear_recorded_info {
+            t.record_fileinfo(rel, Some(-1), Some(0))?;
+        }
+        t.queue_work(&skels(&work))
+    })
 }
 
 /// Value of property `name` in the working copy (local changes included).

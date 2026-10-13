@@ -185,3 +185,97 @@ async fn failure_after_txn_creation_cleans_up_the_server() {
     assert!(JournalStore::new(&e.state).list().expect("list").is_empty());
     assert_eq!(e.ra.inner.youngest_rev(&e.cancel).await.expect("rev").0, 1);
 }
+
+/// Commits a keyword edit and dies after the post-commit transaction, before the `file-commit`
+/// items ran: the rows already say r2, the working file still has the old keyword values.
+async fn crash_before_post_commit_queue(e: &Env) {
+    write(&e.wc, "d/f1", "rev $Rev$\n");
+    svn_client::local::propset(
+        &e.db,
+        &e.cancel,
+        &rp("d/f1"),
+        "svn:keywords",
+        Some(b"Rev"),
+        svn_client::local::PropSetOptions::default(),
+    )
+    .expect("propset");
+    fail::cfg("commit.after_finalize_before_queue", "return").expect("cfg");
+    e.commit().await.expect_err("crash");
+    fail::remove("commit.after_finalize_before_queue");
+
+    let node = e.db.read_node(&rp("d/f1")).expect("read").expect("node");
+    assert_eq!(node.revision, Some(2), "rows were committed");
+    let items = e.db.work_items().expect("wq");
+    assert_eq!(items.len(), 1, "one file-commit item queued: {items:?}");
+    assert_eq!(read(&e.wc, "d/f1"), "rev $Rev$\n", "work item not run yet");
+    assert_eq!(JournalStore::new(&e.state).list().expect("list").len(), 1);
+}
+
+#[tokio::test]
+async fn post_commit_work_left_by_a_crash_is_finished_by_cleanup() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    crash_before_post_commit_queue(&e).await;
+
+    let report = svn_client::local::cleanup(&e.db, &e.cancel).expect("cleanup");
+    assert_eq!(report.work_items, 1);
+    assert_eq!(read(&e.wc, "d/f1"), "rev $Rev: 2 $\n");
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
+
+    // The journal still finalizes cleanly afterwards (idempotent) and goes away.
+    let report = e.recover().await;
+    assert_eq!(report.finalized.len(), 1, "{report:?}");
+    assert!(e.db.work_items().expect("wq").is_empty());
+    assert!(JournalStore::new(&e.state).list().expect("list").is_empty());
+    assert_eq!(read(&e.wc, "d/f1"), "rev $Rev: 2 $\n");
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
+}
+
+#[tokio::test]
+async fn post_commit_work_left_by_a_crash_is_finished_by_svn_cleanup() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    crash_before_post_commit_queue(&e).await;
+
+    // The queued item has svn's format: svn 1.15 itself completes it.
+    svn(&e.fx.oracle, &e.wc, &["cleanup"]);
+    assert!(e.db.work_items().expect("wq").is_empty());
+    assert_eq!(read(&e.wc, "d/f1"), "rev $Rev: 2 $\n");
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
+
+    let report = e.recover().await;
+    assert_eq!(report.finalized.len(), 1, "{report:?}");
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
+}
+
+#[tokio::test]
+async fn post_commit_work_left_by_a_crash_is_finished_by_the_next_operation() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    crash_before_post_commit_queue(&e).await;
+
+    // Any write operation finishes leftover work before its own.
+    write(&e.wc, "later.txt", "later\n");
+    local_add(&e, "later.txt");
+    assert!(e.db.work_items().expect("wq").is_empty());
+    assert_eq!(read(&e.wc, "d/f1"), "rev $Rev: 2 $\n");
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "A       later.txt\n");
+}
+
+#[tokio::test]
+async fn post_commit_work_keeps_a_file_changed_after_the_commit_modified() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    crash_before_post_commit_queue(&e).await;
+
+    // Edited after the commit read it: the fixup must not cache its stat as "unmodified".
+    write(&e.wc, "d/f1", "rev $Rev$\nedited later\n");
+    svn_client::local::cleanup(&e.db, &e.cancel).expect("cleanup");
+    assert_eq!(read(&e.wc, "d/f1"), "rev $Rev: 2 $\nedited later\n");
+    let node = e.db.read_node(&rp("d/f1")).expect("read").expect("node");
+    assert_eq!(
+        node.translated_size, None,
+        "no stat cache for a modified file"
+    );
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "M       d/f1\n");
+}
