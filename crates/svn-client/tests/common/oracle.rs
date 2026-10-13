@@ -18,6 +18,7 @@ use svn_wc::db::WcDb;
 use svn_wc::skel::{Skel, parse_proplist};
 
 use super::{rp, session};
+use opensvn_svn_oracle as _;
 
 /// Resolves the oracle or reports a skip.
 pub fn oracle() -> Option<Oracle> {
@@ -375,4 +376,38 @@ fn normalized_conflict(blob: &[u8]) -> String {
         }
     }
     String::from_utf8_lossy(&skel.to_skel().unparse()).into_owned()
+}
+
+pub fn write(path: &Path, text: &str) {
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p).expect("mkdir");
+    }
+    std::fs::write(path, text).expect("write");
+}
+
+pub fn assert_same(oracle: &Oracle, theirs: &Path, ours: &Path, what: &str) {
+    assert_eq!(tree_snapshot(ours), tree_snapshot(theirs), "{what}: working files differ");
+    assert_eq!(nodes_snapshot(ours), nodes_snapshot(theirs), "{what}: NODES rows differ");
+    assert_eq!(actual_snapshot(ours), actual_snapshot(theirs), "{what}: ACTUAL rows differ");
+    assert_eq!(
+        svn_status(oracle, ours, &[]),
+        svn_status(oracle, theirs, &[]),
+        "{what}: svn status differs"
+    );
+}
+
+/// r1: files, properties, nested directories. Returns the seed working copy.
+pub fn build_r1(repo: &Repo) -> std::path::PathBuf {
+    let seed = repo.checkout("seed");
+    write(&seed.join("README"), "hello\nworld\n");
+    write(&seed.join("run.sh"), "#!/bin/sh\necho hi\n");
+    write(&seed.join("docs/guide.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nseven\n");
+    write(&seed.join("src/lib/deep.rs"), "fn deep() {}\n");
+    write(&seed.join("empty.txt"), "");
+    repo.svn(&seed, &["add", "-q", "README", "run.sh", "docs", "src", "empty.txt"]);
+    repo.svn(&seed, &["propset", "-q", "svn:executable", "*", "run.sh"]);
+    repo.svn(&seed, &["propset", "-q", "svn:eol-style", "native", "docs/guide.txt"]);
+    repo.svn(&seed, &["propset", "-q", "color", "red", "docs"]);
+    repo.svn(&seed, &["commit", "-q", "-m", "r1"]);
+    seed
 }

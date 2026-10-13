@@ -22,6 +22,8 @@ pub enum UpdateAction {
     TreeConflicted,
     /// `E`: an unversioned item that was in the way is now versioned.
     Existed,
+    /// `R`: a versioned item that was missing on disk was restored.
+    Restored,
     /// Skipped because an earlier conflict or obstruction covers the path.
     Skipped,
 }

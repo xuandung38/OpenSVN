@@ -14,40 +14,6 @@ use opensvn_svn_oracle::Oracle;
 use svn_client::{checkout, update};
 use svn_types::{CancelToken, Depth};
 
-fn write(path: &Path, text: &str) {
-    if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p).expect("mkdir");
-    }
-    std::fs::write(path, text).expect("write");
-}
-
-fn assert_same(oracle: &Oracle, theirs: &Path, ours: &Path, what: &str) {
-    assert_eq!(tree_snapshot(ours), tree_snapshot(theirs), "{what}: working files differ");
-    assert_eq!(nodes_snapshot(ours), nodes_snapshot(theirs), "{what}: NODES rows differ");
-    assert_eq!(actual_snapshot(ours), actual_snapshot(theirs), "{what}: ACTUAL rows differ");
-    assert_eq!(
-        svn_status(oracle, ours, &[]),
-        svn_status(oracle, theirs, &[]),
-        "{what}: svn status differs"
-    );
-}
-
-/// r1: files, properties, nested directories. Returns the seed working copy.
-fn build_r1(repo: &Repo) -> std::path::PathBuf {
-    let seed = repo.checkout("seed");
-    write(&seed.join("README"), "hello\nworld\n");
-    write(&seed.join("run.sh"), "#!/bin/sh\necho hi\n");
-    write(&seed.join("docs/guide.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nseven\n");
-    write(&seed.join("src/lib/deep.rs"), "fn deep() {}\n");
-    write(&seed.join("empty.txt"), "");
-    repo.svn(&seed, &["add", "-q", "README", "run.sh", "docs", "src", "empty.txt"]);
-    repo.svn(&seed, &["propset", "-q", "svn:executable", "*", "run.sh"]);
-    repo.svn(&seed, &["propset", "-q", "svn:eol-style", "native", "docs/guide.txt"]);
-    repo.svn(&seed, &["propset", "-q", "color", "red", "docs"]);
-    repo.svn(&seed, &["commit", "-q", "-m", "r1"]);
-    seed
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn checkout_matches_svn_checkout() {
     let Some(oracle) = oracle() else { return };
@@ -303,4 +269,58 @@ async fn missing_file_is_restored_by_update_like_svn() {
         return;
     };
     assert_same(&o, &t, &w, "missing file");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_items_are_restored_without_server_changes_like_svn() {
+    let Some((o, t, w)) = scenario(
+        "restore",
+        |_, wc, _| {
+            std::fs::remove_file(wc.join("run.sh")).expect("rm");
+            std::fs::remove_dir_all(wc.join("src")).expect("rm dir");
+        },
+        |_, seed| write(&seed.join("README"), "hello\nworld\nmore\n"),
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "restore");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn switch_matches_svn_switch() {
+    let Some(oracle) = oracle() else { return };
+    let repo = Repo::new(&oracle);
+    let seed = build_r1(&repo);
+    // A second line of development next to docs.
+    write(&seed.join("docs2/guide.txt"), "one\ntwo\nTHREE\nfour\nfive\nsix\nseven\n");
+    write(&seed.join("docs2/extra.txt"), "extra\n");
+    repo.svn(&seed, &["add", "-q", "docs2"]);
+    repo.svn(&seed, &["propset", "-q", "svn:eol-style", "native", "docs2/guide.txt"]);
+    repo.svn(&seed, &["commit", "-q", "-m", "r2"]);
+    let theirs = repo.checkout("svnwc");
+    let sb = Sandbox::new();
+    let ours = sb.path("wc");
+    let fake = repo.fake(None);
+    checkout(&ctx(), &fake, &ours, Some(svn_types::Revnum(1)), Depth::Infinity, false, &CancelToken::new())
+        .await
+        .expect("checkout");
+    // svn: switch docs to docs2.
+    repo.svn(&theirs, &["update", "-q", "-r1"]);
+    let target = svn_types::RepoUrl::parse(&format!("{}/docs2", common::ROOT_URL)).expect("url");
+    let svn_url = format!("{}/docs2", repo.url);
+    repo.svn(&theirs, &["switch", "-q", "--ignore-ancestry", "-r2", &svn_url, "docs"]);
+    svn_client::switch(
+        &ctx(),
+        &fake,
+        &ours.join("docs"),
+        &target,
+        Some(svn_types::Revnum(2)),
+        Depth::Unknown,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("switch");
+    assert_same(&oracle, &theirs, &ours, "switch");
 }
