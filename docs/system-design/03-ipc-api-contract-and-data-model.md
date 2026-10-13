@@ -147,7 +147,7 @@ type Layout =
 | `remote_edit` | `{ ops: RemoteOp[], message }` (mkdir/rename/delete/copy/upload; `upload` dùng `source: PathGrantId`, không nhận đường dẫn thô) | `OperationHandle` |
 | `branches_list` | `{ repoRootUrl }` | `BranchNode[]` (theo layout, cache 60s; rỗng khi `mode: 'none'`) |
 | `layout_get` / `layout_set` | `{ repoUuid }` / `{ repoUuid, layout }` | `Layout` / `void` |
-| `layout_detect` | `{ repoRootUrl, url }` | `{ found: boolean; layout?: Layout; current?: BranchRef }` |
+| `layout_detect` | `{ repoRootUrl, url }` | `{ found: boolean; layout?: Layout; current?: BranchRef }` (tìm `trunk` + `branches`/`tags` ở gốc repo → `auto`; hoặc ở một cấp project → `custom` với `/{project}/...`) |
 | `copy_location` | `{ fromUrl, fromRev?, toUrl, message, switchWcId?, fromWc? }` (tạo branch/tag hoặc bản sao bất kỳ; có `fromWc` thì nguồn là working copy kèm thay đổi local và `fromUrl`/`fromRev` bị bỏ qua) | `OperationHandle` |
 
 ### 3.5 Hệ thống
@@ -163,7 +163,10 @@ type Layout =
 | `program_choose { kind, args }`, `program_clear { kind }` | Đặt/xóa chương trình ngoài (`kind`: `diff-tool` \| `merge-tool` \| `editor` \| `terminal`). Rust mở dialog chọn file native rồi dialog xác nhận native (mỗi tham số một dòng, có quote; từ chối ký tự điều khiển/bidi); trả `Settings` mới (không đổi nếu người dùng hủy) |
 | `path_pick { request }` | Dialog native chọn thư mục / file / nơi lưu (`PickRequest`), trả `PathGrantInfo \| null` (xem §3.6) |
 | `reveal_in_os { wcId, path }`, `open_external { wcId, path, with: 'default' \| 'editor' \| 'terminal' }` | Tích hợp OS |
-| `diagnostics_export` | Tạo gói chẩn đoán zip, trả đường dẫn |
+| `diagnostics_preview { options: { hidePaths, hideCommitMessages } }` | Dựng gói chẩn đoán trong bộ nhớ (secret luôn bị gỡ) và trả `{ token, entries: { name, size, content }[] }` để người dùng xem **toàn bộ nội dung** trước khi lưu |
+| `diagnostics_export { token }` | Mở dialog lưu file native, ghi zip đúng nội dung đã xem (token dùng một lần), trả đường dẫn đã lưu hoặc `null` nếu hủy. Không gửi đi đâu |
+| `reveal_in_os { wcId, path }`, `open_external { wcId, path, with }` | `path` là relpath trong WC (kiểm bằng `RelPath`/`safe_join`, phải tồn tại). `with: 'default'` từ chối file chạy được (exe, script, `.app`, bit thực thi...); `editor`/`terminal` dùng chương trình đã chọn qua `program_choose`, chưa cấu hình thì lỗi kèm action `open-settings` |
+| `menu_set_layout { hasLayout }` | Đổi menu native giữa Branch và Location. Menu native phát event `menu://<id>` (id ví dụ `wc.update`, `file.checkout`) mà UI lắng nghe |
 
 ### 3.6 Đường dẫn cục bộ ngoài WC: PathGrant
 WebView **không bao giờ** gửi đường dẫn thô cho thao tác đọc/ghi ngoài WC đã đăng ký (thư mục checkout, nơi lưu `repo_save`, file upload, WC cần thêm). Những đường dẫn đó đến từ dialog native (`path_pick`) hoặc kéo-thả native; Rust giữ đường dẫn thật và trả một mã mờ:
