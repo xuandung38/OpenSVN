@@ -1,0 +1,17 @@
+# See log.yaml for the status of this format.
+scenarios:
+  - id: protocol-lock-unlock
+    description: LOCK, steal, break and the lock conflict (423 + errcode 160035)
+    reference: { client: svn 1.15.0, command: "svn lock -m 'locking <it>' ${URL}/trunk/a.txt" }
+    fixture: crates/svn-protocol/tests/data/locks/lock-ok
+    also: [lock-steal, lock-from-wc, lock-conflict-423, unlock-204, unlock-break]
+  - id: protocol-get-lock
+    description: get-lock PROPFIND, locked and unlocked
+    reference: { client: svn 1.15.0, command: "svn info ${URL}/trunk/a.txt" }
+    fixture: crates/svn-protocol/tests/data/propfind/get-lock
+    also: [get-lock-no-comment, get-lock-none]
+  - id: protocol-get-locks-report
+    description: get-locks-report with and without locks
+    reference: { client: svn 1.15.0, command: "svn list -v ${URL}/trunk" }
+    fixture: crates/svn-protocol/tests/data/locks/get-locks-report
+    also: [get-locks-report-empty]
