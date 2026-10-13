@@ -1,0 +1,102 @@
+//! Checkout and update against the in-memory repository.
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
+mod common;
+
+use common::*;
+use svn_client::{UpdateAction, checkout, update};
+use svn_types::{CancelToken, Depth, Revnum};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn checkout_materializes_tree_and_records_base() {
+    let s = session();
+    s.seed(
+        "alice",
+        "initial",
+        &[
+            put("trunk/a.txt", "alpha\n"),
+            put("trunk/src/lib.rs", "pub fn f() {}\n"),
+            put("README", "hello\n"),
+            prop("README", "svn:eol-style", Some("native")),
+        ],
+    )
+    .expect("seed");
+    let sb = Sandbox::new();
+    let wc = sb.path("wc");
+    let sum = checkout(&ctx(), &s, &wc, None, Depth::Infinity, false, &CancelToken::new())
+        .await
+        .expect("checkout");
+    assert_eq!(sum.revision, Some(Revnum(1)));
+    assert_eq!(read(&wc.join("trunk/a.txt")), "alpha\n");
+    assert_eq!(read(&wc.join("trunk/src/lib.rs")), "pub fn f() {}\n");
+    assert_eq!(read(&wc.join("README")), "hello\n");
+
+    let db = open_db(&wc);
+    let rows = base_rows(&db);
+    assert!(
+        rows.iter().all(|r| r.1 == "normal" && r.3 == 1),
+        "rows: {rows:?}"
+    );
+    assert_eq!(rows.len(), 6, "rows: {rows:?}");
+    assert!(db.work_items().expect("queue").is_empty());
+    assert!(db.wc_lock_held(&rp("")).map(|s| s == svn_wc::db::LockState::Free).unwrap_or(false));
+    let readme = db.read_base(&rp("README")).expect("read").expect("node");
+    assert!(readme.checksum.is_some());
+    assert_eq!(readme.repos_relpath.as_deref(), Some("README"));
+    assert!(sum.events.iter().any(|e| e.action == UpdateAction::Add));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_applies_server_changes_and_bumps_untouched_files() {
+    let s = session();
+    s.seed("a", "r1", &[put("a.txt", "one\n"), put("b.txt", "two\n"), put("d/c.txt", "three\n")])
+        .expect("seed");
+    let sb = Sandbox::new();
+    let wc = sb.path("wc");
+    let cancel = CancelToken::new();
+    checkout(&ctx(), &s, &wc, None, Depth::Infinity, false, &cancel)
+        .await
+        .expect("checkout");
+
+    s.seed(
+        "a",
+        "r2",
+        &[put("a.txt", "one\nmore\n"), put("e.txt", "new\n"), del("d/c.txt"), dir("n/m")],
+    )
+    .expect("seed");
+    let sum = update(&ctx(), &s, &wc, None, Depth::Unknown, &cancel)
+        .await
+        .expect("update");
+    assert_eq!(sum.revision, Some(Revnum(2)));
+    assert_eq!(read(&wc.join("a.txt")), "one\nmore\n");
+    assert_eq!(read(&wc.join("e.txt")), "new\n");
+    assert!(!wc.join("d/c.txt").exists());
+    assert!(wc.join("n/m").is_dir());
+
+    let db = open_db(&wc);
+    let rows = base_rows(&db);
+    // Every remaining node, touched or not, is at r2 (b.txt was not part of the drive).
+    assert!(rows.iter().all(|r| r.3 == 2 && r.1 == "normal"), "rows: {rows:?}");
+    let names: Vec<_> = rows.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(names, ["", "a.txt", "b.txt", "d", "e.txt", "n", "n/m"]);
+    assert!(db.work_items().expect("queue").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_keeps_unversioned_files_inside_a_deleted_directory() {
+    let s = session();
+    s.seed("a", "r1", &[put("d/c.txt", "x\n")]).expect("seed");
+    let sb = Sandbox::new();
+    let wc = sb.path("wc");
+    let cancel = CancelToken::new();
+    checkout(&ctx(), &s, &wc, None, Depth::Infinity, false, &cancel)
+        .await
+        .expect("checkout");
+    std::fs::write(wc.join("d/notes.txt"), "mine\n").expect("write");
+    s.seed("a", "r2", &[del("d")]).expect("seed");
+    update(&ctx(), &s, &wc, None, Depth::Unknown, &cancel)
+        .await
+        .expect("update");
+    assert!(!wc.join("d/c.txt").exists());
+    assert_eq!(read(&wc.join("d/notes.txt")), "mine\n");
+}
