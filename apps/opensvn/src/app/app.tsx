@@ -1,4 +1,5 @@
 import { lazy, Suspense } from "react";
+import { AuthPromptHost } from "../features/remote/auth/auth-prompt-host";
 import { AppShell } from "./app-shell";
 import { Providers } from "./providers";
 
@@ -16,6 +17,7 @@ export function App() {
   const path = location.pathname;
   return (
     <Providers>
+      <AuthPromptHost />
       <Suspense fallback={null}>
         {PerfPage && path === "/__perf" ? (
           <PerfPage />

@@ -734,6 +734,56 @@ fn copy_d_to_dc(db: &WcDb, wc: &Path) {
 }
 
 #[test]
+fn commit_nodes_accepts_the_child_items_svn_gathers_for_a_replaced_root() {
+    if skip_without_svn_1_15() {
+        return;
+    }
+    let fx = fixture();
+    let a = checkout(&fx.base, &fx.url, "svn-side", &[]);
+    let b = checkout(&fx.base, &fx.url, "our-side", &[]);
+    // `e` exists in the repository: replace it by a copy of `d`, then delete a child of the copy.
+    svn(&a, &["cp", "-q", "d", "e"]);
+    svn(&a, &["commit", "-q", "-m", "add e"]);
+    svn(&a, &["update", "-q"]);
+    svn(&b, &["update", "-q"]);
+    svn(&a, &["rm", "-q", "e"]);
+    svn(&a, &["cp", "-q", "d", "e"]);
+    svn(&a, &["rm", "-q", "e/f2"]);
+    {
+        let db = WcDb::open(&b).expect("open");
+        rm(&b, "e");
+        db.op_delete(&rp("e"), &[]).expect("rm e");
+        cp(&b.join("d"), &b.join("e"));
+        db.op_copy(&rp("d"), &rp("e"), &[]).expect("cp");
+        rm(&b, "e/f2");
+        db.op_delete(&rp("e/f2"), &[]).expect("rm f2");
+    }
+    svn(&a, &["commit", "-q", "-m", "replace e"]);
+    let (date, author): (i64, String) = open_ro(&a)
+        .query_row(
+            "SELECT changed_date, changed_author FROM nodes WHERE local_relpath = 'e' AND op_depth = 0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("e base");
+    let db = WcDb::open(&b).expect("open");
+    let info = CommitInfo {
+        new_rev: 3,
+        date: Some(date),
+        author: Some(author),
+        ..CommitInfo::default()
+    };
+    db.commit_nodes(&[(rp("e"), info.clone()), (rp("e/f2"), info)], &[])
+        .expect("commit");
+    drop(db);
+    assert_rows_equal(
+        "commit-replace-with-child-items",
+        &dump_rows(&a),
+        &dump_rows(&b),
+    );
+}
+
+#[test]
 fn copy_of_a_mixed_revision_directory_layers_like_svn() {
     check_after(
         &more_history,
