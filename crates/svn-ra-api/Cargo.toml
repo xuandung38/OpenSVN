@@ -1,0 +1,28 @@
+[package]
+name = "svn-ra-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Async RA session contract, editor worker bridge and in-memory fake"
+
+[lints]
+workspace = true
+
+[features]
+# In-memory repository, recording editor and null reporter for tests of dependent crates.
+fake = []
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+secrecy.workspace = true
+svn-types.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync"] }
+
+[dev-dependencies]
+# Enables the fake in integration tests so a plain `cargo test --workspace` runs them.
+svn-ra-api = { path = ".", features = ["fake"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
