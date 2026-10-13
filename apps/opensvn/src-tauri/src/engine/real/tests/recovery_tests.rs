@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
-use opensvn_ipc::{Rev, WcFormat};
+use opensvn_ipc::{Rev, WcFormat, WcId};
 use svn_ra_api::{CommitObserver, RaSession};
 use svn_types::{CancelToken, ErrorCode, LockOwnershipStore, RelPath};
 use svn_wc::WcDb;
@@ -18,7 +18,7 @@ use super::support::{
     ctx, fixture, fixture_on, fixture_with, make_wc, plant_dead_app_lock, plant_lock_row,
     plant_work_item, standard_repo,
 };
-use crate::engine::{EngineFacade, EngineResult, OpContext};
+use crate::engine::{EngineFacade, EngineResult, OpContext, WcRef};
 
 /// Hooks that succeed and count how often they ran.
 #[derive(Default)]
@@ -431,6 +431,29 @@ async fn a_temporary_abort_failure_keeps_the_journal_for_the_next_open() {
         "retried later"
     );
     assert_eq!(session.calls(), vec!["auth", "abort"]);
+}
+
+#[tokio::test]
+async fn ensure_authenticated_signs_in_to_the_working_copy_repository_only_when_interactive() {
+    let repo = standard_repo();
+    let session = Arc::new(ScriptedSession::new(repo.clone(), None));
+    let f = fixture_on(
+        repo,
+        Arc::new(ScriptedConnector(session.clone())),
+        Arc::new(UnwiredRecovery),
+    );
+    let (_tmp, root) = make_wc(1);
+    let wc = WcRef {
+        id: WcId("auth".into()),
+        root,
+    };
+    f.engine
+        .ensure_authenticated(&wc, &OpContext::background())
+        .await
+        .unwrap();
+    assert!(session.calls().is_empty(), "background work never prompts");
+    f.engine.ensure_authenticated(&wc, &ctx()).await.unwrap();
+    assert_eq!(session.calls(), vec!["auth"]);
 }
 
 #[tokio::test]
