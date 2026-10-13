@@ -3714,6 +3714,10 @@ dependencies = [
 [[package]]
 name = "svn-diff"
 version = "0.0.0"
+dependencies = [
+ "proptest",
+ "svn-types",
+]
 
 [[package]]
 name = "svn-protocol"

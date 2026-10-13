@@ -1,0 +1,326 @@
+Index: f
+===================================================================
+--- f	(revision 1)
++++ f	(working copy)
+@@ -3,6 +3,7 @@
+ line 2
+ line 3
+ line 4
++x651 v338
+ line 5
+ line 6
+ line 7
+@@ -109,7 +110,6 @@
+ line 108
+ line 109
+ line 110
+-line 111
+ line 112
+ line 113
+ line 114
+@@ -186,6 +186,7 @@
+ line 185
+ line 186
+ line 187
++x693 v677
+ line 188
+ line 189
+ line 190
+@@ -283,6 +284,7 @@
+ line 282
+ line 283
+ line 284
++x215 v259
+ line 285
+ line 286
+ line 287
+@@ -408,7 +410,7 @@
+ line 407
+ line 408
+ line 409
+-line 410
++x269 v899
+ line 411
+ line 412
+ line 413
+@@ -509,6 +511,7 @@
+ line 508
+ line 509
+ line 510
++x756 v370
+ line 511
+ line 512
+ line 513
+@@ -520,6 +523,7 @@
+ line 519
+ line 520
+ line 521
++x443 v545
+ line 522
+ line 523
+ line 524
+@@ -665,6 +669,7 @@
+ line 664
+ line 665
+ line 666
++x327 v591
+ line 667
+ line 668
+ line 669
+@@ -735,7 +740,6 @@
+ line 734
+ line 735
+ line 736
+-line 737
+ line 738
+ line 739
+ line 740
+@@ -823,7 +827,6 @@
+ line 822
+ line 823
+ line 824
+-line 825
+ line 826
+ line 827
+ line 828
+@@ -894,7 +897,7 @@
+ line 893
+ line 894
+ line 895
+-line 896
++x967 v444
+ line 897
+ line 898
+ line 899
+@@ -963,7 +966,7 @@
+ line 962
+ line 963
+ line 964
+-line 965
++x560 v953
+ line 966
+ line 967
+ line 968
+@@ -1042,6 +1045,7 @@
+ line 1041
+ line 1042
+ line 1043
++x704 v839
+ line 1044
+ line 1045
+ line 1046
+@@ -1127,12 +1131,12 @@
+ line 1126
+ line 1127
+ line 1128
+-line 1129
+ line 1130
+ line 1131
+ line 1132
+ line 1133
+ line 1134
++x420 v511
+ line 1135
+ line 1136
+ line 1137
+@@ -1156,7 +1160,7 @@
+ line 1155
+ line 1156
+ line 1157
+-line 1158
++x533 v684
+ line 1159
+ line 1160
+ line 1161
+@@ -1179,6 +1183,8 @@
+ line 1178
+ line 1179
+ line 1180
++x622 v204
++x933 v544
+ line 1181
+ line 1182
+ line 1183
+@@ -1186,7 +1192,7 @@
+ line 1185
+ line 1186
+ line 1187
+-line 1188
++x706 v219
+ line 1189
+ line 1190
+ line 1191
+@@ -1229,6 +1235,7 @@
+ line 1228
+ line 1229
+ line 1230
++x168 v331
+ line 1231
+ line 1232
+ line 1233
+@@ -1326,6 +1333,7 @@
+ line 1325
+ line 1326
+ line 1327
++x641 v968
+ line 1328
+ line 1329
+ line 1330
+@@ -1359,7 +1367,6 @@
+ line 1358
+ line 1359
+ line 1360
+-line 1361
+ line 1362
+ line 1363
+ line 1364
+@@ -1474,7 +1481,6 @@
+ line 1473
+ line 1474
+ line 1475
+-line 1476
+ line 1477
+ line 1478
+ line 1479
+@@ -1542,7 +1548,7 @@
+ line 1541
+ line 1542
+ line 1543
+-line 1544
++x493 v512
+ line 1545
+ line 1546
+ line 1547
+@@ -1573,7 +1579,7 @@
+ line 1572
+ line 1573
+ line 1574
+-line 1575
++x251 v915
+ line 1576
+ line 1577
+ line 1578
+@@ -1600,7 +1606,7 @@
+ line 1599
+ line 1600
+ line 1601
+-line 1602
++x106 v423
+ line 1603
+ line 1604
+ line 1605
+@@ -1777,6 +1783,7 @@
+ line 1776
+ line 1777
+ line 1778
++x73 v659
+ line 1779
+ line 1780
+ line 1781
+@@ -2149,6 +2156,7 @@
+ line 2148
+ line 2149
+ line 2150
++x66 v331
+ line 2151
+ line 2152
+ line 2153
+@@ -2215,7 +2223,6 @@
+ line 2214
+ line 2215
+ line 2216
+-line 2217
+ line 2218
+ line 2219
+ line 2220
+@@ -2480,7 +2487,7 @@
+ line 2479
+ line 2480
+ line 2481
+-line 2482
++x456 v664
+ line 2483
+ line 2484
+ line 2485
+@@ -2556,7 +2563,7 @@
+ line 2555
+ line 2556
+ line 2557
+-line 2558
++x903 v112
+ line 2559
+ line 2560
+ line 2561
+@@ -2587,7 +2594,7 @@
+ line 2586
+ line 2587
+ line 2588
+-line 2589
++x379 v696
+ line 2590
+ line 2591
+ line 2592
+@@ -2598,6 +2605,7 @@
+ line 2597
+ line 2598
+ line 2599
++x986 v615
+ line 2600
+ line 2601
+ line 2602
+@@ -2608,7 +2616,6 @@
+ line 2607
+ line 2608
+ line 2609
+-line 2610
+ line 2611
+ line 2612
+ line 2613
+@@ -2779,11 +2786,12 @@
+ line 2778
+ line 2779
+ line 2780
++x165 v400
+ line 2781
+ line 2782
+ line 2783
+ line 2784
+-line 2785
++x413 v464
+ line 2786
+ line 2787
+ line 2788
+@@ -2826,7 +2834,7 @@
+ line 2825
+ line 2826
+ line 2827
+-line 2828
++x183 v608
+ line 2829
+ line 2830
+ line 2831
+@@ -2854,7 +2862,6 @@
+ line 2853
+ line 2854
+ line 2855
+-line 2856
+ line 2857
+ line 2858
+ line 2859
+@@ -2880,6 +2887,7 @@
+ line 2879
+ line 2880
+ line 2881
++x116 v953
+ line 2882
+ line 2883
+ line 2884
+@@ -2926,7 +2934,7 @@
+ line 2925
+ line 2926
+ line 2927
+-line 2928
++x77 v34
+ line 2929
+ line 2930
+ line 2931
