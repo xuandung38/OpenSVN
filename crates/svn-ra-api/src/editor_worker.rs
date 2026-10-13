@@ -353,7 +353,10 @@ impl WindowSender {
 impl EditorHandle {
     async fn call<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T> {
         let (tx, rx) = oneshot::channel();
-        let reply = Reply { tx: Some(tx), failure: Arc::clone(&self.failure) };
+        let reply = Reply {
+            tx: Some(tx),
+            failure: Arc::clone(&self.failure),
+        };
         send(&self.tx, &self.failure, make(reply)).await?;
         rx.await.map_err(|_| gone(&self.failure))?
     }
