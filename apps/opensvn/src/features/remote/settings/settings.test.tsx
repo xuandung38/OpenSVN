@@ -4,7 +4,13 @@ import { beforeAll, expect, test } from "vitest";
 import { mockCalls } from "../../../ipc/mock/adapter";
 import { mockSettings } from "../../../ipc/mock/data";
 import { renderApp, setupMockIpc } from "../../../test-utils";
-import { inRange, isHttpsTemplate, isProxyUrl, validateDraft } from "./settings-model";
+import {
+  inRange,
+  isHttpsTemplate,
+  isProxyUrl,
+  validateDraft,
+  withoutUnchanged,
+} from "./settings-model";
 import { SettingsSheet } from "./settings-sheet";
 
 beforeAll(async () => {
@@ -96,4 +102,25 @@ test("paths and commands are display-only: no editable path/command inputs", asy
   expect(
     ((await within(dialog).findByDisplayValue("None configured")) as HTMLInputElement).readOnly,
   ).toBe(true);
+});
+
+test("changing a value and changing it back removes the key, so Save disables again", async () => {
+  renderApp(<SettingsSheet open onClose={() => undefined} />);
+  const dialog = await screen.findByRole("dialog", { name: "Settings", hidden: true });
+  const interval = await within(dialog).findByLabelText(/Check for updates every/);
+  const original = (interval as HTMLInputElement).value;
+  const save = within(dialog).getByRole("button", { name: "Save" }) as HTMLButtonElement;
+  await userEvent.clear(interval);
+  await userEvent.type(interval, "99");
+  expect(save.disabled).toBe(false);
+  await userEvent.clear(interval);
+  await userEvent.type(interval, original);
+  expect(save.disabled).toBe(true);
+});
+
+test("withoutUnchanged compares objects deeply", () => {
+  const s = { ...mockSettings };
+  expect(
+    withoutUnchanged(s, { "network.proxy": { mode: "system" }, "network.timeoutSec": 5 }),
+  ).toEqual({ "network.timeoutSec": 5 });
 });

@@ -1,4 +1,4 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useId, useMemo, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Dialog, WarnBox } from "../../../components/ui/dialog";
@@ -7,11 +7,12 @@ import { SafeText } from "../../../components/ui/safe-text";
 import { SegmentedControl } from "../../../components/ui/segmented-control";
 import { useToast } from "../../../components/ui/toast";
 import { ipc, unwrap } from "../../../ipc/client";
+import { queryKeys } from "../../../ipc/query-keys";
 import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
 import { RepoTree } from "../browse/repo-tree";
 import { baseName, joinUrl, repoPath, validateEntryName } from "../repo-url";
-import { parseRevision, projectRootOf, refTargetUrl } from "./branch-model";
+import { parseRevision, refContainerUrl } from "./branch-model";
 import { branchStrings } from "./branch-strings";
 
 const NAME_ERRORS = {
@@ -33,6 +34,8 @@ export function CreateBranchTagDialog({
   sourceUrl,
   sourceName,
   repoRootUrl,
+  repoUuid,
+  currentRefUrl,
   wcId,
   onClose,
 }: {
@@ -42,6 +45,10 @@ export function CreateBranchTagDialog({
   sourceUrl: string;
   sourceName: string;
   repoRootUrl: string;
+  /** Repository identity for the backend layout lookup. */
+  repoUuid: string;
+  /** The working copy's current branch/tag URL (project detection), if any. */
+  currentRefUrl: string | null;
   /** When set, the dialog offers switching this working copy to the copy. */
   wcId: string | null;
   onClose: () => void;
@@ -50,9 +57,31 @@ export function CreateBranchTagDialog({
   const c = useT(commonStrings);
   const toast = useToast();
   const formId = useId();
-  const projectRoot = useMemo(() => projectRootOf(sourceUrl), [sourceUrl]);
-  const layoutMode = kind !== "location" && projectRoot !== null;
   const [refKind, setRefKind] = useState<"branch" | "tag">(kind === "tag" ? "tag" : "branch");
+  // The backend knows the layout (incl. custom ones); the naming convention is only a fallback.
+  const layoutQ = useQuery({
+    queryKey: queryKeys.layout(repoUuid),
+    queryFn: () => unwrap(ipc().commands.layoutGet(repoUuid)),
+  });
+  const nodesQ = useQuery({
+    queryKey: queryKeys.branches(repoRootUrl),
+    queryFn: () => unwrap(ipc().commands.branchesList(repoRootUrl)),
+  });
+  const lookupPending = kind !== "location" && (layoutQ.isPending || nodesQ.isPending);
+  const container = useMemo(
+    () =>
+      kind === "location"
+        ? null
+        : refContainerUrl(refKind, {
+            layout: layoutQ.data ?? null,
+            nodes: nodesQ.data ?? [],
+            currentRefUrl,
+            sourceUrl,
+            repoRootUrl,
+          }),
+    [kind, refKind, layoutQ.data, nodesQ.data, currentRefUrl, sourceUrl, repoRootUrl],
+  );
+  const layoutMode = kind !== "location" && container !== null;
 
   const [name, setName] = useState(layoutMode ? "" : `${baseName(sourceUrl)}-copy`);
   const [sourceChoice, setSourceChoice] = useState<SourceChoice>("head");
@@ -65,7 +94,7 @@ export function CreateBranchTagDialog({
   const rev = sourceChoice === "rev" ? parseRevision(revText) : null;
   const revInvalid = sourceChoice === "rev" && (rev === "invalid" || rev === null);
   const toUrl = layoutMode
-    ? refTargetUrl(projectRoot as string, refKind, name || "…")
+    ? joinUrl(container as string, name.trim() || "…")
     : joinUrl(destFolder, name.trim() || "…");
   const defaultMessage = layoutMode
     ? t(refKind === "tag" ? "defaultMessageTag" : "defaultMessageBranch", { name: name.trim() })
@@ -74,7 +103,7 @@ export function CreateBranchTagDialog({
         to: repoPath(toUrl, repoRootUrl),
       });
   const finalMessage = message.trim() || defaultMessage;
-  const valid = nameError === null && !revInvalid && finalMessage.length > 0;
+  const valid = nameError === null && !revInvalid && finalMessage.length > 0 && !lookupPending;
 
   const run = useMutation({
     mutationFn: () =>
@@ -121,7 +150,9 @@ export function CreateBranchTagDialog({
           if (valid) run.mutate();
         }}
       >
-        {kind !== "location" && !layoutMode && <WarnBox>{t("cannotDerive")}</WarnBox>}
+        {kind !== "location" && !layoutMode && !lookupPending && (
+          <WarnBox>{t("cannotDerive")}</WarnBox>
+        )}
         {layoutMode && (
           <SegmentedControl<"branch" | "tag">
             label={t("kindLabel")}

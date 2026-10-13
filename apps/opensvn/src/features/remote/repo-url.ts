@@ -1,5 +1,14 @@
 /** URL helpers for repository locations (https:// URLs only; never local paths). */
 
+/** decodeURIComponent that keeps the raw text when the server sent broken percent-encoding. */
+function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
 const trimSlash = (s: string) => s.replace(/\/+$/, "");
 
 /** Appends one child name, percent-encoding it as a single path segment. */
@@ -18,12 +27,7 @@ export function parentUrl(url: string, root: string): string {
 
 /** Last path segment, decoded for display. */
 export function baseName(url: string): string {
-  const seg = trimSlash(url).split("/").pop() ?? "";
-  try {
-    return decodeURIComponent(seg);
-  } catch {
-    return seg;
-  }
+  return safeDecode(trimSlash(url).split("/").pop() ?? "");
 }
 
 /** Breadcrumb segments from `root` down to `url` (inclusive); first element is the root itself. */
@@ -35,7 +39,7 @@ export function crumbs(url: string, root: string): { label: string; url: string 
   let cur = r;
   for (const seg of u.slice(r.length).split("/").filter(Boolean)) {
     cur = `${cur}/${seg}`;
-    out.push({ label: decodeURIComponent(seg), url: cur });
+    out.push({ label: safeDecode(seg), url: cur });
   }
   return out;
 }

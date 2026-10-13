@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, expect, test, vi } from "vitest";
-import { HOSTILE_NAME, MOCK_REPO_ROOT } from "../../../ipc/mock/remote-data";
+import { HOSTILE_NAME, MOCK_REPO_ROOT, MOCK_REPO_UUID } from "../../../ipc/mock/remote-data";
 import { renderApp, setupMockIpc, stubLayout } from "../../../test-utils";
 import { BrowseScreen } from "./browse-screen";
 import { flattenTree, type TreeRow } from "./repo-tree";
@@ -15,6 +15,8 @@ const noop = () => undefined;
 const screenUi = () => (
   <BrowseScreen
     repoRootUrl={MOCK_REPO_ROOT}
+    repoUuid={MOCK_REPO_UUID}
+    currentRefUrl={`${MOCK_REPO_ROOT}/trunk`}
     startUrl={`${MOCK_REPO_ROOT}/trunk`}
     wcId="wc-main"
     layoutRepo
@@ -113,4 +115,25 @@ test("preview of a huge file is truncated, not rendered in full", async () => {
   expect(MAX_PREVIEW_LINES).toBeLessThanOrEqual(5000);
   vi.restoreAllMocks();
   stubLayout();
+});
+
+test("tree: scrolls the active row into view and tracks it by folder, not index", async () => {
+  const scroll = vi.fn();
+  Element.prototype.scrollIntoView = scroll;
+  renderApp(screenUi());
+  const tree = await screen.findByRole("tree", { name: "Folders" });
+  await waitFor(() => expect(within(tree).getAllByRole("treeitem").length).toBeGreaterThan(2));
+  tree.focus();
+  await userEvent.keyboard("{End}");
+  expect(scroll).toHaveBeenCalled();
+  const activeText = () =>
+    document.getElementById(tree.getAttribute("aria-activedescendant") ?? "")?.textContent ?? "";
+  expect(activeText()).toContain("tags");
+  // Expanding a folder above the active one shifts indices; the active row must stay "tags".
+  const trunk = within(tree)
+    .getAllByRole("treeitem")
+    .find((i) => i.textContent?.includes("trunk"));
+  await userEvent.click(within(trunk as HTMLElement).getByRole("button", { hidden: true }));
+  await waitFor(() => expect(within(tree).getAllByRole("treeitem").length).toBeGreaterThan(4));
+  expect(activeText()).toContain("tags");
 });

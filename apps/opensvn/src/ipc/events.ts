@@ -180,9 +180,12 @@ function applyToCache(qc: QueryClient, name: EventName, payload: unknown): void 
     case "op://finished": {
       const p = payload as OpFinished;
       setOutcome(qc, p.opId, { status: "ok", result: p.result });
-      // A finished operation may have changed the server (remote edit, copy, lock): refetch active views.
-      void qc.invalidateQueries({ queryKey: queryKeys.repoRoot });
-      void qc.invalidateQueries({ queryKey: queryKeys.logRoot });
+      // Refetch repository views only for operations that change the server. Read-only ones (blame,
+      // log, status-remote) must not trigger refetching every loaded log page and open folder.
+      if (changesRepository(p.opId, qc)) {
+        void qc.invalidateQueries({ queryKey: queryKeys.repoRoot });
+        void qc.invalidateQueries({ queryKey: queryKeys.logRoot });
+      }
       updateOp(qc, p.opId, (cur) => (cur ? { ...cur, state: "done" } : cur));
       break;
     }
@@ -223,4 +226,21 @@ function setOutcome(qc: QueryClient, opId: string, outcome: OpOutcome) {
     if (ids.length <= MAX_OPS) return merged;
     return Object.fromEntries(ids.slice(-MAX_OPS).map((id) => [id, merged[id] as OpOutcome]));
   });
+}
+
+/** Operation kinds that write to the repository (or its locks). */
+const REPO_CHANGING_KINDS: ReadonlySet<OperationHandle["kind"]> = new Set([
+  "commit",
+  "lock",
+  "unlock",
+  "remote-edit",
+  "switch",
+  "merge",
+]);
+
+/** Unknown operations (finished before started was seen) are treated as changing: refetching is safe. */
+export function changesRepository(opId: string, qc: QueryClient): boolean {
+  const ops = qc.getQueryData<Record<string, OpState>>(queryKeys.ops);
+  const kind = ops?.[opId]?.handle.kind;
+  return kind === undefined || REPO_CHANGING_KINDS.has(kind);
 }

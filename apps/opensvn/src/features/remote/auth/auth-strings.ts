@@ -10,8 +10,6 @@ export const authStrings = defineStrings({
     reasonNegotiateFailed: "Windows sign-in did not work for this server. Use another account.",
     lastAttempt:
       "This was the last attempt. Close this dialog and check the account with your administrator.",
-    ssoButton: "Sign in with Windows account",
-    otherAccount: "Use another account",
     username: "Username",
     password: "Password",
     remember: "Remember in the OS credential store",
@@ -52,8 +50,6 @@ export const authStrings = defineStrings({
     reasonNegotiateFailed:
       "Đăng nhập bằng tài khoản Windows không thành công với máy chủ này. Hãy dùng tài khoản khác.",
     lastAttempt: "Đây là lần thử cuối. Đóng hộp thoại và kiểm tra tài khoản với quản trị viên.",
-    ssoButton: "Đăng nhập bằng tài khoản Windows",
-    otherAccount: "Dùng tài khoản khác",
     username: "Tên đăng nhập",
     password: "Mật khẩu",
     remember: "Ghi nhớ trong kho thông tin xác thực của hệ điều hành",

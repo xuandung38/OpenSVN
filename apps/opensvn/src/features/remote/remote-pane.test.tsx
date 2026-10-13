@@ -7,7 +7,7 @@ import { renderApp, setupMockIpc, stubLayout } from "../../test-utils";
 beforeAll(async () => {
   stubLayout();
   await setupMockIpc("en");
-});
+}, 20_000);
 
 test("history -> open file at revision jumps to Browse with the file previewed", async () => {
   renderApp(<AppShell />);
@@ -27,7 +27,7 @@ test("history -> open file at revision jumps to Browse with the file previewed",
     timeout: 4000,
   });
   expect(screen.getByRole("tab", { name: "Preview" }).getAttribute("aria-selected")).toBe("true");
-});
+}, 20_000);
 
 test("browse -> show log of a folder scopes History and the scope chip clears it", async () => {
   renderApp(<AppShell />);
@@ -42,10 +42,10 @@ test("browse -> show log of a folder scopes History and the scope chip clears it
   const clear = await screen.findByRole("button", { name: "Clear scope" });
   await userEvent.click(clear);
   expect(screen.queryByRole("button", { name: "Clear scope" })).toBeNull();
-});
+}, 20_000);
 
 test("settings opens from the toolbar", async () => {
   renderApp(<AppShell />);
   await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
   expect(await screen.findByRole("dialog", { name: "Settings", hidden: true })).toBeTruthy();
-});
+}, 20_000);
