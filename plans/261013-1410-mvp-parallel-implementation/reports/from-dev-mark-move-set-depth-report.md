@@ -42,10 +42,13 @@ Branch `feat/mark-move-set-depth`, PR #116. Date: 2026-10-14.
   status. Not committed (needs a server).
 - Oracle harness requires svn ≥ 1.15, so the 1.14 runs skip; 1.14 checked by hand (crop semantics identical).
 
-## Gates (merged origin/main 0b46ef8)
-fmt ok; clippy workspace ok; clippy opensvn real-engine ok; `cargo test --workspace --locked` 1312 passed,
-0 failed, 21 ignored (Docker/DAV/benchmarks); `cargo test -p opensvn --features opensvn/real-engine` 438
-passed. Frontend untouched (no IPC change).
+## Gates (merged origin/main e879ece, includes WP8 #110)
+fmt ok; clippy workspace ok; clippy opensvn real-engine (and real-engine,engine-conformance) ok;
+`cargo test --workspace --locked` 1315 passed, 0 failed, 21 ignored (Docker/DAV/benchmarks);
+`cargo test -p opensvn --features opensvn/real-engine` 453 passed. Frontend untouched (no IPC change).
+WP8's `mark_move_and_set_depth` known gap is now a normal scenario in `conformance_tests.rs` and
+`tests/real_engine_dav.rs`. `real_engine_dav` (all 16 tests, `--ignored`) passes against a local
+Apache 2.4 + mod_dav_svn 1.14.3 over HTTPS with Basic auth (`OPENSVN_COMPAT_LOCAL_*`).
 
 ## Found, not fixed (follow-up suggested)
 - `build_report` reports anchor-relative paths; the HTTP layer requires the target first as `""`. Updating a
@@ -53,5 +56,3 @@ passed. Frontend untouched (no IPC change).
   anchoring at the folder; `do_update` with paths still hits it.
 - svn 1.15 itself leaves the work queue and locks behind when `--set-depth exclude` falls back to cropping;
   OpenSVN runs the queue (tests compare after `svn cleanup` on the svn side).
-- When WP8 (`feat/wp8-real-conformance`) lands, its `mark_move_and_set_depth_is_a_known_gap` should_panic
-  tests must become normal tests.
