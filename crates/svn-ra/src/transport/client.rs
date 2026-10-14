@@ -13,8 +13,10 @@ use url::Url;
 
 use super::config::{ProxyConfig, TransportConfig};
 use super::redact::{RedactedHeaders, redacted_url};
-use super::request::{HttpRequest, HttpResponse};
-use super::retry::{classify_error, error_chain, is_idempotent, is_transient_status};
+use super::request::{BufferedResponse, HttpRequest, HttpResponse};
+use super::retry::{
+    classify_error, error_chain, is_connection_failure, is_idempotent, is_transient_status,
+};
 use super::tls::{
     CertProblem, OriginTls, PinAction, TrustStore, make_client_config, tls_server_end_point,
 };
@@ -30,6 +32,9 @@ const MAX_AUTH_ROUND_TRIPS: u8 = 10;
 /// Client, TLS state and connection limit of one `(scheme, host, port)`.
 struct OriginClient {
     client: reqwest::Client,
+    /// Same settings without a pool: every request opens its own connection. Used to retry a
+    /// request whose pooled connection broke, so the retry cannot pick another stale one.
+    fresh: reqwest::Client,
     tls: Arc<OriginTls>,
     slots: Arc<Semaphore>,
     /// RFC 5929 `tls-server-end-point` channel binding of the certificate the server presented on
@@ -164,6 +169,80 @@ impl HttpTransport {
         self.send_mode(req, cancel, Interaction::Forbidden).await
     }
 
+    /// Sends a request and reads its whole body, failing with `Corrupt` above `limit` bytes.
+    ///
+    /// Like [`Self::send`], and more: when the body of a read-only request ([`is_idempotent`]:
+    /// `GET`, `PROPFIND`, `REPORT`, `OPTIONS`, `HEAD`) breaks off because the connection failed
+    /// (closed or reset by the server or a proxy, TLS ended without `close_notify`, read
+    /// timeout; see [`svn_types::ConnectionFailure`]), the partial body is dropped and the
+    /// request is sent again, at most as often as the retry policy allows and after its delays
+    /// (a pooled connection that turns out broken under the new attempt is replaced by a new
+    /// one, as for every read). A write is never sent twice: its failure is returned as is.
+    pub async fn send_and_read(
+        &self,
+        req: HttpRequest,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<BufferedResponse> {
+        self.send_and_read_mode(req, limit, cancel, Interaction::Allowed)
+            .await
+    }
+
+    /// [`Self::send_and_read`] without prompts, as [`Self::send_unattended`].
+    pub async fn send_and_read_unattended(
+        &self,
+        req: HttpRequest,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<BufferedResponse> {
+        self.send_and_read_mode(req, limit, cancel, Interaction::Forbidden)
+            .await
+    }
+
+    async fn send_and_read_mode(
+        &self,
+        mut req: HttpRequest,
+        limit: usize,
+        cancel: &CancelToken,
+        interaction: Interaction,
+    ) -> Result<BufferedResponse> {
+        let mut retries = 0usize;
+        loop {
+            let again = if is_idempotent(&req.method) {
+                req.try_clone()
+            } else {
+                None
+            };
+            let resp = self.send_mode(req, cancel, interaction).await?;
+            let (status, headers) = (resp.status, resp.headers.clone());
+            match resp.bytes(limit).await {
+                Ok(body) => {
+                    return Ok(BufferedResponse {
+                        status,
+                        headers,
+                        body,
+                    });
+                }
+                Err(e) if is_connection_failure(&e) => {
+                    let (Some(next), Some(delay)) =
+                        (again, self.config.retry.delays.get(retries).copied())
+                    else {
+                        return Err(e);
+                    };
+                    retries += 1;
+                    tracing::debug!(
+                        error = %e.message,
+                        failure = ?e.connection,
+                        "response body broke off, sending the request again"
+                    );
+                    backoff(delay, cancel).await?;
+                    req = next;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     async fn send_mode(
         &self,
         mut req: HttpRequest,
@@ -223,9 +302,11 @@ impl HttpTransport {
         let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
         let port = url.port_or_known_default().unwrap_or(0);
         let tls = Arc::new(OriginTls::new(host, port, Arc::clone(&self.trust)));
-        let client = self.make_client(&tls)?;
+        let client = self.make_client(&tls, true)?;
+        let fresh = self.make_client(&tls, false)?;
         let entry = Arc::new(OriginClient {
             client,
+            fresh,
             tls,
             slots: Arc::new(Semaphore::new(self.config.effective_connections())),
             channel_binding: Mutex::default(),
@@ -234,14 +315,21 @@ impl HttpTransport {
         Ok(entry)
     }
 
-    fn make_client(&self, tls: &Arc<OriginTls>) -> Result<reqwest::Client> {
+    /// Client of one origin; `pooled == false` keeps no idle connection.
+    fn make_client(&self, tls: &Arc<OriginTls>, pooled: bool) -> Result<reqwest::Client> {
         let tls_config = make_client_config(Arc::clone(tls), &self.config.extra_root_certs)?;
         let mut b = reqwest::Client::builder()
             .http1_only()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(self.config.connect_timeout)
             .read_timeout(self.config.read_timeout)
-            .pool_max_idle_per_host(self.config.effective_connections())
+            .pool_max_idle_per_host(if pooled {
+                self.config.effective_connections()
+            } else {
+                0
+            })
+            // Drop idle connections before the server's keep-alive timeout closes them.
+            .pool_idle_timeout(self.config.pool_idle_timeout)
             .user_agent(self.config.user_agent.clone())
             // Exposes the server certificate per response, for Negotiate channel bindings.
             .tls_info(true)
@@ -431,6 +519,8 @@ impl HttpTransport {
         };
         let retriable = is_idempotent(&req.method) && req.body.is_replayable();
         let mut retries = 0usize;
+        // Set once a connection broke under this request: the retries do not use the pool.
+        let mut fresh_connection = false;
         loop {
             cancel.check()?;
             if retries > 0 && sent.is_negotiate() {
@@ -441,8 +531,12 @@ impl HttpTransport {
             }
             let authorization = &sent.header;
             let prepared = req.body.prepare().await?;
-            let mut rb = origin
-                .client
+            let client = if fresh_connection {
+                &origin.fresh
+            } else {
+                &origin.client
+            };
+            let mut rb = client
                 .request(req.method.clone(), req.url.clone())
                 .headers(req.headers.clone());
             if let Some(h) = authorization {
@@ -486,9 +580,13 @@ impl HttpTransport {
                         status,
                         headers: resp.headers().clone(),
                         url: resp.url().clone(),
+                        // Read now: reqwest reports the length still to come once the body is
+                        // being read.
+                        content_length: resp.content_length(),
                         inner: resp,
                         cancel: cancel.clone(),
                         _permit: Some(permit),
+                        received: 0,
                     });
                 }
                 Err(e) => {
@@ -497,19 +595,32 @@ impl HttpTransport {
                     {
                         return Err(AttemptError::Tls(Box::new(p)));
                     }
+                    let builder = e.is_builder();
+                    let err = classify_error(e);
                     if retriable
-                        && !e.is_builder()
+                        && !builder
                         && let Some(d) = delay
                     {
+                        // A pooled connection the server (or a proxy) closed or reset under the
+                        // request: the next attempt opens a fresh one (other idle connections of
+                        // the pool may be just as stale), so the first retry need not wait.
+                        let broken = is_connection_failure(&err);
+                        let d = if retries == 0 && broken {
+                            Duration::ZERO
+                        } else {
+                            d
+                        };
+                        fresh_connection |= broken;
                         retries += 1;
                         tracing::debug!(
-                            error = %error_chain(&e.without_url()),
+                            error = %err.message,
+                            failure = ?err.connection,
                             "transient failure, retrying"
                         );
                         backoff(d, cancel).await?;
                         continue;
                     }
-                    return Err(AttemptError::Other(classify_error(e)));
+                    return Err(AttemptError::Other(err));
                 }
             }
         }
