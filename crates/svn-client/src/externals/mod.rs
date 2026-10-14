@@ -447,6 +447,54 @@ async fn process_inner(
     Ok(out)
 }
 
+/// After `svn update --set-depth` cropped or excluded `target`: removes the recorded externals
+/// whose definition lies at or below `target` and whose defining directory left the working
+/// copy or is no longer at depth infinity, as svn does for a cropped target (externals are only
+/// processed in directories at depth infinity). Removal follows [`remove`]: local changes stay,
+/// and the registration is dropped either way, so what is left shows as unversioned.
+///
+/// Like [`process`], does nothing when `ctx.externals` is `None` (`--ignore-externals`).
+pub(crate) async fn remove_cropped(
+    ctx: &ClientCtx,
+    db: &Arc<WcDb>,
+    target: &RelPath,
+    cancel: &CancelToken,
+) -> Result<Vec<ExternalReport>> {
+    if ctx.externals.is_none() {
+        return Ok(Vec::new());
+    }
+    let gone = {
+        let (db, target) = (Arc::clone(db), target.clone());
+        blocking(move || {
+            let mut gone = Vec::new();
+            for ext in db.externals_under(&RelPath::root())? {
+                if !ext.def_local_relpath.starts_with(&target) {
+                    continue;
+                }
+                let definer = db.read_base(&ext.def_local_relpath)?;
+                let kept = definer.is_some_and(|d| {
+                    d.presence.is_present() && d.depth.unwrap_or(Depth::Infinity) == Depth::Infinity
+                });
+                if !kept {
+                    gone.push(ext);
+                }
+            }
+            Ok(gone)
+        })
+        .await?
+    };
+    let mut reports = Vec::new();
+    for ext in gone {
+        cancel.check()?;
+        match remove::remove(ctx, db, &ext, cancel).await {
+            Ok(r) => reports.push(r),
+            Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
+            Err(e) => reports.push(failed(&ext.local_relpath, ext.kind, &e)),
+        }
+    }
+    Ok(reports)
+}
+
 /// One definition being brought into the working copy.
 pub(crate) struct Item<'a> {
     pub ctx: &'a ClientCtx,
