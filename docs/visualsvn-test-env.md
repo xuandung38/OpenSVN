@@ -110,13 +110,30 @@ and run commands.
 
 ## Results (2026-10-14, Ubuntu 24.04, MIT krb5 1.20.1, Apache 2.4.58, mod_auth_gssapi 1.6.4)
 
-See the pull request that added this environment for the run log; summary:
-
-| Suite | 1.14.3 | 1.15.0 |
+| Suite | mod_dav_svn 1.14.3 | 1.15.0 |
 | --- | --- | --- |
-| `real_engine_dav`, Basic (`/svn-basic`) | 18/18 | – |
+| `real_engine_dav`, Basic (`/svn-basic`) | 18/18 | 18/18 |
 | `real_engine_dav`, SSO, Negotiate only (`/svn-sso`) | 18/18 | 18/18 |
 | `real_engine_dav`, SSO, Negotiate + Basic (`/svn`) | 18/18 | 18/18 |
-| `visualsvn_like` (without `big_`) | 10/10 | 10/10 |
+| `visualsvn_like` (without `big_`) | 13/13 | 13/13 |
+| `visualsvn_like` `big_*` | 2/2 | – |
+| `negotiate_gssapi_kdc` (svn-ra, this KDC) | 1/1 | |
+| `ui-checkout.mjs` (app UI) | 6/6 | |
 
-Bugs found and fixed: see the pull request.
+Large content, release build, same container (svn 1.14.3 CLI for comparison):
+
+| | OpenSVN | svn CLI |
+| --- | --- | --- |
+| commit 120 MB file | 6.9 s, peak RSS flat | |
+| checkout 120 MB | 2.2 s | |
+| commit of a 1-byte change in 40 MB | 42 MB uploaded (#132) | 9 KB |
+| commit 10k files | 158 s | 44 s |
+| checkout 10k files | 100 s (#121) | 4.5 s |
+
+Fixed with this environment: repository listings never showed locks over DAV; locking an
+`svn:needs-lock` file left it read-only; the server URL `https://host/svn/` failed with
+"HTTP 500". Behaving as designed: SSO without any prompt, no-ticket and short-name/IP fallbacks
+to the Basic prompt, `negotiate-failed` on Negotiate-only locations and on `http://`, hook
+messages (pre-commit, pre-lock, in Vietnamese), a failing post-commit hook keeps the commit,
+keywords/eol, path-based authz, case variants of a repository name (switching between two
+spellings is refused, as `svn switch` refuses it).
