@@ -106,8 +106,11 @@ impl WcTxn<'_> {
         Ok(())
     }
 
-    /// Rewrites the repository path prefix `old_prefix` to `new_prefix` in the BASE subtree at
-    /// `root` (switch).
+    /// Moves the BASE subtree at `root` from `old_prefix` to `new_prefix` after a switch: a node
+    /// whose repository path is still `old_prefix` plus its path below `root` (it was not
+    /// switched on its own and the drive did not rewrite it) gets `new_prefix` plus that path.
+    /// Nodes the drive already moved, and nodes switched elsewhere, keep their path, so the
+    /// rewrite is idempotent even when `new_prefix` lies below `old_prefix`.
     pub fn relocate_subtree(
         &self,
         root: &RelPath,
@@ -118,13 +121,24 @@ impl WcTxn<'_> {
             return Ok(());
         }
         let scope = scope_sql();
+        // `suffix`: the path below `root` ('' for the root itself); `under(p)`: `p/suffix`.
+        let suffix = "(CASE WHEN local_relpath = ?2 THEN '' \
+            WHEN ?2 = '' THEN local_relpath \
+            ELSE substr(local_relpath, length(?2) + 2) END)";
+        let under = |p: &str| {
+            format!(
+                "(CASE WHEN {suffix} = '' THEN {p} WHEN {p} = '' THEN {suffix} \
+                 ELSE {p} || '/' || {suffix} END)"
+            )
+        };
         self.conn
             .execute(
                 &format!(
-                    "UPDATE nodes SET repos_path = CASE WHEN repos_path = ?3 THEN ?4 \
-                     ELSE ?4 || substr(repos_path, length(?3) + 1) END \
+                    "UPDATE nodes SET repos_path = {} \
                      WHERE wc_id = ?1 AND op_depth = 0 AND {scope} AND repos_path IS NOT NULL \
-                     AND (repos_path = ?3 OR substr(repos_path, 1, length(?3) + 1) = ?3 || '/')"
+                     AND repos_path = {}",
+                    under("?4"),
+                    under("?3")
                 ),
                 params![self.wc_id, root.as_str(), old_prefix, new_prefix],
             )
