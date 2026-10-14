@@ -44,9 +44,15 @@ pub struct UpdateParams {
     pub sticky_depth: bool,
 }
 
-/// Delays before resuming an update drive that broke off on a failed connection; the length is
-/// the number of automatic resumes.
+/// Delays before asking again after a connection failure that left nothing done: a remote
+/// status check (which writes nothing) or an update drive that broke off before it changed the
+/// working copy. The length is how many such attempts in a row are made.
 pub(crate) const RECONNECT_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
+
+/// Most automatic resumes of one update drive. A drive that broke off after it changed the
+/// working copy made progress, so the next resume waits only the first delay and does not count
+/// against [`RECONNECT_DELAYS`]; this cap bounds a connection that keeps breaking anyway.
+const MAX_RESUMES: usize = 20;
 
 /// Whether a failed drive is resumed automatically: an update or checkout (not a switch, whose
 /// half-applied state is left for the user to finish) that broke off because the connection
@@ -267,6 +273,8 @@ pub async fn drive_update(
     // Notifications of drives that broke off on a failed connection.
     let mut earlier_events: Vec<UpdateEvent> = Vec::new();
     let mut reconnects = 0usize;
+    // Broken drives in a row that changed nothing.
+    let mut stalled = 0usize;
     let outcome = loop {
         let setup = UpdateSetup {
             db: Arc::clone(&db),
@@ -315,20 +323,24 @@ pub async fn drive_update(
         let db2 = Arc::clone(&db);
         let _ = blocking(move || crate::wc::run_work_queue(&db2, &CancelToken::new()).map(|_| ()))
             .await;
-        let delay = RECONNECT_DELAYS.get(reconnects).copied();
-        let (Some(delay), true) = (delay, can_reconnect(&params.kind, &e)) else {
+        if !can_reconnect(&params.kind, &e) || reconnects >= MAX_RESUMES {
             return Err(e);
-        };
-        reconnects += 1;
+        }
         // The working copy is consistent: directories the broken drive did not finish are
         // still `incomplete`, so the next report asks only for what is missing (the way an
         // interrupted checkout is resumed by `update`). It goes to the revision the broken
         // drive was reaching, not to a newer HEAD.
-        {
+        let progressed = {
             let out = outcome.lock().unwrap_or_else(PoisonError::into_inner);
             revision = revision.or(out.revision);
             earlier_events.extend(out.events.iter().cloned());
-        }
+            !out.events.is_empty()
+        };
+        stalled = if progressed { 0 } else { stalled + 1 };
+        let Some(delay) = RECONNECT_DELAYS.get(stalled.saturating_sub(1)).copied() else {
+            return Err(e);
+        };
+        reconnects += 1;
         tracing::info!(
             failure = ?e.connection_failure(),
             attempt = reconnects,

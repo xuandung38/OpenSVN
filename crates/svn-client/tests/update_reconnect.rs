@@ -145,14 +145,43 @@ async fn a_resumed_update_stays_at_the_revision_it_was_reaching() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn resumes_are_bounded_and_the_working_copy_stays_resumable() {
+async fn a_drive_that_keeps_breaking_is_resumed_while_it_makes_progress() {
+    let ra = RecRa::new(seeded());
+    {
+        let mut breaks = ra.update_breaks.lock().unwrap();
+        for _ in 0..5 {
+            breaks.push_back(Some((2, broken(ConnectionFailure::TlsClosedUncleanly))));
+        }
+        breaks.push_back(None);
+    }
+    let sb = Sandbox::new();
+    let wc = sb.path("wc");
+    checkout(
+        &ctx(),
+        &ra,
+        &wc,
+        None,
+        Depth::Infinity,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("every broken drive brought in two more files");
+    assert_complete(&wc, 1, "");
+    assert_eq!(ra.update_revisions.lock().unwrap().len(), 6);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resumes_without_progress_are_bounded_and_the_working_copy_stays_resumable() {
     let s = seeded();
     let ra = RecRa::new(s.clone());
     ra.update_breaks.lock().unwrap().extend([
+        // Two files in, then three drives that break before changing anything.
         Some((2, broken(ConnectionFailure::TlsClosedUncleanly))),
-        Some((2, broken(ConnectionFailure::TlsClosedUncleanly))),
-        Some((2, broken(ConnectionFailure::TlsClosedUncleanly))),
-        Some((2, broken(ConnectionFailure::TlsClosedUncleanly))),
+        Some((0, broken(ConnectionFailure::TlsClosedUncleanly))),
+        Some((0, broken(ConnectionFailure::TlsClosedUncleanly))),
+        Some((0, broken(ConnectionFailure::TlsClosedUncleanly))),
+        Some((0, broken(ConnectionFailure::TlsClosedUncleanly))),
     ]);
     let sb = Sandbox::new();
     let wc = sb.path("wc");
@@ -166,13 +195,13 @@ async fn resumes_are_bounded_and_the_working_copy_stays_resumable() {
         &CancelToken::new(),
     )
     .await
-    .expect_err("three broken drives");
+    .expect_err("drives that make no progress");
     assert_eq!(
         err.connection_failure(),
         Some(ConnectionFailure::TlsClosedUncleanly)
     );
-    // The first drive plus two automatic resumes.
-    assert_eq!(ra.update_revisions.lock().unwrap().len(), 3);
+    // The drive that made progress, then two resumes that made none, and a third broken one.
+    assert_eq!(ra.update_revisions.lock().unwrap().len(), 4);
     {
         let db = open_db(&wc);
         assert!(db.work_items().expect("queue").is_empty());

@@ -32,6 +32,9 @@ const MAX_AUTH_ROUND_TRIPS: u8 = 10;
 /// Client, TLS state and connection limit of one `(scheme, host, port)`.
 struct OriginClient {
     client: reqwest::Client,
+    /// Same settings without a pool: every request opens its own connection. Used to retry a
+    /// request whose pooled connection broke, so the retry cannot pick another stale one.
+    fresh: reqwest::Client,
     tls: Arc<OriginTls>,
     slots: Arc<Semaphore>,
     /// RFC 5929 `tls-server-end-point` channel binding of the certificate the server presented on
@@ -298,9 +301,11 @@ impl HttpTransport {
         let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
         let port = url.port_or_known_default().unwrap_or(0);
         let tls = Arc::new(OriginTls::new(host, port, Arc::clone(&self.trust)));
-        let client = self.make_client(&tls)?;
+        let client = self.make_client(&tls, true)?;
+        let fresh = self.make_client(&tls, false)?;
         let entry = Arc::new(OriginClient {
             client,
+            fresh,
             tls,
             slots: Arc::new(Semaphore::new(self.config.effective_connections())),
             channel_binding: Mutex::default(),
@@ -309,14 +314,19 @@ impl HttpTransport {
         Ok(entry)
     }
 
-    fn make_client(&self, tls: &Arc<OriginTls>) -> Result<reqwest::Client> {
+    /// Client of one origin; `pooled == false` keeps no idle connection.
+    fn make_client(&self, tls: &Arc<OriginTls>, pooled: bool) -> Result<reqwest::Client> {
         let tls_config = make_client_config(Arc::clone(tls), &self.config.extra_root_certs)?;
         let mut b = reqwest::Client::builder()
             .http1_only()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(self.config.connect_timeout)
             .read_timeout(self.config.read_timeout)
-            .pool_max_idle_per_host(self.config.effective_connections())
+            .pool_max_idle_per_host(if pooled {
+                self.config.effective_connections()
+            } else {
+                0
+            })
             // Drop idle connections before the server's keep-alive timeout closes them.
             .pool_idle_timeout(self.config.pool_idle_timeout)
             .user_agent(self.config.user_agent.clone())
@@ -508,6 +518,8 @@ impl HttpTransport {
         };
         let retriable = is_idempotent(&req.method) && req.body.is_replayable();
         let mut retries = 0usize;
+        // Set once a connection broke under this request: the retries do not use the pool.
+        let mut fresh_connection = false;
         loop {
             cancel.check()?;
             if retries > 0 && sent.is_negotiate() {
@@ -518,8 +530,12 @@ impl HttpTransport {
             }
             let authorization = &sent.header;
             let prepared = req.body.prepare().await?;
-            let mut rb = origin
-                .client
+            let client = if fresh_connection {
+                &origin.fresh
+            } else {
+                &origin.client
+            };
+            let mut rb = client
                 .request(req.method.clone(), req.url.clone())
                 .headers(req.headers.clone());
             if let Some(h) = authorization {
@@ -582,12 +598,15 @@ impl HttpTransport {
                         && let Some(d) = delay
                     {
                         // A pooled connection the server (or a proxy) closed or reset under the
-                        // request: the next attempt opens a fresh one, so it need not wait.
-                        let d = if retries == 0 && is_connection_failure(&err) {
+                        // request: the next attempt opens a fresh one (other idle connections of
+                        // the pool may be just as stale), so the first retry need not wait.
+                        let broken = is_connection_failure(&err);
+                        let d = if retries == 0 && broken {
                             Duration::ZERO
                         } else {
                             d
                         };
+                        fresh_connection |= broken;
                         retries += 1;
                         tracing::debug!(
                             error = %err.message,

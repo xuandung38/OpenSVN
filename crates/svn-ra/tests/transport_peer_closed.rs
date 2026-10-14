@@ -51,6 +51,13 @@ struct RawServer {
 
 impl RawServer {
     async fn start(ca: &TestCa, script: Vec<Act>) -> Self {
+        Self::start_with(ca, script, false).await
+    }
+
+    /// With `close_reused`, every request after the first one of a connection is answered by
+    /// closing that connection without `close_notify` (a server that ends keep-alive
+    /// connections under the next request).
+    async fn start_with(ca: &TestCa, script: Vec<Act>, close_reused: bool) -> Self {
         let leaf = ca.leaf(&["localhost"], false);
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut config = rustls::ServerConfig::builder_with_provider(provider)
@@ -82,7 +89,7 @@ impl RawServer {
                     let Ok(tls) = acceptor.accept(tcp).await else {
                         return;
                     };
-                    serve_connection(tls, &script, &seen).await;
+                    serve_connection(tls, &script, &seen, close_reused).await;
                 });
             }
         });
@@ -141,12 +148,18 @@ async fn serve_connection(
     mut tls: TlsStream<TcpStream>,
     script: &Mutex<VecDeque<Act>>,
     seen: &Mutex<Vec<String>>,
+    close_reused: bool,
 ) {
+    let mut served = 0usize;
     loop {
         let Some(method) = read_request(&mut tls).await else {
             return;
         };
         seen.lock().unwrap().push(method);
+        served += 1;
+        if close_reused && served > 1 {
+            return unclean_close(tls).await;
+        }
         let act = script
             .lock()
             .unwrap()
@@ -302,6 +315,34 @@ async fn a_reused_connection_closed_or_reset_under_a_read_is_retried_at_once() {
         assert_eq!(server.seen()[..3], ["GET", "GET", "GET"], "{broken:?}");
         assert!(server.connections() >= 2);
     }
+}
+
+#[tokio::test]
+async fn the_retry_after_a_broken_pooled_connection_does_not_reuse_another_stale_one() {
+    let ca = TestCa::new();
+    let server = RawServer::start_with(&ca, Vec::new(), true).await;
+    let t = transport(&ca, |_| {});
+    // Three pooled connections, each used once (held at the same time so none is reused).
+    let cancel = CancelToken::new();
+    let held = futures_util::future::join_all(
+        (0..3).map(|i| t.send(req("GET", &server.url(&format!("/warm{i}"))), &cancel)),
+    )
+    .await;
+    for resp in held {
+        let mut resp = resp.unwrap();
+        while resp.chunk().await.unwrap().is_some() {}
+    }
+    assert_eq!(server.connections(), 3);
+    // Every idle connection is now closed by the server under its next request. The read
+    // fails once on a pooled one and is retried at once on a new connection.
+    let started = Instant::now();
+    assert_eq!(
+        body_of(&t, "PROPFIND", &server.url("/p")).await.unwrap(),
+        "ok"
+    );
+    assert!(started.elapsed() < SLOW_RETRY, "{:?}", started.elapsed());
+    assert_eq!(server.seen().len(), 5, "{:?}", server.seen());
+    assert_eq!(server.connections(), 4);
 }
 
 #[tokio::test]
