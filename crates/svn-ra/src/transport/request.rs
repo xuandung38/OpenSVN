@@ -184,6 +184,9 @@ impl HttpResponse {
             () = self.cancel.cancelled() => self.cancel.check().map(|()| None),
             r = self.inner.chunk() => {
                 let chunk = r.map_err(classify_error)?;
+                if let Some(c) = &chunk {
+                    self.cancel.add_received(c.len() as u64);
+                }
                 if chunk.is_none() {
                     // Body finished: free the slot even if the caller keeps the response.
                     self._permit = None;

@@ -1,9 +1,9 @@
-//! Rate limit for progress events: at most one per interval per operation.
+//! Rate limit for progress events: at most one per interval per operation (see `coalesce`).
 
 use std::time::{Duration, Instant};
 
-/// Minimum spacing of progress events (10 per second).
-pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+/// Minimum spacing of progress events (20 per second).
+pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Decides whether a sample taken at `now` may be sent. The first sample always passes; samples
 /// inside the interval are dropped (a later sample carries the newer state anyway).
@@ -51,14 +51,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn at_most_ten_per_second() {
+    fn at_most_twenty_per_second() {
         let start = Instant::now();
         let mut t = Throttle::new();
         // 1000 samples spread over one second (one per ms).
         let sent = (0..1000u64)
             .filter(|ms| t.allow(start + Duration::from_millis(*ms)))
             .count();
-        assert!((9..=10).contains(&sent), "sent {sent}");
+        assert!((19..=20).contains(&sent), "sent {sent}");
     }
 
     #[test]
@@ -67,8 +67,8 @@ mod tests {
         let mut t = Throttle::new();
         assert!(t.allow(now));
         assert!(!t.allow(now));
-        assert!(!t.allow(now + Duration::from_millis(99)));
-        assert!(t.allow(now + Duration::from_millis(100)));
+        assert!(!t.allow(now + Duration::from_millis(49)));
+        assert!(t.allow(now + Duration::from_millis(50)));
     }
 
     #[test]

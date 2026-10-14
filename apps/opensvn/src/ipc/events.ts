@@ -1,6 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type { IpcAdapter, Unlisten } from "./adapter";
 import type {
+  ActionCounts,
   AppError,
   AuthPromptEvent,
   Banner,
@@ -10,6 +11,7 @@ import type {
   OpFinished,
   OpProgress,
   OpResult,
+  PathAction,
   RevisionChanged,
   StatusChanged,
 } from "./bindings";
@@ -47,16 +49,98 @@ export const EVENT_NAMES: EventName[] = [
  */
 export const PHASE_NEEDS_CLEANUP = "needs-cleanup";
 export const PHASE_NESTED_WC_SKIPPED = "nested-wc-skipped";
+/** An external failed or was skipped; `currentPath` is its path. Collected as an operation warning. */
+export const PHASE_EXTERNAL_WARNING = "external-warning";
 
 /** Native menu events (`menu://wc.update`, `menu://file.checkout`, ...) carry no payload. */
 export type MenuEventName = `menu://${string}`;
 
-/** Live view of one operation for the Activity panel. */
+/** One line of an operation's path log (`A  src/lib.rs`). */
+export interface LogLine {
+  action: PathAction;
+  path: string;
+}
+
+/** Path log lines kept per operation (the details panel virtualises them). */
+export const OP_LOG_LIMIT = 5000;
+
+/** Live view of one operation for the Activity panel and its details panel. */
 export interface OpState {
   handle: OperationHandle;
   state: "running" | "done" | "failed";
   progress: OpProgress | null;
+  /** Backend message of the failure (kept for callers that only need the text). */
   error: string | null;
+  /** The full failure, for the short localised text and its "Details". */
+  appError: AppError | null;
+  /** Result of a finished operation (final revision). */
+  result: OpResult | null;
+  /** Most recent paths, oldest first, at most `OP_LOG_LIMIT`. */
+  log: LogLine[];
+  /** Paths reported but no longer in `log` (older ones, or coalesced away by the backend). */
+  logDropped: number;
+  /** Notices worth keeping in the summary (externals, skipped nested working copies). */
+  warnings: string[];
+  /** Wall-clock times (ms) for the elapsed time and the transfer rate. */
+  startedAt: number;
+  endedAt: number | null;
+  /** Bytes per second, smoothed; `null` until two byte samples arrived. */
+  rate: number | null;
+  rateMark: { bytes: number; at: number } | null;
+}
+
+/** Fresh state of an operation that just started. */
+export function newOpState(handle: OperationHandle, now: number = Date.now()): OpState {
+  return {
+    handle,
+    state: "running",
+    progress: null,
+    error: null,
+    appError: null,
+    result: null,
+    log: [],
+    logDropped: 0,
+    warnings: [],
+    startedAt: now,
+    endedAt: null,
+    rate: null,
+    rateMark: null,
+  };
+}
+
+/** Rate samples closer together than this are merged (avoids jumpy numbers at 20 events/s). */
+const RATE_WINDOW_MS = 500;
+
+/**
+ * Applies one coalesced progress sample: appends its paths to the log (keeping the newest
+ * `OP_LOG_LIMIT`) and updates the smoothed transfer rate. Pure, so it is unit-tested directly.
+ */
+export function applyProgress(cur: OpState, p: OpProgress, now: number = Date.now()): OpState {
+  let { log, logDropped, rate, rateMark } = cur;
+  logDropped += p.entriesDropped ?? 0;
+  if (p.entries?.length) {
+    const merged = log.concat(p.entries);
+    const over = merged.length - OP_LOG_LIMIT;
+    log = over > 0 ? merged.slice(over) : merged;
+    if (over > 0) logDropped += over;
+  }
+  if (p.bytesDone != null) {
+    if (!rateMark) {
+      rateMark = { bytes: 0, at: cur.startedAt };
+    }
+    const dt = now - rateMark.at;
+    if (dt >= RATE_WINDOW_MS) {
+      const inst = (Math.max(0, p.bytesDone - rateMark.bytes) * 1000) / dt;
+      rate = rate === null ? inst : rate * 0.6 + inst * 0.4;
+      rateMark = { bytes: p.bytesDone, at: now };
+    }
+  }
+  return { ...cur, progress: p, log, logDropped, rate, rateMark };
+}
+
+/** Counts of the finished (or running) operation, `null` when it reported no paths. */
+export function opCounts(op: OpState): ActionCounts | null {
+  return op.progress?.counts ?? null;
 }
 
 /** Final result of an operation, kept even when `op://finished` races ahead of `op://started`. */
@@ -235,7 +319,7 @@ function applyToCache(qc: QueryClient, name: EventName, payload: unknown): void 
     }
     case "op://started": {
       const handle = payload as OperationHandle;
-      updateOp(qc, handle.opId, () => ({ handle, state: "running", progress: null, error: null }));
+      updateOp(qc, handle.opId, () => newOpState(handle));
       break;
     }
     case "op://progress": {
@@ -257,8 +341,17 @@ function applyToCache(qc: QueryClient, name: EventName, payload: unknown): void 
         }
         break;
       }
-      if (p.phase === PHASE_NESTED_WC_SKIPPED) break; // a toast (useOpNotifications), not progress
-      updateOp(qc, p.opId, (cur) => (cur ? { ...cur, progress: p } : cur));
+      if (p.phase === PHASE_NESTED_WC_SKIPPED || p.phase === PHASE_EXTERNAL_WARNING) {
+        // News, not progress (the nested working copy is also a toast): kept for the summary.
+        const text = p.currentPath ?? "";
+        if (text) {
+          updateOp(qc, p.opId, (cur) =>
+            cur ? { ...cur, warnings: [...cur.warnings, text].slice(-100) } : cur,
+          );
+        }
+        break;
+      }
+      updateOp(qc, p.opId, (cur) => (cur ? applyProgress(cur, p) : cur));
       break;
     }
     case "op://finished": {
@@ -270,14 +363,46 @@ function applyToCache(qc: QueryClient, name: EventName, payload: unknown): void 
         void qc.invalidateQueries({ queryKey: queryKeys.repoRoot });
         void qc.invalidateQueries({ queryKey: queryKeys.logRoot });
       }
-      updateOp(qc, p.opId, (cur) => (cur ? { ...cur, state: "done" } : cur));
+      const background = qc.getQueryData<Record<string, OpState>>(queryKeys.ops)?.[p.opId]?.handle
+        .background;
+      if (background) {
+        // A background check that went through is not news: it leaves the Activity panel.
+        removeOp(qc, p.opId);
+        break;
+      }
+      updateOp(qc, p.opId, (cur) =>
+        cur ? { ...cur, state: "done", result: p.result, endedAt: Date.now() } : cur,
+      );
       break;
     }
     case "op://failed": {
       const p = payload as OpFailed;
       setOutcome(qc, p.opId, { status: "failed", error: p.error });
+      const failed = qc.getQueryData<Record<string, OpState>>(queryKeys.ops)?.[p.opId]?.handle;
+      if (failed?.background) {
+        // Offline, a check fails every round: only the newest failure per working copy stays, so
+        // they never push the user's own operations out of the panel (MAX_OPS).
+        const ops = qc.getQueryData<Record<string, OpState>>(queryKeys.ops) ?? {};
+        for (const o of Object.values(ops)) {
+          if (
+            o.handle.opId !== p.opId &&
+            o.handle.background &&
+            o.state === "failed" &&
+            o.handle.wcId === failed.wcId
+          )
+            removeOp(qc, o.handle.opId);
+        }
+      }
       updateOp(qc, p.opId, (cur) =>
-        cur ? { ...cur, state: "failed", error: p.error.message } : cur,
+        cur
+          ? {
+              ...cur,
+              state: "failed",
+              error: p.error.message,
+              appError: p.error,
+              endedAt: Date.now(),
+            }
+          : cur,
       );
       break;
     }
@@ -300,6 +425,15 @@ function updateOp(
     if (ids.length <= MAX_OPS) return merged;
     // Keep only the most recent operations (insertion order): the Activity panel is not a history log.
     return Object.fromEntries(ids.slice(-MAX_OPS).map((id) => [id, merged[id] as OpState]));
+  });
+}
+
+/** Drops an operation from the Activity panel (dismissed background failures, finished checks). */
+export function removeOp(qc: QueryClient, opId: string) {
+  qc.setQueryData<Record<string, OpState>>(queryKeys.ops, (cur = {}) => {
+    if (!(opId in cur)) return cur;
+    const { [opId]: _gone, ...rest } = cur;
+    return rest;
   });
 }
 

@@ -617,3 +617,105 @@ async fn a_repository_without_a_layout_shows_no_branch() {
     assert!(listed[0].branch.is_none(), "{:?}", listed[0].branch);
     assert_eq!(listed[0].url, wc.url, "the location is still shown");
 }
+
+/// Starts a stand-in for one of our long operations (a checkout still filling the working copy at
+/// `root`); it ends when the returned sender fires.
+fn hold_wc(
+    f: &Fixture,
+    root: &std::path::Path,
+) -> (
+    opensvn_ipc::OperationHandle,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let spec = crate::ops::OpSpec::new(opensvn_ipc::OperationKind::Checkout, None, "Checkout demo")
+        .at(root);
+    let h = f.state().ops.spawn_with(spec, move |_ctx| async move {
+        let _ = rx.await;
+        Ok(OpResult::Done)
+    });
+    (h, tx)
+}
+
+#[tokio::test]
+async fn cleanup_and_update_checks_are_refused_while_our_operation_holds_the_wc() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    let root = crate::engine::fake::demo_wc_root();
+    let (op, release) = hold_wc(&f, &root);
+    assert_eq!(
+        op.root_path.as_deref().map(std::path::PathBuf::from),
+        Some(dunce::canonicalize(&root).unwrap_or(root.clone()))
+    );
+
+    let request = || opensvn_ipc::CleanupRequest {
+        wc_id: wc.id.clone(),
+        remove_unversioned: None,
+        remove_ignored: None,
+        vacuum_pristines: None,
+    };
+    let err = commands::cleanup(f.state(), request()).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::WcBusy);
+    assert!(err.message.contains("Checkout demo"), "{}", err.message);
+    let err = commands::status_remote(f.state(), wc.id.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::WcBusy);
+    // Neither refusal started an operation (no error row in the UI).
+    let started = f
+        .events
+        .all()
+        .into_iter()
+        .filter(|r| matches!(r, Recorded::Started(_)))
+        .count();
+    assert_eq!(started, 1, "only the held operation started");
+
+    // Our own lock is not offered for cleanup.
+    f.engine.simulate_foreign_lock(&root, "docs").unwrap();
+    commands::wc_open(f.state(), wc.id.clone()).await.unwrap();
+    assert!(
+        !f.events
+            .all()
+            .iter()
+            .any(|r| matches!(r, Recorded::Banner(_))),
+        "no needs-cleanup banner while our operation runs"
+    );
+
+    let _ = release.send(());
+    f.wait_op(&op).await.unwrap();
+    commands::wc_open(f.state(), wc.id.clone()).await.unwrap();
+    assert!(
+        f.events
+            .all()
+            .iter()
+            .any(|r| matches!(r, Recorded::Banner(_))),
+        "the lock is reported once no operation of ours holds the working copy"
+    );
+    let h = commands::cleanup(f.state(), request()).await.unwrap();
+    // The fake engine refuses a foreign lock as busy; what matters is that it started.
+    let _ = f.wait_op(&h).await;
+}
+
+#[tokio::test]
+async fn background_checks_skip_a_busy_working_copy() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    let root = crate::engine::fake::demo_wc_root();
+    let resolved = f.state().wcs.resolve(&wc.id).unwrap();
+    let engine = std::sync::Arc::clone(&f.state().engine);
+    assert_eq!(
+        crate::status::skip_reason(&engine, &f.state().ops, &resolved).await,
+        None
+    );
+    let (op, release) = hold_wc(&f, &root);
+    assert_eq!(
+        crate::status::skip_reason(&engine, &f.state().ops, &resolved).await,
+        Some(crate::status::SkipReason::Busy)
+    );
+    let _ = release.send(());
+    f.wait_op(&op).await.unwrap();
+    assert_eq!(
+        crate::status::skip_reason(&engine, &f.state().ops, &resolved).await,
+        None
+    );
+}

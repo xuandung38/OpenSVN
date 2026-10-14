@@ -11,6 +11,7 @@
     "tauri": "pnpm --filter opensvn tauri",
     "gen:ipc": "pnpm --filter opensvn gen:ipc",
     "lint": "biome check .",
+    "lint:safety": "pnpm --filter opensvn lint:safety",
     "typecheck": "pnpm --filter opensvn typecheck",
     "test": "pnpm --filter opensvn test"
   },

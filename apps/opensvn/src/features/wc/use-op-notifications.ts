@@ -6,10 +6,13 @@ import type { LockConflict } from "../../ipc/bindings";
 import { type OpState, PHASE_NESTED_WC_SKIPPED } from "../../ipc/events";
 import { queryKeys } from "../../ipc/query-keys";
 import { useT } from "../../lib/i18n/i18n";
+import { activityStrings } from "../activity/activity-strings";
+import { errorText } from "../activity/error-text";
 import { wcStrings } from "./wc-strings";
 
 /**
- * Toasts for operation outcomes the user did not wait on: failures (except user cancellation),
+ * Toasts for operation outcomes the user did not wait on: failures (except user cancellation and
+ * the app's own background checks; transport errors in short words),
  * finished updates/switches, and nested working copies an add skipped (svn's W150002). Commit
  * results are reported by the commit box itself.
  *
@@ -24,6 +27,7 @@ export function useOpNotifications(
   const qc = useQueryClient();
   const toast = useToast();
   const t = useT(wcStrings);
+  const a = useT(activityStrings);
   const lockConflict = useRef(onLockConflict);
   lockConflict.current = onLockConflict;
 
@@ -33,8 +37,12 @@ export function useOpNotifications(
     const offFailed = bus.on("op://failed", (p) => {
       if (p.error.code === "cancelled") return;
       const handle = lookup(p.opId);
+      // The app started it (periodic check): the Activity panel shows a small indicator instead.
+      if (handle?.background) return;
       const title = handle?.title ?? "";
-      toast.show(t("opFailed", { title, message: p.error.message }).trim(), 6000);
+      const text = errorText(p.error);
+      const message = text.key ? a(text.key) : text.message;
+      toast.show(t("opFailed", { title, message }).trim(), 6000);
       const conflicts = p.error.lockConflicts ?? [];
       if (
         handle?.kind === "lock" &&
@@ -61,5 +69,5 @@ export function useOpNotifications(
       offDone();
       offNotice();
     };
-  }, [bus, qc, toast, t]);
+  }, [bus, qc, toast, t, a]);
 }
