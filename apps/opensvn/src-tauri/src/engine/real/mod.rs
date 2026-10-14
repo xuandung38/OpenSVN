@@ -180,6 +180,12 @@ impl RealEngine {
         self.svn_config.set_dir(dir);
     }
 
+    /// Directory set by [`RealEngine::set_subversion_config_dir`].
+    #[cfg(test)]
+    pub(crate) fn subversion_config_dir(&self) -> Option<PathBuf> {
+        self.svn_config.dir()
+    }
+
     /// Context for `svn-client` operations: working copy locks are recorded as owned by this
     /// process, with default client configuration and no progress sink.
     pub(crate) fn client_ctx(&self, ctx: &OpContext) -> svn_client::ClientCtx {
