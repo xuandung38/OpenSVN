@@ -544,6 +544,7 @@ impl AuthManager {
     /// A prompt that ends without credentials (cancelled, timed out, or the three-attempt cap)
     /// fails the requests that waited for it, not later ones: the next interactive request
     /// prompts again.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn on_unauthorized(
         &self,
         method: &reqwest::Method,
