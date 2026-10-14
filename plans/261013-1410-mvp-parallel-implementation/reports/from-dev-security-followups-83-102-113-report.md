@@ -46,6 +46,9 @@ Branch `fix/security-followups-83-102-113`, PR #114.
    new test `a_sign_out_during_the_keychain_write_removes_the_saved_password` covers exactly
    that scenario: it stalls the keychain write, starts a sign-out, checks that the sign-out
    waits, then checks that neither the secret nor the row survives.
+   After review: the count lives in its own short-held lock and a separate `account_gate`
+   serializes save vs sign-out (count bumped only under the gate), so answering a prompt never
+   waits for a slow keychain write; the race test also checks that.
 3. `answer_unauthorized` reads `seq` at each of its three `Ok` returns while it holds the
    flight gate. `on_unauthorized` no longer overwrites it. There is no dedicated test: the
    race cannot be reproduced deterministically without injection hooks. The existing denial
