@@ -237,7 +237,9 @@ impl Walker<'_> {
         };
         let status = node_status(self.db, rel, &cur)?;
         if let Some(s) = status
-            && (self.opts.show_unmodified || is_interesting(&s))
+            && (self.opts.show_unmodified
+                || is_interesting(&s)
+                || (self.opts.include_needs_lock && s.needs_lock && s.kind == NodeKind::File))
         {
             self.out.push(s);
         }

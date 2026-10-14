@@ -502,6 +502,7 @@ pub(super) fn unversioned_items_as_spelled(
         show_unmodified: false,
         include_unversioned: unversioned,
         include_ignored: ignored,
+        include_needs_lock: false,
     };
     let found: Vec<WcStatus> =
         local_status(db, rel, &opts, Some(env.global_ignores()), &env.cancel)?;

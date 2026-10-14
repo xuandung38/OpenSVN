@@ -86,6 +86,8 @@ scenario!(switch_to_a_branch);
 scenario!(repository_content_tools);
 scenario!(open_recovers_dead_locks_and_reports_foreign_ones);
 scenario!(locked_unmodified_file_in_status);
+scenario!(needs_lock_unmodified_file_in_status);
+scenario!(lock_held_elsewhere_and_steal);
 scenario!(commit_with_auto_add_remove);
 scenario!(update_ends_in_conflict);
 scenario!(mark_move_and_set_depth);

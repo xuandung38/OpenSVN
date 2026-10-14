@@ -504,6 +504,43 @@ impl FakeEngine {
         Ok(())
     }
 
+    pub(super) async fn do_lock_conflicts(
+        &self,
+        scope: &LockScope,
+        ctx: &OpContext,
+    ) -> Result<Vec<opensvn_ipc::LockConflict>, SvnError> {
+        let requested: Vec<String> = match scope {
+            LockScope::Urls(urls) => urls.clone(),
+            LockScope::Wc { paths, .. } => paths.clone(),
+        };
+        let mut out = Vec::new();
+        for ((session, repo_path, wc_target), asked) in
+            self.lock_targets(scope)?.into_iter().zip(requested)
+        {
+            self.network_tick(ctx).await?;
+            let ours = match &wc_target {
+                Some((root, wc_rel, _)) => self.with_wc(root, |w| {
+                    Ok(w.node(wc_rel)?.lock.as_ref().and_then(|l| l.token.clone()))
+                })?,
+                None => None,
+            };
+            for l in session
+                .get_locks(&repo_path, svn_types::Depth::Empty, &ctx.cancel)
+                .await?
+            {
+                if ours.as_deref() != Some(l.token.as_str()) {
+                    out.push(opensvn_ipc::LockConflict {
+                        path: asked.clone(),
+                        owner: l.owner,
+                        comment: l.comment,
+                        created_at: Some(timestamp_to_iso(l.created)),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Resolves a lock scope to `(session, repository path, optional (wc root, wc path, rev))`.
     #[allow(clippy::type_complexity)]
     fn lock_targets(

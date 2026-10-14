@@ -2,8 +2,9 @@
 //!
 //! * `status` is `svn_client::status` without unmodified nodes, with the configured global
 //!   ignores extended by the working copy's local ignore list (`IgnoreScope::Local`). `svn-client` already lists the
-//!   unmodified nodes the facade asks for (locked, changelisted, switched), so no second pass is
-//!   needed; statuses are sorted by path like the fake engine's.
+//!   unmodified nodes the facade asks for (locked, changelisted, switched, and files with
+//!   `svn:needs-lock`), so no second pass is needed; statuses are sorted by path like the fake
+//!   engine's.
 //! * `diff_wc` compares two sides in repository-normal form: the pristine text (or the copy
 //!   source of a copied node) or the file at a revision read from the repository, against the
 //!   working file with keywords and line endings normalized as a commit would send it. Text is
@@ -473,6 +474,8 @@ impl RealEngine {
             show_unmodified: false,
             include_unversioned: query.include_unversioned,
             include_ignored: query.include_ignored,
+            // Unmodified `svn:needs-lock` files are listed so the UI can offer "lock to edit".
+            include_needs_lock: true,
         };
         let statuses = svn_client::status(&client, &wc.root, &opts, &ctx.cancel).await?;
         let mut out: Vec<FileStatus> = statuses.iter().filter_map(wc_map::file_status).collect();
@@ -601,6 +604,7 @@ impl RealEngine {
             show_unmodified: true,
             include_unversioned: false,
             include_ignored: false,
+            include_needs_lock: false,
         };
         let statuses = svn_client::status_remote(
             &self.client_ctx(ctx),

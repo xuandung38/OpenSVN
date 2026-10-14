@@ -789,6 +789,132 @@ pub async fn locked_unmodified_file_in_status(h: &dyn Harness) {
     );
 }
 
+/// An unmodified `svn:needs-lock` file is listed (read-only until locked, doc 01 §10.4), with
+/// and without its lock, and is never reported as a change.
+pub async fn needs_lock_unmodified_file_in_status(h: &dyn Harness) {
+    let e = h.engine();
+    let (wc, _) = checkout(h, "needs-lock-clean", None).await;
+    e.props_set(&wc, "README.md", "svn:needs-lock", Some("*"), &ctx())
+        .await
+        .expect("props_set");
+    e.commit(
+        &wc,
+        &CommitRequest {
+            wc_id: wc.id.clone(),
+            paths: vec!["README.md".into()],
+            message: "needs lock".into(),
+            keep_locks: false,
+            auto_add_remove: false,
+        },
+        &ctx(),
+    )
+    .await
+    .expect("commit the property");
+    let only_readme = |st: &[FileStatus]| {
+        assert_eq!(st.len(), 1, "only the needs-lock file is listed: {st:?}");
+        let f = find(st, "README.md")
+            .expect("unmodified needs-lock file is listed")
+            .clone();
+        assert_eq!(f.text, NodeStatus::Normal, "{f:?}");
+        assert_eq!(f.props, opensvn_ipc::PropStatus::Normal, "{f:?}");
+        assert!(f.needs_lock, "{f:?}");
+        f
+    };
+    for query in [
+        ALL,
+        StatusQuery {
+            include_ignored: false,
+            include_unversioned: false,
+        },
+    ] {
+        let st = e.status(&wc, query, &ctx()).await.expect("status");
+        assert!(only_readme(&st).lock.is_none());
+    }
+
+    let scope = LockScope::Wc {
+        wc: wc.clone(),
+        paths: vec!["README.md".into()],
+    };
+    e.lock(&scope, Some("lock to edit"), false, &ctx())
+        .await
+        .expect("lock");
+    let lock = only_readme(&status(h, &wc).await)
+        .lock
+        .expect("lock in status");
+    assert!(lock.mine);
+    e.unlock(&scope, false, &ctx()).await.expect("unlock");
+    assert!(only_readme(&status(h, &wc).await).lock.is_none());
+}
+
+/// A lock held elsewhere refuses a lock with `LockedByOther`; `lock_conflicts` names its owner,
+/// comment and date (never the token), and only an explicit steal takes it over.
+pub async fn lock_held_elsewhere_and_steal(h: &dyn Harness) {
+    let e = h.engine();
+    let (holder, _) = checkout(h, "lock-holder", None).await;
+    let (other, _) = checkout(h, "lock-other", None).await;
+    let scope = |wc: &WcRef| LockScope::Wc {
+        wc: wc.clone(),
+        paths: vec!["README.md".into()],
+    };
+    e.lock(&scope(&holder), Some("held elsewhere"), false, &ctx())
+        .await
+        .expect("lock in the first working copy");
+    assert!(
+        e.lock_conflicts(&scope(&holder), &ctx())
+            .await
+            .expect("conflicts of the holder")
+            .is_empty(),
+        "the holder's own lock is not a conflict"
+    );
+
+    let err = e
+        .lock(&scope(&other), None, false, &ctx())
+        .await
+        .expect_err("locked elsewhere");
+    assert_eq!(err.code, ErrorCode::LockedByOther, "{err}");
+    let conflicts = e
+        .lock_conflicts(&scope(&other), &ctx())
+        .await
+        .expect("conflicts");
+    assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+    let c = &conflicts[0];
+    assert_eq!(c.path, "README.md");
+    assert!(!c.owner.is_empty());
+    assert_eq!(c.comment.as_deref(), Some("held elsewhere"));
+    assert!(
+        c.created_at.as_deref().is_some_and(|d| d.contains('T')),
+        "{c:?}"
+    );
+    let url = format!("{}/trunk/README.md", h.repo_url());
+    let by_url = e
+        .lock_conflicts(&LockScope::Urls(vec![url.clone()]), &ctx())
+        .await
+        .expect("conflicts by URL");
+    assert_eq!(by_url.len(), 1, "{by_url:?}");
+    assert_eq!(by_url[0].path, url);
+    assert!(
+        find(&status(h, &other).await, "README.md").is_none(),
+        "a refused lock records nothing"
+    );
+
+    e.lock(&scope(&other), Some("stolen"), true, &ctx())
+        .await
+        .expect("steal");
+    let lock = find(&status(h, &other).await, "README.md")
+        .and_then(|s| s.lock.clone())
+        .expect("stolen lock in status");
+    assert!(lock.mine);
+    assert!(
+        e.lock_conflicts(&scope(&other), &ctx())
+            .await
+            .expect("conflicts after the steal")
+            .is_empty()
+    );
+    e.unlock(&scope(&other), false, &ctx())
+        .await
+        .expect("unlock the stolen lock");
+}
+
 /// Commit with `auto_add_remove` adds selected unversioned files and deletes selected missing
 /// ones in the same revision.
 pub async fn commit_with_auto_add_remove(h: &dyn Harness) {
@@ -1079,6 +1205,8 @@ pub async fn run_all<H: Harness>(make: impl Fn() -> H) {
     repository_content_tools(&make()).await;
     open_recovers_dead_locks_and_reports_foreign_ones(&make()).await;
     locked_unmodified_file_in_status(&make()).await;
+    needs_lock_unmodified_file_in_status(&make()).await;
+    lock_held_elsewhere_and_steal(&make()).await;
     commit_with_auto_add_remove(&make()).await;
     update_ends_in_conflict(&make()).await;
     update_of_sub_paths(&make()).await;

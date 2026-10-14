@@ -535,3 +535,85 @@ async fn log_paging_walks_every_revision_once_newest_first() {
     }
     assert_eq!(seen, (1..=10).rev().collect::<Vec<u64>>());
 }
+
+#[tokio::test]
+async fn a_lock_held_elsewhere_fails_with_its_owner_and_only_an_explicit_steal_takes_it() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    // Someone locks README.md straight in the repository: this working copy has no token.
+    let h = commands::lock(
+        f.state(),
+        LockRequest {
+            targets: LockTargets::Url {
+                urls: vec![url("trunk/README.md")],
+            },
+            comment: Some("held by the other checkout".into()),
+            steal: None,
+        },
+    )
+    .await
+    .unwrap();
+    f.wait_op(&h).await.unwrap();
+
+    let wc_target = LockTargets::Wc {
+        wc_id: wc.id.clone(),
+        paths: vec!["README.md".into()],
+    };
+    let h = commands::lock(
+        f.state(),
+        LockRequest {
+            targets: wc_target.clone(),
+            comment: None,
+            steal: None,
+        },
+    )
+    .await
+    .unwrap();
+    let err = f.wait_op(&h).await.unwrap_err();
+    assert_eq!(err.code, opensvn_ipc::ErrorCode::LockedByOther);
+    assert_eq!(
+        err.actions,
+        Some(vec![opensvn_ipc::ErrorAction::OpenLockDialog])
+    );
+    let conflicts = err.lock_conflicts.expect("the refusal names the lock");
+    assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+    assert_eq!(conflicts[0].path, "README.md");
+    assert!(!conflicts[0].owner.is_empty());
+    assert_eq!(
+        conflicts[0].comment.as_deref(),
+        Some("held by the other checkout")
+    );
+    assert!(conflicts[0].created_at.is_some());
+
+    let h = commands::lock(
+        f.state(),
+        LockRequest {
+            targets: wc_target,
+            comment: Some("mine now".into()),
+            steal: Some(true),
+        },
+    )
+    .await
+    .unwrap();
+    f.wait_op(&h).await.unwrap();
+}
+
+#[tokio::test]
+async fn other_lock_failures_carry_no_lock_conflicts() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let h = commands::lock(
+        f.state(),
+        LockRequest {
+            targets: LockTargets::Url {
+                urls: vec![url("trunk/does-not-exist")],
+            },
+            comment: None,
+            steal: None,
+        },
+    )
+    .await
+    .unwrap();
+    let err = f.wait_op(&h).await.unwrap_err();
+    assert_ne!(err.code, opensvn_ipc::ErrorCode::LockedByOther);
+    assert!(err.lock_conflicts.is_none());
+}

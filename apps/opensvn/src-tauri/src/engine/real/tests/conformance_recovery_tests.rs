@@ -243,6 +243,13 @@ impl EngineFacade for ClientCheckout {
     ) -> EngineResult<()> {
         self.0.engine.unlock(scope, break_lock, ctx).await
     }
+    async fn lock_conflicts(
+        &self,
+        scope: &LockScope,
+        ctx: &OpContext,
+    ) -> EngineResult<Vec<opensvn_ipc::LockConflict>> {
+        self.0.engine.lock_conflicts(scope, ctx).await
+    }
     async fn remote_edit(&self, plan: &RemoteEditPlan, ctx: &OpContext) -> EngineResult<Rev> {
         self.0.engine.remote_edit(plan, ctx).await
     }

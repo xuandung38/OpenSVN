@@ -193,6 +193,7 @@ fn remove_wc(
             show_unmodified: false,
             include_unversioned: true,
             include_ignored: true,
+            include_needs_lock: false,
         };
         let statuses = local_status(&db, &root, &opts, globals, cancel)?;
         if let Some(s) = statuses.iter().find(|s| is_local_change(s)) {

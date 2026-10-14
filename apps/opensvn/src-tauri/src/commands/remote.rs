@@ -10,7 +10,7 @@ use tauri::State;
 
 use crate::app_state::{AppState, leaf};
 use crate::boundary::guard;
-use crate::engine::{EditOp, LockScope, LogScope, OpContext, RemoteEditPlan};
+use crate::engine::{EditOp, EngineFacade, LockScope, LogScope, OpContext, RemoteEditPlan};
 
 fn engine_err(e: svn_types::SvnError) -> AppError {
     AppError::from(&e)
@@ -147,29 +147,55 @@ pub async fn lock(
     guard(async {
         let (comment, steal) = (request.comment.clone(), request.steal.unwrap_or(false));
         match request.targets {
-            LockTargets::Wc { wc_id, paths } => state.start_wc_op(
+            LockTargets::Wc { wc_id, paths } => state.start_wc_op_app(
                 OperationKind::Lock,
                 &wc_id,
                 "Lock files",
                 move |engine, wc, ctx| async move {
                     let scope = LockScope::Wc { wc, paths };
-                    engine.lock(&scope, comment.as_deref(), steal, &ctx).await?;
-                    Ok(OpResult::Done)
+                    lock_with_conflicts(engine.as_ref(), &scope, comment.as_deref(), steal, &ctx)
+                        .await
                 },
             ),
-            LockTargets::Url { urls } => Ok(state.start_op(
+            LockTargets::Url { urls } => Ok(state.start_op_app(
                 OperationKind::Lock,
                 "Lock files",
                 move |engine, ctx| async move {
-                    engine
-                        .lock(&LockScope::Urls(urls), comment.as_deref(), steal, &ctx)
-                        .await?;
-                    Ok(OpResult::Done)
+                    let scope = LockScope::Urls(urls);
+                    lock_with_conflicts(engine.as_ref(), &scope, comment.as_deref(), steal, &ctx)
+                        .await
                 },
             )),
         }
     })
     .await
+}
+
+/// Locks `scope`. A `locked-by-other` refusal carries the locks that refused it, asked from the
+/// server right away (best effort: when that read fails too, the plain refusal is reported), so
+/// the lock dialog can name the owner and offer an explicitly confirmed steal (doc 01 §10.4).
+/// Nothing is ever stolen here: a steal only happens when the request asked for it.
+async fn lock_with_conflicts(
+    engine: &dyn EngineFacade,
+    scope: &LockScope,
+    comment: Option<&str>,
+    steal: bool,
+    ctx: &OpContext,
+) -> Result<OpResult, AppError> {
+    match engine.lock(scope, comment, steal, ctx).await {
+        Ok(()) => Ok(OpResult::Done),
+        Err(e) if e.code == svn_types::ErrorCode::LockedByOther => {
+            let conflicts = match engine.lock_conflicts(scope, ctx).await {
+                Ok(c) => c,
+                Err(read) => {
+                    tracing::warn!(code = ?read.code, "could not read the lock that refused a lock request");
+                    Vec::new()
+                }
+            };
+            Err(AppError::from(&e).with_lock_conflicts(conflicts))
+        }
+        Err(e) => Err(AppError::from(&e)),
+    }
 }
 
 #[tauri::command]
