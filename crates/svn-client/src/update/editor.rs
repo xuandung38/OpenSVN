@@ -516,7 +516,13 @@ impl DeltaEditor for UpdateEditor {
             return Ok(());
         }
         let wc = self.wc_path(path)?;
-        let kind = self.s.db.read_base(&wc)?.map_or(NodeKind::File, |b| b.kind);
+        let base = self.s.db.read_base(&wc)?;
+        // A file external is not part of its parent's tree (it is never reported), so the
+        // parent's drive leaves it alone.
+        if base.as_ref().is_some_and(|b| b.file_external) {
+            return Ok(());
+        }
+        let kind = base.map_or(NodeKind::File, |b| b.kind);
         if !p.admits(kind) {
             return Ok(());
         }
@@ -841,7 +847,20 @@ impl UpdateEditor {
             .db
             .read_base(&wc)?
             .filter(|b| b.presence.is_present());
-        let new_repos = if p_reloc || base.is_none() {
+        let switch_root = self
+            .s
+            .switch_relpath
+            .as_ref()
+            .filter(|_| wc == self.target_wc);
+        if !skipped && wc != self.target_wc && base.as_ref().is_some_and(|b| b.file_external) {
+            // The parent's drive never touches a file external (see `delete_entry`).
+            skipped = true;
+            self.skipped.push(wc.clone());
+            self.emit(&wc, NodeKind::File, UpdateAction::Skipped);
+        }
+        let new_repos = if let Some(sw) = switch_root {
+            sw.clone()
+        } else if p_reloc || base.is_none() {
             repos_child(&p_repos, &name)
         } else {
             base.as_ref()

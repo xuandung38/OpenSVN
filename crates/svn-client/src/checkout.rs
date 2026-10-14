@@ -17,6 +17,8 @@ use crate::update::{UpdateKind, UpdateParams, drive_update};
 /// `path` is created when missing. The working copy format is always 31. The root is recorded as
 /// `incomplete` first, so a cancelled or failed checkout is resumed by `update`.
 /// `allow_unversioned_obstructions` lets the checkout adopt files that already exist at `path`.
+/// Externals are fetched afterwards when [`ClientCtx::externals`] is set (see
+/// [`crate::externals`]); their outcome is in [`UpdateSummary::externals`].
 pub async fn checkout(
     ctx: &ClientCtx,
     session: &dyn RaSession,
@@ -49,6 +51,7 @@ pub async fn checkout(
             depth
         },
     };
+    let requested = depth;
     let (path_buf, owner) = (path.to_path_buf(), ctx.lock_owner.clone());
     let db = tokio::task::spawn_blocking(move || -> Result<WcDb> {
         fs::create_dir_all(&path_buf).map_err(|e| {
@@ -63,10 +66,11 @@ pub async fn checkout(
     })
     .await
     .map_err(|e| SvnError::new(ErrorCode::Internal, format!("worker failed: {e}")))??;
-    drive_update(
+    let db = Arc::new(db);
+    let mut summary = drive_update(
         ctx,
         session,
-        Arc::new(db),
+        Arc::clone(&db),
         RelPath::root(),
         UpdateParams {
             revision: Some(rev),
@@ -77,5 +81,9 @@ pub async fn checkout(
         },
         cancel,
     )
-    .await
+    .await?;
+    let ext = crate::externals::process(ctx, &db, &RelPath::root(), requested, cancel).await?;
+    summary.events.extend(ext.events);
+    summary.externals = ext.reports;
+    Ok(summary)
 }

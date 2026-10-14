@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use svn_types::{CancelToken, Depth, PropChange, RelPath, Revnum};
 use svn_wc::conflicts::{TreeAction, TreeReason};
-use svn_wc::db::{Node, WcDb};
+use svn_wc::db::{NewExternal, Node, WcDb};
 use tempfile::TempPath;
 
 use crate::ctx::{ClientCtx, UpdateEvent};
@@ -34,6 +34,9 @@ pub struct UpdateSetup {
     pub ctx: ClientCtx,
     /// Cancellation, polled between work items.
     pub cancel: CancelToken,
+    /// The target is the file external described here: its BASE row is marked as a file
+    /// external and the `EXTERNALS` row is written in the same transaction as the file.
+    pub file_external: Option<NewExternal>,
 }
 
 /// Facts the drive reports to the caller, shared with the editor running on another thread.
@@ -189,9 +192,48 @@ pub fn parse_svn_date(s: &str) -> Option<i64> {
     Some(((days * 86_400 + hh * 3600 + mm * 60 + ss) * 1_000_000) + micros)
 }
 
+/// Formats APR microseconds as an svn date (`2026-10-14T02:22:00.000000Z`), the inverse of
+/// [`parse_svn_date`].
+pub fn format_svn_date(micros: i64) -> String {
+    let secs = micros.div_euclid(1_000_000);
+    let frac = micros.rem_euclid(1_000_000);
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    // Civil from days (Howard Hinnant).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{frac:06}Z",
+        tod / 3600,
+        tod % 3600 / 60,
+        tod % 60
+    )
+}
+
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
-    use super::parse_svn_date;
+    use super::{format_svn_date, parse_svn_date};
+
+    #[test]
+    fn formats_what_it_parses() {
+        for s in [
+            "1970-01-01T00:00:00.000000Z",
+            "2000-02-29T23:59:59.999999Z",
+            "2026-10-14T02:22:07.123456Z",
+            "1969-12-31T23:59:59.500000Z",
+        ] {
+            let t = parse_svn_date(s).expect("parse");
+            assert_eq!(format_svn_date(t), s);
+        }
+    }
 
     #[test]
     fn parses_svn_timestamps() {

@@ -44,6 +44,14 @@ impl WcDb {
 }
 
 impl WcTxn<'_> {
+    pub(super) fn conn(&self) -> &Connection {
+        self.conn
+    }
+
+    pub(super) fn wc_id(&self) -> i64 {
+        self.wc_id
+    }
+
     // ---- reads inside the transaction ----------------------------------------------------
 
     /// BASE (`op_depth = 0`) row of `path`.
@@ -165,6 +173,10 @@ impl WcTxn<'_> {
             return Ok(());
         };
         if skip_when_dir && node.kind == NodeKind::Dir {
+            return Ok(());
+        }
+        // A file external is an update root of its own: the parent's update leaves it alone.
+        if !is_root && node.file_external {
             return Ok(());
         }
         let old_rev = node.revision.and_then(|r| i64::try_from(r).ok());
