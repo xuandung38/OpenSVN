@@ -36,8 +36,13 @@ Branch `feat/svn-externals`, PR #118. Closes #97, refs #99 item 3.
     - A file external becomes svn's `not-present` marker. Its file is deleted only when it is
       unmodified. A conflicted one is refused.
     - Emptied unversioned parent directories are pruned, as svn does.
-  - Externals nested in externals are processed recursively, at most `MAX_NESTING = 8` levels
-    deep, so a definition that includes itself stops.
+  - Externals nested in externals are processed recursively. They are bounded three ways
+    (review on #118):
+    - cycle detection refuses an external whose URL is, or contains, its defining directory
+      or any directory whose definition led to it (`(uuid, repos_relpath)` chain);
+    - one operation processes at most `MAX_EXTERNALS = 1000` externals across all levels
+      (`ClientConfig::max_externals`);
+    - nesting stops at `MAX_NESTING = 8` levels.
   - A failure is reported per external in `UpdateSummary::externals` (`ExternalReport`) and does
     not stop the other externals. Cancellation stops everything.
 - **Update core fixes** needed by externals:

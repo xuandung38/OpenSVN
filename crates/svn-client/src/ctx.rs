@@ -53,6 +53,9 @@ pub struct ClientConfig {
     pub preserved_conflict_exts: Vec<String>,
     /// `global-ignores` patterns; `None` selects svn's default list.
     pub global_ignores: Option<Vec<String>>,
+    /// Most externals one checkout, update or switch processes, nested ones included; `None`
+    /// selects [`crate::externals::MAX_EXTERNALS`].
+    pub max_externals: Option<usize>,
 }
 
 /// Everything an operation needs besides the repository session and the cancel token.
@@ -70,6 +73,12 @@ pub struct ClientCtx {
     pub externals: Option<Arc<dyn SessionOpener>>,
     /// How many externals deep the current operation runs (0 for the user's own operation).
     pub(crate) external_nesting: u32,
+    /// `(repository UUID, repository path)` of every directory whose definition led to the
+    /// current operation, outermost first (cycle detection).
+    pub(crate) external_chain: Vec<(String, String)>,
+    /// Externals processed so far by the user's operation, shared by every nested operation;
+    /// `None` at the top level (a fresh count starts there).
+    pub(crate) external_budget: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl std::fmt::Debug for ClientCtx {
@@ -91,6 +100,8 @@ impl ClientCtx {
             progress: None,
             externals: None,
             external_nesting: 0,
+            external_chain: Vec::new(),
+            external_budget: None,
         }
     }
 

@@ -19,6 +19,11 @@
 //!   whose nested externals have them) is left exactly as it is, still a working copy; its
 //!   unversioned items always survive. A file external with local changes stays on disk as an
 //!   unversioned file. svn 1.15 deletes such a modified file external; this client does not.
+//! - Externals are bounded. An external whose URL is (or contains) its defining directory or a
+//!   directory whose definition led to it is refused as a cycle. One operation processes at
+//!   most [`MAX_EXTERNALS`] externals across every nesting level, at most [`MAX_NESTING`] deep.
+//!   svn has neither bound, so a definition that includes itself makes it recurse; the cycle
+//!   check is conservative and also refuses a pinned revision of such a URL.
 //! - A failure of one external is reported in [`ExternalReport`] and the others are still
 //!   processed, like svn's `W205011` warnings. Cancellation stops everything.
 //!
@@ -43,6 +48,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use svn_ra_api::RaSession;
@@ -68,6 +74,21 @@ pub trait SessionOpener: Send + Sync {
 /// Externals inside externals are followed this many levels deep at most, so a definition that
 /// (directly or indirectly) includes itself cannot recurse forever.
 pub const MAX_NESTING: u32 = 8;
+
+/// Most externals one top-level operation processes, across every nesting level, unless
+/// [`crate::ClientConfig::max_externals`] says otherwise. Beyond it the remaining externals are
+/// reported as failed, so a definition cannot make a checkout fetch without bound.
+pub const MAX_EXTERNALS: usize = 1000;
+
+/// True when `url_relpath` is `chain_relpath` or one of its ancestors: fetching it would fetch
+/// the definition again (svn would recurse forever).
+fn contains(url_relpath: &str, chain_relpath: &str) -> bool {
+    url_relpath.is_empty()
+        || chain_relpath == url_relpath
+        || chain_relpath
+            .strip_prefix(url_relpath)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
 
 /// What processing externals produced: reports and the notifications of the drives it ran
 /// (paths relative to the working copy root of the operation).
@@ -168,8 +189,16 @@ fn path_key(p: &RelPath) -> String {
     }
 }
 
-/// URL of the versioned directory `dir` and its repository root.
-fn dir_urls(db: &WcDb, dir: &RelPath) -> Result<(RepoUrl, RepoUrl)> {
+/// The defining directory of a definition: its URL, its repository root and its location as
+/// `(repository UUID, repository path)`.
+struct DefDir {
+    url: RepoUrl,
+    root: RepoUrl,
+    location: (String, String),
+}
+
+/// URL of the versioned directory `dir`, its repository root and its location.
+fn dir_urls(db: &WcDb, dir: &RelPath) -> Result<DefDir> {
     let info = db.read_repos_info(dir)?;
     let root = RepoUrl::parse(&info.repos_root_url)?;
     let url = if info.repos_relpath.is_empty() {
@@ -177,7 +206,11 @@ fn dir_urls(db: &WcDb, dir: &RelPath) -> Result<(RepoUrl, RepoUrl)> {
     } else {
         root.join(&RelPath::new(&info.repos_relpath)?)?
     };
-    Ok((url, root))
+    Ok(DefDir {
+        url,
+        root,
+        location: (info.repos_uuid, info.repos_relpath),
+    })
 }
 
 /// Checks that the external at `local` (below the versioned directory `def_dir`) stays inside
@@ -236,11 +269,19 @@ pub(crate) fn create_parents(abs: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The context an operation inside the external at `prefix` runs with: one level deeper, with
-/// notifications carrying the full path.
-pub(crate) fn nested_ctx(ctx: &ClientCtx, prefix: &RelPath) -> ClientCtx {
+/// The context an operation inside the external at `prefix` runs with: one level deeper, below
+/// the defining directory at `location`, sharing the operation's `budget`, with notifications
+/// carrying the full path.
+pub(crate) fn nested_ctx(
+    ctx: &ClientCtx,
+    prefix: &RelPath,
+    location: &(String, String),
+    budget: &Arc<AtomicUsize>,
+) -> ClientCtx {
     let mut inner = ctx.clone();
     inner.external_nesting += 1;
+    inner.external_chain.push(location.clone());
+    inner.external_budget = Some(Arc::clone(budget));
     if let Some(p) = ctx.progress.clone() {
         let prefix = prefix.clone();
         inner.progress = Some(Arc::new(move |e: &UpdateEvent| {
@@ -304,6 +345,11 @@ async fn process_inner(
         .map(|e| (path_key(&e.local_relpath), e))
         .collect();
     let mut claimed = BTreeSet::new();
+    let budget = ctx
+        .external_budget
+        .clone()
+        .unwrap_or_else(|| Arc::new(AtomicUsize::new(0)));
+    let max = ctx.config.max_externals.unwrap_or(MAX_EXTERNALS);
     for (def_dir, value, ambient) in defs {
         cancel.check()?;
         let keep_old = |old: &mut BTreeMap<String, External>| {
@@ -349,8 +395,20 @@ async fn process_inner(
                 out.reports.push(failed(&local, NodeKind::Unknown, &e));
                 continue;
             }
+            if budget.fetch_add(1, Ordering::Relaxed) >= max {
+                let e = SvnError::new(
+                    ErrorCode::LimitExceeded,
+                    format!(
+                        "not fetched: this operation already processed {max} externals, the \
+                         most it processes"
+                    ),
+                )
+                .with_svn_code(205_011);
+                out.reports.push(failed(&local, NodeKind::Unknown, &e));
+                continue;
+            }
             let res = match &urls {
-                Ok((dir_url, root)) => {
+                Ok(def) => {
                     let job = Item {
                         ctx,
                         opener: opener.as_ref(),
@@ -359,9 +417,11 @@ async fn process_inner(
                         local: &local,
                         item: &item,
                         previous: previous.as_ref(),
+                        def_location: &def.location,
+                        budget: &budget,
                         cancel,
                     };
-                    job.run(dir_url, root, &mut out).await
+                    job.run(&def.url, &def.root, &mut out).await
                 }
                 Err(e) => Err(e.clone()),
             };
@@ -397,10 +457,45 @@ pub(crate) struct Item<'a> {
     pub item: &'a ExternalItem,
     /// The `EXTERNALS` row recorded for this path before, if any.
     pub previous: Option<&'a External>,
+    /// `(repository UUID, repository path)` of `def_dir`.
+    pub def_location: &'a (String, String),
+    /// Externals processed by the user's operation so far.
+    pub budget: &'a Arc<AtomicUsize>,
     pub cancel: &'a CancelToken,
 }
 
 impl Item<'_> {
+    /// Refuses an external whose URL is (or contains) its defining directory or a directory
+    /// that led to it: fetching it would fetch the same definition again.
+    fn refuse_cycle(&self, session: &dyn RaSession) -> Result<()> {
+        let relpath = crate::update::repos_relpath_of(session.repos_root(), session.session_url())?;
+        let uuid = session.uuid();
+        let chain = self
+            .ctx
+            .external_chain
+            .iter()
+            .chain(std::iter::once(self.def_location));
+        for (u, p) in chain {
+            if u == uuid && contains(&relpath, p) {
+                return Err(SvnError::new(
+                    ErrorCode::LimitExceeded,
+                    format!(
+                        "not fetched: '{}' contains '{p}', whose externals led here, so it would \
+                         include itself",
+                        session.session_url()
+                    ),
+                )
+                .with_svn_code(205_011));
+            }
+        }
+        Ok(())
+    }
+
+    /// The context of an operation inside this external.
+    pub(crate) fn nested_ctx(&self) -> ClientCtx {
+        nested_ctx(self.ctx, self.local, self.def_location, self.budget)
+    }
+
     async fn run(&self, dir_url: &RepoUrl, root: &RepoUrl, out: &mut Outcome) -> Result<()> {
         let url = resolve_url(&self.item.url, dir_url, root)?;
         {
@@ -427,6 +522,7 @@ impl Item<'_> {
             .await?;
         }
         let session = self.opener.open(&url, self.cancel).await?;
+        self.refuse_cycle(session.as_ref())?;
         let rev = match self.item.revision {
             ExtRev::Number(n) => svn_types::Revnum(n),
             ExtRev::Head => session.youngest_rev(self.cancel).await?,
