@@ -660,12 +660,36 @@ async fn working_copy_metadata_operations() {
         Some("README.md")
     );
 
-    let err = eng
-        .mark_move(&wc, "README.md", "GUIDE.md", &ctx())
+    // Marking the move OpenSVN already recorded changes nothing.
+    eng.mark_move(&wc, "README.md", "GUIDE.md", &ctx())
         .await
-        .expect_err("not supported yet");
+        .expect("mark_move of a recorded move");
+    // A rename made outside OpenSVN becomes a move without touching the files.
+    std::fs::rename(wc.root.join("src/main.rs"), wc.root.join("src/app.rs")).unwrap();
+    write(&wc.root, "src/app.rs", "fn main() { app(); }\n");
+    eng.mark_move(&wc, "src/main.rs", "src/app.rs", &ctx())
+        .await
+        .expect("mark_move");
+    let st = e.status(&wc).await;
+    assert_eq!(text_of(&st, "src/main.rs"), Some(NodeStatus::Deleted));
+    assert_eq!(text_of(&st, "src/app.rs"), Some(NodeStatus::Added));
+    assert_eq!(
+        find(&st, "src/app.rs")
+            .unwrap()
+            .moved_from
+            .as_ref()
+            .map(RelPath::as_str),
+        Some("src/main.rs")
+    );
+    assert_eq!(
+        std::fs::read_to_string(wc.root.join("src/app.rs")).unwrap(),
+        "fn main() { app(); }\n"
+    );
+    let err = eng
+        .mark_move(&wc, "src/app.rs", "README.md", &ctx())
+        .await
+        .expect_err("the source is on disk and the destination is versioned");
     assert_eq!(err.code, ErrorCode::WcInvalidOperation);
-    assert!(err.message.contains("not supported yet"), "{}", err.message);
 
     write(&wc.root, "scratch.txt", "x\n");
     eng.cleanup(&wc, &cleanup_req(&wc, true, true), &ctx())
@@ -685,8 +709,9 @@ async fn working_copy_metadata_operations() {
     let err = eng
         .upgrade_format(&wc, 32, &ctx())
         .await
-        .expect_err("format change not supported yet");
+        .expect_err("format 32 is not written");
     assert_eq!(err.code, ErrorCode::WcFormatUnsupported);
+    assert!(err.message.contains("31"), "{}", err.message);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -476,6 +476,30 @@ async fn commit_of_a_parent_never_sends_an_edited_file_external() {
     assert!(e.journals().is_empty());
 }
 
+type Notices = Arc<std::sync::Mutex<Vec<crate::engine::context::ProgressUpdate>>>;
+
+/// An operation context that records its progress samples.
+fn recording_ctx() -> (Notices, crate::engine::OpContext) {
+    let notices: Notices = Arc::default();
+    let sink = Arc::clone(&notices);
+    let mut c = ctx();
+    c.progress = crate::engine::context::ProgressReporter::new(move |u| {
+        sink.lock().unwrap().push(u);
+    });
+    (notices, c)
+}
+
+/// Texts of the "nested working copy skipped" notices among `notices`.
+fn skipped(notices: &Notices) -> Vec<String> {
+    notices
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|u| u.phase == "nested-wc-skipped")
+        .filter_map(|u| u.current_path.clone())
+        .collect()
+}
+
 /// PR #105 review item 2: auto-add of an unversioned folder skips the working copies nested in
 /// it at any depth (svn's W150002), which stay unversioned with all they contain, while their
 /// siblings are added and committed.
@@ -492,8 +516,15 @@ async fn auto_add_never_adds_a_nested_working_copy_at_any_depth() {
     write(&wc.root, "x/keep.txt", "keep\n");
     write(&wc.root, "x/y/also.txt", "also\n");
 
-    let rev = e.commit(&wc, &["x"], true).await.expect("commit");
+    let (notices, rec) = recording_ctx();
+    let rev =
+        e.f.engine
+            .commit(&wc, &request(&wc, &["x"], true), &rec)
+            .await
+            .expect("commit");
     assert_eq!(rev, Rev(2));
+    // The user hears about every skipped nested working copy, not only the log.
+    assert_eq!(skipped(&notices).len(), 2, "{:?}", skipped(&notices));
     assert_eq!(e.kind_in_repo("trunk/x/keep.txt").await, NodeKind::File);
     assert_eq!(e.kind_in_repo("trunk/x/y/also.txt").await, NodeKind::File);
     for gone in ["trunk/x/nested", "trunk/x/y/deeper"] {
@@ -512,10 +543,14 @@ async fn auto_add_never_adds_a_nested_working_copy_at_any_depth() {
     let other = e.checkout("n3").await;
     std::fs::create_dir_all(wc.root.join("z/q")).unwrap();
     std::fs::rename(&other.root, wc.root.join("z/q/nested")).unwrap();
+    let (notices, rec) = recording_ctx();
     e.f.engine
-        .add_paths(&wc, &["z".to_owned()], &ctx())
+        .add_paths(&wc, &["z".to_owned()], &rec)
         .await
         .expect("add");
+    let skipped = skipped(&notices);
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert!(skipped[0].contains("nested"), "{skipped:?}");
     assert_eq!(e.text_of(&wc, "z/q").await, Some(NodeStatus::Added));
     assert_eq!(
         e.text_of(&wc, "z/q/nested").await,
@@ -777,4 +812,74 @@ async fn copying_a_working_copy_to_a_url_is_refused_with_a_user_facing_error() {
             .expect_err("unsupported");
     assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{err}");
     assert!(err.message.contains("not supported"), "{err}");
+}
+
+/// Issue #111: a commit with changes both outside and below a switched subtree goes through,
+/// like `svn commit`: the session moves to the common ancestor of the changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_commit_with_changes_below_a_switched_subtree_goes_through() {
+    let e = env();
+    e.repo()
+        .seed(
+            "bob",
+            "branch",
+            &[put("branches/b/main.rs", "fn branch() {}\n")],
+        )
+        .unwrap();
+    let wc = e.checkout("switched").await;
+    let root = e.repo().repos_root().clone();
+    let at_trunk = e
+        .repo()
+        .at(&root.join(&RelPath::new("trunk").unwrap()).unwrap())
+        .unwrap();
+    svn_client::switch(
+        &e.f.engine.client_ctx(&ctx()),
+        &at_trunk,
+        &wc.root.join("src"),
+        &root.join(&RelPath::new("branches/b").unwrap()).unwrap(),
+        None,
+        svn_types::Depth::Unknown,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("switch src to the branch");
+    assert_eq!(
+        std::fs::read_to_string(wc.root.join("src/main.rs")).unwrap(),
+        "fn branch() {}\n"
+    );
+
+    write(&wc.root, "README.md", "hello trunk\n");
+    write(&wc.root, "src/main.rs", "fn branch() { edited(); }\n");
+    let rev = e.commit(&wc, &[""], false).await.expect("commit");
+    assert_eq!(rev, Rev(3));
+    let cat = |path: &str| {
+        let repo = e.repo().clone();
+        let path = RelPath::new(path).unwrap();
+        async move {
+            let mut buf = Vec::new();
+            repo.get_file(&path, None, &mut buf, &CancelToken::new())
+                .await
+                .unwrap();
+            String::from_utf8(buf).unwrap()
+        }
+    };
+    assert_eq!(cat("trunk/README.md").await, "hello trunk\n");
+    assert_eq!(
+        cat("branches/b/main.rs").await,
+        "fn branch() { edited(); }\n"
+    );
+    assert_eq!(
+        cat("trunk/src/main.rs").await,
+        "fn main() {}\n",
+        "trunk untouched"
+    );
+    // Only the switched folder itself is listed (switched, unmodified).
+    let st = e.status(&wc).await;
+    assert!(
+        st.iter()
+            .all(|s| s.path == "src" && s.text == NodeStatus::Normal),
+        "everything committed: {st:?}"
+    );
+    assert_eq!(base_rev(&wc.root, "src/main.rs"), Some(3));
+    assert_eq!(base_rev(&wc.root, "README.md"), Some(3));
 }

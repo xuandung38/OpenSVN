@@ -270,6 +270,48 @@ impl WcTxn<'_> {
     }
 
     /// Paths of the BASE children of `path`.
+    /// After a `--set-depth` drive: records `depth` on the BASE directory `root` when it
+    /// widens it, and with `Infinity` on every present BASE directory below `root` outside the
+    /// `skipped` subtrees (svn's `close_directory` rule for sticky depths).
+    pub fn record_sticky_depth(
+        &self,
+        root: &RelPath,
+        depth: Depth,
+        skipped: &[RelPath],
+    ) -> Result<()> {
+        fn rank(d: Option<Depth>) -> u8 {
+            match d {
+                Some(Depth::Empty) => 0,
+                Some(Depth::Files) => 1,
+                Some(Depth::Immediates) => 2,
+                _ => 3,
+            }
+        }
+        if !matches!(
+            depth,
+            Depth::Empty | Depth::Files | Depth::Immediates | Depth::Infinity
+        ) || skipped.iter().any(|s| root.starts_with(s))
+        {
+            return Ok(());
+        }
+        let Some(node) = self.read_base(root)? else {
+            return Ok(());
+        };
+        if node.kind != NodeKind::Dir || !node.presence.is_present() {
+            return Ok(());
+        }
+        if rank(Some(depth)) > rank(node.depth) {
+            ops::set_depth(self.conn, self.wc_id, root, depth)?;
+        }
+        if depth != Depth::Infinity {
+            return Ok(());
+        }
+        for child in self.base_children(root)? {
+            self.record_sticky_depth(&child, depth, skipped)?;
+        }
+        Ok(())
+    }
+
     fn base_children(&self, path: &RelPath) -> Result<Vec<RelPath>> {
         let mut stmt = self
             .conn

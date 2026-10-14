@@ -248,7 +248,12 @@ pub(crate) fn scope_sql() -> String {
 
 /// Keeps `moved_to` / `moved_here` pairs consistent before rows at `op_depth >= min_depth` of
 /// the subtree at `path` are removed.
-fn detach_moves(conn: &Connection, wc_id: i64, path: &RelPath, min_depth: u32) -> Result<()> {
+pub(crate) fn detach_moves(
+    conn: &Connection,
+    wc_id: i64,
+    path: &RelPath,
+    min_depth: u32,
+) -> Result<()> {
     let scope = scope_sql();
     // Source side loses its destination: the delete layer vanishes, so clear nothing here;
     // destination side being removed: forget the source's moved_to pointing at it.
