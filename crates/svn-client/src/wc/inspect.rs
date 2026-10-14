@@ -84,12 +84,29 @@ pub fn text_modified(db: &WcDb, rel: &RelPath, node: &Node) -> Result<bool> {
     let Ok(md) = fs::symlink_metadata(&path) else {
         return Ok(false);
     };
+    text_modified_stat(&path, &md, node, || db.actual_props(rel))
+}
+
+/// [`text_modified`] for a file whose `lstat` result `md` the caller already has (a status walk
+/// lists each directory once). `props` yields the working properties and is only called when
+/// the content has to be compared.
+///
+/// Same rule as svn's `svn_wc__internal_file_modified_p`: a regular file whose size and mtime
+/// match the values recorded when it was last known unmodified is unmodified without reading
+/// it; any other file is converted to repository-normal form (eol-style, keywords, special) and
+/// its SHA-1 compared with the pristine checksum.
+pub fn text_modified_stat(
+    path: &std::path::Path,
+    md: &fs::Metadata,
+    node: &Node,
+    props: impl FnOnce() -> Result<Props>,
+) -> Result<bool> {
     if !md.file_type().is_file() && !md.file_type().is_symlink() {
         return Ok(false);
     }
     if md.file_type().is_file()
         && node.translated_size == i64::try_from(md.len()).ok()
-        && node.last_mod_time == Some(mtime_micros(&md))
+        && node.last_mod_time == Some(mtime_micros(md))
     {
         return Ok(false);
     }
@@ -100,8 +117,8 @@ pub fn text_modified(db: &WcDb, rel: &RelPath, node: &Node) -> Result<bool> {
     else {
         return Ok(true);
     };
-    let info = translate_info(&db.actual_props(rel)?);
-    Ok(normalized_sha1(&path, &info)? != expected.0)
+    let info = translate_info(&props()?);
+    Ok(normalized_sha1(path, &info)? != expected.0)
 }
 
 /// The working file converted to repository-normal form, read into memory.
