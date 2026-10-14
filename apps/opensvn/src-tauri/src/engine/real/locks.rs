@@ -4,9 +4,8 @@
 //! Like `svn lock`, the working copy write lock (`WC_LOCK`) of the node's parent directory is held
 //! for the whole operation, so another client cannot change the same directory meanwhile and a
 //! directory locked by someone else fails with [`ErrorCode::WcBusy`] before the server is asked.
-//!
-//! Not handled yet (needs the property layer): making `svn:needs-lock` files writable on lock
-//! and read-only again on unlock.
+//! Like libsvn_wc, a `svn:needs-lock` file becomes writable once its token is recorded and
+//! read-only again once it is forgotten.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -14,7 +13,10 @@ use std::sync::Arc;
 use svn_ra_api::RaSession;
 use svn_types::{ErrorCode, RelPath, Revnum, SvnError};
 use svn_wc::WcDb;
+use svn_wc::db::DbWorkingCopyOps;
 use svn_wc::db::ObtainMode;
+use svn_wc::translate::flags;
+use svn_wc::workqueue::WorkingCopyOps;
 
 use super::RealEngine;
 use super::wc_read::{NodeLocation, blocking, node_location, open_db};
@@ -59,7 +61,7 @@ impl RealEngine {
                                 &ctx.cancel,
                             )
                             .await?;
-                        if let Err(e) = record_lock(&held.db, &loc, &lock).await {
+                        if let Err(e) = record_lock(&held.db, &wc.root, &loc, &lock, rel).await {
                             // The server lock exists but the working copy cannot remember its
                             // token: give it back instead of leaving one nobody can release.
                             release_quietly(session.as_ref(), &path, &lock.token).await;
@@ -103,7 +105,7 @@ impl RealEngine {
                         session
                             .unlock(&path, token.as_deref(), break_lock, &ctx.cancel)
                             .await?;
-                        forget_lock(&held.db, &loc).await
+                        forget_lock(&held.db, &wc.root, &loc, rel).await
                     }
                     .await;
                     finish(done, held.release().await)?;
@@ -193,10 +195,13 @@ async fn ensure_writable(root: &Path) -> EngineResult<()> {
 
 async fn record_lock(
     db: &Arc<WcDb>,
+    root: &Path,
     loc: &NodeLocation,
     lock: &svn_types::LockInfo,
+    rel: &str,
 ) -> EngineResult<()> {
     let (db, loc, lock) = (db.clone(), loc.clone(), lock.clone());
+    let (root, rel) = (root.to_path_buf(), RelPath::new(rel)?);
     blocking(move || {
         db.with_write(|tx| {
             tx.execute(
@@ -214,7 +219,9 @@ async fn record_lock(
             )
             .map(|_| ())
             .map_err(svn_wc::db::sql_err)
-        })
+        })?;
+        sync_flags(&db, &root, &rel);
+        Ok(())
     })
     .await
 }
@@ -236,8 +243,14 @@ async fn recorded_token(db: &Arc<WcDb>, loc: &NodeLocation) -> EngineResult<Opti
     .await
 }
 
-async fn forget_lock(db: &Arc<WcDb>, loc: &NodeLocation) -> EngineResult<()> {
+async fn forget_lock(
+    db: &Arc<WcDb>,
+    root: &Path,
+    loc: &NodeLocation,
+    rel: &str,
+) -> EngineResult<()> {
     let (db, loc) = (db.clone(), loc.clone());
+    let (root, rel) = (root.to_path_buf(), RelPath::new(rel)?);
     blocking(move || {
         db.with_write(|tx| {
             tx.execute(
@@ -246,9 +259,30 @@ async fn forget_lock(db: &Arc<WcDb>, loc: &NodeLocation) -> EngineResult<()> {
             )
             .map(|_| ())
             .map_err(svn_wc::db::sql_err)
-        })
+        })?;
+        sync_flags(&db, &root, &rel);
+        Ok(())
     })
     .await
+}
+
+/// Makes the permissions of the file `rel` follow its lock and `svn:needs-lock`, as the
+/// `sync-file-flags` work item does, but directly: the lock change is already durable and stays
+/// the outcome, so a failure is only logged and never leaves queued work behind (which would
+/// block the working copy until a cleanup). Directories and files missing on disk are skipped.
+fn sync_flags(db: &WcDb, root: &Path, rel: &RelPath) {
+    let abs = root.join(rel.as_str());
+    if !std::fs::symlink_metadata(&abs).is_ok_and(|m| m.is_file()) {
+        return;
+    }
+    let done = match DbWorkingCopyOps::new(db).sync_flags_input(rel.as_str()) {
+        Ok(Some(input)) => flags::sync_with_props(&abs, input).map_err(|e| e.to_string()),
+        Ok(None) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    };
+    if let Err(e) = done {
+        tracing::warn!(%rel, error = %e, "could not update the permissions of a locked file");
+    }
 }
 
 /// Best-effort release of a lock taken a moment ago; failure is logged, the caller already has
