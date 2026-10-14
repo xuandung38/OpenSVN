@@ -3572,6 +3572,7 @@ dependencies = [
  "svn-client",
  "svn-delta",
  "svn-diff",
+ "svn-protocol",
  "svn-ra",
  "svn-ra-api",
  "svn-types",

@@ -475,3 +475,28 @@ fn repository_root_case_fold_is_ascii_only() {
         assert_eq!(err.code, ErrorCode::UnsafePath, "{s} vs {root}");
     }
 }
+
+#[test]
+fn segments_below_root_follow_the_session_rule() {
+    use svn_protocol::segments_below_root;
+    let root = "/svn/D%E1%BB%B1-%C3%81n";
+    let below = |p: &str| segments_below_root(root, p).unwrap();
+    // Percent escapes compare decoded: lowercase hex and unnecessary escapes are the same path.
+    assert_eq!(below("/svn/D%e1%bb%b1-%c3%81n"), Some(vec![]));
+    assert_eq!(
+        below("/svn/D%E1%BB%B1-%C3%81n/%74runk/a%20b"),
+        Some(vec!["trunk".to_owned(), "a b".to_owned()])
+    );
+    // ASCII case of the root is folded (VisualSVN), non-ASCII case never is.
+    assert_eq!(
+        below("/SVN/d%E1%BB%B1-%C3%81n/trunk"),
+        Some(vec!["trunk".to_owned()])
+    );
+    assert_eq!(below("/svn/D%E1%BB%B1-%C3%A1n/trunk"), None);
+    // Not below the root, or a segment that only starts like it.
+    assert_eq!(below("/svn/other"), None);
+    assert_eq!(below("/svn/D%E1%BB%B1-%C3%81nX"), None);
+    // Escapes that cannot be decoded, or an encoded slash, are errors.
+    assert!(segments_below_root(root, "/svn/%zz").is_err());
+    assert!(segments_below_root(root, "/svn/D%E1%BB%B1-%C3%81n/a%2Fb").is_err());
+}
