@@ -318,9 +318,12 @@ fn file_diff_flags_too_complex_in_camel_case() {
 
 #[test]
 fn engine_capabilities_shape() {
-    let caps = EngineCapabilities { externals: false };
+    let caps = EngineCapabilities {
+        externals: false,
+        demo: true,
+    };
     let v = serde_json::to_value(caps).unwrap();
-    assert_eq!(v, json!({"externals": false}));
+    assert_eq!(v, json!({"externals": false, "demo": true}));
     assert_eq!(
         serde_json::from_value::<EngineCapabilities>(v).unwrap(),
         caps

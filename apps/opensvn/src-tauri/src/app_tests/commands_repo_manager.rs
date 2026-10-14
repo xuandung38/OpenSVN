@@ -459,5 +459,28 @@ async fn an_unfinished_checkout_is_registered_as_resumable_only_when_its_working
 async fn engine_capabilities_come_from_the_engine() {
     let f = Fixture::new(Duration::ZERO).await;
     let caps = commands::engine_capabilities(f.state()).await.unwrap();
-    assert_eq!(caps, opensvn_ipc::EngineCapabilities { externals: true });
+    // The fixture runs the demo engine; debug builds never show its banner.
+    assert_eq!(
+        caps,
+        opensvn_ipc::EngineCapabilities {
+            externals: true,
+            demo: false,
+        }
+    );
+}
+
+#[test]
+fn the_demo_engine_banner_is_shown_only_in_release_builds() {
+    use crate::commands::visible_capabilities;
+    let demo = opensvn_ipc::EngineCapabilities {
+        externals: true,
+        demo: true,
+    };
+    assert!(visible_capabilities(demo, true).demo);
+    assert!(!visible_capabilities(demo, false).demo);
+    let real = opensvn_ipc::EngineCapabilities {
+        externals: false,
+        demo: false,
+    };
+    assert!(!visible_capabilities(real, true).demo);
 }

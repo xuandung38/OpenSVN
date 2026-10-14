@@ -58,7 +58,7 @@ use svn_wc::WcDb;
 use svn_wc::db::{LockState, ObtainMode};
 use svn_wc::pristine::PristineIndex;
 
-use self::collect::{CollectOptions, ItemAction, collect};
+use self::collect::{CollectOptions, Committable, ItemAction, collect};
 use self::drive::{DriveContext, DriveItem, PreparedText, drive};
 use self::journal::{JournalItem, JournalLock, JournalObserver, JournalStore, JournalText};
 use self::recovery::Reconciled;
@@ -157,6 +157,74 @@ pub fn map_commit_error(mut e: SvnError) -> SvnError {
     e
 }
 
+/// Longest common ancestor of two repository paths (`""` is the repository root).
+fn common_ancestor(a: &str, b: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for (x, y) in a.split('/').zip(b.split('/')) {
+        if x != y || x.is_empty() {
+            break;
+        }
+        out.push(x);
+    }
+    out.join("/")
+}
+
+/// Parent of a repository path (`""` stays `""`).
+fn repos_parent(p: &str) -> String {
+    p.rsplit_once('/')
+        .map_or_else(String::new, |(d, _)| d.to_owned())
+}
+
+/// The session anchor a commit of `items` needs, like svn's `svn_client__condense_commit_items`:
+/// the longest common ancestor of `within` (where the caller would like the session, e.g. the
+/// working copy URL) and every item's repository path, moved to its parent while an item sits
+/// exactly there and is not a directory with only property changes (the session root can only
+/// be opened, never added, deleted or be a file).
+fn condensed_anchor(items: &[Committable], within: &str) -> String {
+    let mut base = items.iter().fold(within.to_owned(), |b, it| {
+        common_ancestor(&b, &it.repos_relpath)
+    });
+    while !base.is_empty()
+        && items.iter().any(|it| {
+            it.repos_relpath == base
+                && !(it.kind == collect::ItemKind::Dir && it.action == ItemAction::Modify)
+        })
+    {
+        base = repos_parent(&base);
+    }
+    base
+}
+
+/// Repository path (below the root) the commit session must be anchored at to commit the local
+/// changes below `targets`: `within` (normally the working copy's own path) unless some change
+/// lies outside it, e.g. below a switched subtree, or sits exactly at it in a way the session
+/// root cannot express. `None` when there is nothing to commit. Read-only; [`commit`] harvests
+/// again under the working copy lock and refuses, before any server transaction, changes that
+/// fall outside [`CommitOptions::session_prefix`].
+pub fn commit_anchor(
+    db: &WcDb,
+    targets: &[PathBuf],
+    opts: &CommitOptions,
+    within: &str,
+) -> Result<Option<String>> {
+    let rels: Vec<RelPath> = targets
+        .iter()
+        .map(|t| rel_of(db, t))
+        .collect::<Result<_>>()?;
+    let harvest = collect(
+        db,
+        &rels,
+        &CollectOptions {
+            depth: opts.depth,
+            changelists: opts.changelists.clone(),
+        },
+    )?;
+    if harvest.items.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(condensed_anchor(&harvest.items, within)))
+}
+
 /// Commits the local changes below `targets` (absolute paths inside the working copy).
 ///
 /// Returns `None` when there is nothing to commit. The handle must have a lock owner set.
@@ -215,12 +283,32 @@ async fn commit_locked(
     if harvest.items.is_empty() {
         return Ok(None);
     }
+    // Every change must be expressible below the session root (see `commit_anchor`); checked
+    // before a server transaction exists.
+    if condensed_anchor(&harvest.items, &opts.session_prefix) != opts.session_prefix {
+        let outside = harvest
+            .items
+            .iter()
+            .find(|it| drive::editor_path(&opts.session_prefix, &it.repos_relpath).is_err())
+            .map_or_else(
+                || opts.session_prefix.clone(),
+                |it| it.repos_relpath.clone(),
+            );
+        return Err(SvnError::new(
+            ErrorCode::WcInvalidOperation,
+            format!(
+                "the change to '/{outside}' cannot be committed through a session at '/{}'; \
+                 open the session at the common ancestor of the changes (see commit_anchor)",
+                opts.session_prefix
+            ),
+        ));
+    }
     ctx.cancel.check()?;
 
     // A revision made by this commit is newer than this: recovery searches the log from here
     // when the outcome of the MERGE is unknown.
     let start_youngest = ctx.ra.youngest_rev(ctx.cancel).await?;
-    let id = store.new_id();
+    let id = store.new_id_for(db.wcroot());
     let data_dir = store.create_data_dir(&id)?;
     let prepared = match prepare_items(db, &harvest.items, &data_dir) {
         Ok(p) => p,
@@ -527,4 +615,68 @@ fn prepare_items(
         out.push(di);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::collect::{Committable, ItemAction, ItemKind};
+    use super::{common_ancestor, condensed_anchor};
+    use svn_types::RelPath;
+
+    fn item(repos: &str, kind: ItemKind, action: ItemAction) -> Committable {
+        Committable {
+            relpath: RelPath::root(),
+            repos_relpath: repos.to_owned(),
+            kind,
+            action,
+            copy_from: None,
+            base_rev: Some(1),
+            needs_text: false,
+            base_sha1: None,
+            prop_changes: Vec::new(),
+            lock_token: None,
+        }
+    }
+
+    #[test]
+    fn common_ancestor_is_component_wise() {
+        assert_eq!(common_ancestor("trunk/a", "trunk/ab"), "trunk");
+        assert_eq!(common_ancestor("trunk", "branches/b"), "");
+        assert_eq!(common_ancestor("", "trunk"), "");
+        assert_eq!(common_ancestor("a/b/c", "a/b/c"), "a/b/c");
+    }
+
+    #[test]
+    fn anchor_stays_at_the_working_copy_for_changes_below_it() {
+        let items = [
+            item("trunk/f", ItemKind::File, ItemAction::Modify),
+            item("trunk/d/g", ItemKind::File, ItemAction::Add),
+        ];
+        assert_eq!(condensed_anchor(&items, "trunk"), "trunk");
+        // Property changes of the working copy root itself are made on the session root.
+        let root_props = [item("trunk", ItemKind::Dir, ItemAction::Modify)];
+        assert_eq!(condensed_anchor(&root_props, "trunk"), "trunk");
+    }
+
+    #[test]
+    fn anchor_moves_to_the_common_ancestor_of_switched_changes() {
+        let items = [
+            item("trunk/f", ItemKind::File, ItemAction::Modify),
+            item("branches/b/x", ItemKind::File, ItemAction::Modify),
+        ];
+        assert_eq!(condensed_anchor(&items, "trunk"), "");
+        let items = [
+            item("proj/trunk/f", ItemKind::File, ItemAction::Modify),
+            item("proj/branches/b/x", ItemKind::File, ItemAction::Delete),
+        ];
+        assert_eq!(condensed_anchor(&items, "proj/trunk"), "proj");
+    }
+
+    #[test]
+    fn a_file_or_an_add_at_the_anchor_moves_it_to_the_parent() {
+        let items = [item("trunk/sub/x", ItemKind::File, ItemAction::Modify)];
+        assert_eq!(condensed_anchor(&items, "trunk/sub/x"), "trunk/sub");
+        let items = [item("trunk/new", ItemKind::Dir, ItemAction::Add)];
+        assert_eq!(condensed_anchor(&items, "trunk/new"), "trunk");
+    }
 }

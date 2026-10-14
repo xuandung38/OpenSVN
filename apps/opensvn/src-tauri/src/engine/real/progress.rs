@@ -9,12 +9,27 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::engine::context::{ProgressReporter, ProgressUpdate};
+use crate::engine::context::{PHASE_NESTED_WC_SKIPPED, ProgressReporter, ProgressUpdate};
 
 /// Phase label of a checkout.
 pub(super) const PHASE_CHECKOUT: &str = "checkout";
 /// Phase label of an update or a switch.
 pub(super) const PHASE_UPDATE: &str = "update";
+
+/// Reports every W150002 warning of an add as a [`PHASE_NESTED_WC_SKIPPED`] notice (and logs it).
+pub(super) fn report_skipped_nested_wcs(
+    reporter: &ProgressReporter,
+    warnings: &[svn_types::SvnError],
+) {
+    for w in warnings {
+        tracing::warn!(warning = %w, "add skipped a nested working copy");
+        reporter.report(ProgressUpdate {
+            phase: PHASE_NESTED_WC_SKIPPED.to_owned(),
+            current_path: Some(w.message.clone()),
+            ..ProgressUpdate::default()
+        });
+    }
+}
 
 /// Progress callback for `svn-client` that forwards every notification to `reporter`.
 ///
