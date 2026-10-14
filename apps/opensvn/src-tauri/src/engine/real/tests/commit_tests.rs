@@ -116,6 +116,20 @@ impl Env {
             .0
     }
 
+    async fn text_in_repo(&self, path: &str) -> String {
+        let mut out = Vec::new();
+        self.repo()
+            .get_file(
+                &RelPath::new(path).unwrap(),
+                None,
+                &mut out,
+                &CancelToken::new(),
+            )
+            .await
+            .unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
     fn journals(&self) -> Vec<PathBuf> {
         JournalStore::new(self.f.engine.commit_journal_dir())
             .list()
@@ -410,6 +424,53 @@ async fn auto_add_remove_never_deletes_the_source_of_a_missing_file_external() {
             .await
             .expect_err("external");
     assert_eq!(err.svn_code, Some(155_030), "{err}");
+}
+
+/// PR #105 re-review: an edited file external is committed only when it is named itself, as
+/// svn 1.15 does (`svn ci src` and `svn ci .` send nothing); committing an enclosing folder,
+/// even with auto add/remove, never writes the edit into the external's source.
+#[tokio::test(flavor = "multi_thread")]
+async fn commit_of_a_parent_never_sends_an_edited_file_external() {
+    let e = env();
+    let wc = e.checkout("wc").await;
+    let source = e.text_in_repo("trunk/README.md").await;
+    std::fs::copy(wc.root.join("README.md"), wc.root.join("src/shared.md")).unwrap();
+    plant_file_external(&wc.root, "src/shared.md");
+    write(&wc.root, "src/shared.md", "EDITED VIA EXTERNAL\n");
+    assert_eq!(
+        e.text_of(&wc, "src/shared.md").await,
+        Some(NodeStatus::Modified)
+    );
+
+    for paths in [&["src"][..], &[""]] {
+        let err = e.commit(&wc, paths, true).await.expect_err("nothing");
+        assert_eq!(err.message, "nothing to commit", "{paths:?}: {err}");
+        assert_eq!(e.youngest().await, 1, "{paths:?}: the repository changed");
+        assert_eq!(e.text_in_repo("trunk/README.md").await, source);
+    }
+
+    // Alongside another change, only that change is committed.
+    write(&wc.root, "src/main.rs", "changed\n");
+    assert_eq!(e.commit(&wc, &[""], true).await.expect("commit"), Rev(2));
+    assert_eq!(e.text_in_repo("trunk/src/main.rs").await, "changed\n");
+    assert_eq!(e.text_in_repo("trunk/README.md").await, source);
+    assert_eq!(
+        e.text_of(&wc, "src/shared.md").await,
+        Some(NodeStatus::Modified)
+    );
+
+    // Named explicitly, it is committed to its source, as `svn ci src/shared.md` does.
+    assert_eq!(
+        e.commit(&wc, &["src/shared.md"], true)
+            .await
+            .expect("commit"),
+        Rev(3)
+    );
+    assert_eq!(
+        e.text_in_repo("trunk/README.md").await,
+        "EDITED VIA EXTERNAL\n"
+    );
+    assert!(e.journals().is_empty());
 }
 
 /// PR #105 review item 2: auto-add of an unversioned folder skips the working copies nested in

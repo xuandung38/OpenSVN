@@ -180,3 +180,51 @@ Merged origin/main first (already up to date).
 - `cargo test -p opensvn --features opensvn/real-engine`: 407 passed, 0 failed
 - `cargo test -p opensvn --features failpoints`: 413 passed, 0 failed
 - `cargo test -p svn-client -p svn-wc --all-features`: 384 passed, 0 failed, 1 ignored
+
+## Review round 2 (review 5512258499)
+Merged origin/main first (#106, #107).
+
+### Blocking: a commit of an enclosing folder no longer sends an edited file external
+- `svn-client` `Collector::walk` now skips any node whose BASE row has `file_external = 1`,
+  unless that node is itself a commit target. This matches libsvn_client's harvest, which commits
+  a file external only when it is the harvest root.
+- Directory externals were already safe. They are separate working copies, and the outer wc.db
+  holds no NODES rows for them, so `live_children` never walks into them. The oracle test asserts
+  this (`read_node("e/dext")` is `None`).
+- A `base-deleted` row planted on an external is now skipped when an enclosing folder is
+  committed, as svn skips it. Naming the external explicitly is still refused with E155030.
+- Tests:
+  - Oracle `local_ops_vs_svn::commit_skips_a_file_external_unless_named_like_svn` (svn 1.15):
+    - Setup: the WC is made by svn, with `e` defining `^/top.txt ext.txt` and `^/d dext`. Both
+      `e/ext.txt` and `e/dext/f1` are edited.
+    - `svn ci e` and `svn ci .` make no revision, and the sources are unchanged.
+    - Our `collect` of `e` and of `""` returns no items.
+    - `svn ci e/ext.txt` commits the edit. Our `collect(["e/ext.txt"])` returns a single text
+      Modify of `top.txt`.
+  - Engine `commit_of_a_parent_never_sends_an_edited_file_external`:
+    - Setup: the external is edited and auto add/remove is on.
+    - `["src"]` and `[""]` give "nothing to commit"; `trunk/README.md` is unchanged and youngest
+      stays r1.
+    - With another change in the selection, the commit gives r2 and the source is still unchanged.
+    - `["src/shared.md"]` gives r3 and writes the edit into the source.
+- Non-vacuity: with the skip disabled, both tests fail, and so does
+  `delete_refuses_a_file_external_like_svn`.
+
+### Nits
+- The nested-WC target refusal test now creates `top-new.txt` first. It asserts both 150002 and
+  that `top-new.txt` stays unversioned. With the pre-check disabled, the test fails because the
+  add succeeds.
+- Ignored nested WCs: svn 1.15 skips them silently (checked by hand with `--config-option
+  config:miscellany:global-ignores=...`). `add_children` now applies ignore rules before the
+  nested-WC check. The oracle test covers this case: `z/ign` gives empty stderr from svn, and we
+  add `z` with no warnings. With the old order, the test fails.
+
+### Gates (svn 1.15.0, OPENSVN_REQUIRE_SVN=1, own target dir)
+- `cargo fmt --all --check`: pass
+- `cargo clippy --workspace --all-targets -- -D warnings`: pass
+- `cargo clippy -p opensvn --features real-engine --all-targets -- -D warnings`: pass
+- `cargo clippy -p opensvn --features failpoints --all-targets -- -D warnings`: pass
+- `cargo test --workspace --locked`: 1290 passed, 0 failed, 21 ignored
+- `cargo test -p opensvn --features opensvn/real-engine`: 434 passed, 0 failed
+- `cargo test -p opensvn --features failpoints`: 440 passed, 0 failed
+- `cargo test -p svn-client -p svn-wc --all-features`: 385 passed, 0 failed, 1 ignored

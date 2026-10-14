@@ -166,6 +166,13 @@ impl Collector<'_> {
             Err(e) if e.code == ErrorCode::PathNotFound && !explicit => return Ok(()),
             Err(e) => return Err(e),
         };
+        // A file external is committed only when it is itself a commit target, as
+        // libsvn_client's harvest does: its BASE location is the external's source, which a
+        // commit of an enclosing folder must never change. (A directory external is a separate
+        // working copy with no rows here, so it is never walked.)
+        if !explicit && info.base.as_ref().is_some_and(|b| b.file_external) {
+            return Ok(());
+        }
         if self.db.conflict(rel)?.is_some() {
             return Err(blocked(format!(
                 "aborting commit: '{rel}' remains in conflict"
