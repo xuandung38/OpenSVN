@@ -778,3 +778,73 @@ async fn copying_a_working_copy_to_a_url_is_refused_with_a_user_facing_error() {
     assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{err}");
     assert!(err.message.contains("not supported"), "{err}");
 }
+
+/// Issue #111: a commit with changes both outside and below a switched subtree goes through,
+/// like `svn commit`: the session moves to the common ancestor of the changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_commit_with_changes_below_a_switched_subtree_goes_through() {
+    let e = env();
+    e.repo()
+        .seed(
+            "bob",
+            "branch",
+            &[put("branches/b/main.rs", "fn branch() {}\n")],
+        )
+        .unwrap();
+    let wc = e.checkout("switched").await;
+    let root = e.repo().repos_root().clone();
+    let at_trunk = e
+        .repo()
+        .at(&root.join(&RelPath::new("trunk").unwrap()).unwrap())
+        .unwrap();
+    svn_client::switch(
+        &e.f.engine.client_ctx(&ctx()),
+        &at_trunk,
+        &wc.root.join("src"),
+        &root.join(&RelPath::new("branches/b").unwrap()).unwrap(),
+        None,
+        svn_types::Depth::Unknown,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("switch src to the branch");
+    assert_eq!(
+        std::fs::read_to_string(wc.root.join("src/main.rs")).unwrap(),
+        "fn branch() {}\n"
+    );
+
+    write(&wc.root, "README.md", "hello trunk\n");
+    write(&wc.root, "src/main.rs", "fn branch() { edited(); }\n");
+    let rev = e.commit(&wc, &[""], false).await.expect("commit");
+    assert_eq!(rev, Rev(3));
+    let cat = |path: &str| {
+        let repo = e.repo().clone();
+        let path = RelPath::new(path).unwrap();
+        async move {
+            let mut buf = Vec::new();
+            repo.get_file(&path, None, &mut buf, &CancelToken::new())
+                .await
+                .unwrap();
+            String::from_utf8(buf).unwrap()
+        }
+    };
+    assert_eq!(cat("trunk/README.md").await, "hello trunk\n");
+    assert_eq!(
+        cat("branches/b/main.rs").await,
+        "fn branch() { edited(); }\n"
+    );
+    assert_eq!(
+        cat("trunk/src/main.rs").await,
+        "fn main() {}\n",
+        "trunk untouched"
+    );
+    // Only the switched folder itself is listed (switched, unmodified).
+    let st = e.status(&wc).await;
+    assert!(
+        st.iter()
+            .all(|s| s.path == "src" && s.text == NodeStatus::Normal),
+        "everything committed: {st:?}"
+    );
+    assert_eq!(base_rev(&wc.root, "src/main.rs"), Some(3));
+    assert_eq!(base_rev(&wc.root, "README.md"), Some(3));
+}
