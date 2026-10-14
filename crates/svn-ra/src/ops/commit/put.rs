@@ -305,6 +305,8 @@ pub(super) struct PutJob {
     pub slots: Arc<Semaphore>,
     pub writer: TxnWriter,
     pub cancel: CancelToken,
+    /// Told once the text was read and encoded (dropped unsent when that failed).
+    pub encoded: tokio::sync::oneshot::Sender<()>,
 }
 
 /// Checks that a checksum can be verified here (MD5 only).
@@ -319,7 +321,7 @@ pub(super) fn require_md5(c: &Checksum, what: &str) -> Result<[u8; 16]> {
 }
 
 /// Runs one upload: encode (a delta when the base can be used), `PUT` it, check the answer.
-pub(super) async fn run_put(job: PutJob) -> Result<()> {
+pub(super) async fn run_put(mut job: PutJob) -> Result<()> {
     let _slot = tokio::select! {
         biased;
         () = job.cancel.cancelled() => return job.cancel.check(),
@@ -340,6 +342,9 @@ pub(super) async fn run_put(job: PutJob) -> Result<()> {
     })
     .await
     .map_err(|e| SvnError::new(ErrorCode::Internal, format!("encode task failed: {e}")))??;
+    // The sources are no longer needed; the caller may go on.
+    let (done, _) = tokio::sync::oneshot::channel();
+    let _ = std::mem::replace(&mut job.encoded, done).send(());
     send_put(&job, &spill).await
 }
 
