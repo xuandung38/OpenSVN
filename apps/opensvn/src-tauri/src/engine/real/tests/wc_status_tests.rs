@@ -578,6 +578,21 @@ async fn diff_paths_never_escape_the_working_copy() {
         assert_ne!(err.code, ErrorCode::Cancelled, "{path}");
     }
 
+    // Spellings that some file system resolves to the administrative folder are refused even
+    // where they are distinct names (here on disk), so their content is never shown.
+    for alias in [".svn.", ".svn ", "SVN~1", "_svn", ".SVN"] {
+        let dir = rw.root.join("src").join(alias);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("wc.db"), b"admin\n").unwrap();
+        let path = format!("src/{alias}/wc.db");
+        let err = real
+            .engine()
+            .diff_wc(&rw, &path, None, DiffOptions::default(), &ctx())
+            .await
+            .expect_err(&path);
+        assert_eq!(err.code, ErrorCode::PathNotFound, "{path}");
+    }
+
     #[cfg(unix)]
     {
         // A symlinked folder pointing outside is not followed.
@@ -684,8 +699,9 @@ async fn a_diff_against_a_revision_reads_the_left_side_from_the_repository() {
     assert_eq!(rows, vec![("x:k", Some("v"), None)]);
     let fake_diff = fake.diff(&fw, "README.md", Some(Rev(2))).await;
     assert_eq!(
-        (&diff.left, &diff.right),
-        (&fake_diff.left, &fake_diff.right)
+        (&diff.left, &diff.right, &diff.prop_changes),
+        (&fake_diff.left, &fake_diff.right, &fake_diff.prop_changes),
+        "both engines send the property rows of a diff against a revision"
     );
 
     // The binary decision uses the properties of the compared revision too.
