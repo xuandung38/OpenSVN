@@ -9,8 +9,10 @@ import {
   setMockOpDuration,
   setMockProgressTotal,
 } from "../../ipc/mock/adapter";
+import { mockWorkingCopies } from "../../ipc/mock/data";
 import { resetWcMock } from "../../ipc/mock/wc-mock-commands";
 import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../test-utils";
+import { WcLockDialog } from "./dialogs/lock-dialogs";
 import { WcSessionProvider } from "./wc-session";
 import { WelcomeScreen } from "./welcome/welcome-screen";
 
@@ -406,6 +408,29 @@ test("lock held elsewhere (#127): a refusal after the dialog was closed reopens 
   expect(within(again).getByRole("checkbox", { name: /Steal the lock held by binh/ })).toBeTruthy();
   // Nothing was stolen: only the one plain lock request went out.
   expect(mockCalls.filter((c) => c.name === "lock")).toHaveLength(1);
+});
+
+test("lock held elsewhere (#127): with several owners, the steal box and warning name them all", async () => {
+  renderApp(
+    <WcSessionProvider wc={mockWorkingCopies[0] ?? null} files={[]}>
+      <WcLockDialog
+        mode="lock"
+        paths={["a.psd", "b.psd", "c.psd"]}
+        conflicts={[
+          { path: "a.psd", owner: "an", comment: null, createdAt: null },
+          { path: "b.psd", owner: "binh", comment: null, createdAt: null },
+          { path: "c.psd", owner: "an", comment: null, createdAt: null },
+        ]}
+        onClose={() => {}}
+      />
+    </WcSessionProvider>,
+  );
+  const dlg = await dialog("Lock to edit");
+  expect(within(dlg).getByText("b.psd: Locked by binh")).toBeTruthy();
+  await user().click(
+    within(dlg).getByRole("checkbox", { name: "Steal the lock held by an, binh" }),
+  );
+  expect(within(dlg).getByText(/takes the lock away from an, binh\./)).toBeTruthy();
 });
 
 test("locks section (#128): unmodified needs-lock and locked files offer Lock / Unlock, never a commit tick", async () => {
