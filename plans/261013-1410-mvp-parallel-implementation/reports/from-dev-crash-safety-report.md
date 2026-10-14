@@ -69,7 +69,7 @@ Remaining case: `special::install_from_reader` (a `svn:special` file that is not
 - `crates/svn-client/tests/checkout_restart.rs`: update reports an interrupted checkout, checkout restarts and keeps the user's unversioned file, and a second checkout into the finished working copy is refused.
 - The existing `concurrent_creators_have_one_winner…` test caught a race in the first version (removing and recreating `.svn`). The takeover-in-place design fixes it.
 
-## Gates (final head)
+## Gates (final head, after merging origin/main)
 
 | gate | result |
 |---|---|
@@ -77,11 +77,11 @@ Remaining case: `special::install_from_reader` (a `svn:special` file that is not
 | `cargo clippy --workspace --all-targets -- -D warnings` | 0 warnings |
 | `cargo clippy -p opensvn --features real-engine --all-targets -- -D warnings` | 0 warnings |
 | clippy `--features failpoints` on `svn-wc`, `svn-client`, `opensvn`, `opensvn-crash` (all targets, `-D warnings`) | 0 warnings |
-| `cargo test --workspace --locked` | 1378 passed, 0 failed, 22 ignored |
-| `cargo test -p opensvn --features opensvn/real-engine` | 474 passed, 0 failed |
+| `cargo test --workspace --locked` | 1393 passed, 0 failed, 22 ignored |
+| `cargo test -p opensvn --features opensvn/real-engine` | 479 passed, 0 failed |
 | `cargo test -p svn-wc --features failpoints` | 239 passed, 0 failed, 1 ignored |
-| `cargo test -p svn-client --features failpoints` | 209 passed, 0 failed |
-| `cargo test -p opensvn --features failpoints` | 480 passed, 0 failed |
+| `cargo test -p svn-client --features failpoints` | 212 passed, 0 failed |
+| `cargo test -p opensvn --features failpoints` | 485 passed, 0 failed |
 | crash suite, random SIGKILL (seed 20261014) | 35 cases, 0 failed |
 | crash suite, failpoints (seed 20261014) | 91 cases, 0 failed |
 
