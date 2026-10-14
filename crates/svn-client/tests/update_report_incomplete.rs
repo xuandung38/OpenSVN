@@ -186,7 +186,6 @@ async fn incomplete_directory_reports_every_child() {
     assert_server_can_place(set);
 
     // And the interrupted update resumes.
-    let db = Arc::try_unwrap(db).ok().expect("sole owner");
     drop(db);
     svn_client::update(&ctx(), &s, &wc, None, Depth::Unknown, &cancel)
         .await

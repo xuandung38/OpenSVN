@@ -73,8 +73,12 @@ impl RecoveryHooks for ClientRecovery {
         blocking(move || {
             svn_client::local::lock::with_wc_lock(&db, &cancel, || {
                 svn_client::wc::run_work_queue(&db, &cancel)?;
-                // Same lock, queue now empty: crash leftovers in `.svn/tmp` can go (#120).
-                db.remove_stale_tmp_files().map(|_| ())
+                // Same lock, queue now empty: crash leftovers in `.svn/tmp` can go (#120). Best
+                // effort: they only waste space, which must not keep the working copy closed.
+                if let Err(e) = db.remove_stale_tmp_files() {
+                    tracing::warn!(error = %e, "could not remove stale temp files");
+                }
+                Ok(())
             })
         })
         .await
