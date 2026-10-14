@@ -28,8 +28,7 @@
     "linux": {
       "deb": {
         "section": "devel",
-        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"],
-        "recommends": ["libgssapi-krb5-2"]
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "libgssapi-krb5-2"]
       },
       "appimage": { "bundleMediaFramework": false }
     }
