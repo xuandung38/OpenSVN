@@ -45,6 +45,7 @@ pub mod drive;
 pub mod file_commit;
 pub mod finalize;
 pub mod journal;
+mod parallel;
 pub mod recovery;
 
 use std::path::{Path, PathBuf};
@@ -57,6 +58,7 @@ use svn_types::{
 use svn_wc::WcDb;
 use svn_wc::db::{LockState, ObtainMode};
 use svn_wc::pristine::PristineIndex;
+use svn_wc::workqueue::WorkItem;
 
 use self::collect::{CollectOptions, Committable, ItemAction, collect};
 use self::drive::{DriveContext, DriveItem, PreparedText, drive};
@@ -435,7 +437,7 @@ async fn commit_locked(
             e.message
         ));
     }
-    if let Err(e) = run_work_queue(db, &CancelToken::new()) {
+    if let Err(e) = run_committed_queue(db) {
         warnings.push(format!(
             "updating the committed working files did not finish; run cleanup: {}",
             e.message
@@ -449,10 +451,64 @@ async fn commit_locked(
     }))
 }
 
+/// `file-commit` items finished per transaction by [`run_committed_queue`].
+const FILE_COMMIT_BATCH: usize = 1000;
+
+/// Runs the work queue after [`finalize::finalize`], which queued one `file-commit` item per
+/// committed file. Leading `file-commit` items are finished in batches: the fixups of a batch
+/// run first, then ONE transaction stores their stat caches and deletes the items, the same
+/// guarantee the runner gives per item (a crash before that transaction runs the batch again,
+/// and the fixup is idempotent). Anything else, from the first other item on, goes through
+/// the regular runner in queue order.
+fn run_committed_queue(db: &WcDb) -> Result<usize> {
+    let mut done = 0;
+    let mut ids = Vec::new();
+    let mut infos = Vec::new();
+    for (id, skel) in db.work_items()? {
+        let Ok(WorkItem::FileCommit { relpath }) = WorkItem::from_skel(&skel) else {
+            break;
+        };
+        let path = RelPath::new(&relpath)?;
+        if let Some(info) = file_commit::file_commit_fixup_deferred(db, &path)? {
+            infos.push((path, info));
+        }
+        ids.push(id);
+        if ids.len() >= FILE_COMMIT_BATCH {
+            done += complete_file_commits(db, &mut ids, &mut infos)?;
+        }
+    }
+    done += complete_file_commits(db, &mut ids, &mut infos)?;
+    Ok(done + run_work_queue(db, &CancelToken::new())?)
+}
+
+fn complete_file_commits(
+    db: &WcDb,
+    ids: &mut Vec<i64>,
+    infos: &mut Vec<(RelPath, (i64, i64))>,
+) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    db.with_txn(|t| {
+        for (path, (size, mtime)) in infos.iter() {
+            match t.record_fileinfo(path, Some(*size), Some(*mtime)) {
+                // The node went away meanwhile: the item is still done, like the runner's.
+                Err(e) if e.code == ErrorCode::PathNotFound => {}
+                other => other?,
+            }
+        }
+        t.complete_work_items(ids)
+    })?;
+    let n = ids.len();
+    ids.clear();
+    infos.clear();
+    Ok(n)
+}
+
 /// Folds the merged commit into the working copy (failpoint `commit.finalize` replaces it).
 fn finalize_after_merge(db: &WcDb, journal: &journal::JournalData, data_dir: &Path) -> Result<()> {
     failpoint!("commit.finalize");
-    finalize::finalize(db, journal, data_dir)
+    finalize::finalize_fresh(db, journal, data_dir)
 }
 
 /// How a commit whose `close_edit` failed continues.
@@ -569,52 +625,75 @@ fn prepare_items(
     items: &[collect::Committable],
     data_dir: &Path,
 ) -> Result<Vec<DriveItem>> {
-    let store = db.pristine_store();
-    let mut out = Vec::with_capacity(items.len());
-    for (n, item) in items.iter().enumerate() {
-        let mut di = DriveItem {
-            item: item.clone(),
-            text: None,
-        };
-        if item.needs_text && item.action != ItemAction::Delete {
-            let abs = abs_of(db, &item.relpath);
-            let name = format!("{n}.txt");
-            let dest = data_dir.join(&name);
-            let digest = detranslate_to_file(db, &item.relpath, &abs, &dest)?;
-            let (base, base_md5) = match &item.base_sha1 {
-                Some(sha1) => match store.index().lookup(sha1).map_err(SvnError::from)? {
-                    Some(rec) if store.path_of(sha1).is_file() => (
-                        Some(ReplayableSource {
-                            path: store.path_of(sha1),
-                            translated: true,
-                            size: Some(rec.size),
-                        }),
-                        Some(Checksum::Md5(rec.md5.0)),
-                    ),
-                    _ => (None, None),
-                },
-                None => (None, None),
-            };
-            di.text = Some(PreparedText {
-                target: ReplayableSource {
-                    path: dest,
-                    translated: true,
-                    size: Some(digest.size),
-                },
-                base,
-                base_md5,
-                result_md5: Checksum::Md5(digest.md5.0),
-                record: JournalText {
-                    sha1: digest.sha1.to_hex(),
-                    md5: digest.md5.to_hex(),
-                    size: digest.size,
-                    data: name,
-                },
-            });
-        }
-        out.push(di);
+    let out = items
+        .iter()
+        .enumerate()
+        .map(|(n, item)| prepare_item(db, n, item, data_dir))
+        .collect::<Result<Vec<_>>>()?;
+    // The saved texts must survive a crash once the MERGE may be sent: recovery installs them
+    // as the new pristines. One batch of syncs instead of one sync per file.
+    let saved: Vec<PathBuf> = out
+        .iter()
+        .filter_map(|d| d.text.as_ref().map(|t| t.target.path.clone()))
+        .collect();
+    if !saved.is_empty() {
+        parallel::sync_files(saved)?;
+        parallel::sync_dir(data_dir)?;
     }
     Ok(out)
+}
+
+/// Saves the repository-normal text of a changed file as `<n>.txt` in `data_dir` (not synced
+/// yet, see [`prepare_items`]) and says how to upload it.
+fn prepare_item(
+    db: &WcDb,
+    n: usize,
+    item: &collect::Committable,
+    data_dir: &Path,
+) -> Result<DriveItem> {
+    let mut di = DriveItem {
+        item: item.clone(),
+        text: None,
+    };
+    if !item.needs_text || item.action == ItemAction::Delete {
+        return Ok(di);
+    }
+    let store = db.pristine_store();
+    let abs = abs_of(db, &item.relpath);
+    let name = format!("{n}.txt");
+    let dest = data_dir.join(&name);
+    let digest = detranslate_to_file(db, &item.relpath, &abs, &dest)?;
+    let (base, base_md5) = match &item.base_sha1 {
+        Some(sha1) => match store.index().lookup(sha1).map_err(SvnError::from)? {
+            Some(rec) if store.path_of(sha1).is_file() => (
+                Some(ReplayableSource {
+                    path: store.path_of(sha1),
+                    translated: true,
+                    size: Some(rec.size),
+                }),
+                Some(Checksum::Md5(rec.md5.0)),
+            ),
+            _ => (None, None),
+        },
+        None => (None, None),
+    };
+    di.text = Some(PreparedText {
+        target: ReplayableSource {
+            path: dest,
+            translated: true,
+            size: Some(digest.size),
+        },
+        base,
+        base_md5,
+        result_md5: Checksum::Md5(digest.md5.0),
+        record: JournalText {
+            sha1: digest.sha1.to_hex(),
+            md5: digest.md5.to_hex(),
+            size: digest.size,
+            data: name,
+        },
+    });
+    Ok(di)
 }
 
 #[cfg(test)]

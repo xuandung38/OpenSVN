@@ -43,6 +43,9 @@ pub struct RaWire {
     /// Every request goes through [`HttpTransport::send_unattended`]: no credential or
     /// certificate prompt, only what is cached, accepted or stored.
     unattended: bool,
+    /// Round trip of the opening `OPTIONS` when it took a single exchange (no authentication
+    /// round), the measure libsvn_ra_serf uses to call a connection low-latency.
+    open_latency: Option<std::time::Duration>,
 }
 
 impl RaWire {
@@ -65,6 +68,7 @@ impl RaWire {
             bulk: BulkPreference::Auto,
             list_limits: ListLimits::default(),
             unattended: false,
+            open_latency: None,
         })
     }
 
@@ -95,12 +99,17 @@ impl RaWire {
     ) -> Result<Self> {
         let req = options_request(&session_url)?;
         let body = buffered_body(&req)?;
+        let started = std::time::Instant::now();
         let resp = send_with(&transport, req, body, unattended, cancel).await?;
+        let elapsed = started.elapsed();
         let head = svn_protocol::ResponseHead::new(resp.status().as_u16(), headers_of(&resp));
         let body = read_limited(resp, ParserLimits::default().max_error_body_bytes, cancel).await?;
         let caps = Capabilities::from_options_response(&session_url, &head, &body)?;
         let mut wire = Self::new(transport, session_url, caps)?;
         wire.unattended = unattended;
+        // A prompt or an authentication round makes the time meaningless; it then just
+        // counts as not low-latency.
+        wire.open_latency = Some(elapsed);
         Ok(wire)
     }
 
@@ -127,6 +136,15 @@ impl RaWire {
     pub fn unattended(mut self) -> Self {
         self.unattended = true;
         self
+    }
+
+    /// Whether the connection looks low-latency the way libsvn_ra_serf decides it (the opening
+    /// `OPTIONS` answered within 5 ms, which includes connecting; any authentication round or
+    /// prompt makes it slower). Commits then send svndiff 2 (LZ4, cheap to compress and to apply)
+    /// instead of svndiff 1 (zlib, smaller on a slow link), like svn.
+    pub fn is_low_latency(&self) -> bool {
+        self.open_latency
+            .is_some_and(|d| d < std::time::Duration::from_millis(5))
     }
 
     /// Whether requests never prompt (see [`Self::unattended`]).

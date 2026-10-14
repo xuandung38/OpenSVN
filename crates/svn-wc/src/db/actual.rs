@@ -36,21 +36,23 @@ const ALL_EMPTY: &str = "properties IS NULL AND conflict_old IS NULL AND conflic
     AND older_checksum IS NULL AND left_checksum IS NULL AND right_checksum IS NULL";
 
 fn ensure_row(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<()> {
-    conn.execute(
+    conn.prepare_cached(
         "INSERT OR IGNORE INTO actual_node (wc_id, local_relpath, parent_relpath) \
          VALUES (?1, ?2, ?3)",
-        params![wc_id, path.as_str(), parent_text(path)],
     )
+    .map_err(sql_err)?
+    .execute(params![wc_id, path.as_str(), parent_text(path)])
     .map_err(sql_err)?;
     Ok(())
 }
 
 /// Deletes the row of `path` when nothing is recorded in it any more.
 pub(crate) fn prune(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<()> {
-    conn.execute(
-        &format!("DELETE FROM actual_node WHERE wc_id = ?1 AND local_relpath = ?2 AND {ALL_EMPTY}"),
-        params![wc_id, path.as_str()],
-    )
+    conn.prepare_cached(&format!(
+        "DELETE FROM actual_node WHERE wc_id = ?1 AND local_relpath = ?2 AND {ALL_EMPTY}"
+    ))
+    .map_err(sql_err)?
+    .execute(params![wc_id, path.as_str()])
     .map_err(sql_err)?;
     Ok(())
 }
@@ -58,11 +60,11 @@ pub(crate) fn prune(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<()>
 /// Locally modified properties, or `None` when the row holds no property change.
 pub(crate) fn read_props(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<Option<Props>> {
     let blob: Option<Option<Vec<u8>>> = conn
-        .query_row(
+        .prepare_cached(
             "SELECT properties FROM actual_node WHERE wc_id = ?1 AND local_relpath = ?2",
-            params![wc_id, path.as_str()],
-            |r| r.get(0),
         )
+        .map_err(sql_err)?
+        .query_row(params![wc_id, path.as_str()], |r| r.get(0))
         .optional()
         .map_err(sql_err)?;
     blob.flatten().as_deref().map(decode_props).transpose()
@@ -79,17 +81,19 @@ pub(crate) fn write_props(
     match props {
         Some(p) => {
             ensure_row(conn, wc_id, path)?;
-            conn.execute(
+            conn.prepare_cached(
                 "UPDATE actual_node SET properties = ?3 WHERE wc_id = ?1 AND local_relpath = ?2",
-                params![wc_id, path.as_str(), encode_props(p)],
             )
+            .map_err(sql_err)?
+            .execute(params![wc_id, path.as_str(), encode_props(p)])
             .map_err(sql_err)?;
         }
         None => {
-            conn.execute(
+            conn.prepare_cached(
                 "UPDATE actual_node SET properties = NULL WHERE wc_id = ?1 AND local_relpath = ?2",
-                params![wc_id, path.as_str()],
             )
+            .map_err(sql_err)?
+            .execute(params![wc_id, path.as_str()])
             .map_err(sql_err)?;
             prune(conn, wc_id, path)?;
         }
@@ -103,11 +107,11 @@ pub(crate) fn read_changelist(
     path: &RelPath,
 ) -> Result<Option<String>> {
     let v: Option<Option<String>> = conn
-        .query_row(
+        .prepare_cached(
             "SELECT changelist FROM actual_node WHERE wc_id = ?1 AND local_relpath = ?2",
-            params![wc_id, path.as_str()],
-            |r| r.get(0),
         )
+        .map_err(sql_err)?
+        .query_row(params![wc_id, path.as_str()], |r| r.get(0))
         .optional()
         .map_err(sql_err)?;
     Ok(v.flatten())
@@ -122,10 +126,11 @@ pub(crate) fn write_changelist(
     if name.is_some() {
         ensure_row(conn, wc_id, path)?;
     }
-    conn.execute(
+    conn.prepare_cached(
         "UPDATE actual_node SET changelist = ?3 WHERE wc_id = ?1 AND local_relpath = ?2",
-        params![wc_id, path.as_str(), name],
     )
+    .map_err(sql_err)?
+    .execute(params![wc_id, path.as_str(), name])
     .map_err(sql_err)?;
     prune(conn, wc_id, path)
 }

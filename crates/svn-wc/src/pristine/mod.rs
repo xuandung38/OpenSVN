@@ -288,11 +288,7 @@ impl<I: PristineIndex> PristineStore<I> {
 
     /// Where the text with this checksum lives (or would live).
     pub fn path_of(&self, sha1: &Sha1Digest) -> PathBuf {
-        let hex = sha1.to_hex();
-        self.adm_dir
-            .join("pristine")
-            .join(&hex[..2])
-            .join(format!("{hex}{SUFFIX}"))
+        text_path(&self.adm_dir, sha1)
     }
 
     /// Streams `reader` into the store and returns the record of what is stored.
@@ -314,45 +310,8 @@ impl<I: PristineIndex> PristineStore<I> {
         self.require_writable()?;
         let tmp_dir = self.adm_dir.join("tmp");
         fs::create_dir_all(&tmp_dir).map_err(PristineError::io("create directory", &tmp_dir))?;
-        let mut tmp = tempfile::Builder::new()
-            .prefix("pristine-")
-            .tempfile_in(&tmp_dir)
-            .map_err(PristineError::io("create temp file in", &tmp_dir))?;
-
-        let (mut sha, mut md5) = (Sha1::new(), Md5::new());
-        let mut size = 0u64;
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            let n = reader
-                .read(&mut buf)
-                .map_err(PristineError::io("read stream for", tmp.path()))?;
-            if n == 0 {
-                break;
-            }
-            sha.update(&buf[..n]);
-            md5.update(&buf[..n]);
-            size += n as u64;
-            tmp.write_all(&buf[..n])
-                .map_err(PristineError::io("write", tmp.path()))?;
-        }
-        let record = PristineRecord {
-            sha1: Sha1Digest(sha.finalize().into()),
-            md5: Md5Digest(md5.finalize().into()),
-            size,
-            hydrated: true,
-        };
-        if let Some(expected) = expected_sha1.filter(|e| **e != record.sha1) {
-            return Err(PristineError::ChecksumMismatch {
-                expected: expected.to_svn_string(),
-                actual: record.sha1.to_svn_string(),
-            });
-        }
-        if let Some(expected) = expected_md5.filter(|e| **e != record.md5) {
-            return Err(PristineError::ChecksumMismatch {
-                expected: expected.to_svn_string(),
-                actual: record.md5.to_svn_string(),
-            });
-        }
+        let (tmp, record) = write_temp(&tmp_dir, reader)?;
+        check_expected(&record, expected_sha1, expected_md5)?;
 
         match self.index.lookup(&record.sha1)? {
             // The row is authoritative: the stored file stays, the temp file is dropped.
@@ -361,30 +320,24 @@ impl<I: PristineIndex> PristineStore<I> {
             None => {}
         }
 
-        tmp.as_file()
-            .sync_all()
-            .map_err(PristineError::io("sync", tmp.path()))?;
         let dest = self.path_of(&record.sha1);
-        let parent = dest.parent().unwrap_or(&self.adm_dir);
-        fs::create_dir_all(parent).map_err(PristineError::io("create directory", parent))?;
-        let tmp_path = tmp.into_temp_path();
-        #[cfg(feature = "failpoints")]
-        fail::fail_point!("pristine.install.before_rename", |_| Err(
-            PristineError::index("failpoint pristine.install.before_rename")
-        ));
-        // Replaces an orphan file (no row) that may be truncated or damaged; on Windows this
-        // clears the read-only attribute and retries sharing violations.
-        rename_replacing(&tmp_path, &dest)?;
-        // A pristine is immutable, like svn leaves it.
-        let mut perms = fs::metadata(&dest)
-            .map_err(PristineError::io("stat", &dest))?
-            .permissions();
-        perms.set_readonly(true);
-        fs::set_permissions(&dest, perms)
-            .map_err(PristineError::io("set permissions of", &dest))?;
-        sync_dir(parent)?;
+        place(tmp, &dest, &self.adm_dir)?;
+        sync_dir(dest.parent().unwrap_or(&self.adm_dir))?;
         self.index.record(&record)?;
         Ok(record)
+    }
+
+    /// A writer that puts many texts into this store without recording their rows, for a
+    /// caller that records all of them in one database transaction (see [`PristineBatch`]).
+    ///
+    /// Requires the WC write lock, like [`Self::install`].
+    pub fn batch(&self) -> Result<PristineBatch, PristineError> {
+        self.require_writable()?;
+        let tmp_dir = self.adm_dir.join("tmp");
+        fs::create_dir_all(&tmp_dir).map_err(PristineError::io("create directory", &tmp_dir))?;
+        Ok(PristineBatch {
+            adm_dir: self.adm_dir.clone(),
+        })
     }
 
     /// Opens the stored text for reading. Fails with [`PristineError::NotHydrated`] when the row says the
@@ -465,6 +418,226 @@ impl<I: PristineIndex> PristineStore<I> {
             }
         }
         Ok(removed)
+    }
+}
+
+/// Where the text with checksum `sha1` lives below the administrative directory `adm_dir`.
+fn text_path(adm_dir: &Path, sha1: &Sha1Digest) -> PathBuf {
+    let hex = sha1.to_hex();
+    adm_dir
+        .join("pristine")
+        .join(&hex[..2])
+        .join(format!("{hex}{SUFFIX}"))
+}
+
+/// Streams `reader` into a new temp file in `tmp_dir` and returns it with its record.
+fn write_temp(
+    tmp_dir: &Path,
+    reader: &mut dyn Read,
+) -> Result<(tempfile::NamedTempFile, PristineRecord), PristineError> {
+    let mut tmp = tempfile::Builder::new()
+        .prefix("pristine-")
+        .tempfile_in(tmp_dir)
+        .map_err(PristineError::io("create temp file in", tmp_dir))?;
+    let (mut sha, mut md5) = (Sha1::new(), Md5::new());
+    let mut size = 0u64;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(PristineError::io("read stream for", tmp.path()))?;
+        if n == 0 {
+            break;
+        }
+        sha.update(&buf[..n]);
+        md5.update(&buf[..n]);
+        size += n as u64;
+        tmp.write_all(&buf[..n])
+            .map_err(PristineError::io("write", tmp.path()))?;
+    }
+    let record = PristineRecord {
+        sha1: Sha1Digest(sha.finalize().into()),
+        md5: Md5Digest(md5.finalize().into()),
+        size,
+        hydrated: true,
+    };
+    Ok((tmp, record))
+}
+
+fn check_expected(
+    record: &PristineRecord,
+    expected_sha1: Option<&Sha1Digest>,
+    expected_md5: Option<&Md5Digest>,
+) -> Result<(), PristineError> {
+    if let Some(expected) = expected_sha1.filter(|e| **e != record.sha1) {
+        return Err(PristineError::ChecksumMismatch {
+            expected: expected.to_svn_string(),
+            actual: record.sha1.to_svn_string(),
+        });
+    }
+    if let Some(expected) = expected_md5.filter(|e| **e != record.md5) {
+        return Err(PristineError::ChecksumMismatch {
+            expected: expected.to_svn_string(),
+            actual: record.md5.to_svn_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Syncs the temp file and renames it to `dest` (replacing an orphan file without a row, which
+/// may be truncated or damaged), then makes it read-only. The directory entry is not synced.
+fn place(tmp: tempfile::NamedTempFile, dest: &Path, adm_dir: &Path) -> Result<(), PristineError> {
+    tmp.as_file()
+        .sync_all()
+        .map_err(PristineError::io("sync", tmp.path()))?;
+    let parent = dest.parent().unwrap_or(adm_dir);
+    fs::create_dir_all(parent).map_err(PristineError::io("create directory", parent))?;
+    let tmp_path = tmp.into_temp_path();
+    #[cfg(feature = "failpoints")]
+    fail::fail_point!("pristine.install.before_rename", |_| Err(
+        PristineError::index("failpoint pristine.install.before_rename")
+    ));
+    // On Windows this clears the read-only attribute and retries sharing violations.
+    rename_replacing(&tmp_path, dest)?;
+    // A pristine is immutable, like svn leaves it.
+    let mut perms = fs::metadata(dest)
+        .map_err(PristineError::io("stat", dest))?
+        .permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(dest, perms).map_err(PristineError::io("set permissions of", dest))
+}
+
+/// Puts many texts into a store with one directory sync per pristine directory and no row
+/// written: the caller records the rows of all of them in one database transaction (for
+/// example with [`crate::db::WcTxn::record_pristine`]) after [`Self::sync_dirs`].
+///
+/// The ordering of [`PristineStore::install`] holds for the batch as a whole: every text is
+/// synced and in place before its row exists, so a crash leaves at worst orphan files, which a
+/// later install of the same text replaces. [`Self::stage`] needs no `&mut` and the batch is
+/// `Send + Sync`, so texts can be staged from several threads.
+#[derive(Debug, Clone)]
+pub struct PristineBatch {
+    adm_dir: PathBuf,
+}
+
+impl PristineBatch {
+    /// Where the text with this checksum lives (or would live).
+    pub fn path_of(&self, sha1: &Sha1Digest) -> PathBuf {
+        text_path(&self.adm_dir, sha1)
+    }
+
+    /// Streams `reader` into the store like [`PristineStore::install`] (checked against the
+    /// expected checksums, synced, renamed into place, read-only), but without looking at or
+    /// writing the index and without syncing the directory. The caller decides beforehand
+    /// whether the text is needed (an existing hydrated row is authoritative).
+    pub fn stage(
+        &self,
+        reader: &mut dyn Read,
+        expected_sha1: Option<&Sha1Digest>,
+        expected_md5: Option<&Md5Digest>,
+    ) -> Result<PristineRecord, PristineError> {
+        let (tmp, record) = write_temp(&self.adm_dir.join("tmp"), reader)?;
+        check_expected(&record, expected_sha1, expected_md5)?;
+        place(tmp, &self.path_of(&record.sha1), &self.adm_dir)?;
+        Ok(record)
+    }
+
+    /// Moves the file at `src` into the store as the text with the expected checksums, without
+    /// copying it when it is on the same file system: the content is hashed and checked first,
+    /// then the file is renamed into place and made read-only. On another file system (or when
+    /// the rename fails for another reason) it is copied like [`Self::stage`] and `src` stays.
+    ///
+    /// `src` must already be synced to disk: no sync happens here on the rename path.
+    pub fn adopt(
+        &self,
+        src: &Path,
+        expected_sha1: &Sha1Digest,
+        expected_md5: &Md5Digest,
+    ) -> Result<PristineRecord, PristineError> {
+        let mut file = File::open(src).map_err(PristineError::io("open", src))?;
+        let (mut sha, mut md5) = (Sha1::new(), Md5::new());
+        let mut size = 0u64;
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(PristineError::io("read", src))?;
+            if n == 0 {
+                break;
+            }
+            sha.update(&buf[..n]);
+            md5.update(&buf[..n]);
+            size += n as u64;
+        }
+        drop(file);
+        let record = PristineRecord {
+            sha1: Sha1Digest(sha.finalize().into()),
+            md5: Md5Digest(md5.finalize().into()),
+            size,
+            hydrated: true,
+        };
+        check_expected(&record, Some(expected_sha1), Some(expected_md5))?;
+        self.place_file(src, &record)
+    }
+
+    /// [`Self::adopt`] for a file whose content the caller produced and hashed itself (for
+    /// example a copy it wrote and synced moments ago): only its size is checked against
+    /// `record`, the content is not read again.
+    pub fn adopt_trusted(
+        &self,
+        src: &Path,
+        record: &PristineRecord,
+    ) -> Result<PristineRecord, PristineError> {
+        let len = fs::metadata(src)
+            .map_err(PristineError::io("stat", src))?
+            .len();
+        if len != record.size {
+            return Err(PristineError::ChecksumMismatch {
+                expected: format!("{} bytes", record.size),
+                actual: format!("{len} bytes"),
+            });
+        }
+        self.place_file(src, record)
+    }
+
+    /// Renames `src` into place as `record`'s text (copying when the rename fails).
+    fn place_file(
+        &self,
+        src: &Path,
+        record: &PristineRecord,
+    ) -> Result<PristineRecord, PristineError> {
+        let record = record.clone();
+        let (expected_sha1, expected_md5) = (&record.sha1, &record.md5);
+        let dest = self.path_of(&record.sha1);
+        let parent = dest.parent().unwrap_or(&self.adm_dir);
+        fs::create_dir_all(parent).map_err(PristineError::io("create directory", parent))?;
+        #[cfg(feature = "failpoints")]
+        fail::fail_point!("pristine.install.before_rename", |_| Err(
+            PristineError::index("failpoint pristine.install.before_rename")
+        ));
+        if rename_replacing(src, &dest).is_err() {
+            let mut file = File::open(src).map_err(PristineError::io("open", src))?;
+            return self.stage(&mut file, Some(expected_sha1), Some(expected_md5));
+        }
+        let mut perms = fs::metadata(&dest)
+            .map_err(PristineError::io("stat", &dest))?
+            .permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&dest, perms)
+            .map_err(PristineError::io("set permissions of", &dest))?;
+        Ok(record)
+    }
+
+    /// Syncs the directory of every staged text once; call it before recording their rows.
+    pub fn sync_dirs(&self, records: &[PristineRecord]) -> Result<(), PristineError> {
+        let dirs: std::collections::BTreeSet<PathBuf> = records
+            .iter()
+            .filter_map(|r| self.path_of(&r.sha1).parent().map(Path::to_path_buf))
+            .collect();
+        for d in dirs {
+            sync_dir(&d)?;
+        }
+        Ok(())
     }
 }
 
