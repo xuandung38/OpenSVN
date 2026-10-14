@@ -334,7 +334,22 @@ fn txn_tree_writers_update_base_subtrees() {
         .read_node(&rp("d/sub/b.txt"))
         .expect("read")
         .expect("copy");
-    assert_eq!(cur.op_depth, 2);
+    // `b.txt` is at r2 below `d/sub` at r1: like svn, a copy of its own at its own depth, with a
+    // `not-present` row in the layer of `d/sub`.
+    assert_eq!(cur.op_depth, 3);
+    let sub = db.read_node(&rp("d/sub")).expect("read").expect("copy");
+    assert_eq!((sub.op_depth, sub.presence), (2, Presence::Normal));
+    let layer = db
+        .with_read(|c| {
+            Ok(c.query_row(
+                "SELECT presence FROM nodes WHERE local_relpath = 'd/sub/b.txt' AND op_depth = 2",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .expect("row"))
+        })
+        .expect("read");
+    assert_eq!(layer, "not-present");
     db.with_txn(|t| t.mark_base_deleted(&rp("d/a.txt"), NodeKind::File))
         .expect("obstruction");
     let cur = db.read_node(&rp("d/a.txt")).expect("read").expect("row");

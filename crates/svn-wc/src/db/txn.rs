@@ -368,27 +368,137 @@ impl WcTxn<'_> {
     /// content stays versioned as an addition with history and the tree conflict decides what
     /// happens next.
     ///
+    /// The layout is svn's (`svn_wc__db_op_make_copy_internal` and `make_copy_txn`): a node at
+    /// its parent's revision and repository path joins the parent's layer; one at another
+    /// revision (a mixed-revision subtree, or the children of a directory an interrupted update
+    /// left `incomplete`) becomes a copy of its own at its own depth, with a `not-present` row in
+    /// the parent's layer. Presence is copied as it is (`incomplete` included).
+    ///
     /// Fails without changing anything when a working row already exists at that depth in the
     /// subtree (a local replacement must never be overwritten).
     pub fn convert_base_to_copy(&self, path: &RelPath) -> Result<()> {
         let scope = scope_sql();
-        let taken: i64 = super::connection::cached_row(
-            self.conn,
-            &format!("SELECT COUNT(*) FROM nodes WHERE wc_id = ?1 AND op_depth = ?3 AND {scope}"),
-            params![self.wc_id, path.as_str(), relpath_depth(path)],
-            |r| r.get(0),
-        )
-        .map_err(sql_err)?;
+        let op_depth = relpath_depth(path);
+        let taken: i64 = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM nodes WHERE wc_id = ?1 AND op_depth = ?3 AND {scope}"
+                ),
+                params![self.wc_id, path.as_str(), op_depth],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
         if taken > 0 {
             return Err(SvnError::new(
                 ErrorCode::Internal,
                 format!("cannot keep '{path}' as a local copy: a working layer already exists"),
             ));
         }
-        super::connection::cached_exec(
-            self.conn,
-            &format!(
-                "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
+        // A `base-deleted` layer over the BASE subtree first (svn's
+        // STMT_INSERT_DELETE_FROM_NODE_RECURSIVE); the copy then replaces it row by row.
+        self.conn
+            .execute(
+                &format!(
+                    "INSERT INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, presence, \
+                     kind) SELECT wc_id, local_relpath, ?3, parent_relpath, 'base-deleted', kind \
+                     FROM nodes WHERE wc_id = ?1 AND op_depth = 0 AND {scope} \
+                     AND (local_relpath = ?2 OR presence NOT IN ('base-deleted', 'not-present', \
+                     'excluded', 'server-excluded'))"
+                ),
+                params![self.wc_id, path.as_str(), op_depth],
+            )
+            .map_err(sql_err)?;
+        self.make_copy(path, None, op_depth, false)?;
+        // `base-deleted` rows left right above BASE below `path` cover nothing once BASE is gone
+        // (svn's STMT_DELETE_WORKING_BASE_DELETE_RECURSIVE in `db_base_remove`).
+        self.conn
+            .execute(
+                &format!(
+                    "DELETE FROM nodes WHERE wc_id = ?1 AND {} \
+                     AND presence = 'base-deleted' AND op_depth > 0 \
+                     AND op_depth = (SELECT MIN(op_depth) FROM nodes n \
+                     WHERE n.wc_id = ?1 AND n.local_relpath = nodes.local_relpath \
+                     AND op_depth > 0)",
+                    nodes::strict_descendant("local_relpath", "?2")
+                ),
+                params![self.wc_id, path.as_str()],
+            )
+            .map_err(sql_err)?;
+        self.conn
+            .execute(
+                &format!("DELETE FROM nodes WHERE wc_id = ?1 AND op_depth = 0 AND {scope}"),
+                params![self.wc_id, path.as_str()],
+            )
+            .map_err(sql_err)?;
+        Ok(())
+    }
+
+    /// svn's `make_copy_txn` without the move bookkeeping: copies the BASE node `path` into the
+    /// layer at `last_op_depth` when it continues its parent (`last`: the parent's repository
+    /// id, path and revision), into a layer of its own otherwise.
+    fn make_copy(
+        &self,
+        path: &RelPath,
+        last: Option<(i64, &str, i64)>,
+        last_op_depth: u32,
+        mut shadowed: bool,
+    ) -> Result<()> {
+        let presence: String = self
+            .conn
+            .query_row(
+                "SELECT presence FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+                 AND op_depth = 0",
+                params![self.wc_id, path.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+        if presence == "server-excluded" {
+            // Never part of a copy (svn refuses the whole copy); it just goes with BASE.
+            return Ok(());
+        }
+        let mut op_depth = relpath_depth(path);
+        let mut have_row = false;
+        if last_op_depth != op_depth {
+            have_row = self.row_exists(path, op_depth)?;
+            shadowed |= have_row;
+        }
+        let (kind, revision, repos_relpath, repos_id): (
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+        ) = self
+            .conn
+            .query_row(
+                "SELECT kind, revision, repos_path, repos_id FROM nodes \
+                     WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = 0",
+                params![self.wc_id, path.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .map_err(sql_err)?;
+        if let (Some((last_id, last_repos, last_rev)), Some(repos), Some(id), Some(rev)) =
+            (last, repos_relpath.as_deref(), repos_id, revision)
+            && id == last_id
+            && rev == last_rev
+        {
+            let name = path.file_name().unwrap_or("");
+            let continues = if last_repos.is_empty() {
+                repos == name
+            } else {
+                repos
+                    .strip_prefix(last_repos)
+                    .and_then(|r| r.strip_prefix('/'))
+                    == Some(name)
+            };
+            if continues {
+                op_depth = last_op_depth;
+            }
+        }
+        if !have_row || op_depth == last_op_depth {
+            self.conn
+                .execute(
+                    "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
                      repos_id, repos_path, revision, presence, kind, checksum, symlink_target, \
                      properties, translated_size, last_mod_time, changed_revision, changed_date, \
                      changed_author, depth) \
@@ -396,17 +506,112 @@ impl WcTxn<'_> {
                      revision, presence, kind, checksum, symlink_target, properties, \
                      translated_size, last_mod_time, changed_revision, changed_date, \
                      changed_author, depth FROM nodes \
-                     WHERE wc_id = ?1 AND op_depth = 0 AND presence = 'normal' AND {scope}"
-            ),
-            params![self.wc_id, path.as_str(), relpath_depth(path)],
-        )
-        .map_err(sql_err)?;
-        super::connection::cached_exec(
-            self.conn,
-            &format!("DELETE FROM nodes WHERE wc_id = ?1 AND op_depth = 0 AND {scope}"),
-            params![self.wc_id, path.as_str()],
-        )
-        .map_err(sql_err)?;
+                     WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = 0",
+                    params![self.wc_id, path.as_str(), op_depth],
+                )
+                .map_err(sql_err)?;
+            if shadowed && !path.is_root() {
+                self.extend_parent_delete(path, &kind, op_depth)?;
+            }
+            if kind == "dir" {
+                let children = self.base_children(path)?;
+                let me = repos_relpath.as_deref().zip(repos_id).zip(revision);
+                for child in children {
+                    let last = me.map(|((repos, id), rev)| (id, repos, rev));
+                    self.make_copy(&child, last, op_depth, shadowed)?;
+                }
+            }
+        } else {
+            // The depth is taken by a local change of the user: drop the `base-deleted` rows of
+            // the parent's layer that would cover it (STMT_DELETE_WORKING_BASE_DELETE and its
+            // recursive form).
+            for one in [true, false] {
+                let which = if one {
+                    "local_relpath = ?2".to_owned()
+                } else {
+                    nodes::strict_descendant("local_relpath", "?2")
+                };
+                self.conn
+                    .execute(
+                        &format!(
+                            "DELETE FROM nodes WHERE wc_id = ?1 AND {which} \
+                             AND presence = 'base-deleted' AND op_depth > ?3 \
+                             AND op_depth = (SELECT MIN(op_depth) FROM nodes n \
+                             WHERE n.wc_id = ?1 AND n.local_relpath = nodes.local_relpath \
+                             AND op_depth > ?3)"
+                        ),
+                        params![self.wc_id, path.as_str(), last_op_depth],
+                    )
+                    .map_err(sql_err)?;
+            }
+        }
+        // What the parent's layer has here is not known: `not-present` (done last, as in svn).
+        if last_op_depth > 0 && last_op_depth != op_depth {
+            self.conn
+                .execute(
+                    "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
+                     repos_id, repos_path, revision, presence, kind) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'not-present', ?8)",
+                    params![
+                        self.wc_id,
+                        path.as_str(),
+                        last_op_depth,
+                        parent_text(path),
+                        repos_id,
+                        repos_relpath,
+                        revision,
+                        kind
+                    ],
+                )
+                .map_err(sql_err)?;
+        }
+        Ok(())
+    }
+
+    fn row_exists(&self, path: &RelPath, op_depth: u32) -> Result<bool> {
+        let n: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+                 AND op_depth = ?3",
+                params![self.wc_id, path.as_str(), op_depth],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+        Ok(n > 0)
+    }
+
+    /// svn's `db_extend_parent_delete`: when the parent of `path` has a working layer deeper
+    /// than `op_depth`, `path` gets a `base-deleted` row in it (unless it already has a row
+    /// at or above that depth).
+    fn extend_parent_delete(&self, path: &RelPath, kind: &str, op_depth: u32) -> Result<()> {
+        let lowest = |p: &str| -> Result<Option<u32>> {
+            self.conn
+                .query_row(
+                    "SELECT op_depth FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+                     AND op_depth > ?3 ORDER BY op_depth LIMIT 1",
+                    params![self.wc_id, p, op_depth],
+                    |r| r.get(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    e => Err(sql_err(e)),
+                })
+        };
+        let parent = parent_text(path).unwrap_or_default();
+        let Some(parent_op_depth) = lowest(&parent)? else {
+            return Ok(());
+        };
+        if lowest(path.as_str())?.is_none_or(|existing| parent_op_depth < existing) {
+            self.conn
+                .execute(
+                    "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
+                     presence, kind) VALUES (?1, ?2, ?3, ?4, 'base-deleted', ?5)",
+                    params![self.wc_id, path.as_str(), parent_op_depth, parent, kind],
+                )
+                .map_err(sql_err)?;
+        }
         Ok(())
     }
 
