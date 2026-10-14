@@ -205,6 +205,7 @@ fn sample_settings() -> Settings {
         network_max_connections: 4,
         network_timeout_sec: 60,
         network_proxy: ProxySetting::System,
+        network_negotiate: true,
         wc_default_format: WcFormat::V31,
         wc_read_subversion_config: true,
         cache_max_size_gb: 2,

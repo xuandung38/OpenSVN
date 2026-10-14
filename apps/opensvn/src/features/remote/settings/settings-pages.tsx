@@ -347,6 +347,11 @@ export function NetworkPage({ settings, draft, errors, set }: PageProps) {
           />
         </Field>
       )}
+      <Check
+        label={t("negotiate")}
+        checked={v("network.negotiate")}
+        onChange={(on) => set({ "network.negotiate": on })}
+      />
     </div>
   );
 }
