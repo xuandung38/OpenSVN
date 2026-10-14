@@ -178,6 +178,32 @@ pub async fn drive_update(
             format!("'{target_wc}' is not below the session URL"),
         )
     })?;
+    // The drive is anchored at the target's parent (svn's anchor/target split), named by its
+    // path below the session URL: that parent must be where the session URL says it is.
+    if matches!(params.kind, UpdateKind::Update)
+        && let Some(parent) = target_wc.parent().filter(|_| !target.is_root())
+        && parent.starts_with(&anchor)
+    {
+        let session_rel = repos_relpath_of(session.repos_root(), session.session_url())?;
+        let below = wc::strip_rel(&parent, &anchor).unwrap_or_else(RelPath::root);
+        let expected = if below.is_root() {
+            session_rel
+        } else if session_rel.is_empty() {
+            below.as_str().to_owned()
+        } else {
+            format!("{session_rel}/{below}")
+        };
+        let actual = db.read_base(&parent)?.and_then(|n| n.repos_relpath);
+        if actual.as_deref() != Some(expected.as_str()) {
+            return Err(SvnError::new(
+                ErrorCode::WcInvalidOperation,
+                format!(
+                    "'{parent}' is switched to another location; update '{target_wc}' through a \
+                     session at its parent's URL"
+                ),
+            ));
+        }
+    }
 
     db.wc_lock_obtain(&lock_dir, -1, ObtainMode::Cleanup)?;
     let _guard = LockGuard {
