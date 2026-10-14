@@ -29,6 +29,7 @@ mod ops;
 mod repos_info;
 mod schema;
 mod sparse;
+mod subtree;
 mod txn;
 mod wc_lock;
 
@@ -51,6 +52,7 @@ pub use nodes::{Node, Presence, Props};
 pub use ops::{BaseNode, CommitInfo};
 pub use repos_info::ReposInfo;
 pub use schema::{FORMAT_MAX_READ, FORMAT_WRITE, check_supported_format, read_user_version};
+pub use subtree::{ActualRow, LockRow, SubtreeRows};
 pub use txn::WcTxn;
 pub use wc_lock::{ENGINE_TMP_PREFIXES, LockCleanup, LockOwner, LockState, ObtainMode};
 
