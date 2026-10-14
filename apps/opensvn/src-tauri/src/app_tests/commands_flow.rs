@@ -547,3 +547,46 @@ async fn poller_announces_incoming_for_open_working_copies_only() {
     assert_eq!(seen, later);
     f.state().poller.lock().unwrap().as_ref().unwrap().stop();
 }
+
+#[tokio::test]
+async fn a_switch_at_the_same_revision_announces_the_new_location() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    commands::wc_open(f.state(), wc.id.clone()).await.unwrap();
+    let revisions = || {
+        f.events
+            .all()
+            .iter()
+            .filter(|r| matches!(r, Recorded::Revision(_)))
+            .count()
+    };
+    for _ in 0..200 {
+        if revisions() > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let before = revisions();
+    assert!(before > 0, "the first scan announces the revision");
+
+    let url = wc.url.replace("/trunk", "/branches/feature-x");
+    let handle = commands::switch(f.state(), wc.id.clone(), url.clone(), Some(wc.base_rev))
+        .await
+        .unwrap();
+    let OpResult::NewRev { new_rev } = f.wait_op(&handle).await.unwrap() else {
+        panic!("switch result is a revision");
+    };
+    assert_eq!(new_rev, wc.base_rev, "same revision, other location");
+    for _ in 0..200 {
+        if revisions() > before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        revisions() > before,
+        "the toolbar is told to refetch the working copy"
+    );
+    let listed = commands::wc_list(f.state()).await.unwrap();
+    assert_eq!(listed[0].url, url);
+}

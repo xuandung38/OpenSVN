@@ -24,3 +24,6 @@ apps/opensvn/src-tauri/gen/
 
 # Local agent memory
 .claude/agent-memory/
+
+# End-to-end test screenshots and logs
+e2e-artifacts/
