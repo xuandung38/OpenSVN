@@ -277,14 +277,6 @@ pub fn event_name(id: &str) -> String {
     format!("menu://{}", id.replace('.', "/"))
 }
 
-/// Whether Tauri accepts `name` as an event name (its own rule, which it does not export).
-pub fn is_valid_event_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '/' | ':' | '_'))
-}
-
 fn has_item_id(entries: &[Entry], wanted: &str) -> bool {
     entries.iter().any(|e| match e {
         Entry::Item { id, .. } => *id == wanted,

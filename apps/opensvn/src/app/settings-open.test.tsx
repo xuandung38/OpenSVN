@@ -124,3 +124,19 @@ test("Ctrl+, opens Settings on Linux and Windows; Meta+, does not", async () => 
   await user().keyboard("{Control>},{/Control}");
   await expectOpen();
 });
+
+test("Settings still opens and closes on a WebKit without showModal/close (Safari < 15.4)", async () => {
+  const proto = HTMLDialogElement.prototype as unknown as Record<string, unknown>;
+  const saved = { showModal: proto.showModal, close: proto.close };
+  proto.showModal = undefined;
+  proto.close = undefined;
+  try {
+    await renderWelcome();
+    await user().click(screen.getByRole("button", { name: "Settings" }));
+    await expectOpen();
+    await close();
+  } finally {
+    proto.showModal = saved.showModal;
+    proto.close = saved.close;
+  }
+});

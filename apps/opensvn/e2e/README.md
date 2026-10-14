@@ -16,6 +16,12 @@ Apache + mod_dav_svn over HTTPS with Basic auth. It covers the MVP flows of
 | 10.5 switch | Branch ▾ → feature-x → "Carry changes and switch"; local change carried over, toolbar shows the branch; Switch… by URL back to trunk |
 | history and blame | History tab lists the revisions; Browse → file → Blame attributes lines |
 
+`settings.test.mjs` needs no server (a fresh profile starts on the Welcome screen, like a fresh
+install): the toolbar gear, Ctrl+, and Cmd+, (page reporting macOS) open a visible Settings sheet,
+and Tauri accepts the menu event names the UI subscribes to. `pnpm e2e` runs only the flows; run
+this one after the same build with `xvfb-run -a node e2e/settings.test.mjs` (tauri-driver and
+WebKitWebDriver on `PATH`).
+
 Every test gets a fresh scratch repository (`e2e-<test>-<pid>-<n>`) and a fresh app profile
 (`HOME`, `XDG_*_HOME` in a temp dir), so tests never share state. On failure a screenshot, the
 window text and the driver log land in `e2e-artifacts/` (`OPENSVN_E2E_ARTIFACTS`).
