@@ -79,10 +79,12 @@ export function OpDetails({
     ? t("statusRunning", { title: op.handle.title, stage })
     : op.state === "done"
       ? t("statusDone", { title: op.handle.title })
-      : t("statusFailed", {
-          title: op.handle.title,
-          message: err?.key ? t(err.key) : (err?.message ?? ""),
-        });
+      : op.appError?.code === "cancelled"
+        ? t("statusCancelled", { title: op.handle.title })
+        : t("statusFailed", {
+            title: op.handle.title,
+            message: err?.key ? t(err.key) : (err?.message ?? ""),
+          });
 
   return (
     <ModalDialog

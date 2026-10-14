@@ -48,6 +48,7 @@ export function ActivityPanel({
     if (latest.state === "running")
       return t("statusRunning", { title, stage: t(stageKey(latest)) });
     if (latest.state === "done") return t("statusDone", { title });
+    if (latest.appError?.code === "cancelled") return t("statusCancelled", { title });
     const err = latest.appError ? errorText(latest.appError) : null;
     return t("statusFailed", {
       title,
