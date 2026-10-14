@@ -667,3 +667,25 @@ async fn ignoring_externals_matches_ignore_externals() {
     assert_same_externals(&oracle, &theirs, &ours, "update --ignore-externals");
     let _ = RelPath::root();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_older_svn_reads_our_externals() {
+    // Format 31 is shared by svn 1.8 to 1.15; run with OPENSVN_SVN_BIN pointing at an older
+    // svn (1.14 here) to check it accepts the rows we write.
+    let Some(oracle) = Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_14).expect("oracle")
+    else {
+        return;
+    };
+    let r = Repos::new(&oracle);
+    build(&r);
+    let sb = Sandbox::new();
+    let (ours, _) = our_checkout(&r, &sb, "ours").await;
+    let status = r.svn(&ours, &["status"]);
+    for line in ["X       ext", "X       other", "    X   fext", "    X   sub/pfext"] {
+        assert!(status.lines().any(|l| l == line), "{line} missing in:\n{status}");
+    }
+    r.svn(&ours, &["cleanup"]);
+    let info = r.svn(&ours, &["info", "fext", "ext/a.txt"]);
+    assert!(info.contains("lib/f.txt"), "{info}");
+    assert!(r.svn(&ours, &["propget", "svn:externals", "."]).contains("^/lib ext"));
+}

@@ -8,7 +8,7 @@ use svn_types::{
     CancelToken, Depth, ErrorCode, NodeKind, NodeStatus, PropStatus, RelPath, Result, SvnError,
     WcStatus,
 };
-use svn_wc::db::{BaseNode, External, LockOwner, ObtainMode, Presence, WcDb};
+use svn_wc::db::{BaseNode, External, LockOwner, Node, ObtainMode, Presence, WcDb};
 use svn_wc::workqueue::WorkItem;
 
 use super::{DirLock, ExternalAction, blocking, report};
@@ -204,15 +204,27 @@ fn remove_wc(
         let mut files = Vec::new();
         let mut dirs = Vec::new();
         collect(&db, &root, &mut files, &mut dirs)?;
-        for rel in files {
+        // Each file is checked again right before it goes: one edited since the status ran
+        // stays, and so does the working copy (with its administrative data) around it.
+        let mut edited = None;
+        for (rel, node) in files {
             cancel.check()?;
             let path = wc::abs_path(&db, &rel)?;
             match path.symlink_metadata() {
-                Ok(m) if !m.is_dir() => std::fs::remove_file(&path).map_err(|e| {
-                    SvnError::from_io(format!("cannot remove '{}'", path.display()), &e)
-                })?,
+                Ok(m) if !m.is_dir() => {
+                    if inspect::text_modified(&db, &rel, &node)? {
+                        edited.get_or_insert(rel);
+                        continue;
+                    }
+                    std::fs::remove_file(&path).map_err(|e| {
+                        SvnError::from_io(format!("cannot remove '{}'", path.display()), &e)
+                    })?;
+                }
                 _ => {}
             }
+        }
+        if let Some(rel) = edited {
+            return Ok(Removal::Left(format!("'{rel}' has local modifications")));
         }
         // Deepest first; a directory that still holds unversioned items stays.
         for rel in dirs.iter().rev() {
@@ -246,7 +258,7 @@ impl Drop for RootLock {
 fn collect(
     db: &WcDb,
     dir: &RelPath,
-    files: &mut Vec<RelPath>,
+    files: &mut Vec<(RelPath, Node)>,
     dirs: &mut Vec<RelPath>,
 ) -> Result<()> {
     for child in db.children(dir)? {
@@ -260,7 +272,7 @@ fn collect(
             dirs.push(child.clone());
             collect(db, &child, files, dirs)?;
         } else {
-            files.push(child);
+            files.push((child, node));
         }
     }
     Ok(())
