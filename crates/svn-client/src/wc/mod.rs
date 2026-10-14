@@ -96,6 +96,30 @@ pub fn open_containing(owner: &svn_wc::db::LockOwner, path: &Path) -> Result<(Wc
     Ok((db, rel))
 }
 
+/// [`open_containing`] for a read-only walk of `path` (status): the path is resolved like svn
+/// does it, lexically, so a target that is missing on disk, below a versioned directory replaced
+/// by a file, or below a symlink is still the working copy path the caller named (the walk never
+/// follows a symlink to read what is behind it). A path whose working copy cannot be found that
+/// way (a symlink from outside into a working copy's subdirectory) or with `..` in it is resolved
+/// by [`open_containing`].
+pub fn open_target(owner: &svn_wc::db::LockOwner, path: &Path) -> Result<(WcDb, RelPath)> {
+    let lexical = std::path::absolute(path).ok().filter(|p| {
+        p.components()
+            .all(|c| !matches!(c, std::path::Component::ParentDir))
+    });
+    let Some(abs) = lexical else {
+        return open_containing(owner, path);
+    };
+    let Ok(root) = svn_wc::db::find_wcroot(&abs) else {
+        return open_containing(owner, path);
+    };
+    let rel = rel_of(&root, &abs)?;
+    let canonical = std::fs::canonicalize(&root)
+        .map_err(|e| SvnError::from_io(format!("cannot resolve '{}'", root.display()), &e))?;
+    let (db, _) = WcDb::open_and_recover(&canonical, owner.clone())?;
+    Ok((db, rel))
+}
+
 /// `svn upgrade` to working copy format `to`. Only the format the working copy already has is
 /// accepted (a no-op): OpenSVN writes format 31 only, which svn 1.8 to 1.15 and TortoiseSVN use;
 /// converting between formats 31 and 32 (`svn upgrade --compatible-version 1.15`) is not
