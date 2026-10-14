@@ -175,8 +175,9 @@ impl HttpTransport {
     /// `GET`, `PROPFIND`, `REPORT`, `OPTIONS`, `HEAD`) breaks off because the connection failed
     /// (closed or reset by the server or a proxy, TLS ended without `close_notify`, read
     /// timeout; see [`svn_types::ConnectionFailure`]), the partial body is dropped and the
-    /// request is sent again on a fresh connection, at most as often as the retry policy allows
-    /// and after its delays. A write is never sent twice: its failure is returned as is.
+    /// request is sent again, at most as often as the retry policy allows and after its delays
+    /// (a pooled connection that turns out broken under the new attempt is replaced by a new
+    /// one, as for every read). A write is never sent twice: its failure is returned as is.
     pub async fn send_and_read(
         &self,
         req: HttpRequest,

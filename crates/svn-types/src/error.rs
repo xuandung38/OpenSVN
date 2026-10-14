@@ -203,3 +203,26 @@ impl SvnError {
         Self::new(code, format!("{context}: {err}"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_connection_failure_is_found_in_the_cause_chain() {
+        let plain = SvnError::new(ErrorCode::Network, "refused");
+        assert_eq!(plain.connection_failure(), None);
+        let broken = SvnError::new(ErrorCode::Network, "cut off")
+            .with_connection(ConnectionFailure::TlsClosedUncleanly);
+        assert_eq!(
+            broken.connection_failure(),
+            Some(ConnectionFailure::TlsClosedUncleanly)
+        );
+        let wrapped = SvnError::new(ErrorCode::Internal, "drive failed").with_child(broken);
+        assert_eq!(wrapped.connection, None);
+        assert_eq!(
+            wrapped.connection_failure(),
+            Some(ConnectionFailure::TlsClosedUncleanly)
+        );
+    }
+}

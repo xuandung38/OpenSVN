@@ -279,7 +279,7 @@ impl RaWire {
 
     /// Sends a protocol request (buffered or empty body) and reads the whole answer (at most
     /// 4 MiB). The answer of a read-only request that breaks off on a failed connection is
-    /// fetched again on a fresh connection (see [`HttpTransport::send_and_read`]).
+    /// fetched again (see [`HttpTransport::send_and_read`]).
     pub async fn fetch_small(
         &self,
         req: svn_protocol::HttpRequest,

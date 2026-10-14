@@ -99,7 +99,7 @@ async fn a_checkout_broken_mid_drive_resumes_on_a_fresh_connection() {
                 e.action == svn_client::UpdateAction::Add && e.path.as_str().ends_with(".txt")
             })
             .count();
-        assert!(added >= 12, "{failure:?}: {added}");
+        assert_eq!(added, 12, "{failure:?}");
     }
 }
 

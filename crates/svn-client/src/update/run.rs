@@ -385,6 +385,12 @@ pub async fn drive_update(
         .collect();
     events.extend(earlier_events);
     events.extend(out.events.iter().cloned());
+    if reconnects > 0 {
+        // A resumed drive sends again the directories the broken one had opened: report each
+        // notification once.
+        let mut seen = std::collections::HashSet::new();
+        events.retain(|e| seen.insert(format!("{e:?}")));
+    }
     Ok(UpdateSummary {
         revision: out.revision,
         events,
