@@ -5,9 +5,11 @@
 //!
 //! 1. A session is opened at the working copy URL ([`ConnectOptions::at_url`]: the connector
 //!    reparents its cached root session there) and authenticates before any working copy lock
-//!    is taken. Like `svn commit`, the commit is driven relative to that URL
-//!    (`CommitOptions::session_prefix`), so a user whose path-based authorization only covers
-//!    the working copy's subtree (no access to the repository root) can commit.
+//!    is taken. The commit is driven relative to that URL (`CommitOptions::session_prefix`), so
+//!    a user whose path-based authorization only covers the working copy's subtree (no access
+//!    to the repository root) can commit. When a change lies outside it (below a switched
+//!    subtree), the session moves to the common ancestor of the changes, as `svn commit` does
+//!    (`svn_client::commit::commit_anchor`).
 //! 2. The registered root is opened with `svn_client::wc::open_containing`, which gives the
 //!    canonical root spelling crash recovery uses too, so the commit journal is found again on
 //!    the next open whatever path the working copy was registered under.
@@ -220,13 +222,13 @@ impl RealEngine {
         ctx.check()?;
         let info = wc_read::wc_info(&wc.root, ctx).await?;
         let url = RepoUrl::parse(&info.url)?;
-        let session = self
+        let mut session = self
             .connector
             .connect_with(&url, &ConnectOptions::at_url(ctx), &ctx.cancel)
             .await?;
         // Any prompt happens now, before the working copy is locked.
         session.ensure_authenticated(&ctx.cancel).await?;
-        let prefix = session_prefix(session.as_ref())?;
+        let mut prefix = session_prefix(session.as_ref())?;
         let author = session.authenticated_user();
 
         let client = self.client_ctx(ctx);
@@ -268,18 +270,49 @@ impl RealEngine {
             return Err(nothing_to_commit());
         }
 
+        let mut opts = CommitOptions {
+            depth: Depth::Infinity,
+            keep_locks: req.keep_locks,
+            session_prefix: prefix.clone(),
+            author: author.clone(),
+            ..CommitOptions::new(req.message.clone())
+        };
+        // Like `svn commit`, the session is anchored at the common ancestor of the changes: a
+        // change below a switched subtree lies outside the working copy URL.
+        let anchor = {
+            let (db, targets, opts, within) = (
+                Arc::clone(&db),
+                targets.clone(),
+                opts.clone(),
+                prefix.clone(),
+            );
+            blocking(move || svn_client::commit::commit_anchor(&db, &targets, &opts, &within))
+                .await?
+        };
+        if let Some(anchor) = anchor.filter(|a| *a != prefix) {
+            let root = RepoUrl::parse(&info.repo_root_url)?;
+            let at = if anchor.is_empty() {
+                root
+            } else {
+                root.join(&RelPath::new(&anchor)?)?
+            };
+            session = self
+                .connector
+                .connect_with(&at, &ConnectOptions::at_url(ctx), &ctx.cancel)
+                .await?;
+            session.ensure_authenticated(&ctx.cancel).await?;
+            prefix = session_prefix(session.as_ref())?;
+            opts.session_prefix.clone_from(&prefix);
+            if opts.author.is_none() {
+                opts.author = session.authenticated_user();
+            }
+        }
+
         ctx.progress.report(ProgressUpdate {
             phase: PHASE_COMMIT.to_owned(),
             total: Some(targets.len() as u64),
             ..ProgressUpdate::default()
         });
-        let opts = CommitOptions {
-            depth: Depth::Infinity,
-            keep_locks: req.keep_locks,
-            session_prefix: prefix,
-            author,
-            ..CommitOptions::new(req.message.clone())
-        };
         let state_dir = self.commit_journal_dir();
         let result = svn_client::commit::commit(
             &db,
