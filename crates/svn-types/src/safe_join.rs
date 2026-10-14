@@ -72,6 +72,56 @@ pub fn safe_join(root: &Path, rel: &RelPath) -> Result<PathBuf> {
     Ok(out)
 }
 
+/// [`safe_join`] of `rel` for a caller that already holds the result for its parent: `parent`
+/// is `safe_join(root, rel.parent())` and `parent_md` its `lstat` (`None` when nothing is
+/// there). Returns the same path and fails with the same errors as `safe_join(root, rel)`
+/// without `lstat`ing every ancestor again, which matters to walkers that visit every node of
+/// a working copy (status).
+pub fn safe_join_child(
+    parent: &Path,
+    parent_md: Option<&fs::Metadata>,
+    rel: &RelPath,
+) -> Result<PathBuf> {
+    let Some(seg) = rel.file_name() else {
+        return Err(SvnError::new(
+            ErrorCode::UnsafePath,
+            "the working copy root has no parent",
+        ));
+    };
+    // `safe_join` checks the parent as an intermediate component, except the root (the trust
+    // anchor), before it looks at the last segment.
+    if rel.parent().is_some_and(|p| !p.is_root()) {
+        match parent_md {
+            Some(md) if md.file_type().is_symlink() => {
+                return Err(SvnError::new(
+                    ErrorCode::UnsafePath,
+                    format!("symlink in intermediate component of {rel}"),
+                ));
+            }
+            Some(md) if !md.is_dir() => {
+                return Err(SvnError::new(
+                    ErrorCode::UnsafePath,
+                    format!("non-directory in intermediate component of {rel}"),
+                ));
+            }
+            _ => {}
+        }
+    }
+    if is_admin_dir_alias(seg) {
+        return Err(SvnError::new(
+            ErrorCode::UnsafePath,
+            format!("administrative directory in {rel}"),
+        ));
+    }
+    if !is_single_normal_component(seg) {
+        return Err(SvnError::new(
+            ErrorCode::UnsafePath,
+            format!("segment {seg:?} of {rel} is not a plain name"),
+        ));
+    }
+    Ok(parent.join(seg))
+}
+
 /// A segment must parse as exactly one `Component::Normal` on the running platform; this
 /// excludes drive prefixes, root markers and `..` that `PathBuf::push` would act on.
 fn is_single_normal_component(seg: &str) -> bool {
