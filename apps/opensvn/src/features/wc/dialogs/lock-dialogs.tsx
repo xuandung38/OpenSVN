@@ -50,7 +50,8 @@ export function WcLockDialog({
   // Locks of others: what the server just said, else what the status knows.
   const held = heldElsewhere(targets, conflicts);
   const showSteal = held.length > 0 || serverSaysLocked;
-  const owner = held[0]?.owner ?? "";
+  // Every owner the steal would take a lock from, named in the steal box and its warning.
+  const owner = [...new Set(held.map((c) => c.owner))].join(", ");
   const alreadyMine = isLock && mine.length === targets.length && targets.length > 0;
   const running = opId !== undefined;
   // Stealing/breaking needs the tick; plain lock/unlock does not.

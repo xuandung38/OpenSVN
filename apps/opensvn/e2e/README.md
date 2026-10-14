@@ -11,8 +11,8 @@ Apache + mod_dav_svn over HTTPS with Basic auth. It covers the MVP flows of
 | 10.2 daily commit | edit → see the diff → Ctrl+Enter commit → list empties |
 | 10.2 out of date | commit refused → Update merges the incoming change → commit goes through |
 | 10.3 update with a conflict | conflict banner → resolver → "Mine" → banner gone, marker files removed |
-| 10.4 needs-lock file | read-only file → Lock… → writable → Unlock… → read-only → lock → commit releases the lock |
-| 10.4 lock held elsewhere | `todo` until #127: the server refusal never reaches the dialog |
+| 10.4 needs-lock file | read-only file listed under Locks → Lock to edit… → writable → Unlock… → read-only → lock → edit → commit releases the lock |
+| 10.4 lock held elsewhere | Lock to edit… → refused: owner and comment shown → Steal + confirmation → writable, the other lock is gone |
 | 10.5 switch | Location → Switch… → branch URL; local change carried over, toolbar updates |
 | history and blame | History tab lists the revisions; Browse → file → Blame attributes lines |
 
@@ -35,7 +35,9 @@ window text and the driver log land in `e2e-artifacts/` (`OPENSVN_E2E_ARTIFACTS`
 
 The server must accept `tester` / `tester-pass` (Basic). Its certificate may be self-signed: the
 test accepts it in the app's trust dialog, and `svn` runs with
-`--trust-server-cert-failures=unknown-ca,cn-mismatch`.
+`--trust-server-cert-failures=unknown-ca,cn-mismatch`. The server certificate itself must not be a
+CA (`basicConstraints=CA:FALSE`): rustls refuses a CA certificate used as the server's
+(`CaUsedAsEndEntity`). `scripts/test-env/visualsvn-like.sh up` sets up a suitable Apache.
 
 ## Running
 
