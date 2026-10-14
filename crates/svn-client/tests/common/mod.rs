@@ -94,3 +94,48 @@ pub fn base_rows(db: &WcDb) -> Vec<(String, String, String, i64, String)> {
     })
     .expect("read")
 }
+
+/// Opens sessions for externals over a set of fake repositories (by repository root), and
+/// records every URL it was asked for.
+pub struct FakeOpener {
+    pub repos: Vec<FakeRaSession>,
+    pub opened: std::sync::Mutex<Vec<String>>,
+}
+
+impl FakeOpener {
+    pub fn new(repos: Vec<FakeRaSession>) -> Arc<Self> {
+        Arc::new(Self {
+            repos,
+            opened: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl svn_client::externals::SessionOpener for FakeOpener {
+    async fn open(
+        &self,
+        url: &svn_types::RepoUrl,
+        _cancel: &svn_types::CancelToken,
+    ) -> svn_types::Result<Arc<dyn svn_ra_api::RaSession>> {
+        use svn_ra_api::RaSession as _;
+        self.opened.lock().unwrap().push(url.to_string());
+        for r in &self.repos {
+            if let Ok(s) = r.at(url) {
+                return Ok(Arc::new(s));
+            }
+            let _ = r.repos_root();
+        }
+        Err(svn_types::SvnError::new(
+            svn_types::ErrorCode::Network,
+            format!("no fake repository serves {url}"),
+        ))
+    }
+}
+
+/// [`ctx`] that fetches externals through `opener`.
+pub fn ext_ctx(opener: Arc<FakeOpener>) -> ClientCtx {
+    let mut c = ctx();
+    c.externals = Some(opener);
+    c
+}

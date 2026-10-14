@@ -505,10 +505,7 @@ async fn a_commit_between_paths_leaves_every_path_at_the_same_revision() {
     assert_eq!(info.rev_range, Some((Rev(2), Rev(3))));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn externals_are_never_fetched() {
-    let s = setup();
-    assert!(!s.f.engine.capabilities().externals);
+fn set_trunk_externals(s: &Setup, value: &str) {
     s.f.repo
         .seed(
             "carol",
@@ -517,11 +514,21 @@ async fn externals_are_never_fetched() {
                 RelPath::new("trunk").unwrap(),
                 PropChange {
                     name: "svn:externals".into(),
-                    value: Some(Bytes::from_static(b"^/branches/b1 ext\n")),
+                    value: Some(Bytes::from(value.to_owned())),
                 },
             )],
         )
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn checkout_and_update_fetch_externals_unless_ignored() {
+    let s = setup();
+    assert!(s.f.engine.capabilities().externals);
+    set_trunk_externals(
+        &s,
+        "^/branches/b1 ext\n^/branches/b1/README.md readme-ext\n",
+    );
     for ignore_externals in [false, true] {
         let wc = s.tmp.path().join(format!("wc-{ignore_externals}"));
         s.f.engine
@@ -534,29 +541,132 @@ async fn externals_are_never_fetched() {
             )
             .await
             .unwrap();
-        assert!(!wc.join("ext").exists(), "an external was fetched");
-        // The property itself is checked out like any other.
-        let props: Vec<u8> = rusqlite::Connection::open(wc.join(".svn/wc.db"))
-            .unwrap()
-            .query_row(
-                "SELECT properties FROM nodes WHERE local_relpath = '' AND op_depth = 0",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(
-            props.windows(13).any(|w| w == b"svn:externals"),
-            "svn:externals property missing"
-        );
+        assert_eq!(wc.join("ext").exists(), !ignore_externals);
+        assert_eq!(wc.join("readme-ext").exists(), !ignore_externals);
+        if !ignore_externals {
+            assert_eq!(read(&wc.join("ext/README.md")), "branch\n");
+            assert_eq!(read(&wc.join("readme-ext")), "branch\n");
+        }
+    }
+    // An update follows the changed definition: the old external goes, a new one comes.
+    let wc = s.tmp.path().join("wc-false");
+    set_trunk_externals(&s, "^/branches/b1/src moved\n");
+    s.f.engine
+        .update(&wc_ref(&wc), &update_all(), &ctx())
+        .await
+        .unwrap();
+    assert!(!wc.join("ext").exists());
+    assert!(!wc.join("readme-ext").exists());
+    assert_eq!(read(&wc.join("moved/main.rs")), "fn main() { b1() }\n");
+    // Status reports the external as `X`, never as unversioned.
+    let st =
         s.f.engine
-            .update(&wc_ref(&wc), &update_all(), &ctx())
+            .status(
+                &wc_ref(&wc),
+                crate::engine::facade::StatusQuery {
+                    include_ignored: false,
+                    include_unversioned: true,
+                },
+                &ctx(),
+            )
             .await
             .unwrap();
-        assert!(
-            !wc.join("ext").exists(),
-            "an external was fetched by update"
-        );
+    let moved = st.iter().find(|f| f.path == "moved").expect("listed");
+    assert_eq!(moved.text, opensvn_ipc::NodeStatus::External, "{st:?}");
+}
+
+/// Serves `inner`, but refuses every URL on `refused_host` the way the transport refuses an
+/// untrusted certificate.
+struct RefusingConnector {
+    inner: AnchoringConnector,
+    refused_host: &'static str,
+    asked: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl SessionConnector for RefusingConnector {
+    async fn connect(
+        &self,
+        url: &RepoUrl,
+        cancel: &CancelToken,
+    ) -> Result<Arc<dyn RaSession>, SvnError> {
+        self.inner.connect(url, cancel).await
     }
+
+    async fn connect_with(
+        &self,
+        url: &RepoUrl,
+        options: &ConnectOptions,
+        cancel: &CancelToken,
+    ) -> Result<Arc<dyn RaSession>, SvnError> {
+        self.asked.lock().unwrap().push(url.to_string());
+        if url.as_url().host_str() == Some(self.refused_host) {
+            assert_eq!(options.anchor, Anchor::Url);
+            return Err(SvnError::new(
+                ErrorCode::TlsUntrusted,
+                "the server certificate is not trusted",
+            ));
+        }
+        self.inner.connect_with(url, options, cancel).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_external_on_another_host_goes_through_the_connector_and_only_warns() {
+    let repo = standard_repo();
+    repo.seed(
+        "bob",
+        "branch",
+        &[
+            put("branches/b1/README.md", "branch\n"),
+            FakeChange::SetProp(
+                RelPath::new("trunk").unwrap(),
+                PropChange {
+                    name: "svn:externals".into(),
+                    value: Some(Bytes::from_static(
+                        b"https://evil.example/svn/x far\n^/branches/b1 near\n",
+                    )),
+                },
+            ),
+        ],
+    )
+    .unwrap();
+    let connector = Arc::new(RefusingConnector {
+        inner: AnchoringConnector {
+            repo: repo.clone(),
+            hang: Arc::new(AtomicBool::new(false)),
+            after_update: Arc::new(Mutex::new(None)),
+        },
+        refused_host: "evil.example",
+        asked: Mutex::new(Vec::new()),
+    });
+    let f = fixture_on(repo, Arc::clone(&connector) as _, Arc::new(ClientRecovery));
+    let tmp = tempfile::tempdir().unwrap();
+    let wc = tmp.path().join("wc");
+    let (ctx, seen) = recording_ctx();
+    f.engine
+        .checkout(&plan(&format!("{URL}/trunk"), &wc), &ctx)
+        .await
+        .unwrap();
+    assert!(!wc.join("far").exists());
+    assert_eq!(read(&wc.join("near/README.md")), "branch\n");
+    assert!(
+        connector
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|u| u.starts_with("https://evil.example/")),
+        "the other host was asked through the connector"
+    );
+    let warnings: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|u| u.phase == "external-warning")
+        .map(|u| u.current_path.clone())
+        .collect();
+    assert_eq!(warnings, [Some("far".to_owned())]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

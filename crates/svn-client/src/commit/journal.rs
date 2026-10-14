@@ -21,8 +21,15 @@
 //! (another build wrote it); a file of a known version that does not parse is corrupt and is
 //! moved aside under a new name, never replacing an earlier one; a file that cannot be read at
 //! all (permissions, I/O) stays where it is.
+//!
+//! File names carry an owner hint: `commit-<hint>-<unique>.json`, where `<hint>` is the first 12
+//! hex digits of the SHA-1 of the working copy root ([`owner_hint`]). A file that cannot be read
+//! or parsed is attributed to its working copy through the name alone, so an unreadable journal
+//! of one working copy does not block or get reported for every other one. Files without a hint
+//! (written by earlier builds, or renamed by hand) may belong to any working copy and are treated
+//! conservatively as such ([`JournalStore::may_belong_to`]).
 
-use std::fs::{self, File};
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -46,6 +53,8 @@ const FORMAT_VERSION: u32 = 2;
 const READABLE_VERSIONS: [u32; 2] = [1, 2];
 const JOURNAL_PREFIX: &str = "commit-";
 const JOURNAL_SUFFIX: &str = ".json";
+/// Hex digits of the owner hint in journal file names.
+const OWNER_HINT_LEN: usize = 12;
 /// How many quarantined copies of one journal may exist before quarantine refuses.
 const QUARANTINE_SLOTS: usize = 8;
 
@@ -214,15 +223,52 @@ fn new_id() -> String {
     )
 }
 
+/// Owner hint of the working copy at `wcroot` for journal file names: the first 12 hex digits of
+/// the SHA-1 of the root path exactly as journals record it ([`JournalData::wcroot`]).
+pub fn owner_hint(wcroot: &Path) -> String {
+    use sha1::{Digest, Sha1};
+    let digest = Sha1::digest(wcroot.to_string_lossy().as_bytes());
+    let mut hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    hex.truncate(OWNER_HINT_LEN);
+    hex
+}
+
+/// The owner hint in the name of the journal file `path`, when it has one: the name continues
+/// after `commit-` with exactly 12 lower-case hex digits and a `-`. Identifiers of earlier builds
+/// start with the 16 hex digits of a nanosecond timestamp, so they never look like a hint.
+fn file_owner_hint(path: &Path) -> Option<&str> {
+    let name = path.file_name()?.to_str()?;
+    let rest = name.strip_prefix(JOURNAL_PREFIX)?;
+    let hint = rest.get(..OWNER_HINT_LEN)?;
+    let is_hint = hint
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && rest.as_bytes().get(OWNER_HINT_LEN) == Some(&b'-');
+    is_hint.then_some(hint)
+}
+
 impl JournalStore {
     /// Uses `dir` (created on demand).
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
     }
 
-    /// Fresh identifier for a new commit.
+    /// Fresh identifier for a new commit, without an owner hint (see [`Self::new_id_for`]).
     pub fn new_id(&self) -> String {
         new_id()
+    }
+
+    /// Fresh identifier for a new commit of the working copy at `wcroot`, starting with its
+    /// [`owner_hint`] so the file can be attributed without being read.
+    pub fn new_id_for(&self, wcroot: &Path) -> String {
+        format!("{}-{}", owner_hint(wcroot), new_id())
+    }
+
+    /// Whether the journal file `path` may belong to the working copy at `wcroot`, judged from
+    /// its name only: true when the name carries that working copy's owner hint or no hint at all
+    /// (an earlier build's file, whose owner is unknown until it is read).
+    pub fn may_belong_to(path: &Path, wcroot: &Path) -> bool {
+        file_owner_hint(path).is_none_or(|h| h == owner_hint(wcroot))
     }
 
     /// Path of the journal file with `id`.
@@ -326,10 +372,7 @@ impl JournalStore {
                 n => path.with_file_name(format!("{name}.corrupt.{n}")),
             };
             match move_no_replace(path, &aside) {
-                Ok(()) => {
-                    sync_dir(&self.dir);
-                    return Ok(aside);
-                }
+                Ok(()) => return Ok(aside),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => {
                     return Err(io(
@@ -423,8 +466,9 @@ impl JournalStore {
 /// atomically), then the original is removed. On file systems without hard links the contents
 /// are copied into a file opened with `create_new` (`O_EXCL` / `CREATE_NEW`), which is just as
 /// exclusive. If the original cannot be removed afterwards the new name is removed again, so on
-/// any error `from` is left as it was.
-fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+/// any error `from` is left as it was. On success the folders of both names are synced so the
+/// move survives a crash (where the platform allows it).
+pub fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     match fs::hard_link(from, to) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
@@ -446,13 +490,16 @@ fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
         let _ = fs::remove_file(to);
         return Err(e);
     }
+    for dir in [to.parent(), from.parent()].into_iter().flatten() {
+        sync_dir(dir);
+    }
     Ok(())
 }
 
 /// Makes a rename durable where the platform allows it (no-op elsewhere).
 fn sync_dir(dir: &Path) {
     #[cfg(unix)]
-    if let Ok(f) = File::open(dir) {
+    if let Ok(f) = fs::File::open(dir) {
         let _ = f.sync_all();
     }
     #[cfg(not(unix))]
@@ -685,5 +732,45 @@ mod tests {
         std::fs::write(&path, b"{ nope").expect("write");
         let err = JournalStore::read(&path).expect_err("corrupt");
         assert_eq!(err.code, ErrorCode::Corrupt);
+    }
+
+    #[test]
+    fn file_names_carry_an_owner_hint_of_their_working_copy() {
+        let store = JournalStore::new("/state");
+        let (a, b) = (Path::new("/wc/a"), Path::new("/wc/b"));
+        let id = store.new_id_for(a);
+        let file = store.file_of(&id);
+        assert!(id.starts_with(&owner_hint(a)), "{id}");
+        assert_eq!(owner_hint(a).len(), 12);
+        assert_ne!(owner_hint(a), owner_hint(b));
+        assert!(JournalStore::may_belong_to(&file, a));
+        assert!(!JournalStore::may_belong_to(&file, b));
+        // Without a hint (earlier builds, hand-made names) the owner is unknown: any working copy.
+        for old in [
+            store.file_of(&store.new_id()),
+            PathBuf::from("/state/commit-junk.json"),
+            PathBuf::from("/state/commit-0123456789ab.json"),
+            PathBuf::from("/state/commit-0123456789AB-1.json"),
+            PathBuf::from("/state/commit-0123456789abc-1.json"),
+        ] {
+            assert!(JournalStore::may_belong_to(&old, a), "{}", old.display());
+            assert!(JournalStore::may_belong_to(&old, b), "{}", old.display());
+        }
+    }
+
+    #[test]
+    fn move_no_replace_never_replaces_and_keeps_the_source_on_failure() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let (from, to) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::write(&from, b"a").expect("write");
+        std::fs::write(&to, b"b").expect("write");
+        let err = move_no_replace(&from, &to).expect_err("target exists");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&from).expect("kept"), b"a");
+        assert_eq!(std::fs::read(&to).expect("kept"), b"b");
+        std::fs::remove_file(&to).expect("rm");
+        move_no_replace(&from, &to).expect("moved");
+        assert!(!from.exists());
+        assert_eq!(std::fs::read(&to).expect("moved"), b"a");
     }
 }

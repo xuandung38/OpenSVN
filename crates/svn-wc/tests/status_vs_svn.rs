@@ -486,6 +486,7 @@ fn status_matches_svn_for_translation_symlinks_and_subdir_target() {
     write(&wc, "native.txt", "one\ntwo\n");
     write(&wc, "same.txt", "aaaa\n");
     write(&wc, "d/sub.txt", "s\n");
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut added = vec![
         "kw_id.txt",
         "kw_rev.txt",

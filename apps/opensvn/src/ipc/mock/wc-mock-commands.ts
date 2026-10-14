@@ -419,7 +419,7 @@ export function wcMockCommands(deps: MockDeps) {
               owner: "you",
               comment: req.comment,
               createdAt: new Date().toISOString(),
-              token: `tok-${f.path}`,
+              token: null,
               mine: true,
             },
           })),
