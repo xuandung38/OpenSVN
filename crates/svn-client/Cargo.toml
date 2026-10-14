@@ -34,4 +34,5 @@ fail = { workspace = true, optional = true }
 [dev-dependencies]
 svn-ra-api = { workspace = true, features = ["fake"] }
 opensvn-svn-oracle = { path = "../../tests/svn-oracle" }
+rusqlite.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

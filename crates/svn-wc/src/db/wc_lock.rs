@@ -462,23 +462,29 @@ impl WcDb {
                 None => report.needs_user_action.push(dir.clone()),
             }
         }
-        let removed = self.with_write(|tx| {
-            let mut removed = Vec::new();
-            for (dir, levels) in &to_remove {
-                // Only the exact row we left: same directory and same levels as the marker says.
-                let n = tx
-                    .execute(
-                        "DELETE FROM wc_lock WHERE wc_id = ?1 AND local_dir_relpath = ?2 \
+        // Nothing to remove: no write transaction, so opening a working copy for reading (status)
+        // never waits for the write lock of another process.
+        let removed = if to_remove.is_empty() {
+            Vec::new()
+        } else {
+            self.with_write(|tx| {
+                let mut removed = Vec::new();
+                for (dir, levels) in &to_remove {
+                    // Only the exact row we left: same directory and same levels as the marker says.
+                    let n = tx
+                        .execute(
+                            "DELETE FROM wc_lock WHERE wc_id = ?1 AND local_dir_relpath = ?2 \
                          AND locked_levels = ?3",
-                        params![self.wc_id, dir.as_str(), levels],
-                    )
-                    .map_err(sql_err)?;
-                if n > 0 {
-                    removed.push(dir.clone());
+                            params![self.wc_id, dir.as_str(), levels],
+                        )
+                        .map_err(sql_err)?;
+                    if n > 0 {
+                        removed.push(dir.clone());
+                    }
                 }
-            }
-            Ok(removed)
-        })?;
+                Ok(removed)
+            })?
+        };
         report.recovered = removed;
         // Bookkeeping after the rows are gone; a crash here only leaves things for the next run.
         for (dir, _) in &to_remove {
