@@ -34,12 +34,17 @@ struct App {
 }
 
 fn start(db: &AppDb, store: &Arc<MemoryStore>) -> App {
+    start_with_timeout(db, store, Duration::from_secs(20))
+}
+
+/// Like [`start`] with a custom sign-in prompt timeout.
+fn start_with_timeout(db: &AppDb, store: &Arc<MemoryStore>, timeout: Duration) -> App {
     let events = Arc::new(RecordingEvents::default());
     let broker = Arc::new(AuthBroker::with_timeout(
         events.clone(),
         db.clone(),
         store.clone(),
-        Duration::from_secs(20),
+        timeout,
     ));
     let (settings, rx) = watch::channel(crate::settings::defaults(None));
     let connector = connector_for(&broker, rx);
@@ -908,4 +913,57 @@ async fn a_stale_saved_password_stays_withheld_after_a_restart() {
         .ensure_authenticated(&CancelToken::new())
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn a_timed_out_sign_in_prompt_does_not_block_the_next_attempt() {
+    // Issue #108: an unanswered prompt (broker timeout) used to fail every later request on the
+    // shared transport without asking again.
+    let srv = SvnServer::start(Script {
+        require_auth: true,
+        ..Script::default()
+    })
+    .await;
+    let (db, store) = (AppDb::open_in_memory().unwrap(), store());
+    trust(&db, &srv);
+    let app = start_with_timeout(&db, &store, Duration::from_millis(300));
+    let err = app
+        .connect(&srv.url("/trunk"), Anchor::Url, true)
+        .await
+        .err()
+        .expect("nobody answered");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert_eq!(app.prompts().len(), 1);
+
+    // Background work still fails fast and never prompts.
+    let err = app
+        .connect(&srv.url("/trunk"), Anchor::Url, false)
+        .await
+        .err()
+        .expect("background work needs the user");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert_eq!(app.prompts().len(), 1);
+
+    // The user tries again: a new prompt, answered this time.
+    let connector = app.connector.clone();
+    let url = RepoUrl::parse(&srv.url("/trunk")).unwrap();
+    let retry = tokio::spawn(async move {
+        connector
+            .connect_with(
+                &url,
+                &ConnectOptions {
+                    anchor: Anchor::Url,
+                    interactive: true,
+                },
+                &CancelToken::new(),
+            )
+            .await
+            .map(|_| ())
+    });
+    app.respond(1, credentials(PASSWORD, false)).await;
+    retry
+        .await
+        .unwrap()
+        .expect("signed in on the second prompt");
+    assert_eq!(app.prompts().len(), 2);
 }
