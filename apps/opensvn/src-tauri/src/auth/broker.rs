@@ -103,11 +103,13 @@ pub struct AuthBroker {
     /// Sign-outs per realm. A typed answer records the count when it is typed and is saved only
     /// if no sign-out of its realm happened since (a request still in flight at sign-out must
     /// not save the password back).
-    ///
-    /// Also the account gate: [`AuthPrompter::credentials_accepted`] holds it across the count
-    /// check, the keychain write and `account_upsert`, and [`Self::sign_out`] across the count
-    /// bump and its deletions, so a save and a sign-out never interleave.
+    /// Only ever locked briefly; the count changes only under `account_gate`.
     sign_outs: Arc<Mutex<HashMap<String, u64>>>,
+    /// [`AuthPrompter::credentials_accepted`] holds it across the sign-out count check, the
+    /// keychain write and `account_upsert`, and [`Self::sign_out`] across the count bump and
+    /// its deletions, so a save and a sign-out never interleave. Kept apart from `sign_outs` so
+    /// reading the count (when a prompt is answered) never waits for a slow keychain write.
+    account_gate: Arc<Mutex<()>>,
     /// `sign_outs` count of the realm when the last answer for each origin was typed.
     typed_at: Mutex<HashMap<OriginKey, u64>>,
     /// Bumped whenever cached sessions must be dropped (sign-out, certificate removed).
@@ -184,6 +186,7 @@ impl AuthBroker {
             awaiting: Mutex::default(),
             typed_rejected: Mutex::default(),
             sign_outs: Arc::default(),
+            account_gate: Arc::default(),
             typed_at: Mutex::default(),
             invalidations: watch::Sender::new(0),
         }
@@ -333,9 +336,9 @@ impl AuthBroker {
     pub fn sign_out(&self, realm: &str) -> Result<(), AppError> {
         // Held to the end: a save in progress finishes first (and is then deleted here), or
         // starts after and sees the new count.
-        let mut sign_outs = locked(&self.sign_outs);
+        let gate = locked(&self.account_gate);
         // First, so an answer typed before now cannot be saved by a request still in flight.
-        *sign_outs.entry(realm.to_owned()).or_default() += 1;
+        *locked(&self.sign_outs).entry(realm.to_owned()).or_default() += 1;
         let accounts = self.db.accounts_of_realm(realm)?;
         let mut failures = Vec::new();
         for account in accounts {
@@ -374,7 +377,7 @@ impl AuthBroker {
                 }
             }
         }
-        drop(sign_outs);
+        drop(gate);
         self.invalidate();
         if failures.is_empty() {
             Ok(())
@@ -439,10 +442,12 @@ fn origin_url(o: &OriginKey) -> String {
 
 /// Saves an accepted typed password: the secret first, then the account row (which clears the
 /// stale flag), so a failed save cannot re-arm an old, rejected password. Runs under the account
-/// gate (`sign_outs`) and does nothing if the realm was signed out since the answer was typed
+/// gate and does nothing if the realm was signed out since the answer was typed
 /// (`typed_at`). Returns whether the password and its row were recorded.
+#[allow(clippy::too_many_arguments)]
 fn save_accepted(
-    gate: &Mutex<HashMap<String, u64>>,
+    gate: &Mutex<()>,
+    sign_outs: &Mutex<HashMap<String, u64>>,
     store: &dyn CredentialStore,
     db: &AppDb,
     origin: &OriginKey,
@@ -450,8 +455,8 @@ fn save_accepted(
     password: &SecretString,
     typed_at: u64,
 ) -> bool {
-    let sign_outs = locked(gate);
-    if sign_outs.get(&origin.realm).copied().unwrap_or(0) != typed_at {
+    let gate = locked(gate);
+    if locked(sign_outs).get(&origin.realm).copied().unwrap_or(0) != typed_at {
         tracing::info!(host = %origin.host, "signed out since the password was typed; not saving it");
         return false;
     }
@@ -484,7 +489,7 @@ fn save_accepted(
             tracing::warn!(error = %e, "could not delete the replaced password");
         }
     }
-    drop(sign_outs);
+    drop(gate);
     true
 }
 
@@ -547,7 +552,8 @@ impl AuthPrompter for AuthBroker {
             return;
         };
         // Off the async runtime (OS stores may block on IPC), under the account gate.
-        let (gate, store, db) = (
+        let (gate, sign_outs, store, db) = (
+            Arc::clone(&self.account_gate),
             Arc::clone(&self.sign_outs),
             Arc::clone(&self.secrets),
             self.db.clone(),
@@ -555,7 +561,9 @@ impl AuthPrompter for AuthBroker {
         let (o, user) = (origin.clone(), creds.username.clone());
         let password = SecretString::from(creds.password.expose_secret().to_owned());
         let saved = tokio::task::spawn_blocking(move || {
-            save_accepted(&gate, &*store, &db, &o, &user, &password, typed_at)
+            save_accepted(
+                &gate, &sign_outs, &*store, &db, &o, &user, &password, typed_at,
+            )
         });
         match saved.await {
             Ok(true) => {

@@ -289,10 +289,10 @@ fn path_below_root(session: &dyn RaSession, url: &RepoUrl) -> EngineResult<RelPa
 #[async_trait]
 impl EngineFacade for RealEngine {
     fn capabilities(&self) -> EngineCapabilities {
-        // `svn-client` does not fetch `svn:externals` yet (issue #97): checkout, update and switch
-        // behave like `svn --ignore-externals`.
+        // Checkout, update and switch fetch `svn:externals`; a checkout honours
+        // `ignore_externals` (see `sync`).
         EngineCapabilities {
-            externals: false,
+            externals: true,
             demo: false,
         }
     }
