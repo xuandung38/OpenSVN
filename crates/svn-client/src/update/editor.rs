@@ -50,6 +50,9 @@ pub(super) use failpoint;
 /// How long a cancelled drive waits for durability barriers before it gives up committing.
 const CANCEL_GRACE: Duration = Duration::from_millis(500);
 
+/// How often a barrier wait looks at the cancellation token.
+const CANCEL_POLL: Duration = Duration::from_millis(50);
+
 /// Applies an update, switch or checkout drive to a working copy.
 pub struct UpdateEditor {
     pub(super) s: UpdateSetup,
@@ -237,20 +240,30 @@ impl UpdateEditor {
         Ok(())
     }
 
-    /// Waits for `barrier`, or until the cancellation deadline. Past the deadline nothing more
-    /// is committed by this drive (the barrier finishes on its own thread).
+    /// Waits for `barrier`. A cancellation, also one that arrives during the wait, bounds the
+    /// wait to [`CANCEL_GRACE`]; past it nothing more is committed by this drive (the barrier
+    /// finishes on its own thread, and nothing that relies on it commits).
     fn await_barrier(&mut self, barrier: &Barrier) -> Result<()> {
-        let root = self.s.db.wcroot();
-        match barrier.wait(self.deadline) {
-            Some(r) => {
-                r.map_err(|e| SvnError::from_io(format!("cannot sync '{}'", root.display()), &e))
+        #[cfg(feature = "failpoints")]
+        fail::fail_point!("update.barrier_wait");
+        loop {
+            if self.deadline.is_none() && self.s.cancel.is_cancelled() {
+                self.deadline = Some(Instant::now() + CANCEL_GRACE);
             }
-            None => {
+            let step = Instant::now() + CANCEL_POLL;
+            let until = self.deadline.map_or(step, |d| d.min(step));
+            if let Some(r) = barrier.wait(Some(until)) {
+                let root = self.s.db.wcroot();
+                return r.map_err(|e| {
+                    SvnError::from_io(format!("cannot sync '{}'", root.display()), &e)
+                });
+            }
+            if self.deadline.is_some_and(|d| Instant::now() >= d) {
                 self.poisoned = true;
-                Err(SvnError::new(
+                return Err(SvnError::new(
                     ErrorCode::Cancelled,
                     "cancelled while waiting for the disk; the next update finishes the work",
-                ))
+                ));
             }
         }
     }

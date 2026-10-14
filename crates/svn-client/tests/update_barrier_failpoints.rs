@@ -5,8 +5,8 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -22,6 +22,7 @@ async fn barriers_of_the_batched_editor() {
     let scenario = fail::FailScenario::setup();
     same_text_is_placed_once_across_batches().await;
     cancel_does_not_wait_for_a_slow_barrier().await;
+    cancel_during_a_barrier_wait_returns_promptly().await;
     scenario.teardown();
 }
 
@@ -121,6 +122,102 @@ async fn cancel_does_not_wait_for_a_slow_barrier() {
         took < Duration::from_millis(1500),
         "cancel waited {took:?} for the barrier"
     );
+
+    let sum = update(&ctx(), &s, &wc, None, Depth::Unknown, &CancelToken::new())
+        .await
+        .expect("resume");
+    assert_eq!(sum.revision, Some(Revnum(2)));
+    for (f, text) in [("a.txt", "a2\n"), ("b.txt", "b2\n"), ("d/c.txt", "c2\n")] {
+        assert_eq!(read(&wc.join(f)), text, "{f}");
+    }
+    let db = open_db(&wc);
+    assert!(db.work_items().expect("queue").is_empty());
+    let rows = base_rows(&db);
+    assert!(rows.iter().all(|r| r.1 == "normal" && r.3 == 2), "{rows:?}");
+}
+
+/// A cancellation that arrives while the editor already waits for a slow barrier (here the one
+/// of the last batch, at the end of the drive) ends the wait within the grace period; nothing
+/// that relies on the barrier is committed, and the next update finishes the work.
+async fn cancel_during_a_barrier_wait_returns_promptly() {
+    let s = session();
+    s.seed(
+        "a",
+        "r1",
+        &[
+            put("a.txt", "a\n"),
+            put("b.txt", "b\n"),
+            put("d/c.txt", "c\n"),
+        ],
+    )
+    .expect("seed");
+    let sb = Sandbox::new();
+    let wc = sb.path("wc");
+    checkout(
+        &ctx(),
+        &s,
+        &wc,
+        None,
+        Depth::Infinity,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("checkout");
+    if !svn_wc::durable::batched_sync(&wc) {
+        eprintln!("skipped: the test directory's filesystem syncs every file on its own");
+        return;
+    }
+    s.seed(
+        "a",
+        "r2",
+        &[
+            put("a.txt", "a2\n"),
+            put("b.txt", "b2\n"),
+            put("d/c.txt", "c2\n"),
+        ],
+    )
+    .expect("seed");
+
+    // The barrier takes 4 s; 300 ms into the first wait for it, the user cancels.
+    let cancel = CancelToken::new();
+    let cancelled_at: Arc<Mutex<Option<Instant>>> = Arc::default();
+    let (trip, at) = (cancel.clone(), Arc::clone(&cancelled_at));
+    fail::cfg("update.sync_barrier", "sleep(4000)").unwrap();
+    fail::cfg_callback("update.barrier_wait", move || {
+        let mut slot = at.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(Instant::now() + Duration::from_millis(300));
+            let (trip, at) = (trip.clone(), Arc::clone(&at));
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                *at.lock().unwrap() = Some(Instant::now());
+                trip.cancel();
+            });
+        }
+    })
+    .unwrap();
+    let result = update(&ctx(), &s, &wc, None, Depth::Unknown, &cancel).await;
+    let returned = Instant::now();
+    fail::remove("update.barrier_wait");
+    fail::remove("update.sync_barrier");
+    let err = result.expect_err("cancelled");
+    assert_eq!(err.code, ErrorCode::Cancelled, "{err}");
+    let at = cancelled_at
+        .lock()
+        .unwrap()
+        .expect("the editor waited for a barrier");
+    let took = returned.saturating_duration_since(at);
+    assert!(
+        took < Duration::from_secs(1),
+        "update returned {took:?} after the cancellation"
+    );
+    {
+        // Nothing that relies on the unfinished barrier was committed.
+        let db = open_db(&wc);
+        let rows = base_rows(&db);
+        assert!(rows.iter().all(|r| r.3 == 1), "{rows:?}");
+    }
 
     let sum = update(&ctx(), &s, &wc, None, Depth::Unknown, &CancelToken::new())
         .await
