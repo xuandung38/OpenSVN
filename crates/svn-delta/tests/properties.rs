@@ -272,3 +272,56 @@ fn base64_decode_throughput_with_wrapped_lines() {
         assert!(rate >= 100.0, "chunk {chunk}: {rate:.0} MB/s < 100");
     }
 }
+
+/// A target derived from `base` by random edits (replace, insert, delete, move), so the
+/// delta finds matches of every shape.
+fn edited(base: &[u8], edits: &[(u8, usize, usize, u8)]) -> Vec<u8> {
+    let mut t = base.to_vec();
+    for &(kind, at, len, byte) in edits {
+        let at = if t.is_empty() { 0 } else { at % t.len() };
+        let end = (at + len).min(t.len());
+        match kind % 4 {
+            0 => t[at..end].iter_mut().for_each(|b| *b = byte),
+            1 => {
+                t.splice(at..at, std::iter::repeat_n(byte, len));
+            }
+            2 => {
+                t.drain(at..end);
+            }
+            _ => {
+                let chunk: Vec<u8> = t[at..end].to_vec();
+                t.extend_from_slice(&chunk);
+            }
+        }
+    }
+    t
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2_000))]
+
+    /// Windows of `delta_window` encoded, decoded in chunks and applied give back the target,
+    /// window by window, like the commit upload sends them.
+    #[test]
+    fn delta_windows_roundtrip(
+        base in proptest::collection::vec(any::<u8>(), 0..6000),
+        edits in proptest::collection::vec((any::<u8>(), any::<usize>(), 0usize..300, any::<u8>()), 0..8),
+        window in 64usize..2500,
+        v in version(),
+        cuts in proptest::collection::vec(0usize..64, 0..12),
+    ) {
+        let target = edited(&base, &edits);
+        let mut enc = SvndiffEncoder::new(v);
+        let mut stream = Vec::new();
+        enc.write_header(&mut stream);
+        let mut sview = base.chunks(window);
+        let mut offset = 0u64;
+        for t in target.chunks(window) {
+            let s = sview.next().unwrap_or(&[]);
+            enc.write_window(&svn_delta::delta_window(offset, s, t), &mut stream).unwrap();
+            offset += s.len() as u64;
+        }
+        let windows = decode_in_chunks(&stream, &cuts);
+        prop_assert_eq!(apply(&base, &windows), target);
+    }
+}

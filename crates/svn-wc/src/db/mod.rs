@@ -29,6 +29,7 @@ mod ops;
 mod repos_info;
 mod schema;
 mod sparse;
+mod subtree;
 mod txn;
 mod wc_lock;
 
@@ -51,6 +52,7 @@ pub use nodes::{Node, Presence, Props};
 pub use ops::{BaseNode, CommitInfo};
 pub use repos_info::ReposInfo;
 pub use schema::{FORMAT_MAX_READ, FORMAT_WRITE, check_supported_format, read_user_version};
+pub use subtree::{ActualRow, LockRow, SubtreeRows};
 pub use txn::WcTxn;
 pub use wc_lock::{ENGINE_TMP_PREFIXES, LockCleanup, LockOwner, LockState, ObtainMode};
 
@@ -277,6 +279,35 @@ impl WcDb {
     /// Runs a read-only closure on the connection. Do not hold the result's borrows across calls.
     pub fn with_read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         f(&self.conn_guard())
+    }
+
+    /// Runs `f`, which makes many reads through this handle, inside ONE read transaction
+    /// (`BEGIN DEFERRED` ... `COMMIT`): SQLite then takes its shared lock and validates its
+    /// page cache once instead of for every statement. `f` must not write: a write transaction
+    /// cannot start inside it. Other processes can still read meanwhile; their writes wait
+    /// (busy timeout) until it ends, so keep it free of network I/O.
+    pub fn read_txn<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        /// Ends the read transaction even when `f` panics.
+        struct End<'a>(&'a WcDb);
+        impl Drop for End<'_> {
+            fn drop(&mut self) {
+                let conn = self.0.conn_guard();
+                if !conn.is_autocommit() {
+                    let _ = conn.execute_batch("ROLLBACK");
+                }
+            }
+        }
+        self.conn_guard()
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(sql_err)?;
+        let end = End(self);
+        let out = f();
+        // Nothing was written: COMMIT and ROLLBACK both just release the shared lock.
+        let done = self.conn_guard().execute_batch("COMMIT").map_err(sql_err);
+        drop(end);
+        let value = out?;
+        done?;
+        Ok(value)
     }
 
     /// Runs `f` inside a `BEGIN IMMEDIATE` transaction; commits on `Ok`, rolls back on `Err`.

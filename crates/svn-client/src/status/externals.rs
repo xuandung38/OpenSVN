@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use svn_types::{RelPath, Result};
-use svn_wc::db::WcDb;
+use svn_wc::db::{Props, WcDb};
 
 use crate::wc::{inspect, join_rel};
 
@@ -201,8 +201,15 @@ impl ExternalPaths {
     /// Adds the targets defined by the `svn:externals` property of the versioned directory
     /// `dir`, both the committed and the local value.
     pub fn add_defined_in(&mut self, db: &WcDb, dir: &RelPath) -> Result<()> {
-        for props in [db.pristine_props(dir)?, db.actual_props(dir)?] {
-            let Some(value) = inspect::prop_value(&props, EXTERNALS_PROP) else {
+        self.add_defined_by(dir, &db.pristine_props(dir)?, &db.actual_props(dir)?);
+        Ok(())
+    }
+
+    /// [`ExternalPaths::add_defined_in`] with the directory's committed (`pristine`) and local
+    /// (`actual`) properties already read.
+    pub fn add_defined_by(&mut self, dir: &RelPath, pristine: &Props, actual: &Props) {
+        for props in [pristine, actual] {
+            let Some(value) = inspect::prop_value(props, EXTERNALS_PROP) else {
                 continue;
             };
             for t in external_targets(value) {
@@ -213,7 +220,6 @@ impl ExternalPaths {
                 }
             }
         }
-        Ok(())
     }
 
     /// True when `rel` is itself an external.

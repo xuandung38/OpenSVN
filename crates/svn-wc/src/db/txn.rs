@@ -543,13 +543,26 @@ impl WcTxn<'_> {
         Ok(())
     }
 
+    /// Removes finished work items by id (an id that is already gone is fine), like the
+    /// deletion step of [`WcDb::wq_record_and_fetch_next`] for many items at once.
+    pub fn complete_work_items(&self, ids: &[i64]) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("DELETE FROM work_queue WHERE id = ?1")
+            .map_err(sql_err)?;
+        for id in ids {
+            stmt.execute([id]).map_err(sql_err)?;
+        }
+        Ok(())
+    }
+
     // ---- pristine index -----------------------------------------------------------------
 
     /// Records the `PRISTINE` row of a text placed with
     /// [`PristineStore::place`](crate::pristine::PristineStore::place); an existing row (and
     /// its refcount) is left alone, like [`PristineIndex::record`](crate::pristine::PristineIndex::record).
-    /// Must run before the NODES row that references the text is written, so the refcount
-    /// trigger counts it.
+    /// Also records a text staged with [`crate::pristine::PristineBatch`]. Must run before the
+    /// NODES row that references the text is written, so the refcount trigger counts it.
     pub fn record_pristine(&self, record: &PristineRecord) -> Result<()> {
         let size = i64::try_from(record.size)
             .map_err(|_| SvnError::new(ErrorCode::Internal, "pristine size out of range"))?;

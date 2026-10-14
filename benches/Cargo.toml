@@ -14,6 +14,10 @@ workspace = true
 name = "compare-svn"
 path = "src/main.rs"
 
+[[bin]]
+name = "compare-svn-commit"
+path = "src/commit.rs"
+
 [dependencies]
 opensvn-crash = { path = "../tests/crash" }
 svn-types.workspace = true

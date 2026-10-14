@@ -85,6 +85,28 @@ impl WcDb {
             .collect()
     }
 
+    /// Paths at or below `path` that have an `ACTUAL_NODE` row (local property changes, a
+    /// conflict or a changelist). A path without one has none of those, so a tree walk can skip
+    /// the per-node queries for them.
+    pub fn actual_rows_below(&self, path: &RelPath) -> Result<Vec<RelPath>> {
+        let rows: Vec<String> = self.with_read(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT local_relpath FROM actual_node WHERE wc_id = ?1 AND (?2 = '' \
+                     OR local_relpath = ?2 OR substr(local_relpath, 1, length(?2) + 1) = ?2 || '/')",
+                )
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map(params![self.wc_id, path.as_str()], |r| r.get(0))
+                .map_err(sql_err)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sql_err)
+        })?;
+        rows.into_iter()
+            .map(|p| RelPath::new(&p).map_err(|_| corrupt(format!("bad relpath '{p}'"))))
+            .collect()
+    }
+
     /// Cached repository lock of the BASE node at `path`, matched by repository location like
     /// svn does (`LOCK.repos_id/repos_relpath` against the node's).
     pub fn repos_lock(&self, path: &RelPath) -> Result<Option<LockInfo>> {

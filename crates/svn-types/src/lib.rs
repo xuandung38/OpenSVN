@@ -24,4 +24,4 @@ pub use model::{
     PropChange, PropStatus, RemoteStatus, WcStatus,
 };
 pub use rel_path::RelPath;
-pub use safe_join::{rename_replacing, safe_join, write_file_replacing};
+pub use safe_join::{rename_replacing, safe_join, safe_join_child, write_file_replacing};

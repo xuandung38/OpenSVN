@@ -360,6 +360,99 @@ fn rename_failure_keeps_its_classification() {
     );
 }
 
+fn hello_record() -> PristineRecord {
+    PristineRecord {
+        sha1: Sha1Digest::from_hex(HELLO_SHA1).unwrap(),
+        md5: Md5Digest::from_hex(HELLO_MD5).unwrap(),
+        size: 6,
+        hydrated: true,
+    }
+}
+
+#[test]
+fn batch_stage_places_texts_without_rows() {
+    let (_d, st) = store();
+    let batch = st.batch().unwrap();
+    let rec = batch
+        .stage(&mut Cursor::new(b"hello\n"), None, None)
+        .unwrap();
+    assert_eq!(rec, hello_record());
+    let path = st.path_of(&rec.sha1);
+    assert_eq!(batch.path_of(&rec.sha1), path);
+    assert_eq!(std::fs::read(&path).unwrap(), b"hello\n");
+    assert!(std::fs::metadata(&path).unwrap().permissions().readonly());
+    assert!(st.index().rows.is_empty(), "the caller records the rows");
+    batch.sync_dirs(&[rec]).unwrap();
+    // A wrong checksum leaves nothing behind.
+    let wrong = Sha1Digest([7; 20]);
+    assert!(matches!(
+        batch.stage(&mut Cursor::new(b"other\n"), Some(&wrong), None),
+        Err(PristineError::ChecksumMismatch { .. })
+    ));
+    assert_eq!(
+        std::fs::read_dir(st.adm_dir.join("tmp")).unwrap().count(),
+        0
+    );
+}
+
+#[test]
+fn batch_adopt_moves_a_checked_file_into_the_store() {
+    let (d, st) = store();
+    let batch = st.batch().unwrap();
+    let src = d.path().join("copy.txt");
+    std::fs::write(&src, b"hello\n").unwrap();
+    let want = hello_record();
+    // Checked before anything moves: a wrong expectation keeps the file where it is.
+    let wrong_md5 = Md5Digest([1; 16]);
+    assert!(matches!(
+        batch.adopt(&src, &want.sha1, &wrong_md5),
+        Err(PristineError::ChecksumMismatch { .. })
+    ));
+    assert!(src.is_file());
+    let rec = batch.adopt(&src, &want.sha1, &want.md5).unwrap();
+    assert_eq!(rec, want);
+    assert!(!src.exists(), "renamed, not copied");
+    let path = st.path_of(&rec.sha1);
+    assert_eq!(std::fs::read(&path).unwrap(), b"hello\n");
+    assert!(std::fs::metadata(&path).unwrap().permissions().readonly());
+    // A missing source is an I/O error the caller can recognize.
+    match batch.adopt(&src, &want.sha1, &want.md5) {
+        Err(PristineError::Io { source, .. }) => {
+            assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn batch_adopt_trusted_checks_the_size_only() {
+    let (d, st) = store();
+    let batch = st.batch().unwrap();
+    let src = d.path().join("copy.txt");
+    std::fs::write(&src, b"hello!\n").unwrap();
+    assert!(matches!(
+        batch.adopt_trusted(&src, &hello_record()),
+        Err(PristineError::ChecksumMismatch { .. })
+    ));
+    assert!(src.is_file());
+    std::fs::write(&src, b"hello\n").unwrap();
+    let rec = batch.adopt_trusted(&src, &hello_record()).unwrap();
+    assert_eq!(rec, hello_record());
+    assert!(!src.exists());
+    assert_eq!(std::fs::read(st.path_of(&rec.sha1)).unwrap(), b"hello\n");
+}
+
+#[test]
+fn batch_needs_a_writable_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = PristineStore::open(
+        dir.path().join(".svn"),
+        PristineMode::ReadOnly,
+        MemIndex::default(),
+    );
+    assert!(matches!(st.batch(), Err(PristineError::ReadOnlyFormat)));
+}
+
 /// A temp file holding `content` in the store's directory, with its record (as the update
 /// editor hands it to `place`).
 fn placed_text(

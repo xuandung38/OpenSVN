@@ -266,8 +266,12 @@ pub(crate) fn read_layer(
     query_one(conn, &sql, params![wc_id, path.as_str(), op_depth])
 }
 
+/// One node row. The statement is cached on the connection: these few queries run for every
+/// node of a tree walk, and preparing them again each time costs more than running them.
 fn query_one(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> Result<Option<Node>> {
-    super::connection::cached_row(conn, sql, p, |r| Ok(node_from_row(r)))
+    conn.prepare_cached(sql)
+        .map_err(sql_err)?
+        .query_row(p, |r| Ok(node_from_row(r)))
         .optional()
         .map_err(sql_err)?
         .transpose()

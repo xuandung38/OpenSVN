@@ -83,6 +83,7 @@ pub(crate) fn sync_file(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
