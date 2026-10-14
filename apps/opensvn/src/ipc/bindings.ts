@@ -176,6 +176,9 @@ export const events = {
 	wcStatusChanged: makeEvent<WcStatusChanged>("wc://status-changed"),
 };
 
+/* Constants */
+export const SETTING_RANGES = {"cache.maxSizeGb":{"max":4096,"min":1},"general.checkIntervalMin":{"max":1440,"min":1},"network.maxConnections":{"max":8,"min":1},"network.timeoutSec":{"max":3600,"min":5}} as const;
+
 /* Types */
 /**  Credential metadata only; never contains a password. */
 export type Account = {
@@ -800,7 +803,7 @@ export type Settings = {
 	"appearance.theme": Theme,
 	"diff.mode": DiffMode,
 	"diff.ignoreWhitespace": boolean,
-	/**  1..=16 */
+	/**  Range: `SETTING_RANGES` (validator in the app crate). */
 	"network.maxConnections": number,
 	"network.timeoutSec": number,
 	"network.proxy": ProxySetting,
@@ -849,7 +852,7 @@ export type SettingsPatch_Deserialize = {
 	"appearance.theme"?: Theme | null,
 	"diff.mode"?: DiffMode | null,
 	"diff.ignoreWhitespace"?: boolean | null,
-	/**  1..=16 */
+	/**  Range: `SETTING_RANGES` (validator in the app crate). */
 	"network.maxConnections"?: number | null,
 	"network.timeoutSec"?: number | null,
 	"network.proxy"?: ProxySetting | null,
@@ -877,7 +880,7 @@ export type SettingsPatch_Serialize = {
 	"appearance.theme"?: Theme | null,
 	"diff.mode"?: DiffMode | null,
 	"diff.ignoreWhitespace"?: boolean | null,
-	/**  1..=16 */
+	/**  Range: `SETTING_RANGES` (validator in the app crate). */
 	"network.maxConnections"?: number | null,
 	"network.timeoutSec"?: number | null,
 	"network.proxy"?: ProxySetting | null,

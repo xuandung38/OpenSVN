@@ -156,10 +156,38 @@ fn proxy_url_with_credentials_is_refused() {
 }
 
 #[test]
+fn out_of_range_stored_numbers_are_clamped_on_load() {
+    let db = AppDb::open_in_memory().unwrap();
+    db.settings_apply(&[
+        // Accepted by older UIs (1..=16, 0 = off, 1 s, ...), refused by the validator now.
+        ("network.maxConnections".into(), Some("16".into())),
+        ("general.checkIntervalMin".into(), Some("0".into())),
+        ("network.timeoutSec".into(), Some("1".into())),
+        ("cache.maxSizeGb".into(), Some("9000".into())),
+    ])
+    .unwrap();
+    let s = SettingsService::load(db, None).unwrap().get();
+    assert_eq!(s.network_max_connections, 8);
+    assert_eq!(s.general_check_interval_min, 1);
+    assert_eq!(s.network_timeout_sec, 5);
+    assert_eq!(s.cache_max_size_gb, 4096);
+}
+
+#[test]
+fn every_ranged_key_is_a_numeric_setting() {
+    let map = to_map(&defaults(None)).unwrap();
+    for (key, r) in SETTING_RANGES {
+        assert!(map.get(key).is_some_and(Value::is_u64), "{key}");
+        assert!(r.min <= r.max, "{key}");
+    }
+    assert_eq!(setting_ranges().len(), SETTING_RANGES.len());
+}
+
+#[test]
 fn corrupt_stored_value_falls_back_to_default() {
     let db = AppDb::open_in_memory().unwrap();
     db.settings_apply(&[
-        ("network.maxConnections".into(), Some("500".into())),
+        ("network.maxConnections".into(), Some("\"many\"".into())),
         ("appearance.theme".into(), Some("\"dark\"".into())),
         ("unknown.key".into(), Some("1".into())),
         ("diff.mode".into(), Some("not json".into())),
@@ -183,4 +211,23 @@ fn checkout_root_changes_only_through_the_picker_path() {
     let s = svc.set_checkout_root("/home/me/work").unwrap();
     assert_eq!(s.general_checkout_root, "/home/me/work");
     assert!(svc.set_checkout_root("  ").is_err());
+}
+
+/// The UI validates with `SETTING_RANGES` from the generated bindings: they must be exactly the
+/// validator's ranges (a stale `bindings.ts` fails here; `pnpm gen:ipc` regenerates it).
+#[test]
+fn the_ui_bindings_carry_the_validator_ranges() {
+    let ts = include_str!("../../../src/ipc/bindings.ts");
+    let json = ts
+        .split("export const SETTING_RANGES = ")
+        .nth(1)
+        .and_then(|rest| rest.split(" as const;").next())
+        .expect("SETTING_RANGES in bindings.ts");
+    let ui: std::collections::BTreeMap<String, opensvn_ipc::SettingRange> =
+        serde_json::from_str(json).unwrap();
+    let rust: std::collections::BTreeMap<String, opensvn_ipc::SettingRange> = SETTING_RANGES
+        .into_iter()
+        .map(|(k, r)| (k.to_owned(), r))
+        .collect();
+    assert_eq!(ui, rust);
 }

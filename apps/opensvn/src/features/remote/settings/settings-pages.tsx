@@ -9,13 +9,19 @@ import type { Settings } from "../../../ipc/bindings";
 import { ipc, unwrap } from "../../../ipc/client";
 import { queryKeys } from "../../../ipc/query-keys";
 import { useT } from "../../../lib/i18n/i18n";
-import { type Draft, settingValue } from "./settings-model";
+import {
+  type Draft,
+  type FieldError,
+  type RangedKey,
+  rangeOf,
+  settingValue,
+} from "./settings-model";
 import { settingsStrings } from "./settings-strings";
 
 export interface PageProps {
   settings: Settings;
   draft: Draft;
-  errors: Record<string, "https" | "range" | "proxy">;
+  errors: Record<string, FieldError>;
   set: (patch: Draft) => void;
 }
 
@@ -71,6 +77,52 @@ function Check({
 
 const num = (s: string) => (s.trim() === "" ? Number.NaN : Number(s));
 
+/** Inline text for `key`: the local rule's message, or `rejected` when only the backend refused it. */
+function fieldError(
+  errors: Record<string, FieldError>,
+  key: string,
+  local: string,
+  rejected: string,
+): string | undefined {
+  const e = errors[key];
+  return e === "rejected" ? rejected : e ? local : undefined;
+}
+
+/**
+ * A numeric setting: its label, `<input min/max>` and inline error all use the backend's range
+ * (`SETTING_RANGES`), so the page can never accept a value that Save would refuse.
+ */
+function NumberField({
+  name,
+  label,
+  settings,
+  draft,
+  errors,
+  set,
+}: PageProps & {
+  name: RangedKey;
+  label: "checkInterval" | "maxConnections" | "timeoutSec" | "cacheMax";
+}) {
+  const t = useT(settingsStrings);
+  const range = rangeOf(name);
+  const value = settingValue(settings, draft, name);
+  const error = errors[name];
+  return (
+    <Field label={t(label, range)} error={error && t("outOfRange", range)}>
+      <Input
+        type="number"
+        min={range.min}
+        max={range.max}
+        step={1}
+        aria-invalid={error ? true : undefined}
+        value={Number.isNaN(value) ? "" : value}
+        onChange={(e) => set({ [name]: num(e.target.value) } as Draft)}
+        className="w-32"
+      />
+    </Field>
+  );
+}
+
 export function GeneralPage({ settings, draft, errors, set }: PageProps) {
   const t = useT(settingsStrings);
   const qc = useQueryClient();
@@ -96,19 +148,11 @@ export function GeneralPage({ settings, draft, errors, set }: PageProps) {
           </Button>
         </div>
       </Field>
-      <Field
-        label={t("checkInterval")}
-        error={errors["general.checkIntervalMin"] && t("outOfRange")}
-      >
-        <Input
-          type="number"
-          min={0}
-          max={1440}
-          value={Number.isNaN(v("general.checkIntervalMin")) ? "" : v("general.checkIntervalMin")}
-          onChange={(e) => set({ "general.checkIntervalMin": num(e.target.value) })}
-          className="w-32"
-        />
-      </Field>
+      <NumberField
+        name="general.checkIntervalMin"
+        label="checkInterval"
+        {...{ settings, draft, errors, set }}
+      />
       <Field label={t("language")}>
         <Select
           value={v("general.language")}
@@ -270,7 +314,12 @@ export function IntegrationsPage({ settings, draft, errors, set }: PageProps) {
       <Field
         label={t("webRevisionUrl")}
         hint={t("templateHelp")}
-        error={errors["integrations.webRevisionUrl"] && t("urlMustBeHttps")}
+        error={fieldError(
+          errors,
+          "integrations.webRevisionUrl",
+          t("urlMustBeHttps"),
+          t("rejected"),
+        )}
       >
         <Input
           value={rev}
@@ -281,7 +330,7 @@ export function IntegrationsPage({ settings, draft, errors, set }: PageProps) {
       </Field>
       <Field
         label={t("webFileUrl")}
-        error={errors["integrations.webFileUrl"] && t("urlMustBeHttps")}
+        error={fieldError(errors, "integrations.webFileUrl", t("urlMustBeHttps"), t("rejected"))}
       >
         <Input
           value={file}
@@ -300,28 +349,16 @@ export function NetworkPage({ settings, draft, errors, set }: PageProps) {
   const v = <K extends keyof Settings>(k: K) => settingValue(settings, draft, k);
   return (
     <div className="flex flex-col gap-3">
-      <Field
-        label={t("maxConnections")}
-        error={errors["network.maxConnections"] && t("outOfRange")}
-      >
-        <Input
-          type="number"
-          min={1}
-          max={16}
-          value={Number.isNaN(v("network.maxConnections")) ? "" : v("network.maxConnections")}
-          onChange={(e) => set({ "network.maxConnections": num(e.target.value) })}
-          className="w-32"
-        />
-      </Field>
-      <Field label={t("timeoutSec")} error={errors["network.timeoutSec"] && t("outOfRange")}>
-        <Input
-          type="number"
-          min={1}
-          value={Number.isNaN(v("network.timeoutSec")) ? "" : v("network.timeoutSec")}
-          onChange={(e) => set({ "network.timeoutSec": num(e.target.value) })}
-          className="w-32"
-        />
-      </Field>
+      <NumberField
+        name="network.maxConnections"
+        label="maxConnections"
+        {...{ settings, draft, errors, set }}
+      />
+      <NumberField
+        name="network.timeoutSec"
+        label="timeoutSec"
+        {...{ settings, draft, errors, set }}
+      />
       <Field label={t("proxy")}>
         <Select
           value={proxy.mode}
@@ -338,7 +375,10 @@ export function NetworkPage({ settings, draft, errors, set }: PageProps) {
         </Select>
       </Field>
       {proxy.mode === "custom" && (
-        <Field label={t("proxyCustom")} error={errors["network.proxy"] && t("proxyUrlInvalid")}>
+        <Field
+          label={t("proxyCustom")}
+          error={fieldError(errors, "network.proxy", t("proxyUrlInvalid"), t("rejected"))}
+        >
           <Input
             value={proxy.url}
             spellCheck={false}
@@ -358,7 +398,6 @@ export function NetworkPage({ settings, draft, errors, set }: PageProps) {
 
 export function AdvancedPage({ settings, draft, errors, set }: PageProps) {
   const t = useT(settingsStrings);
-  const cache = settingValue(settings, draft, "cache.maxSizeGb");
   return (
     <div className="flex flex-col gap-3">
       <Field label={t("wcFormat")}>
@@ -369,15 +408,7 @@ export function AdvancedPage({ settings, draft, errors, set }: PageProps) {
         checked={settingValue(settings, draft, "wc.readSubversionConfig")}
         onChange={(v) => set({ "wc.readSubversionConfig": v })}
       />
-      <Field label={t("cacheMax")} error={errors["cache.maxSizeGb"] && t("outOfRange")}>
-        <Input
-          type="number"
-          min={1}
-          value={Number.isNaN(cache) ? "" : cache}
-          onChange={(e) => set({ "cache.maxSizeGb": num(e.target.value) })}
-          className="w-32"
-        />
-      </Field>
+      <NumberField name="cache.maxSizeGb" label="cacheMax" {...{ settings, draft, errors, set }} />
     </div>
   );
 }

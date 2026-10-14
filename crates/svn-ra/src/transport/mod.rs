@@ -12,7 +12,10 @@ mod retry;
 mod tls;
 
 pub use client::HttpTransport;
-pub use config::{ProxyConfig, SVN_COMPAT_VERSION, TransportConfig, USER_AGENT};
+pub use config::{
+    DEFAULT_CONNECTIONS, MAX_CONNECTIONS, MIN_CONNECTIONS, ProxyConfig, SVN_COMPAT_VERSION,
+    TransportConfig, USER_AGENT,
+};
 pub use redact::{
     RedactedHeaders, RedactingMakeWriter, RedactingWriter, redact_text, redacted_url,
 };

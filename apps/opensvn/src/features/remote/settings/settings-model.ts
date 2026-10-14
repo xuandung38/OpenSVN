@@ -1,6 +1,28 @@
-import type { ProxySetting, Settings, SettingsPatch_Deserialize } from "../../../ipc/bindings";
+import {
+  type AppError,
+  type ProxySetting,
+  SETTING_RANGES,
+  type Settings,
+  type SettingsPatch_Deserialize,
+} from "../../../ipc/bindings";
+import { IpcError } from "../../../ipc/client";
 
 export type Draft = SettingsPatch_Deserialize;
+
+/** A numeric setting with a range. The ranges come from the Rust validator (generated bindings). */
+export type RangedKey = keyof typeof SETTING_RANGES & keyof Settings;
+export const RANGED_KEYS = Object.keys(SETTING_RANGES) as RangedKey[];
+
+/** Inclusive bounds of `key`, exactly as the backend validates them. */
+export function rangeOf(key: RangedKey): { min: number; max: number } {
+  return SETTING_RANGES[key];
+}
+
+/**
+ * Why a field is invalid: checked here before Save, or `rejected` when the backend refused the
+ * value on Save (its message is never shown as is; the field shows a localized text).
+ */
+export type FieldError = "https" | "range" | "proxy" | "rejected";
 
 /** Effective value of a setting: the unsaved draft wins over the stored value. */
 export function settingValue<K extends keyof Settings>(s: Settings, d: Draft, key: K): Settings[K] {
@@ -18,16 +40,24 @@ export function isHttpsTemplate(v: string): boolean {
     .replaceAll("{revSpec}", "head")
     .replaceAll("{path}", "a/b");
   try {
-    return new URL(sample).protocol === "https:";
+    const u = new URL(sample);
+    // Like the backend: no credentials in a link that is opened in the browser.
+    return u.protocol === "https:" && u.username === "" && u.password === "";
   } catch {
     return false;
   }
 }
 
+/** http(s) proxy URL without credentials (they belong in the credential store, as the backend says). */
 export function isProxyUrl(v: string): boolean {
   try {
-    const p = new URL(v).protocol;
-    return p === "http:" || p === "https:";
+    const u = new URL(v);
+    return (
+      (u.protocol === "http:" || u.protocol === "https:") &&
+      u.hostname !== "" &&
+      u.username === "" &&
+      u.password === ""
+    );
   } catch {
     return false;
   }
@@ -38,20 +68,29 @@ export function inRange(n: number, min: number, max: number): boolean {
 }
 
 /** Field-level validation of the draft against the stored settings; keys with errors map to an error id. */
-export function validateDraft(s: Settings, d: Draft): Record<string, "https" | "range" | "proxy"> {
-  const errors: Record<string, "https" | "range" | "proxy"> = {};
+export function validateDraft(s: Settings, d: Draft): Record<string, FieldError> {
+  const errors: Record<string, FieldError> = {};
   const v = <K extends keyof Settings>(k: K) => settingValue(s, d, k);
   if (!isHttpsTemplate(v("integrations.webRevisionUrl")))
     errors["integrations.webRevisionUrl"] = "https";
   if (!isHttpsTemplate(v("integrations.webFileUrl"))) errors["integrations.webFileUrl"] = "https";
-  if (!inRange(v("network.maxConnections"), 1, 16)) errors["network.maxConnections"] = "range";
-  if (!inRange(v("network.timeoutSec"), 1, 3600)) errors["network.timeoutSec"] = "range";
-  if (!inRange(v("general.checkIntervalMin"), 0, 1440))
-    errors["general.checkIntervalMin"] = "range";
-  if (!inRange(v("cache.maxSizeGb"), 1, 1024)) errors["cache.maxSizeGb"] = "range";
+  for (const key of RANGED_KEYS) {
+    const { min, max } = rangeOf(key);
+    if (!inRange(v(key), min, max)) errors[key] = "range";
+  }
   const proxy: ProxySetting = v("network.proxy");
   if (proxy.mode === "custom" && !isProxyUrl(proxy.url)) errors["network.proxy"] = "proxy";
   return errors;
+}
+
+/**
+ * The setting a failed Save points at: the backend refuses a value with `invalid-argument` and the
+ * dotted key in `detail`. `null` for any other failure (or a key the sheet does not show).
+ */
+export function rejectedKey(err: unknown, s: Settings | undefined): keyof Settings | null {
+  const e: AppError | null = err instanceof IpcError ? err.appError : null;
+  if (e?.code !== "invalid-argument" || !e.detail || !s || !(e.detail in s)) return null;
+  return e.detail as keyof Settings;
 }
 
 /**
