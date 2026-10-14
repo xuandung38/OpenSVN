@@ -256,15 +256,120 @@ async fn a_file_external_from_another_repository_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_definition_that_includes_itself_stops_at_the_nesting_limit() {
-    let (main, other) = repos("^/trunk self\n");
+async fn definitions_that_include_themselves_are_refused_without_fanning_out() {
+    // Two self-references would fetch 2 + 4 + ... + 2^8 = 510 working copies without cycle
+    // detection; the repository root and an indirect cycle (trunk -> lib -> trunk) too.
+    let main = session();
+    main.seed(
+        "alice",
+        "r1",
+        &[
+            put("lib/a.txt", "alpha\n"),
+            put("trunk/sub/keep.txt", "keep\n"),
+            prop(
+                "trunk",
+                "svn:externals",
+                Some("^/trunk a\n^/trunk b\n^/ root\n^/lib lib\n../trunk/sub up\n"),
+            ),
+            prop(
+                "lib",
+                "svn:externals",
+                Some("^/trunk back\n^/lib/a.txt f\n"),
+            ),
+        ],
+    )
+    .unwrap();
+    let opener = FakeOpener::new(vec![main.clone()]);
     let sb = Sandbox::new();
-    let (wc, sum) = co(&main, FakeOpener::new(vec![main.clone(), other]), &sb).await;
-    let deepest = (0..svn_client::externals::MAX_NESTING)
-        .map(|_| "self")
-        .collect::<Vec<_>>()
-        .join("/");
-    assert!(wc.join(&deepest).join("sub/keep.txt").is_file());
+    let started = std::time::Instant::now();
+    let (wc, sum) = co(&main, Arc::clone(&opener), &sb).await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    for p in ["a", "b", "root", "lib/back"] {
+        let r = find(&sum, p);
+        assert_eq!(r.action, ExternalAction::Failed, "{p}: {r:?}");
+        assert_eq!(r.code, Some(ErrorCode::LimitExceeded), "{p}");
+        assert!(!wc.join(p).exists(), "{p}");
+    }
+    // Not cycles: a sibling, a subdirectory of the definition and a file of the sibling.
+    assert_eq!(find(&sum, "lib").action, ExternalAction::Fetched);
+    assert_eq!(find(&sum, "lib/f").action, ExternalAction::Fetched);
+    assert_eq!(find(&sum, "up").action, ExternalAction::Fetched);
+    assert_eq!(read(&wc.join("up/keep.txt")), "keep\n");
+    let fetched = sum
+        .externals
+        .iter()
+        .filter(|e| e.action == ExternalAction::Fetched)
+        .count();
+    assert_eq!(fetched, 3, "{:?}", sum.externals);
+    assert!(opener.opened.lock().unwrap().len() <= 10);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_operation_processes_a_bounded_number_of_externals() {
+    let defs: String = (0..5).map(|i| format!("^/lib e{i}\n")).collect();
+    let (main, other) = repos(&defs);
+    let opener = FakeOpener::new(vec![main.clone(), other]);
+    let mut c = ext_ctx(opener);
+    c.config.max_externals = Some(3);
+    let sb = Sandbox::new();
+    let wc = sb.path("wc");
+    let sum = checkout(
+        &c,
+        &trunk(&main),
+        &wc,
+        None,
+        Depth::Infinity,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .unwrap();
+    let fetched: Vec<_> = sum
+        .externals
+        .iter()
+        .filter(|e| e.action == ExternalAction::Fetched)
+        .map(|e| e.path.as_str().to_owned())
+        .collect();
+    assert_eq!(fetched, ["e0", "e1", "e2"]);
+    for p in ["e3", "e4"] {
+        assert_eq!(find(&sum, p).code, Some(ErrorCode::LimitExceeded));
+        assert!(!wc.join(p).exists());
+    }
+    // The count is per operation: the next update starts again (and keeps what is there).
+    let sum = update(
+        &c,
+        &trunk(&main),
+        &wc,
+        None,
+        Depth::Unknown,
+        &CancelToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(find(&sum, "e0").action, ExternalAction::Updated);
+    assert!(wc.join("e0/a.txt").is_file());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deep_chain_without_cycles_stops_at_the_nesting_limit() {
+    // lib/d0 -> lib/d1 -> ... each a distinct directory, deeper than MAX_NESTING.
+    let depth = svn_client::externals::MAX_NESTING as usize + 2;
+    let main = session();
+    let mut changes = vec![put("trunk/keep.txt", "keep\n")];
+    changes.push(prop("trunk", "svn:externals", Some("^/lib/d0 n\n")));
+    for i in 0..depth {
+        changes.push(put(&format!("lib/d{i}/f.txt"), "f\n"));
+        changes.push(prop(
+            &format!("lib/d{i}"),
+            "svn:externals",
+            Some(&format!("^/lib/d{} n\n", i + 1)),
+        ));
+    }
+    main.seed("alice", "r1", &changes).unwrap();
+    let sb = Sandbox::new();
+    let (wc, sum) = co(&main, FakeOpener::new(vec![main.clone()]), &sb).await;
+    let deepest = vec!["n"; svn_client::externals::MAX_NESTING as usize].join("/");
+    assert!(wc.join(&deepest).join("f.txt").is_file());
     let limit = sum
         .externals
         .iter()

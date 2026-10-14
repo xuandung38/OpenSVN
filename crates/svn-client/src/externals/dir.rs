@@ -8,8 +8,7 @@ use svn_types::{Depth, NodeKind, RelPath, RepoUrl, Result, Revnum};
 use svn_wc::db::{NewExternal, WcDb};
 
 use super::{
-    DirLock, ExternalAction, Item, Outcome, blocking, create_parents, in_the_way, nested_ctx,
-    remove, report,
+    DirLock, ExternalAction, Item, Outcome, blocking, create_parents, in_the_way, remove, report,
 };
 use crate::status::is_wc_root_dir;
 use crate::update::{repos_relpath_of, root_string};
@@ -73,7 +72,7 @@ pub(super) async fn ensure(
         );
         blocking(move || inspect_existing(&owner, &abs, &r, &u)).await?
     };
-    let inner = nested_ctx(job.ctx, job.local);
+    let inner = job.nested_ctx();
     let mut existing = existing;
     if matches!(existing, Existing::OtherRepo) {
         // Only an external this working copy registered is replaced; any other working copy
