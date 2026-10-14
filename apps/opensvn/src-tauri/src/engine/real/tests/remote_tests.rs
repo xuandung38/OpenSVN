@@ -14,18 +14,8 @@ use crate::engine::conformance::{self, Harness, PlantedOwner};
 use crate::engine::real::RealEngine;
 use crate::engine::{DiffOptions, EngineFacade, LockScope, LogScope, OpContext, WcRef};
 
-/// Harness that runs the shared suite against the real engine.
-///
-/// Groups that run here: `repository_reads`, `repository_content_tools`,
-/// `cancellation_and_errors`. The others are skipped on purpose until the working copy layer
-/// (`svn-client`) is wired, because each one starts with a checkout or needs status/commit:
-/// `commit_and_update_cycle`, `schedule_and_revert`, `conflict_blocks_commit_until_resolved`,
-/// `lock_and_unlock` (WC scope + status), `working_copy_metadata_operations`,
-/// `switch_to_a_branch`, `open_recovers_dead_locks_and_reports_foreign_ones` (its recovery part
-/// runs below through `plant_lock` on a `svn-wc` working copy). `remote_edit_and_copy` is skipped
-/// because the in-memory repository's commit editor refuses copy-from; copy driving is covered
-/// in `edit_tests`. Status, working copy diff and remote status are wired; their parts of the
-/// skipped groups run in `wc_status_tests` on working copies checked out by `svn-client`.
+/// Harness for the repository-only groups of the shared suite on the real engine (no working
+/// copy writes). The whole suite, working copy groups included, runs in `conformance_tests`.
 struct RealHarness {
     fixture: super::support::Fixture,
     scratch: tempfile::TempDir,
@@ -42,6 +32,9 @@ impl Harness for RealHarness {
         self.scratch.path().join("work")
     }
     fn write_file(&self, _root: &Path, _rel: &str, _content: &str) -> Result<(), SvnError> {
+        Err(SvnError::new(ErrorCode::Internal, "no working copy writes"))
+    }
+    fn remove_file(&self, _root: &Path, _rel: &str) -> Result<(), SvnError> {
         Err(SvnError::new(ErrorCode::Internal, "no working copy writes"))
     }
     fn scratch_dir(&self) -> PathBuf {
