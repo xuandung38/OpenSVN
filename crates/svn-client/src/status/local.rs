@@ -451,7 +451,7 @@ struct DirJob {
 /// What listing one directory produced, in the walk's order.
 enum Item {
     /// A versioned child to report.
-    Status(WcStatus),
+    Status(Box<WcStatus>),
     /// A versioned child directory the walk descends into: index into the jobs.
     Dir(usize),
     /// An unversioned child; whether it is an external is decided in walk order, since the
@@ -550,7 +550,7 @@ impl Lister<'_> {
                 if let Some(s) = node_status(snap, &child, &child_abs, &cur, child_disk.as_ref())?
                     && (self.opts.show_unmodified || is_interesting(&s))
                 {
-                    items.push(Item::Status(s));
+                    items.push(Item::Status(Box::new(s)));
                 }
                 if descends(&cur, child_depth(depth)) {
                     let Some(&j) = self.index.get(child.as_str()) else {
@@ -690,7 +690,7 @@ fn assemble(
             continue;
         };
         match item {
-            Item::Status(s) => out.push(s),
+            Item::Status(s) => out.push(*s),
             Item::Dir(j) => {
                 let it = enter(j, &mut listed, externals)?;
                 stack.push(it);

@@ -3,7 +3,9 @@
 
 use std::fs;
 
-use svn_types::{ErrorCode, RelPath, rename_replacing, safe_join, write_file_replacing};
+use svn_types::{
+    ErrorCode, RelPath, rename_replacing, safe_join, safe_join_child, write_file_replacing,
+};
 
 fn rel(s: &str) -> RelPath {
     RelPath::new(s).expect("valid rel path")
@@ -180,4 +182,66 @@ fn rename_replacing_reports_a_missing_source() {
     let err =
         rename_replacing(&dir.path().join("nope"), &dir.path().join("to")).expect_err("must fail");
     assert_eq!(err.code, ErrorCode::PathNotFound);
+}
+
+/// `safe_join_child` from the parent's `safe_join` and `lstat` gives what `safe_join` gives.
+fn assert_child_like_safe_join(root: &std::path::Path, child: &str) {
+    let child = rel(child);
+    let parent = child.parent().expect("not the root");
+    let direct = safe_join(root, &child);
+    let Ok(parent_path) = safe_join(root, &parent) else {
+        // A walker never reaches the children of a parent it could not join.
+        assert!(direct.is_err(), "{child}: parent refused, child joined");
+        return;
+    };
+    let md = fs::symlink_metadata(&parent_path).ok();
+    match (direct, safe_join_child(&parent_path, md.as_ref(), &child)) {
+        (Ok(a), Ok(b)) => assert_eq!(a, b, "{child}"),
+        (Err(a), Err(b)) => {
+            assert_eq!(a.code, b.code, "{child}");
+            assert_eq!(a.message, b.message, "{child}");
+        }
+        (a, b) => panic!("{child}: safe_join {a:?}, safe_join_child {b:?}"),
+    }
+}
+
+#[test]
+fn child_join_matches_safe_join() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("a/b")).expect("mkdir");
+    fs::write(root.join("a/b/f"), b"x").expect("write");
+    fs::write(root.join("top"), b"x").expect("write");
+    for child in [
+        "x",
+        "top",
+        "a",
+        "a/b",
+        "a/b/f",
+        "a/b/f/below-a-file",
+        "top/below-a-file",
+        "a/missing",
+        "a/missing/deeper",
+        "a/.svn",
+        "a/.SVN",
+        "a/b/SVN~1",
+        ".svn",
+    ] {
+        assert_child_like_safe_join(root, child);
+    }
+    let err = safe_join_child(root, None, &RelPath::root()).expect_err("root has no parent");
+    assert_eq!(err.code, ErrorCode::UnsafePath);
+}
+
+#[cfg(unix)]
+#[test]
+fn child_join_matches_safe_join_below_symlinks() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("real/sub")).expect("mkdir");
+    std::os::unix::fs::symlink(root.join("real"), root.join("link")).expect("symlink");
+    std::os::unix::fs::symlink(root.join("nowhere"), root.join("dangling")).expect("symlink");
+    for child in ["link", "link/sub", "link/sub/f", "dangling/f", "real/sub/f"] {
+        assert_child_like_safe_join(root, child);
+    }
 }
