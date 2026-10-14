@@ -450,11 +450,15 @@ pub(super) fn conflict_markers(db: &WcDb) -> EngineResult<HashSet<RelPath>> {
 /// A folder recorded as incomplete (`presence = 'incomplete'`) and everything below it may
 /// simply not have been fetched yet: its "missing" content is not a user deletion, so it is
 /// never deleted (issue #99).
+///
+/// A file external is never deleted: its BASE row is the external's source, so deleting it would
+/// delete that source from the repository. svn refuses to delete externals (E155030); a missing
+/// one is restored by the next update.
 pub(super) fn missing_is_deletable(db: &WcDb, rel: &RelPath) -> EngineResult<bool> {
     let Some(node) = db.read_node(rel)? else {
         return Ok(false);
     };
-    if node.op_depth != 0 || node.presence != Presence::Normal {
+    if node.op_depth != 0 || node.presence != Presence::Normal || node.file_external {
         return Ok(false);
     }
     let mut cur = Some(rel.clone());

@@ -116,6 +116,20 @@ impl Env {
             .0
     }
 
+    async fn text_in_repo(&self, path: &str) -> String {
+        let mut out = Vec::new();
+        self.repo()
+            .get_file(
+                &RelPath::new(path).unwrap(),
+                None,
+                &mut out,
+                &CancelToken::new(),
+            )
+            .await
+            .unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
     fn journals(&self) -> Vec<PathBuf> {
         JournalStore::new(self.f.engine.commit_journal_dir())
             .list()
@@ -341,6 +355,179 @@ async fn auto_add_remove_never_deletes_an_incomplete_folder_or_its_unfetched_con
     assert_eq!(rev, Rev(4));
     assert_eq!(e.kind_in_repo("trunk/src/main.rs").await, NodeKind::File);
     assert_eq!(e.kind_in_repo("trunk/new.txt").await, NodeKind::File);
+}
+
+/// Records `at` as a file external of `src` whose source is `trunk/README.md` (inside the
+/// working copy's own subtree, the case where deleting it would hit a real repository path),
+/// as svn 1.15 stores one: a BASE row with `file_external = 1` plus an `EXTERNALS` row.
+fn plant_file_external(root: &Path, at: &str) {
+    let db = WcDb::open(root).unwrap();
+    db.with_write(|tx| {
+        tx.execute(
+            "INSERT INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, repos_id, \
+             repos_path, revision, presence, kind, properties, checksum, changed_revision, \
+             changed_date, changed_author, translated_size, last_mod_time, file_external) \
+             SELECT wc_id, ?1, 0, 'src', repos_id, repos_path, revision, presence, kind, \
+             properties, checksum, changed_revision, changed_date, changed_author, \
+             translated_size, last_mod_time, 1 FROM nodes \
+             WHERE local_relpath = 'README.md' AND op_depth = 0",
+            [at],
+        )
+        .map_err(svn_wc::db::sql_err)?;
+        tx.execute(
+            "INSERT INTO externals (wc_id, local_relpath, parent_relpath, repos_id, presence, \
+             kind, def_local_relpath, def_repos_relpath, def_operational_revision, \
+             def_revision) SELECT wc_id, ?1, 'src', repos_id, 'normal', 'file', 'src', \
+             repos_path, NULL, NULL FROM nodes \
+             WHERE local_relpath = 'README.md' AND op_depth = 0",
+            [at],
+        )
+        .map(|_| ())
+        .map_err(svn_wc::db::sql_err)
+    })
+    .unwrap();
+}
+
+/// PR #105 review item 1: a file external whose file is gone from disk is reported missing, but
+/// auto add/remove never schedules it for deletion: its BASE location is the external's source,
+/// so the commit would delete that source from the repository.
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_add_remove_never_deletes_the_source_of_a_missing_file_external() {
+    let e = env();
+    let wc = e.checkout("wc").await;
+    plant_file_external(&wc.root, "src/shared.md");
+    assert_eq!(
+        e.text_of(&wc, "src/shared.md").await,
+        Some(NodeStatus::Missing)
+    );
+
+    for paths in [&[""][..], &["src"], &["src/shared.md"]] {
+        let err = e.commit(&wc, paths, true).await.expect_err("nothing");
+        assert_eq!(err.message, "nothing to commit", "{paths:?}: {err}");
+        assert_eq!(e.youngest().await, 1, "{paths:?}: the repository changed");
+        assert_eq!(e.kind_in_repo("trunk/README.md").await, NodeKind::File);
+    }
+    // Nothing was scheduled: the external is still just missing, never deleted.
+    assert_eq!(
+        e.text_of(&wc, "src/shared.md").await,
+        Some(NodeStatus::Missing)
+    );
+
+    // With another change in the selection the commit goes through without touching it.
+    write(&wc.root, "src/main.rs", "changed\n");
+    let rev = e.commit(&wc, &[""], true).await.expect("commit");
+    assert_eq!(rev, Rev(2));
+    assert_eq!(e.kind_in_repo("trunk/README.md").await, NodeKind::File);
+    assert!(e.journals().is_empty());
+
+    // Deleting it explicitly is refused as svn refuses it.
+    let err =
+        e.f.engine
+            .delete_paths(&wc, &["src/shared.md".to_owned()], true, &ctx())
+            .await
+            .expect_err("external");
+    assert_eq!(err.svn_code, Some(155_030), "{err}");
+}
+
+/// PR #105 re-review: an edited file external is committed only when it is named itself, as
+/// svn 1.15 does (`svn ci src` and `svn ci .` send nothing); committing an enclosing folder,
+/// even with auto add/remove, never writes the edit into the external's source.
+#[tokio::test(flavor = "multi_thread")]
+async fn commit_of_a_parent_never_sends_an_edited_file_external() {
+    let e = env();
+    let wc = e.checkout("wc").await;
+    let source = e.text_in_repo("trunk/README.md").await;
+    std::fs::copy(wc.root.join("README.md"), wc.root.join("src/shared.md")).unwrap();
+    plant_file_external(&wc.root, "src/shared.md");
+    write(&wc.root, "src/shared.md", "EDITED VIA EXTERNAL\n");
+    assert_eq!(
+        e.text_of(&wc, "src/shared.md").await,
+        Some(NodeStatus::Modified)
+    );
+
+    for paths in [&["src"][..], &[""]] {
+        let err = e.commit(&wc, paths, true).await.expect_err("nothing");
+        assert_eq!(err.message, "nothing to commit", "{paths:?}: {err}");
+        assert_eq!(e.youngest().await, 1, "{paths:?}: the repository changed");
+        assert_eq!(e.text_in_repo("trunk/README.md").await, source);
+    }
+
+    // Alongside another change, only that change is committed.
+    write(&wc.root, "src/main.rs", "changed\n");
+    assert_eq!(e.commit(&wc, &[""], true).await.expect("commit"), Rev(2));
+    assert_eq!(e.text_in_repo("trunk/src/main.rs").await, "changed\n");
+    assert_eq!(e.text_in_repo("trunk/README.md").await, source);
+    assert_eq!(
+        e.text_of(&wc, "src/shared.md").await,
+        Some(NodeStatus::Modified)
+    );
+
+    // Named explicitly, it is committed to its source, as `svn ci src/shared.md` does.
+    assert_eq!(
+        e.commit(&wc, &["src/shared.md"], true)
+            .await
+            .expect("commit"),
+        Rev(3)
+    );
+    assert_eq!(
+        e.text_in_repo("trunk/README.md").await,
+        "EDITED VIA EXTERNAL\n"
+    );
+    assert!(e.journals().is_empty());
+}
+
+/// PR #105 review item 2: auto-add of an unversioned folder skips the working copies nested in
+/// it at any depth (svn's W150002), which stay unversioned with all they contain, while their
+/// siblings are added and committed.
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_add_never_adds_a_nested_working_copy_at_any_depth() {
+    let e = env();
+    let wc = e.checkout("wc").await;
+    for (name, at) in [("n1", "x/nested"), ("n2", "x/y/deeper")] {
+        let other = e.checkout(name).await;
+        std::fs::create_dir_all(wc.root.join(at).parent().unwrap()).unwrap();
+        std::fs::rename(&other.root, wc.root.join(at)).unwrap();
+        write(&wc.root, &format!("{at}/inner-local.txt"), "local\n");
+    }
+    write(&wc.root, "x/keep.txt", "keep\n");
+    write(&wc.root, "x/y/also.txt", "also\n");
+
+    let rev = e.commit(&wc, &["x"], true).await.expect("commit");
+    assert_eq!(rev, Rev(2));
+    assert_eq!(e.kind_in_repo("trunk/x/keep.txt").await, NodeKind::File);
+    assert_eq!(e.kind_in_repo("trunk/x/y/also.txt").await, NodeKind::File);
+    for gone in ["trunk/x/nested", "trunk/x/y/deeper"] {
+        assert_eq!(e.kind_in_repo(gone).await, NodeKind::None, "{gone}");
+    }
+    assert_eq!(
+        e.text_of(&wc, "x/nested").await,
+        Some(NodeStatus::Unversioned)
+    );
+    assert_eq!(
+        e.text_of(&wc, "x/y/deeper").await,
+        Some(NodeStatus::Unversioned)
+    );
+
+    // A plain add behaves the same way.
+    let other = e.checkout("n3").await;
+    std::fs::create_dir_all(wc.root.join("z/q")).unwrap();
+    std::fs::rename(&other.root, wc.root.join("z/q/nested")).unwrap();
+    e.f.engine
+        .add_paths(&wc, &["z".to_owned()], &ctx())
+        .await
+        .expect("add");
+    assert_eq!(e.text_of(&wc, "z/q").await, Some(NodeStatus::Added));
+    assert_eq!(
+        e.text_of(&wc, "z/q/nested").await,
+        Some(NodeStatus::Unversioned)
+    );
+    // And refuses the nested working copy as an explicit target.
+    let err =
+        e.f.engine
+            .add_paths(&wc, &["z/q/nested".to_owned()], &ctx())
+            .await
+            .expect_err("nested");
+    assert!(err.message.contains("is a nested working copy"), "{err}");
 }
 
 /// A conflicted `src/main.rs` with its marker files next to it.

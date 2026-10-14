@@ -13,7 +13,7 @@ use opensvn_ipc::{
 use tauri::Manager;
 use tauri::test::MockRuntime;
 
-use crate::app_state::{AppDeps, AppState};
+use crate::app_state::{AppDeps, AppState, EngineSource};
 use crate::engine::FakeEngine;
 use crate::engine::fake::demo_wc_root;
 use crate::menu::MenuControl;
@@ -160,6 +160,29 @@ impl ProgramLauncher for RecordingLauncher {
     }
 }
 
+/// App state over `engine` in `dir` with inert doubles for everything else, as `lib.rs` builds it
+/// at start-up (engine selection tests).
+pub fn state_with_engine(
+    dir: &std::path::Path,
+    engine: EngineSource,
+) -> Result<AppState, AppError> {
+    AppState::build(AppDeps {
+        data_dir: dir.to_path_buf(),
+        engine,
+        credentials: Arc::new(secure_store::MemoryStore::new()),
+        events: Arc::new(RecordingEvents::default()),
+        picker: Arc::new(Scripted::default()),
+        status_timing: StatusTiming::default(),
+        path_picker: Arc::new(ScriptedPaths::default()),
+        opener: Arc::new(RecordingOpener::default()),
+        notifier: Arc::new(RecordingNotifier::default()),
+        menu: Arc::new(RecordingMenu::default()),
+        updates: Arc::new(RecordingUpdates::default()),
+        secrets: Arc::new(MemorySecretStore::default()),
+        launcher: Arc::new(RecordingLauncher::default()),
+    })
+}
+
 pub struct Fixture {
     pub app: tauri::App<MockRuntime>,
     pub events: Arc<RecordingEvents>,
@@ -196,7 +219,7 @@ impl Fixture {
         let launcher = Arc::new(RecordingLauncher::default());
         let state = AppState::build(AppDeps {
             data_dir: dir.path().to_path_buf(),
-            engine: crate::app_state::EngineSource::Ready(engine.clone()),
+            engine: EngineSource::Ready(engine.clone()),
             credentials: Arc::new(secure_store::MemoryStore::new()),
             events: events.clone(),
             picker: picker.clone(),

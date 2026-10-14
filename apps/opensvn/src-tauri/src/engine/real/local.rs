@@ -222,7 +222,11 @@ impl RealEngine {
                 add_parents: true,
                 ..AddOptions::default()
             };
-            client_local::add(db, &env.cancel, &targets, &opts, &env.add).map(|_| ())
+            let outcome = client_local::add_reporting(db, &env.cancel, &targets, &opts, &env.add)?;
+            for w in &outcome.warnings {
+                tracing::warn!(warning = %w, "add skipped a nested working copy");
+            }
+            Ok(())
         })
         .await
     }
