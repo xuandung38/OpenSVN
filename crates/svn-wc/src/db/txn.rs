@@ -513,4 +513,37 @@ impl WcTxn<'_> {
     pub fn queue_work(&self, items: &[Skel]) -> Result<()> {
         ops::queue_work(self.conn, items)
     }
+
+    /// Removes finished work items by id (an id that is already gone is fine), like the
+    /// deletion step of [`WcDb::wq_record_and_fetch_next`] for many items at once.
+    pub fn complete_work_items(&self, ids: &[i64]) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("DELETE FROM work_queue WHERE id = ?1")
+            .map_err(sql_err)?;
+        for id in ids {
+            stmt.execute([id]).map_err(sql_err)?;
+        }
+        Ok(())
+    }
+
+    /// Records a pristine text staged with [`crate::pristine::PristineBatch`] (what
+    /// [`crate::pristine::PristineIndex::record`] writes, inside this transaction).
+    pub fn record_pristine(&self, record: &crate::pristine::PristineRecord) -> Result<()> {
+        let size = i64::try_from(record.size)
+            .map_err(|_| SvnError::new(ErrorCode::Internal, "size out of range"))?;
+        self.conn
+            .prepare_cached(
+                "INSERT OR IGNORE INTO pristine (checksum, compression, size, refcount, \
+                 md5_checksum) VALUES (?1, NULL, ?2, 0, ?3)",
+            )
+            .map_err(sql_err)?
+            .execute(params![
+                record.sha1.to_svn_string(),
+                size,
+                record.md5.to_svn_string()
+            ])
+            .map_err(sql_err)?;
+        Ok(())
+    }
 }

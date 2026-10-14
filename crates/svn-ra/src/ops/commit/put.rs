@@ -1,24 +1,58 @@
-//! Upload of one file's text: svndiff full-text spill file, then a replayable `PUT`.
+//! Upload of one file's text: an svndiff stream (a delta against the BASE text when there is
+//! one, otherwise the full text), then a replayable `PUT`.
 //!
-//! The svndiff stream is written to a temporary file first. That keeps memory flat for any file
-//! size, gives the exact `Content-Length`, lets the transport send the body again after a 401
-//! or a connection reset, and lets us check the content against the checksum the caller
-//! promised before a single byte goes to the server.
+//! The stream is encoded completely before anything is sent: small streams stay in memory,
+//! larger ones go to a temporary file. That keeps memory flat for any file size, gives the exact
+//! `Content-Length`, lets the transport send the body again after a 401 or a connection reset,
+//! and lets us check the content against the checksums the caller promised before a single byte
+//! goes to the server.
+//!
+//! A delta is only sent when the base text read here has exactly the size and MD5 the caller
+//! named: the server applies the delta to its own copy of the base (after checking the
+//! `X-SVN-Base-Fulltext-MD5` header against it), so a damaged or stale local base would
+//! otherwise produce a wrong file. When the local base does not match, the full text is sent
+//! instead. The server additionally checks the result against `X-SVN-Result-Fulltext-MD5` where
+//! it announces that.
 
 use std::io::{BufWriter, Read, Write};
 use std::sync::Arc;
 
+use bytes::Bytes;
 use md5::{Digest, Md5};
-use svn_delta::{SvndiffEncoder, SvndiffVersion, WINDOW_SIZE};
+use svn_delta::{SvndiffEncoder, SvndiffVersion, WINDOW_SIZE, delta_window};
 use svn_protocol::commit::{LockToken, PutOptions, put_request};
 use svn_protocol::{Body, TxnName};
 use svn_ra_api::ReplayableSource;
 use svn_types::{CancelToken, Checksum, ErrorCode, RelPath, Result, Revnum, SvnError};
 use tempfile::NamedTempFile;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
 
 use crate::ops::update::RaWire;
 use crate::transport::RequestBody;
+
+/// Serializes the requests that write into the transaction. mod_dav_svn on FSFS cannot take
+/// two writes into one transaction at once (both update the transaction's `next-ids` and
+/// proto-revision files; the second fails or, worse, corrupts them), and libsvn_ra_serf never
+/// sends them in parallel. Encoding still runs ahead of the wire.
+pub(super) type TxnWriter = Arc<Mutex<()>>;
+
+/// Waits for the turn to write into the transaction, or for cancellation.
+pub(super) async fn write_turn(
+    writer: &TxnWriter,
+    cancel: &CancelToken,
+) -> Result<OwnedMutexGuard<()>> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(cancel
+            .check()
+            .err()
+            .unwrap_or_else(|| SvnError::new(ErrorCode::Cancelled, "cancelled"))),
+        g = Arc::clone(writer).lock_owned() => Ok(g),
+    }
+}
+
+/// Encoded streams up to this size are kept in memory instead of a temporary file.
+const MEMORY_LIMIT: usize = 1 << 20;
 
 /// Lower-case hex of an MD5 digest.
 pub(super) fn md5_hex(digest: &[u8; 16]) -> String {
@@ -29,10 +63,78 @@ pub(super) fn md5_hex(digest: &[u8; 16]) -> String {
     })
 }
 
-/// An encoded svndiff stream waiting on disk.
-struct Spill {
-    file: NamedTempFile,
+/// An encoded svndiff stream waiting to be sent.
+pub(super) enum Spill {
+    Memory(Bytes),
+    File { file: NamedTempFile, size: u64 },
+}
+
+impl Spill {
+    fn body(&self) -> RequestBody {
+        match self {
+            Self::Memory(b) => RequestBody::Bytes(b.clone()),
+            Self::File { file, size } => RequestBody::File(ReplayableSource {
+                path: file.path().to_path_buf(),
+                translated: true,
+                size: Some(*size),
+            }),
+        }
+    }
+}
+
+/// Collects the encoded stream in memory and moves it to a temporary file once it grows past
+/// [`MEMORY_LIMIT`].
+struct SpillWriter {
+    mem: Vec<u8>,
+    file: Option<BufWriter<NamedTempFile>>,
     size: u64,
+}
+
+impl SpillWriter {
+    fn new() -> Self {
+        Self {
+            mem: Vec::new(),
+            file: None,
+            size: 0,
+        }
+    }
+
+    fn write(&mut self, data: &[u8]) -> Result<()> {
+        self.size += data.len() as u64;
+        if self.file.is_none() && self.mem.len() + data.len() <= MEMORY_LIMIT {
+            self.mem.extend_from_slice(data);
+            return Ok(());
+        }
+        let out = match &mut self.file {
+            Some(f) => f,
+            None => {
+                let tmp = NamedTempFile::new()
+                    .map_err(|e| io_err("cannot create upload spill file", &e))?;
+                let mut f = BufWriter::new(tmp);
+                f.write_all(&self.mem)
+                    .map_err(|e| io_err("cannot write upload spill file", &e))?;
+                self.mem = Vec::new();
+                self.file.insert(f)
+            }
+        };
+        out.write_all(data)
+            .map_err(|e| io_err("cannot write upload spill file", &e))
+    }
+
+    fn finish(self) -> Result<Spill> {
+        match self.file {
+            None => Ok(Spill::Memory(Bytes::from(self.mem))),
+            Some(f) => {
+                let file = f
+                    .into_inner()
+                    .map_err(|e| io_err("cannot write upload spill file", e.error()))?;
+                Ok(Spill::File {
+                    file,
+                    size: self.size,
+                })
+            }
+        }
+    }
 }
 
 fn io_err(what: &str, e: &std::io::Error) -> SvnError {
@@ -53,19 +155,116 @@ fn fill(src: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     Ok(n)
 }
 
-/// Encodes `source` as a full-text svndiff stream, checking size and MD5 on the way.
-fn spill(source: &ReplayableSource, version: SvndiffVersion, expected: &[u8; 16]) -> Result<Spill> {
-    let mut input = source
+/// The base text a delta is computed against, with what the caller says it is.
+pub(super) struct DeltaBase<'a> {
+    pub source: &'a ReplayableSource,
+    pub md5: [u8; 16],
+}
+
+/// Reads the base text window by window.
+struct BaseReader {
+    file: std::fs::File,
+    offset: u64,
+    buf: Vec<u8>,
+}
+
+impl BaseReader {
+    /// The next source view (empty once the base is exhausted).
+    fn next_view(&mut self) -> Result<(u64, &[u8])> {
+        let n = fill(&mut self.file, &mut self.buf)
+            .map_err(|e| io_err("cannot read the base text", &e))?;
+        let offset = self.offset;
+        self.offset += n as u64;
+        Ok((offset, &self.buf[..n]))
+    }
+}
+
+/// Whether the base on disk has the size and MD5 the caller named (`false` when unreadable).
+fn base_matches(base: &DeltaBase<'_>) -> bool {
+    let Ok(mut file) = base.source.open() else {
+        return false;
+    };
+    let mut hasher = Md5::new();
+    let mut buf = vec![0_u8; WINDOW_SIZE];
+    let mut total = 0_u64;
+    loop {
+        match fill(&mut file, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                hasher.update(&buf[..n]);
+                total += n as u64;
+            }
+            Err(_) => return false,
+        }
+    }
+    let digest: [u8; 16] = hasher.finalize().into();
+    digest == base.md5 && base.source.size.is_none_or(|s| s == total)
+}
+
+/// Bases larger than this are checked on a second thread while the delta is computed.
+const PARALLEL_BASE_CHECK: u64 = 1 << 20;
+
+/// Encodes `target` as an svndiff stream, against `base` when given, checking the target's
+/// size and MD5 on the way. Returns the stream and whether it is a delta against the base;
+/// `false` when there was no base or the base on disk is not the one the caller named (then
+/// the stream is the full text).
+pub(super) fn encode(
+    target: &ReplayableSource,
+    base: Option<&DeltaBase<'_>>,
+    version: SvndiffVersion,
+    expected: &[u8; 16],
+) -> Result<(Spill, bool)> {
+    let Some(b) = base else {
+        return Ok((encode_with(target, None, version, expected)?, false));
+    };
+    // The base is checked as a whole (size and MD5) besides being read window by window; for
+    // a large one the check runs on a second thread meanwhile.
+    let (delta, matches) = if b.source.size.unwrap_or(0) > PARALLEL_BASE_CHECK {
+        std::thread::scope(|s| {
+            let check = s.spawn(|| base_matches(b));
+            let delta = encode_with(target, Some(b), version, expected);
+            (delta, check.join().unwrap_or(false))
+        })
+    } else {
+        let delta = encode_with(target, Some(b), version, expected);
+        (delta, base_matches(b))
+    };
+    let delta = delta?;
+    if matches {
+        Ok((delta, true))
+    } else {
+        // The local base is not the text the server will apply the delta to.
+        drop(delta);
+        Ok((encode_with(target, None, version, expected)?, false))
+    }
+}
+
+/// Encodes `target` as an svndiff stream, as a delta against `base` when given (whose content
+/// the caller checks), checking the target's size and MD5 on the way.
+fn encode_with(
+    target: &ReplayableSource,
+    base: Option<&DeltaBase<'_>>,
+    version: SvndiffVersion,
+    expected: &[u8; 16],
+) -> Result<Spill> {
+    let mut base_reader = match base.map(|b| b.source.open()) {
+        Some(Ok(file)) => Some(BaseReader {
+            file,
+            offset: 0,
+            buf: vec![0_u8; WINDOW_SIZE],
+        }),
+        // A missing pristine only costs bandwidth (the base check fails too).
+        Some(Err(_)) | None => None,
+    };
+    let mut input = target
         .open()
         .map_err(|e| io_err("cannot open file to commit", &e))?;
-    let tmp = NamedTempFile::new().map_err(|e| io_err("cannot create upload spill file", &e))?;
-    let mut out = BufWriter::new(tmp);
+    let mut out = SpillWriter::new();
     let mut encoder = SvndiffEncoder::new(version);
     let mut hasher = Md5::new();
     let mut buf = vec![0_u8; WINDOW_SIZE];
     let mut encoded = Vec::new();
     let mut total = 0_u64;
-    let mut size = 0_u64;
     // The header is written even for an empty file.
     encoder.write_header(&mut encoded);
     loop {
@@ -75,19 +274,18 @@ fn spill(source: &ReplayableSource, version: SvndiffVersion, expected: &[u8; 16]
         }
         hasher.update(&buf[..n]);
         total += n as u64;
-        encoder.write_fulltext(&buf[..n], &mut encoded)?;
-        out.write_all(&encoded)
-            .map_err(|e| io_err("cannot write upload spill file", &e))?;
-        size += encoded.len() as u64;
+        match &mut base_reader {
+            Some(r) => {
+                let (offset, view) = r.next_view()?;
+                encoder.write_window(&delta_window(offset, view, &buf[..n]), &mut encoded)?;
+            }
+            None => encoder.write_fulltext(&buf[..n], &mut encoded)?,
+        }
+        out.write(&encoded)?;
         encoded.clear();
     }
-    out.write_all(&encoded)
-        .map_err(|e| io_err("cannot write upload spill file", &e))?;
-    size += encoded.len() as u64;
-    let tmp = out
-        .into_inner()
-        .map_err(|e| io_err("cannot write upload spill file", e.error()))?;
-    if let Some(expected_len) = source.size
+    out.write(&encoded)?;
+    if let Some(expected_len) = target.size
         && expected_len != total
     {
         return Err(SvnError::new(
@@ -102,11 +300,11 @@ fn spill(source: &ReplayableSource, version: SvndiffVersion, expected: &[u8; 16]
             "file changed while committing: its content does not match the expected checksum",
         ));
     }
-    Ok(Spill { file: tmp, size })
+    out.finish()
 }
 
 fn version_of(wire: &RaWire) -> SvndiffVersion {
-    match wire.caps().svndiff_version(false) {
+    match wire.caps().svndiff_version(wire.is_low_latency()) {
         2 => SvndiffVersion::V2,
         1 => SvndiffVersion::V1,
         _ => SvndiffVersion::V0,
@@ -120,12 +318,18 @@ pub(super) struct PutJob {
     /// Repository-relative path of the file.
     pub path: RelPath,
     pub target: ReplayableSource,
+    /// The BASE text to compute the delta against (`None`: send the full text).
+    pub base: Option<ReplayableSource>,
     pub base_rev: Option<Revnum>,
     pub base_md5: Option<[u8; 16]>,
     pub result_md5: [u8; 16],
     pub lock: Option<String>,
+    /// Bounds the files being encoded or sent (and so the encoded streams waiting).
     pub slots: Arc<Semaphore>,
+    pub writer: TxnWriter,
     pub cancel: CancelToken,
+    /// Told once the text was read and encoded (dropped unsent when that failed).
+    pub encoded: tokio::sync::oneshot::Sender<()>,
 }
 
 /// Checks that a checksum can be verified here (MD5 only).
@@ -139,8 +343,8 @@ pub(super) fn require_md5(c: &Checksum, what: &str) -> Result<[u8; 16]> {
     }
 }
 
-/// Runs one upload: encode to a spill file, `PUT` it, check the answer.
-pub(super) async fn run_put(job: PutJob) -> Result<()> {
+/// Runs one upload: encode (a delta when the base can be used), `PUT` it, check the answer.
+pub(super) async fn run_put(mut job: PutJob) -> Result<()> {
     let _slot = tokio::select! {
         biased;
         () = job.cancel.cancelled() => return job.cancel.check(),
@@ -151,9 +355,19 @@ pub(super) async fn run_put(job: PutJob) -> Result<()> {
     job.cancel.check()?;
     let version = version_of(&job.wire);
     let (target, expected) = (job.target.clone(), job.result_md5);
-    let spill = tokio::task::spawn_blocking(move || spill(&target, version, &expected))
-        .await
-        .map_err(|e| SvnError::new(ErrorCode::Internal, format!("encode task failed: {e}")))??;
+    // Without the base checksum the server cannot check the base, so no delta.
+    let base = job.base.clone().zip(job.base_md5);
+    let (spill, _delta) = tokio::task::spawn_blocking(move || {
+        let base = base
+            .as_ref()
+            .map(|(source, md5)| DeltaBase { source, md5: *md5 });
+        encode(&target, base.as_ref(), version, &expected)
+    })
+    .await
+    .map_err(|e| SvnError::new(ErrorCode::Internal, format!("encode task failed: {e}")))??;
+    // The sources are no longer needed; the caller may go on.
+    let (done, _) = tokio::sync::oneshot::channel();
+    let _ = std::mem::replace(&mut job.encoded, done).send(());
     send_put(&job, &spill).await
 }
 
@@ -168,20 +382,17 @@ async fn send_put(job: &PutJob, spill: &Spill) -> Result<()> {
     }
     .with_result_md5(job.wire.caps(), &result_hex);
     let req = put_request(job.wire.urls(), &job.txn, &job.path, Body::Empty, &opts)?;
-    let source = ReplayableSource {
-        path: spill.file.path().to_path_buf(),
-        translated: true,
-        size: Some(spill.size),
-    };
+    let _turn = write_turn(&job.writer, &job.cancel).await?;
     let resp = job
         .wire
-        .send_with_body(req, RequestBody::File(source), &job.cancel)
+        .send_with_body(req, spill.body(), &job.cancel)
         .await?;
     RaWire::require_success(resp, &job.cancel).await?;
     Ok(())
 }
 
-/// Creates an empty file: the server expects a svndiff stream, here just its header.
+/// Creates an empty file: the server expects a svndiff stream, here just its header. The
+/// caller holds the write turn.
 pub(super) async fn put_empty(
     wire: &RaWire,
     txn: &TxnName,

@@ -23,7 +23,7 @@ use svn_wc::pristine::Sha1Digest;
 use svn_wc::translate::{self, utc_offset_local};
 use svn_wc::workqueue::WorkingCopyOps;
 
-use crate::local::content::{detranslate_digest, stat_cache, translate_info};
+use crate::local::content::{detranslate_sha1, stat_cache, translate_info};
 use crate::local::paths::abs_of;
 
 /// Post-commit fixup of the committed file at `path`; the handler passed to
@@ -31,15 +31,25 @@ use crate::local::paths::abs_of;
 ///
 /// A path that is no longer a versioned file, or whose working file is gone, needs nothing.
 pub fn file_commit_fixup(db: &WcDb, path: &RelPath) -> Result<()> {
+    if let Some((size, mtime)) = file_commit_fixup_deferred(db, path)? {
+        db.with_txn(|t| t.record_fileinfo(path, Some(size), Some(mtime)))?;
+    }
+    Ok(())
+}
+
+/// [`file_commit_fixup`] without writing the stat cache: returns the `(size, mtime)` to record
+/// (`None` when there is nothing to record), so a caller finishing many items can store all of
+/// them in the transaction that also completes the items.
+pub fn file_commit_fixup_deferred(db: &WcDb, path: &RelPath) -> Result<Option<(i64, i64)>> {
     let Some(node) = db.read_node(path)? else {
-        return Ok(());
+        return Ok(None);
     };
     if node.kind != NodeKind::File || node.presence != Presence::Normal {
-        return Ok(());
+        return Ok(None);
     }
     let abs = abs_of(db, path);
     let Ok(md) = fs::symlink_metadata(&abs) else {
-        return Ok(());
+        return Ok(None);
     };
     let ops = DbWorkingCopyOps::new(db);
     let tinfo = translate_info(db, path)?;
@@ -75,9 +85,9 @@ pub fn file_commit_fixup(db: &WcDb, path: &RelPath) -> Result<()> {
         .as_deref()
         .and_then(Sha1Digest::from_svn_string);
     let Some(expected) = expected else {
-        return Ok(());
+        return Ok(None);
     };
-    let digest = match detranslate_digest(db, path, &abs) {
+    let sha1 = match detranslate_sha1(db, path, &abs) {
         Ok(d) => d,
         // Inconsistent or unknown line endings (SVN_ERR_IO_INCONSISTENT_EOL / UNKNOWN_EOL): the
         // file is simply modified. A file deleted meanwhile has no stat to cache.
@@ -85,15 +95,12 @@ pub fn file_commit_fixup(db: &WcDb, path: &RelPath) -> Result<()> {
             if matches!(e.svn_code, Some(135_000 | 135_001))
                 || e.code == ErrorCode::PathNotFound =>
         {
-            return Ok(());
+            return Ok(None);
         }
         Err(e) => return Err(e),
     };
-    if digest.sha1 != expected {
-        return Ok(());
+    if sha1 != expected {
+        return Ok(None);
     }
-    if let Some((size, mtime)) = stat_cache(&abs) {
-        db.with_txn(|t| t.record_fileinfo(path, Some(size), Some(mtime)))?;
-    }
-    Ok(())
+    Ok(stat_cache(&abs))
 }

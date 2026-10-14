@@ -591,9 +591,12 @@ async fn failures_clean_up_and_map_to_error_codes() {
             .await
             .unwrap();
         ed.apply_text(f, None, src, None, md5).await.unwrap();
-        let err = ed.close_file(f).await.unwrap_err();
+        // The PUT finishes in the background: the refusal stops the commit before the MERGE.
+        ed.close_file(f).await.unwrap();
+        ed.close_directory(trunk).await.unwrap();
+        ed.close_directory(root).await.unwrap();
+        let err = ed.close_edit().await.unwrap_err();
         assert_eq!(err.code, ErrorCode::LockedByOther, "{version}: {err}");
-        ed.abort_edit().await.unwrap();
     }
 }
 

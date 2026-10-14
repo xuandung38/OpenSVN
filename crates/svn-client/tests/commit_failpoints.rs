@@ -161,6 +161,49 @@ async fn finalize_is_idempotent_after_a_crash_inside_it() {
     assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
 }
 
+#[tokio::test]
+async fn texts_moved_into_the_store_before_a_crash_are_reused_by_recovery() {
+    let _scenario = FailScenario::setup();
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "changed\n");
+    write(&e.wc, "new.txt", "new\n");
+    local_add(&e, "new.txt");
+    fail::cfg("commit.after_merge_before_finalize", "return").expect("cfg");
+    e.commit().await.expect_err("crash");
+    fail::remove("commit.after_merge_before_finalize");
+
+    // Finalize moves the journal's copies into the pristine store, then its transaction fails:
+    // the copies are gone from the journal but no row names them yet.
+    let store = JournalStore::new(&e.state);
+    let path = store.list().expect("list").remove(0);
+    let data = JournalStore::read(&path).expect("read");
+    let data_dir = store.data_dir_of(&data.id);
+    let before = dump_rows(&e.wc);
+    let err = svn_client::local::lock::with_wc_lock(&e.db, &e.cancel, || {
+        fail::cfg("wc.txn.before_commit", "return").expect("cfg");
+        let r = svn_client::commit::finalize::finalize(&e.db, &data, &data_dir);
+        fail::remove("wc.txn.before_commit");
+        r
+    })
+    .expect_err("finalize fails before its rows are committed");
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert_eq!(dump_rows(&e.wc), before, "no row changed");
+    let left = std::fs::read_dir(&data_dir).map_or(0, |d| d.count());
+    assert_eq!(left, 0, "the copies were moved into the store, not copied");
+
+    // Recovery finds the texts in the store, checks them and records them.
+    let report = e.recover().await;
+    assert_eq!(report.finalized.len(), 1, "{report:?}");
+    assert!(report.failed.is_empty());
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
+    assert_eq!(svn_out(&e.fx.oracle, &e.wc, &["diff"]), "");
+    assert_eq!(
+        svn_out(&e.fx.oracle, &e.wc, &["cat", "-r", "BASE", "d/f1"]),
+        "changed\n"
+    );
+    svn(&e.fx.oracle, &e.wc, &["cleanup"]);
+}
+
 fn local_delete(e: &Env, rel: &str) {
     svn_client::local::delete(
         &e.db,

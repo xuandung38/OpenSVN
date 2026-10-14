@@ -5,7 +5,7 @@ use svn_wc::WcDb;
 use svn_wc::db::{Node, Presence};
 use svn_wc::pristine::Sha1Digest;
 
-use super::content::{detranslate_digest, stat_cache};
+use super::content::{detranslate_sha1, stat_cache};
 use super::paths::{abs_of, depth_of};
 
 /// What the user has scheduled for a node.
@@ -110,7 +110,7 @@ pub fn text_modified(db: &WcDb, info: &NodeInfo) -> Result<bool> {
     if info.node.translated_size == Some(size) && info.node.last_mod_time == Some(mtime) {
         return Ok(false);
     }
-    Ok(detranslate_digest(db, &info.rel, &abs)?.sha1 != expected)
+    Ok(detranslate_sha1(db, &info.rel, &abs)? != expected)
 }
 
 /// True when a conflict is recorded on `rel`.

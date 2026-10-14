@@ -131,7 +131,11 @@ pub trait CommitEditor: Send {
         rev: Option<Revnum>,
         parent: DirId,
     ) -> Result<()>;
-    /// Closes a file.
+    /// Closes a file. The text sources given to `apply_text` are no longer needed once this
+    /// returns, and a local failure (a checksum mismatch, an unreadable source) is reported
+    /// here. An implementation may send the file (its text and property changes) in the
+    /// background: a failure the server reports then surfaces from a later call, and from
+    /// `close_edit` at the latest, before anything is merged.
     async fn close_file(&mut self, file: FileId) -> Result<()>;
     /// Closes a directory.
     async fn close_directory(&mut self, dir: DirId) -> Result<()>;
