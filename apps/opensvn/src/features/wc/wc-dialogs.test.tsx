@@ -317,7 +317,8 @@ test("lock: a lock held by someone else can only be stolen after an explicit con
   await user().click(await option(/crate\.fbx/));
   await user().keyboard("{Control>}l{/Control}");
   const dlg = await dialog("Lock to edit");
-  expect(within(dlg).getByText("Locked by an")).toBeTruthy();
+  expect(within(dlg).getByText(/assets\/models\/crate\.fbx: locked by an/)).toBeTruthy();
+  expect(within(dlg).getByText("Their comment: rework")).toBeTruthy();
   await user().click(within(dlg).getByRole("checkbox", { name: /Steal the lock held by an/ }));
   const steal = within(dlg).getByRole("button", { name: "Steal lock" }) as HTMLButtonElement;
   expect(steal.disabled).toBe(true);
@@ -345,8 +346,101 @@ test("lock: without the steal option the server refusal is shown and the dialog 
   await user().keyboard("{Control>}l{/Control}");
   const dlg = await dialog("Lock to edit");
   await user().click(within(dlg).getByRole("button", { name: "Lock" }));
-  expect((await within(dlg).findByRole("alert")).textContent).toContain("Locked by an");
+  expect((await within(dlg).findByRole("alert")).textContent).toContain("locked by an");
   expect(screen.getByRole("dialog", { name: "Lock to edit", hidden: true })).toBeTruthy();
+  expect(lastCall("lock")?.args[0]).toMatchObject({ steal: false });
+});
+
+test("lock held elsewhere (#127): the refusal names owner, comment and date; Steal needs two confirmations", async () => {
+  renderApp(<AppShell />);
+  // Unmodified needs-lock file: listed under Locks, its foreign lock unknown until the server says.
+  const locks = await screen.findByRole("region", { name: /^Locks \(/ });
+  const row = within(locks).getByRole("listitem", { name: "assets/audio/theme.ogg" });
+  await user().click(within(row).getByRole("button", { name: "Lock to edit…" }));
+  const dlg = await dialog("Lock to edit");
+  expect(within(dlg).queryByRole("checkbox", { name: /Steal/ })).toBeNull();
+  await user().click(within(dlg).getByRole("button", { name: "Lock" }));
+  // The dialog stays open through the operation and shows who holds the lock.
+  expect(await within(dlg).findByText(/assets\/audio\/theme\.ogg: locked by binh/)).toBeTruthy();
+  expect(within(dlg).getByText("Their comment: mixing the final cut")).toBeTruthy();
+  expect(within(dlg).getByText(/Ask binh to release the lock/)).toBeTruthy();
+  expect(within(dlg).getByRole("alert").textContent).toContain("HTTP 423");
+  expect(lastCall("lock")?.args[0]).toMatchObject({ steal: false });
+
+  await user().click(within(dlg).getByRole("checkbox", { name: /Steal the lock held by binh/ }));
+  const steal = within(dlg).getByRole("button", { name: "Steal lock" }) as HTMLButtonElement;
+  expect(steal.disabled).toBe(true);
+  expect(within(dlg).getByText(/takes the lock away from binh/)).toBeTruthy();
+  await user().click(within(dlg).getByRole("checkbox", { name: /I understand/ }));
+  expect(steal.disabled).toBe(false);
+  await user().click(steal);
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: "Lock to edit", hidden: true })).toBeNull(),
+  );
+  expect(lastCall("lock")?.args[0]).toMatchObject({
+    steal: true,
+    targets: { kind: "wc", paths: ["assets/audio/theme.ogg"] },
+  });
+  await waitFor(() =>
+    expect(
+      within(
+        within(screen.getByRole("region", { name: /^Locks \(/ })).getByRole("listitem", {
+          name: "assets/audio/theme.ogg",
+        }),
+      ).getByText("Locked by you"),
+    ).toBeTruthy(),
+  );
+});
+
+test("lock held elsewhere (#127): a refusal after the dialog was closed reopens it with the owner", async () => {
+  renderApp(<AppShell />);
+  const locks = await screen.findByRole("region", { name: /^Locks \(/ });
+  const row = within(locks).getByRole("listitem", { name: "assets/audio/theme.ogg" });
+  await user().click(within(row).getByRole("button", { name: "Lock to edit…" }));
+  const dlg = await dialog("Lock to edit");
+  await user().click(within(dlg).getByRole("button", { name: "Lock" }));
+  await waitFor(() => expect(lastCall("lock")).toBeTruthy());
+  await user().click(within(dlg).getByRole("button", { name: "Cancel" }));
+  const again = await dialog("Lock to edit");
+  expect(await within(again).findByText(/theme\.ogg: locked by binh/)).toBeTruthy();
+  expect(within(again).getByRole("checkbox", { name: /Steal the lock held by binh/ })).toBeTruthy();
+  // Nothing was stolen: only the one plain lock request went out.
+  expect(mockCalls.filter((c) => c.name === "lock")).toHaveLength(1);
+});
+
+test("locks section (#128): unmodified needs-lock and locked files offer Lock / Unlock, never a commit tick", async () => {
+  renderApp(<AppShell />);
+  const locks = await screen.findByRole("region", { name: "Locks (2)" });
+  const theme = within(locks).getByRole("listitem", { name: "assets/audio/theme.ogg" });
+  expect(within(theme).getByText("Needs lock")).toBeTruthy();
+  expect(within(theme).queryByRole("button", { name: "Unlock…" })).toBeNull();
+  const spec = within(locks).getByRole("listitem", { name: "docs/spec.docx" });
+  expect(within(spec).getByText("Locked by you")).toBeTruthy();
+  expect(within(spec).queryByRole("button", { name: "Lock to edit…" })).toBeNull();
+  // Not changes: not in the Changes list.
+  expect(screen.queryByRole("option", { name: /theme\.ogg/ })).toBeNull();
+  expect(screen.queryByRole("option", { name: /spec\.docx/ })).toBeNull();
+
+  await user().click(within(spec).getByRole("button", { name: "Unlock…" }));
+  const dlg = await dialog("Unlock");
+  await user().click(within(dlg).getByRole("button", { name: "Unlock" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: "Unlock", hidden: true })).toBeNull(),
+  );
+  expect(lastCall("unlock")?.args[0]).toMatchObject({
+    breakLock: false,
+    targets: { kind: "wc", paths: ["docs/spec.docx"] },
+  });
+  // Still listed: it needs a lock again before the next edit.
+  await waitFor(() =>
+    expect(
+      within(
+        within(screen.getByRole("region", { name: "Locks (2)" })).getByRole("listitem", {
+          name: "docs/spec.docx",
+        }),
+      ).getByText("Needs lock"),
+    ).toBeTruthy(),
+  );
 });
 
 test("discard: confirmation names the consequence and reverts only the selection", async () => {
