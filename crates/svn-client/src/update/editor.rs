@@ -319,7 +319,7 @@ impl UpdateEditor {
 
     /// Commits everything first when a node that is not committed yet (pending or staged)
     /// removed `wc` (see [`Batch::touches`]).
-    fn settle(&mut self, wc: &RelPath) -> Result<()> {
+    pub(super) fn settle(&mut self, wc: &RelPath) -> Result<()> {
         let staged = self
             .staged
             .as_ref()
