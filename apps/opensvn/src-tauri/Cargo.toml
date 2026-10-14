@@ -15,6 +15,13 @@ workspace = true
 name = "opensvn_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# IPC codegen helper (`pnpm gen:ipc`). Behind a feature so installers, which bundle every binary of
+# this package, ship only `opensvn`.
+[[bin]]
+name = "gen_ipc"
+path = "src/bin/gen_ipc.rs"
+required-features = ["gen-ipc"]
+
 [build-dependencies]
 tauri-build.workspace = true
 # Reads tauri*.conf.json to refuse updater `dangerous*` TLS options at build time.
@@ -112,6 +119,8 @@ release = ["real-engine"]
 # builds for macOS and Linux turn it on. Windows always has SSPI. Users can switch Negotiate off in
 # the network settings either way.
 negotiate-gssapi = ["svn-ra/negotiate-gssapi"]
+# Builds the `gen_ipc` binary (TypeScript bindings); never enabled for installers.
+gen-ipc = []
 # Exposes `engine::conformance`, the engine-independent test suite every `EngineFacade` must pass.
 engine-conformance = []
 # Crash-injection points of the working copy layer, for the real engine's crash recovery tests

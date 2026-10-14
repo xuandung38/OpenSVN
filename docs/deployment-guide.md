@@ -97,8 +97,8 @@ cargo install cargo-about --locked --version 0.9.2 --features cli
 scripts/release/build-linux.sh
 ```
 
-The deb depends on `libwebkit2gtk-4.1-0`, `libgtk-3-0` and `libgssapi-krb5-2` (the default
-`negotiate-gssapi` feature links the Kerberos library). Build on the oldest distro you support: the
+The deb depends on `libwebkit2gtk-4.1-0` and `libgtk-3-0` (added by Tauri) and `libgssapi-krb5-2`
+(the `negotiate-gssapi` feature the Linux build enables links the Kerberos library). Build on the oldest distro you support: the
 AppImage inherits its glibc. Built and smoke-tested on Ubuntu 24.04 (xvfb) for `v0.0.1-test1`.
 
 ## Windows (MSI), run on Windows

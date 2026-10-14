@@ -61,7 +61,7 @@ stamp_version() {
 tauri_feature_args() {
   local features="${OPENSVN_FEATURES-$1}"
   FEATURE_ARGS=()
-  if [[ -n "$features" ]]; then FEATURE_ARGS=(--features "$features"); fi
+  if [[ -n "$features" ]]; then FEATURE_ARGS+=(--features "$features"); fi
   log "cargo features: ${features:-<none, fake engine only>}"
 }
 
