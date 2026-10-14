@@ -109,7 +109,7 @@ Tính atomic: server chỉ có revision mới sau MERGE thành công; WC chỉ c
 | Dữ liệu | Nơi lưu | Ghi chú |
 |---|---|---|
 | Metadata WC | `<wc>/.svn/wc.db` + `pristine/` | Chuẩn libsvn_wc, không thêm bảng (ADR-004) |
-| Danh sách WC, layout, settings, URL gần đây, cert tin cậy | `app.sqlite` trong thư mục dữ liệu app | `%APPDATA%\com.opensvn.desktop`, `~/Library/Application Support/com.opensvn.desktop`, `$XDG_DATA_HOME/com.opensvn.desktop` (tên thư mục = bundle identifier trong `tauri.conf.json`; app dùng engine giả thì dữ liệu nằm trong thư mục con `fake-engine/`) |
+| Danh sách WC, layout, settings, URL gần đây, cert tin cậy | `app.sqlite` trong thư mục dữ liệu app | `%APPDATA%\com.opensvn.desktop`, `~/Library/Application Support/com.opensvn.desktop`, `$XDG_DATA_HOME/com.opensvn.desktop` (tên thư mục = bundle identifier trong `tauri.conf.json`; app dùng engine giả thì dữ liệu nằm trong thư mục con `fake-engine/`; build có feature `real-engine` mặc định chạy engine thật trên chính thư mục này, journal commit ở `state/commit-journals/`; `OPENSVN_ENGINE=fake` chọn engine giả cho dev FE/e2e, build release chạy engine giả sẽ log cảnh báo) |
 | Cache log/list/blame | `cache.sqlite` (tách riêng, xóa được) | Key `(repo_uuid, path, rev)`; revision bất biến → cache vĩnh viễn |
 | Cache status | `cache.sqlite` | Chỉ để hiển thị nhanh lúc mở; luôn xác minh lại |
 | Mật khẩu | OS credential store (keyring-core) | Service `opensvn`; account = `scheme\|host\|port\|realm\|user` (mỗi trường escape `%`→`%25`, `\|`→`%7C` nên key là đơn ánh); proxy dùng realm `\u{1}proxy` |

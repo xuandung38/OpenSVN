@@ -37,8 +37,8 @@ svn-client = { workspace = true, optional = true }
 svn-delta = { workspace = true, optional = true }
 md-5 = { workspace = true, optional = true }
 sha1 = { workspace = true, optional = true }
-# `fake` ships the in-memory repository that backs FakeEngine (the default engine until the real
-# engine is registered behind the `real-engine` feature).
+# `fake` ships the in-memory repository that backs FakeEngine (the engine of builds without the
+# `real-engine` feature, and of `OPENSVN_ENGINE=fake`).
 svn-ra-api = { workspace = true, features = ["fake"] }
 # `protocol-asset` is required for the scoped asset protocol (image diffs); its scope is pinned to
 # the app temp dir in tauri.conf.json.
@@ -82,7 +82,10 @@ dunce = "=1.0.5"
 rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }
 
 [features]
-# Registers `engine::real::RealEngine`, the `EngineFacade` backed by the Subversion crates.
+# Compiles in `engine::real::RealEngine`, the `EngineFacade` backed by the Subversion crates, and
+# makes it the app's engine (`OPENSVN_ENGINE=fake` still selects the demo engine). Not a default
+# feature yet: the rollout turns it on after the conformance run against Apache and a manual
+# VisualSVN smoke test on all three OSes.
 real-engine = ["dep:svn-wc", "dep:svn-client", "dep:svn-delta", "dep:md-5", "dep:sha1"]
 # Kerberos single sign-on on macOS/Linux through the system GSSAPI library (needs the krb5
 # development headers and libclang to build). Off by default so CI builds without them; release
