@@ -335,9 +335,18 @@ impl UpdateEditor {
             old_side.as_ref(),
             new_side.as_ref(),
         );
+        let file_external = self
+            .s
+            .file_external
+            .as_ref()
+            .filter(|_| wc == self.target_wc);
         failpoint!("update.after_merge3_before_txn");
         db.with_txn(|t| {
             t.base_add(&wc, &node)?;
+            if let Some(ext) = file_external {
+                t.mark_file_external(&wc)?;
+                t.external_add(&wc, ext)?;
+            }
             if let Some(op_depth) = f.shadow {
                 t.mark_base_deleted_at(&wc, NodeKind::File, op_depth)?;
             } else if obstructed {
