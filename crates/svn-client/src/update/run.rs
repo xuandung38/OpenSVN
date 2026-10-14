@@ -198,10 +198,10 @@ pub async fn drive_update(
         let (db, cancel, tc) = (
             Arc::clone(&db),
             cancel.clone(),
-            (target_wc.clone(), ctx.config.use_commit_times),
+            (target_wc.clone(), ctx.config.use_commit_times, params.depth),
         );
         blocking(move || {
-            let restored = restore::queue_missing(&db, &tc.0, tc.1)?;
+            let restored = restore::queue_missing(&db, &tc.0, tc.2, tc.1)?;
             crate::wc::run_work_queue(&db, &cancel)?;
             Ok(restored)
         })

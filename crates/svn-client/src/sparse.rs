@@ -135,6 +135,11 @@ fn crop_children(
 fn check_target(db: &WcDb, rel: &RelPath, what: &str) -> Result<svn_wc::db::Node> {
     let base = db.read_base(rel)?;
     let cur = db.read_node(rel)?;
+    if base.is_none() && cur.as_ref().is_some_and(|c| c.presence.is_present()) {
+        return Err(unsupported(format!(
+            "cannot {what} '{rel}': it is to be added to the repository; commit or revert first"
+        )));
+    }
     let (Some(base), Some(cur)) = (base, cur) else {
         return Err(SvnError::new(
             ErrorCode::PathNotFound,
@@ -236,7 +241,7 @@ pub fn exclude(db: &WcDb, cancel: &CancelToken, rel: &RelPath) -> Result<Vec<(Re
 /// A narrower depth crops first (see the module documentation; locally modified items are kept
 /// and reported by nothing being removed for them), a wider one fetches what is missing. `exclude`
 /// removes the directory itself and records it as excluded, without contacting the server.
-/// Only directories can change depth.
+/// Only directories can change depth; a file can only be excluded.
 pub async fn set_depth(
     ctx: &ClientCtx,
     session: &dyn RaSession,
@@ -263,7 +268,7 @@ pub async fn set_depth(
                  folder to bring it back"
             )));
         }
-        if base.kind != NodeKind::Dir {
+        if base.kind != NodeKind::Dir && depth != Depth::Exclude {
             return Err(unsupported(format!(
                 "only directories have a depth; '{rel2}' is a file"
             )));
