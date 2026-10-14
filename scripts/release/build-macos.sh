@@ -11,6 +11,9 @@
 #                            or APPLE_API_ISSUER + APPLE_API_KEY + APPLE_API_KEY_PATH
 # Updater artifacts (.app.tar.gz + .sig) are produced when OPENSVN_UPDATER=1 together with
 # TAURI_SIGNING_PRIVATE_KEY and OPENSVN_UPDATER_PUBKEY.
+# Cargo features default to `release,negotiate-gssapi` (real engine + Kerberos SSO through the
+# system GSS framework; needs libclang from the Xcode command line tools); override with
+# OPENSVN_FEATURES (empty = fake engine only).
 # Other knobs: RELEASE_VERSION (override stamped version), SKIP_LICENSES=1 (reuse generated report).
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 [[ "$(uname -s)" == "Darwin" ]] || die "build-macos.sh must run on macOS"
@@ -45,9 +48,10 @@ if [[ "${OPENSVN_UPDATER:-0}" == "1" ]]; then
   [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]] || die "OPENSVN_UPDATER=1 needs TAURI_SIGNING_PRIVATE_KEY"
 fi
 tauri_config_args
+tauri_feature_args "release,negotiate-gssapi"
 (cd "$REPO_ROOT" && pnpm install --frozen-lockfile)
 MARK="$(mktemp)"; trap 'rm -f "$MARK"' EXIT
-(cd "$APP_DIR" && pnpm tauri build --bundles "$BUNDLES" ${TRIPLE_ARGS[@]+"${TRIPLE_ARGS[@]}"} "${CONFIG_ARGS[@]}")
+(cd "$APP_DIR" && pnpm tauri build --bundles "$BUNDLES" ${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"} ${TRIPLE_ARGS[@]+"${TRIPLE_ARGS[@]}"} "${CONFIG_ARGS[@]}")
 
 OUT="$GEN_DIR/out/$VERSION"
 rm -rf "$OUT"; mkdir -p "$OUT"
