@@ -167,6 +167,29 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
   // Like the fake engine; the checkout dialog explains when an engine does not fetch externals.
   engineCapabilities: () => ok({ ...engineCaps }),
   opList: () => ok([]),
+  // Mimics `repo_resolve_url`: a VisualSVN web link becomes `<prefix>/svn/<Repo>[/path]` when the
+  // mock server serves that repository (only `game`); anything else that is a web link fails.
+  repoResolveUrl: (url: string) => {
+    const m =
+      /^(https?:\/\/[^/?#]+)((?:\/[^?#]*)?)\/!\/?#([^/?]+)(?:\/view\/(head|r(\d+))((?:\/[^?]*)?))?/i.exec(
+        url.trim(),
+      );
+    if (!m) return ok({ url, converted: false, pegRev: null });
+    const [, origin, prefix, repo, , rev, path] = m;
+    if (decodeURIComponent(repo ?? "") !== "game") {
+      return errCode(
+        "invalid-argument",
+        `This is a VisualSVN web-interface link, not a repository URL, and no repository was found for it (${origin}${prefix}/svn/${repo} does not exist).`,
+        "visualsvn-web-link",
+      );
+    }
+    const tail = (path ?? "").replace(/\/+$/, "");
+    return ok({
+      url: `${origin}${prefix}/svn/${repo}${tail}`,
+      converted: true,
+      pegRev: rev ? Number(rev) : null,
+    });
+  },
   repoInfo: (url: string) =>
     ok({
       repoRootUrl: MOCK_REPO_ROOT,
