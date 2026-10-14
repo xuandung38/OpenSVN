@@ -46,16 +46,24 @@ Closes #87, #98, #101, #104; refs #99 (items 1 and 4).
 5. svn-client's `journal::move_no_replace` is now `pub` and syncs the folders of both names. The app's copy is removed.
 
 ### #104 — case-insensitive file systems
-- `local_util::target` uses `target_with(…, CASE_INSENSITIVE_FS)`, which is `cfg!(macos | windows)`.
-  When wc.db has no row for the path as spelled, `case_variants` searches it component by component, with NFC and full case folding.
-  - One match: that spelling is used.
-  - Several matches (`a.txt` and `A.txt` both versioned): refused as ambiguous with `WcInvalidOperation`.
-  - No match: the path stays as it is.
-- The move destination uses `new_target` (exact spelling), so case-only renames still work.
-- `unversioned_items` drops every item that matches a versioned node up to case (`drop_case_aliases`).
-  On a case-insensitive FS, a versioned file that was renamed by case outside svn is never deleted by revert/cleanup "remove unversioned".
-- Case-sensitive APFS volumes are treated as insensitive too. This is the conservative choice: a differently spelled request then acts on the versioned node or is refused.
-- The tests simulate this on Linux through `target_with(.., true)`, `resolve_case`, `unversioned_items_as_spelled` and `drop_case_aliases`.
+- `local_util::target_in` reads the flag from `LocalEnv::case_insensitive`. The default is `CASE_INSENSITIVE_FS` (`cfg!(macos | windows)`); tests switch it with `RealEngine::with_case_insensitive_fs`. `target` keeps the constant for `commit.rs`.
+- When wc.db has no row for the path as spelled, `case_variants` searches wc.db component by component, with NFC and full case folding.
+  - Several matches are refused as ambiguous.
+  - One match is used only when the disk confirms it (`spelling_on_disk`), as follows. (This follows review B1 on PR #115: case-sensitive APFS volumes and per-folder case-sensitive Windows directories exist.)
+
+  | On disk | Result |
+  |---|---|
+  | Neither name exists | the wc.db spelling |
+  | Both exist and are the same item: same dev/ino on Unix, and no folder on the way lists the asked spelling as an entry of its own | the wc.db spelling |
+  | Only the asked name exists | taken as spelled |
+  | Anything else (two different files, or only the versioned one) | refused (`WcInvalidOperation`) |
+
+  As a result, a request never reverts, deletes or edits a different file than the one named.
+- The move destination uses `new_target`, which keeps the exact spelling.
+- `unversioned_items` drops items that match a versioned node up to case whenever `env.case_insensitive` is set.
+- Tests run on Linux, which plays the case-sensitive volume:
+  - helper level: missing items resolve; distinct `README.md`/`README.MD`, or only the versioned name present, are refused; a separate file next to a missing versioned one is taken as spelled; ambiguous matches are refused; aliases are dropped;
+  - engine level, with the flag on: revert of `README.MD` with remove_unversioned is refused and `README.md` keeps its edits; cleanup with remove_unversioned keeps `README.MD`; revert of `readme.md` restores a missing `README.md`.
 
 ### #99 items 1 and 4
 - `svn_protocol::segments_below_root` (new, public) wraps the WP0 rule (`decode_path` + `below_root`, ASCII-only root folding).

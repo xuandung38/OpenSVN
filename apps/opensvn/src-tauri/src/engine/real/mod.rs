@@ -163,6 +163,9 @@ pub struct RealEngine {
     /// Longest time the repository part of commit recovery may take when a working copy is
     /// opened ([`recovery::RECOVERY_NETWORK_TIMEOUT`]).
     recovery_network_timeout: std::time::Duration,
+    /// Request paths of local operations are matched against `wc.db` ignoring case
+    /// ([`local_util::CASE_INSENSITIVE_FS`] unless a test overrides it).
+    case_insensitive_fs: bool,
 }
 
 impl RealEngine {
@@ -176,7 +179,16 @@ impl RealEngine {
             recovery: config.recovery,
             svn_config: Arc::new(SvnConfigSource::default()),
             recovery_network_timeout: recovery::RECOVERY_NETWORK_TIMEOUT,
+            case_insensitive_fs: local_util::CASE_INSENSITIVE_FS,
         }
+    }
+
+    /// Matches request paths of local operations against `wc.db` ignoring case or not, whatever
+    /// the platform (tests of the case-insensitive rules on any file system).
+    #[cfg(test)]
+    pub(crate) fn with_case_insensitive_fs(mut self, on: bool) -> Self {
+        self.case_insensitive_fs = on;
+        self
     }
 
     /// Replaces [`recovery::RECOVERY_NETWORK_TIMEOUT`] (tests with a server that never answers).
