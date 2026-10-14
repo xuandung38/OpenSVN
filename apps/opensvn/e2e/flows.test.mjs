@@ -2,7 +2,15 @@
 // engine and Apache + mod_dav_svn. See e2e/README.md for how to run them.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { App, PASSWORD, ScratchRepo, USER } from "./harness.mjs";
@@ -45,6 +53,17 @@ function wcRoot() {
   const parent = join(app.home, "svn");
   const [name] = readdirSync(parent);
   return join(parent, name);
+}
+
+/**
+ * Edits a read-only file the way a user forcing it would, and leaves it read-only again, so a
+ * later "writable" check proves that the app changed the permissions.
+ */
+function forceWrite(path, text) {
+  const mode = statSync(path).mode & 0o777;
+  chmodSync(path, mode | 0o200);
+  writeFileSync(path, text);
+  chmodSync(path, mode);
 }
 
 /** Flow 10.1: Welcome -> Checkout -> URL -> trust certificate -> sign in -> Changes (empty). */
@@ -142,8 +161,8 @@ test("10.4 needs-lock file: lock to edit, unlock, lock again, commit releases th
   const writable = () => (statSync(readme).mode & 0o222) !== 0;
   assert.ok(!writable(), "read-only until locked");
   // An unmodified needs-lock file is not listed in Changes (#128), so the file is
-  // edited first; the tests run as any user, and root may write a read-only file anyway.
-  writeFileSync(readme, "hello\nlocked edit\n");
+  // edited first.
+  forceWrite(readme, "hello\nlocked edit\n");
   await app.waitText("Needs lock", 30_000);
 
   const lockVia = async (item) => {
@@ -182,7 +201,7 @@ test("10.4 lock held elsewhere: the lock is refused, steal needs two confirmatio
   repo.svn(["commit", "-q", "-m", "README needs a lock"], repo.seed);
   repo.svn(["lock", "-q", "-m", "held by the other checkout", "README.md"], repo.seed);
   const wc = await checkout();
-  writeFileSync(join(wc, "README.md"), "hello\nmine\n");
+  forceWrite(join(wc, "README.md"), "hello\nmine\n");
   await app.waitText("Needs lock", 30_000);
   await app.click("option", /README\.md/);
   await app.contextMenu("option", /README\.md/);
