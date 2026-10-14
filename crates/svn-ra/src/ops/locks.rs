@@ -12,7 +12,7 @@ use svn_protocol::{ResponseHead, error_from_response, map_http_status};
 use svn_types::{CancelToken, Depth, ErrorCode, LockInfo, RelPath, Result, Revnum, SvnError};
 
 use super::read::stream_items;
-use super::update::{RaWire, error_of, headers_of};
+use super::update::{RaWire, buffered_headers, error_of, headers_of};
 
 /// Classification of a failed `LOCK`/`UNLOCK` that carried no classified Subversion error.
 fn lock_status_code(status: u16) -> ErrorCode {
@@ -113,10 +113,9 @@ async fn current_token(
     cancel: &CancelToken,
 ) -> Result<Option<String>> {
     let req = get_lock_request(wire.urls(), repo)?;
-    let resp = wire.send(req, cancel).await?;
-    let status = resp.status().as_u16();
-    let head = ResponseHead::new(status, headers_of(&resp));
-    let body = RaWire::read_small(resp, cancel).await?;
+    let resp = wire.fetch_small(req, cancel).await?;
+    let head = ResponseHead::new(resp.status.as_u16(), buffered_headers(&resp));
+    let body = resp.body;
     Ok(parse_get_lock_response(repo, &head, &body)?.map(|l| l.token))
 }
 

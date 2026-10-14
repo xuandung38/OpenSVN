@@ -101,6 +101,41 @@ cargo test -p opensvn --features $F --test visualsvn_like -- --ignored big_ --te
 The no-ticket cases re-run themselves in a child process with an empty credential cache, so a
 ticket in `KRB5CCNAME` is fine for the whole run.
 
+### Connections closed, reset or cut off by the server
+
+Apache on Windows, IIS and many proxies end TLS without a `close_notify`. They also close or reset
+idle keep-alive connections and enforce `KeepAliveTimeout` / `MaxKeepAliveRequests`. Two tools
+reproduce this:
+
+- **Low keep-alive limits** on both Apaches. They apply when `up` writes the configuration, so
+  restart with `down` first:
+
+  ```sh
+  scripts/test-env/visualsvn-like.sh down
+  VSVN_KEEPALIVE_TIMEOUT=1 VSVN_MAX_KEEPALIVE_REQUESTS=5 scripts/test-env/visualsvn-like.sh up
+  ```
+
+- **`scripts/test-env/flaky-tls-proxy.py`**: a TLS proxy in front of either Apache. It never sends
+  `close_notify`. Faults:
+  - `--close-after N`: closes a reused connection after N exchanges, under the next request.
+  - `--reset-after N`: the same, with a reset.
+  - `--idle-reset S`: resets a connection that stayed idle for S seconds.
+  - `--truncate-every K --truncate-at B`: cuts every K-th response bigger than B bytes mid-body.
+
+  ```sh
+  D=/tmp/opensvn-visualsvn
+  python3 scripts/test-env/flaky-tls-proxy.py --listen 18452 --upstream svn.opensvn.test:18443 \
+    --cert $D/certs/server.crt --key $D/certs/server.key --ca $D/certs/ca.crt \
+    --reset-after 2 --idle-reset 2 &
+  OPENSVN_COMPAT_LOCAL_URL=https://svn.opensvn.test:18452/svn-basic \
+    cargo test -p opensvn --features real-engine,engine-conformance --test real_engine_dav \
+    -- --ignored checkout_and_remote_status_at_the_same_time
+  ```
+
+`checkout_and_remote_status_at_the_same_time` runs a 1000-file checkout and repeated remote status
+checks at the same time over the app's shared transport. The whole conformance suite can also run
+through the proxy.
+
 ### App UI
 
 `scripts/test-env/ui-checkout.mjs` drives the built app through `tauri-driver` (WebKitWebDriver,

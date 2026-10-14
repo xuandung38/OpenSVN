@@ -1,4 +1,5 @@
 import { expect, test } from "vitest";
+import { activityStrings } from "../../features/activity/activity-strings";
 import { authStrings } from "../../features/remote/auth/auth-strings";
 import { blameStrings } from "../../features/remote/blame/blame-strings";
 import { branchStrings } from "../../features/remote/branch/branch-strings";
@@ -11,6 +12,7 @@ import { detectLang, interpolate } from "./i18n";
 
 const catalogs = {
   common: commonStrings,
+  activity: activityStrings,
   auth: authStrings,
   blame: blameStrings,
   branch: branchStrings,

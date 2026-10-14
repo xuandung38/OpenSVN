@@ -237,7 +237,7 @@ test("checkout: progress without a total is indeterminate and counts items", asy
     "https://svn.example.com/repos/game/trunk",
   );
   await user().click(within(dlg).getByRole("button", { name: "Checkout" }));
-  expect(await within(dlg).findByText("1 items")).toBeTruthy();
+  expect(await within(dlg).findByText(/^1 items/)).toBeTruthy();
   const bar = within(dlg).getByRole("progressbar", { name: "Checking out…" });
   expect(bar.hasAttribute("value")).toBe(false);
   expect(bar.hasAttribute("max")).toBe(false);
@@ -550,7 +550,7 @@ test("activity: a running operation can be cancelled and is reported as cancelle
   expect(screen.queryByText(/failed: Cancelled/)).toBeNull();
 });
 
-test("activity: a failed operation is toasted with the backend message", async () => {
+test("activity: a failed operation is toasted with a short text for transport errors", async () => {
   renderApp(<AppShell />);
   await option(/renderer\.ts/);
   await act(async () => {
@@ -567,7 +567,9 @@ test("activity: a failed operation is toasted with the backend message", async (
       },
     });
   });
-  expect(await screen.findAllByText("Update failed: Connection reset")).toBeTruthy();
+  expect(
+    await screen.findAllByText("Update failed: Connection was closed by the server"),
+  ).toBeTruthy();
 });
 
 test("demo engine: a release build running the demo engine says so, permanently", async () => {
@@ -599,6 +601,12 @@ test("commit: a needs-cleanup notice shows the working copy's cleanup banner", a
       bytesTotal: null,
       currentPath: "src/app.ts is in use",
     });
+  });
+  // While the commit itself still runs, its lock is ours: no cleanup offered yet.
+  expect(await screen.findByText("Commit in progress…")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Run cleanup" })).toBeNull();
+  await act(async () => {
+    mockEmit("op://finished", { opId: "c1", result: { kind: "newRev", newRev: 9 } });
   });
   expect(await screen.findByRole("button", { name: "Run cleanup" })).toBeTruthy();
 });

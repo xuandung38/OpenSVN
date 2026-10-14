@@ -342,12 +342,22 @@ impl WcTxn<'_> {
     }
 
     fn base_children(&self, path: &RelPath) -> Result<Vec<RelPath>> {
+        self.base_children_where(path, "")
+    }
+
+    /// The BASE children a copy of `path` takes: all but file externals (svn's
+    /// `STMT_SELECT_OP_DEPTH_CHILDREN`).
+    fn base_children_to_copy(&self, path: &RelPath) -> Result<Vec<RelPath>> {
+        self.base_children_where(path, " AND file_external IS NULL")
+    }
+
+    fn base_children_where(&self, path: &RelPath, filter: &str) -> Result<Vec<RelPath>> {
         let mut stmt = self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT local_relpath FROM nodes WHERE wc_id = ?1 AND parent_relpath = ?2 \
-                 AND op_depth = 0 ORDER BY local_relpath",
-            )
+                 AND op_depth = 0{filter} ORDER BY local_relpath"
+            ))
             .map_err(sql_err)?;
         let rows = stmt
             .query_map(params![self.wc_id, path.as_str()], |r| {
@@ -374,11 +384,38 @@ impl WcTxn<'_> {
     /// left `incomplete`) becomes a copy of its own at its own depth, with a `not-present` row in
     /// the parent's layer. Presence is copied as it is (`incomplete` included).
     ///
+    /// File externals below `path` are not part of the copy (svn's
+    /// `STMT_SELECT_OP_DEPTH_CHILDREN`): their BASE rows go with the rest of BASE.
+    ///
     /// Fails without changing anything when a working row already exists at that depth in the
-    /// subtree (a local replacement must never be overwritten).
+    /// subtree (a local replacement must never be overwritten), or when a node below `path` is
+    /// `server-excluded` (svn's `catch_copy_of_server_excluded`: a copy that leaves out what
+    /// the user may not read would delete it on commit).
     pub fn convert_base_to_copy(&self, path: &RelPath) -> Result<()> {
         let scope = scope_sql();
         let op_depth = relpath_depth(path);
+        let excluded: Option<String> = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT local_relpath FROM nodes WHERE wc_id = ?1 AND op_depth = 0 \
+                     AND presence = 'server-excluded' AND {} LIMIT 1",
+                    nodes::strict_descendant("local_relpath", "?2")
+                ),
+                params![self.wc_id, path.as_str()],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(sql_err(e)),
+            })?;
+        if let Some(excluded) = excluded {
+            return Err(SvnError::new(
+                ErrorCode::Forbidden,
+                format!("Cannot copy '{excluded}' excluded by server"),
+            ));
+        }
         let taken: i64 = self
             .conn
             .query_row(
@@ -403,8 +440,8 @@ impl WcTxn<'_> {
                     "INSERT INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, presence, \
                      kind) SELECT wc_id, local_relpath, ?3, parent_relpath, 'base-deleted', kind \
                      FROM nodes WHERE wc_id = ?1 AND op_depth = 0 AND {scope} \
-                     AND (local_relpath = ?2 OR presence NOT IN ('base-deleted', 'not-present', \
-                     'excluded', 'server-excluded'))"
+                     AND (local_relpath = ?2 OR (presence NOT IN ('base-deleted', \
+                     'not-present', 'excluded', 'server-excluded') AND file_external IS NULL))"
                 ),
                 params![self.wc_id, path.as_str(), op_depth],
             )
@@ -444,19 +481,6 @@ impl WcTxn<'_> {
         last_op_depth: u32,
         mut shadowed: bool,
     ) -> Result<()> {
-        let presence: String = self
-            .conn
-            .query_row(
-                "SELECT presence FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
-                 AND op_depth = 0",
-                params![self.wc_id, path.as_str()],
-                |r| r.get(0),
-            )
-            .map_err(sql_err)?;
-        if presence == "server-excluded" {
-            // Never part of a copy (svn refuses the whole copy); it just goes with BASE.
-            return Ok(());
-        }
         let mut op_depth = relpath_depth(path);
         let mut have_row = false;
         if last_op_depth != op_depth {
@@ -514,7 +538,7 @@ impl WcTxn<'_> {
                 self.extend_parent_delete(path, &kind, op_depth)?;
             }
             if kind == "dir" {
-                let children = self.base_children(path)?;
+                let children = self.base_children_to_copy(path)?;
                 let me = repos_relpath.as_deref().zip(repos_id).zip(revision);
                 for child in children {
                     let last = me.map(|((repos, id), rev)| (id, repos, rev));

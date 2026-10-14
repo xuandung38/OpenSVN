@@ -1,6 +1,7 @@
 //! Orchestration of one update, switch or checkout drive.
 
 use std::sync::{Arc, PoisonError};
+use std::time::Duration;
 
 use svn_ra_api::{RaSession, UpdateMode, UpdateRequest};
 use svn_types::{
@@ -41,6 +42,25 @@ pub struct UpdateParams {
     /// `svn update --set-depth`: record `depth` and let the drive widen the working copy to it.
     /// The caller crops first when the depth shrinks.
     pub sticky_depth: bool,
+}
+
+/// Delays before asking again after a connection failure that left nothing done: a remote
+/// status check (which writes nothing) or an update drive that broke off before it changed the
+/// working copy. The length is how many such attempts in a row are made.
+pub(crate) const RECONNECT_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
+
+/// Most automatic resumes of one update drive. A drive that broke off after it changed the
+/// working copy made progress, so the next resume waits only the first delay and does not count
+/// against [`RECONNECT_DELAYS`]; this cap bounds a connection that keeps breaking anyway.
+const MAX_RESUMES: usize = 20;
+
+/// Whether a failed drive is resumed automatically: an update or checkout (not a switch, whose
+/// half-applied state is left for the user to finish) that broke off because the connection
+/// failed (see [`svn_types::ConnectionFailure`]).
+fn can_reconnect(kind: &UpdateKind, err: &SvnError) -> bool {
+    matches!(kind, UpdateKind::Update)
+        && err.code != ErrorCode::Cancelled
+        && err.connection_failure().is_some()
 }
 
 /// Releases the working copy lock when dropped, also on error and cancellation.
@@ -249,47 +269,56 @@ pub async fn drive_update(
         ),
     };
     let (root, uuid) = wc::repos_identity(&db)?;
-    let setup = UpdateSetup {
-        db: Arc::clone(&db),
-        anchor: anchor.clone(),
-        target: target.clone(),
-        switch_relpath,
-        depth: params.depth,
-        sticky_depth: params.sticky_depth,
-        allow_unversioned_obstructions: params.allow_unversioned_obstructions,
-        repos_root: root.clone(),
-        uuid,
-        ctx: ctx.clone(),
-        cancel: cancel.clone(),
-        file_external: None,
-    };
-    let (editor, outcome) = UpdateEditor::new(setup)?;
-    let report = build_report(
-        Arc::clone(&db),
-        anchor,
-        target.clone(),
-        params.depth,
-        params.sticky_depth,
-        root,
-    );
-    let req = UpdateRequest {
-        revision: params.revision,
-        target: target.clone(),
-        // Like svn against a depth-aware server: only a sticky depth is sent; otherwise the
-        // report carries the depths and the editor applies the requested one.
-        depth: if params.sticky_depth {
-            params.depth
-        } else {
-            Depth::Unknown
-        },
-        mode,
-        send_copyfrom: false,
-        ignore_ancestry: params.ignore_ancestry,
-    };
-    let result = session
-        .do_update(req, report, Box::new(editor), cancel)
-        .await;
-    if let Err(e) = result {
+    let mut revision = params.revision;
+    // Notifications of drives that broke off on a failed connection.
+    let mut earlier_events: Vec<UpdateEvent> = Vec::new();
+    let mut reconnects = 0usize;
+    // Broken drives in a row that changed nothing.
+    let mut stalled = 0usize;
+    let outcome = loop {
+        let setup = UpdateSetup {
+            db: Arc::clone(&db),
+            anchor: anchor.clone(),
+            target: target.clone(),
+            switch_relpath: switch_relpath.clone(),
+            depth: params.depth,
+            sticky_depth: params.sticky_depth,
+            allow_unversioned_obstructions: params.allow_unversioned_obstructions,
+            repos_root: root.clone(),
+            uuid: uuid.clone(),
+            ctx: ctx.clone(),
+            cancel: cancel.clone(),
+            file_external: None,
+        };
+        let (editor, outcome) = UpdateEditor::new(setup)?;
+        let report = build_report(
+            Arc::clone(&db),
+            anchor.clone(),
+            target.clone(),
+            params.depth,
+            params.sticky_depth,
+            root.clone(),
+        );
+        let req = UpdateRequest {
+            revision,
+            target: target.clone(),
+            // Like svn against a depth-aware server: only a sticky depth is sent; otherwise the
+            // report carries the depths and the editor applies the requested one.
+            depth: if params.sticky_depth {
+                params.depth
+            } else {
+                Depth::Unknown
+            },
+            mode: mode.clone(),
+            send_copyfrom: false,
+            ignore_ancestry: params.ignore_ancestry,
+        };
+        let result = session
+            .do_update(req, report, Box::new(editor), cancel)
+            .await;
+        let Err(e) = result else {
+            break outcome;
+        };
         if e.code == ErrorCode::Cancelled {
             // The user is waiting: what is still queued (the drive stopped committing when its
             // grace period ran out) is finished by the next update or cleanup, which run the
@@ -300,8 +329,37 @@ pub async fn drive_update(
         let db2 = Arc::clone(&db);
         let _ = blocking(move || crate::wc::run_work_queue(&db2, &CancelToken::new()).map(|_| ()))
             .await;
-        return Err(e);
-    }
+        if !can_reconnect(&params.kind, &e) || reconnects >= MAX_RESUMES {
+            return Err(e);
+        }
+        // The working copy is consistent: directories the broken drive did not finish are
+        // still `incomplete`, so the next report asks only for what is missing (the way an
+        // interrupted checkout is resumed by `update`). It goes to the revision the broken
+        // drive was reaching, not to a newer HEAD.
+        let progressed = {
+            let out = outcome.lock().unwrap_or_else(PoisonError::into_inner);
+            revision = revision.or(out.revision);
+            earlier_events.extend(out.events.iter().cloned());
+            !out.events.is_empty()
+        };
+        stalled = if progressed { 0 } else { stalled + 1 };
+        let Some(delay) = RECONNECT_DELAYS.get(stalled.saturating_sub(1)).copied() else {
+            return Err(e);
+        };
+        reconnects += 1;
+        tracing::info!(
+            failure = ?e.connection_failure(),
+            attempt = reconnects,
+            "connection failed during the update drive; resuming on a fresh connection"
+        );
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                cancel.check()?;
+            }
+            () = tokio::time::sleep(delay) => {}
+        }
+    };
     let reached = outcome
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -331,7 +389,14 @@ pub async fn drive_update(
             action: UpdateAction::Restored,
         })
         .collect();
+    events.extend(earlier_events);
     events.extend(out.events.iter().cloned());
+    if reconnects > 0 {
+        // A resumed drive sends again the directories the broken one had opened: report each
+        // notification once.
+        let mut seen = std::collections::HashSet::new();
+        events.retain(|e| seen.insert(format!("{e:?}")));
+    }
     Ok(UpdateSummary {
         revision: out.revision,
         events,

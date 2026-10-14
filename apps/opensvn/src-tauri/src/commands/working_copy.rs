@@ -164,16 +164,18 @@ pub async fn status_remote(
             std::sync::Arc::clone(&state.status),
             std::sync::Arc::clone(&state.wcs),
         );
+        // While one of our operations writes the working copy (a checkout still filling it),
+        // the check would only fail on the lock: refuse it up front with the reason instead.
+        if let Some(op) = state.ops.running_on(&resolved.wc.root) {
+            return Err(crate::commands::write_ops::busy_with(&op.title));
+        }
         let title = format!("Check {} for updates", resolved.row.name);
-        Ok(state.ops.spawn(
-            OperationKind::StatusRemote,
-            Some(wc_id.clone()),
-            title,
-            move |ctx| async move {
-                crate::status::run_remote_check(&engine, &publisher, &wcs, &resolved, &ctx).await?;
-                Ok(OpResult::Done)
-            },
-        ))
+        let spec = crate::ops::OpSpec::new(OperationKind::StatusRemote, Some(wc_id.clone()), title)
+            .at(&resolved.wc.root);
+        Ok(state.ops.spawn_with(spec, move |ctx| async move {
+            crate::status::run_remote_check(&engine, &publisher, &wcs, &resolved, &ctx).await?;
+            Ok(OpResult::Done)
+        }))
     })
     .await
 }
