@@ -151,9 +151,29 @@ impl FakeCommitEditor {
         }
     }
 
+    /// Applies one edit and records it once per path, as a real repository's changed-path list
+    /// does: an added file whose text arrives afterwards stays a single `A`, a node deleted and
+    /// added again in the same transaction is `R`.
     fn apply(&mut self, change: FakeChange) -> Result<()> {
         let rev = Revnum(self.base_head.0 + 1);
-        apply_change(&mut self.tree, rev, &change, &mut self.changed)
+        let mut recorded = Vec::new();
+        apply_change(&mut self.tree, rev, &change, &mut recorded)?;
+        for cp in recorded {
+            match self.changed.iter_mut().find(|c| c.path == cp.path) {
+                Some(prev) if prev.action != ChangeAction::Deleted => {
+                    prev.text_mods |= cp.text_mods;
+                    prev.prop_mods |= cp.prop_mods;
+                }
+                Some(prev) if cp.action == ChangeAction::Added => {
+                    *prev = ChangedPath {
+                        action: ChangeAction::Replaced,
+                        ..cp
+                    };
+                }
+                _ => self.changed.push(cp),
+            }
+        }
+        Ok(())
     }
 
     /// Adds `path` as a copy of the node named by the URL `from` at `rev`, with its subtree:

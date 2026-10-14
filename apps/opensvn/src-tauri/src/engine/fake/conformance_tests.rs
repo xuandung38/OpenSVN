@@ -69,6 +69,9 @@ impl Harness for FakeHarness {
     fn write_file(&self, root: &Path, rel: &str, content: &str) -> Result<(), SvnError> {
         self.engine.edit_file(root, rel, content.as_bytes())
     }
+    fn remove_file(&self, root: &Path, rel: &str) -> Result<(), SvnError> {
+        self.engine.remove_from_disk(root, rel)
+    }
     fn scratch_dir(&self) -> PathBuf {
         self.scratch.path().to_path_buf()
     }

@@ -26,8 +26,26 @@ pub(crate) fn corrupt(msg: impl Into<String>) -> SvnError {
 }
 
 /// Newest revision, read from the `SVN-Youngest-Rev` header of a fresh `OPTIONS` (HTTPv2).
+///
+/// Asked at the session URL. A session reparented to a location the user may not read (the
+/// repository root, under path-based authorization that allows only `/trunk`) gets `403` there;
+/// it then asks at the URL the session was opened at, which the server already let the user
+/// read. The youngest revision is the same anywhere in the repository.
 pub(crate) async fn youngest_rev(wire: &RaWire, cancel: &CancelToken) -> Result<Revnum> {
-    let req = options_request(wire.session_url())?;
+    match youngest_rev_at(wire, wire.session_url(), cancel).await {
+        Err(e) if e.code == ErrorCode::Forbidden && wire.opened_url() != wire.session_url() => {
+            youngest_rev_at(wire, wire.opened_url(), cancel).await
+        }
+        other => other,
+    }
+}
+
+async fn youngest_rev_at(
+    wire: &RaWire,
+    url: &svn_types::RepoUrl,
+    cancel: &CancelToken,
+) -> Result<Revnum> {
+    let req = options_request(url)?;
     let resp = wire.send_ok(req, cancel).await?;
     let value = resp
         .headers()
