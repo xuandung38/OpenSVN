@@ -856,6 +856,96 @@ pub async fn commit_with_auto_add_remove(h: &dyn Harness) {
 /// An update that merges an incoming change into a locally modified file conflicts: the update
 /// itself succeeds and reaches the target revision, other incoming changes are applied, and the
 /// conflicted file can be resolved to the local version and committed.
+/// `svn update PATH` on a folder, a file inside a folder and a top-level file of a working copy
+/// whose session is anchored at its root: only the named paths move to the new revision.
+pub async fn update_of_sub_paths(h: &dyn Harness) {
+    let e = h.engine();
+    let (wc1, before) = checkout(h, "subpath-1", None).await;
+    let (wc2, _) = checkout(h, "subpath-2", None).await;
+    // Working file content through the engine (the fake engine keeps no files on disk).
+    let read = |wc: &WcRef, rel: &str| {
+        let (wc, rel) = (wc.clone(), rel.to_owned());
+        async move {
+            e.diff_wc(&wc, &rel, None, DiffOptions::default(), &ctx())
+                .await
+                .unwrap_or_else(|err| panic!("diff {rel}: {err}"))
+                .right
+                .unwrap_or_else(|| panic!("{rel} has no working content"))
+                .content
+        }
+    };
+    let commit = |paths: &[&str], message: &str| CommitRequest {
+        wc_id: wc1.id.clone(),
+        paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+        message: message.into(),
+        keep_locks: false,
+        auto_add_remove: true,
+    };
+    let update = |paths: &[&str]| UpdateRequest {
+        wc_id: wc2.id.clone(),
+        paths: Some(paths.iter().map(|p| (*p).to_owned()).collect()),
+        rev: None,
+        depth: None,
+    };
+
+    h.write_file(&wc1.root, "README.md", "hello again\n")
+        .expect("write");
+    h.write_file(&wc1.root, "src/main.rs", "fn main() { run(); }\n")
+        .expect("write");
+    h.write_file(&wc1.root, "src/lib.rs", "pub fn run() {}\n")
+        .expect("write");
+    let r2 = e
+        .commit(
+            &wc1,
+            &commit(&["README.md", "src/main.rs", "src/lib.rs"], "r2"),
+            &ctx(),
+        )
+        .await
+        .expect("commit r2");
+
+    // A folder.
+    let reached = e
+        .update(&wc2, &update(&["src"]), &ctx())
+        .await
+        .expect("update src");
+    assert_eq!(reached, r2);
+    assert_eq!(read(&wc2, "src/main.rs").await, "fn main() { run(); }\n");
+    assert_eq!(read(&wc2, "src/lib.rs").await, "pub fn run() {}\n");
+    assert_eq!(
+        read(&wc2, "README.md").await,
+        "hello\n",
+        "outside the path stays"
+    );
+    let info = e.wc_info(&wc2.root, &ctx()).await.expect("info");
+    assert_eq!(
+        info.rev_range,
+        Some((before.base_rev, r2)),
+        "mixed revisions"
+    );
+
+    // A file inside a folder, then a top-level file.
+    h.write_file(&wc1.root, "src/main.rs", "fn main() { run(); run(); }\n")
+        .expect("write");
+    let r3 = e
+        .commit(&wc1, &commit(&["src/main.rs"], "r3"), &ctx())
+        .await
+        .expect("commit r3");
+    let reached = e
+        .update(&wc2, &update(&["src/main.rs"]), &ctx())
+        .await
+        .expect("update src/main.rs");
+    assert_eq!(reached, r3);
+    assert_eq!(
+        read(&wc2, "src/main.rs").await,
+        "fn main() { run(); run(); }\n"
+    );
+    e.update(&wc2, &update(&["README.md"]), &ctx())
+        .await
+        .expect("update README.md");
+    assert_eq!(read(&wc2, "README.md").await, "hello again\n");
+    assert!(status(h, &wc2).await.is_empty(), "nothing is left modified");
+}
+
 pub async fn update_ends_in_conflict(h: &dyn Harness) {
     let e = h.engine();
     let url = h.repo_url();
@@ -973,4 +1063,5 @@ pub async fn run_all<H: Harness>(make: impl Fn() -> H) {
     locked_unmodified_file_in_status(&make()).await;
     commit_with_auto_add_remove(&make()).await;
     update_ends_in_conflict(&make()).await;
+    update_of_sub_paths(&make()).await;
 }

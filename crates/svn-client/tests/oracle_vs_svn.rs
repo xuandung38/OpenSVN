@@ -1085,3 +1085,32 @@ async fn incoming_delete_in_copy_replaced_dir_keeps_modified_file_unlike_svn() {
         "our copy shows the edit as a modification:\n{st}"
     );
 }
+
+/// `svn update src/lib` and `svn update docs/guide.txt`: nested targets below the session root.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_of_nested_targets_matches_svn() {
+    for target in ["src/lib", "docs/guide.txt"] {
+        let Some((o, t, w)) = scenario_at(
+            &format!("nested-{target}"),
+            |_, _, _| {},
+            |repo, seed| {
+                repo.svn(seed, &["update", "-q"]);
+                write(&seed.join("src/lib/deep.rs"), "fn deeper() {}\n");
+                write(&seed.join("src/lib/new.rs"), "fn new() {}\n");
+                write(
+                    &seed.join("docs/guide.txt"),
+                    "one\ntwo\nthree\nfour\nfive\nsix\nSEVEN\n",
+                );
+                write(&seed.join("README"), "hello\nchanged\n");
+                repo.svn(seed, &["add", "-q", "src/lib/new.rs"]);
+            },
+            target,
+            Depth::Unknown,
+        )
+        .await
+        else {
+            return;
+        };
+        assert_same(&o, &t, &w, target);
+    }
+}

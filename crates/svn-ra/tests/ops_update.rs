@@ -214,10 +214,74 @@ async fn switch_sends_destination_and_target() {
         RepoUrl::parse(&format!("{}{ROOT}/branches/b1", srv.uri())).unwrap(),
     ));
     req.target = p("src");
-    run_update(&w, req, report(), Box::new(editor), &CancelToken::new())
+    // Report paths are session relative; the wire carries them relative to the target.
+    let report: ReportFn = Box::new(|r| {
+        r.set_path(&p("src"), Revnum(0), Depth::Infinity, true, None)?;
+        r.finish()
+    });
+    run_update(&w, req, report, Box::new(editor), &CancelToken::new())
         .await
         .expect("switch");
     assert!(log.violations().is_empty());
+}
+
+#[tokio::test]
+async fn nested_target_is_anchored_at_its_parent_like_svn() {
+    let srv = server(Bulk::Prefer).await;
+    Mock::given(method("REPORT"))
+        .and(body_string_contains(&format!(
+            "<S:src-path>{ROOT}/trunk/a/b</S:src-path>"
+        )))
+        .and(body_string_contains("<S:update-target>c</S:update-target>"))
+        .and(body_string_contains(
+            "<S:entry rev=\"0\" depth=\"infinity\" start-empty=\"true\"></S:entry>",
+        ))
+        .and(body_string_contains("<S:missing>x</S:missing>"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_bytes(fixture("update/checkout-send-all.resp")),
+        )
+        .mount(&srv)
+        .await;
+    let w = wire(&srv, 4).await;
+    let (editor, log) = RecordingEditor::new();
+    let mut req = request(UpdateMode::Update);
+    req.target = p("a/b/c");
+    let report: ReportFn = Box::new(|r| {
+        r.set_path(&p("a/b/c"), Revnum(0), Depth::Infinity, true, None)?;
+        r.delete_path(&p("a/b/c/x"))?;
+        r.finish()
+    });
+    run_update(&w, req, report, Box::new(editor), &CancelToken::new())
+        .await
+        .expect("nested update");
+    assert!(log.violations().is_empty(), "{:?}", log.violations());
+    assert!(log.is_closed());
+    let files = log.file_contents();
+    assert!(!files.is_empty());
+    assert!(
+        files.keys().all(|k| k.as_str().starts_with("a/b/")),
+        "editor paths are session relative: {:?}",
+        files.keys().collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn report_paths_outside_the_target_are_refused() {
+    let srv = server(Bulk::Prefer).await;
+    let w = wire(&srv, 4).await;
+    let (editor, _log) = RecordingEditor::new();
+    let mut req = request(UpdateMode::Update);
+    req.target = p("a/b");
+    let report: ReportFn = Box::new(|r| {
+        r.set_path(&p("a/b"), Revnum(0), Depth::Infinity, false, None)?;
+        r.set_path(&p("a/other"), Revnum(0), Depth::Infinity, false, None)?;
+        r.finish()
+    });
+    let err = run_update(&w, req, report, Box::new(editor), &CancelToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal, "{err}");
+    assert!(requests(&srv).await.iter().all(|r| r.0 != "REPORT"));
 }
 
 #[tokio::test]
