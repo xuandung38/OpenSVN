@@ -181,6 +181,9 @@ impl CertDecision {
 pub trait AuthPrompter: Send + Sync {
     /// Asks for credentials. The transport guarantees at most one concurrent call per
     /// `req.origin` (single-flight). `None` means the user cancelled.
+    ///
+    /// Do not persist the answer here even when `save` is set: the server has not seen it yet.
+    /// Persist it in [`Self::credentials_accepted`].
     async fn credentials(&self, req: &CredentialRequest) -> Option<Credentials>;
 
     /// Credentials saved earlier for `req.origin` (for example in the OS credential store),
@@ -226,6 +229,23 @@ pub trait AuthPrompter: Send + Sync {
     /// a pending cancel takes effect as soon as it returns. The default does nothing.
     async fn stored_credentials_rejected(&self, req: &CredentialRequest) {
         let _ = req;
+    }
+
+    /// The server accepted credentials that [`Self::credentials`] returned for `origin`: the
+    /// first response to a request carrying them was neither a 401 nor a server error. Called
+    /// at most once per answer, whether or not `credentials.save` is set; never for
+    /// credentials from [`Self::stored_credentials`].
+    ///
+    /// **Persist a password the user asked to save here, not in [`Self::credentials`].** A
+    /// password saved before the server answered could be wrong; it would then be offered
+    /// silently after every restart and count towards a directory server's lockout threshold.
+    /// Credentials the server rejects never reach this hook.
+    ///
+    /// Must never show UI and should return promptly: the transport does not race it against
+    /// cancellation, and the response is handed to the caller once it returns. The default
+    /// does nothing.
+    async fn credentials_accepted(&self, origin: &OriginKey, credentials: &Credentials) {
+        let _ = (origin, credentials);
     }
 
     /// Asks whether to trust a certificate that failed verification.

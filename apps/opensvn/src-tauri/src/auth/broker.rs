@@ -19,7 +19,7 @@ use svn_types::OriginKey;
 use tokio::sync::{oneshot, watch};
 
 use super::trust::{AppDbTrustStore, hex};
-use crate::db::{AccountRecord, AppDb};
+use crate::db::{AccountRecord, AppDb, SavedAccount};
 use crate::ops::AppEvents;
 
 /// How long a prompt waits for the user before it counts as cancelled.
@@ -74,10 +74,14 @@ struct Pending {
 /// * Saved passwords live in the OS credential store, account metadata (user name, method) in
 ///   `app.sqlite`; [`AuthPrompter::stored_credentials`] combines both without showing UI.
 /// * Permanently trusted certificates are served to the transport by [`AppDbTrustStore`].
+/// * A password typed at the prompt with "save" is persisted only once the server accepted it
+///   ([`AuthPrompter::credentials_accepted`]), so a mistyped password never lands in the store.
 /// * A saved password the server rejected (401, reported through
-///   [`AuthPrompter::stored_credentials_rejected`]) is not offered again in this process until
-///   the user saves new credentials for that origin, so background work and rebuilt transports
-///   cannot lock the account by retrying it.
+///   [`AuthPrompter::stored_credentials_rejected`]) is marked stale in `app.sqlite` and not
+///   offered again, in this process or after a restart, until the user saves a password for
+///   that account again. It stays in the OS store (a 401 is not always a wrong password); the
+///   user is prompted instead, and background work fails with `auth-required` without sending
+///   it. This keeps background work and rebuilt transports from locking a directory account.
 pub struct AuthBroker {
     events: Arc<dyn AppEvents>,
     db: AppDb,
@@ -85,18 +89,21 @@ pub struct AuthBroker {
     trust: Arc<AppDbTrustStore>,
     timeout: Duration,
     pending: Mutex<HashMap<String, Pending>>,
-    /// Origins whose saved password the server rejected.
+    /// Origins whose saved password the server rejected (also kept in memory in case the
+    /// database cannot be written).
     stored_rejected: Mutex<HashSet<OriginKey>>,
+    /// User name of the saved password last offered per origin, to mark the right account stale.
+    offered: Mutex<HashMap<OriginKey, String>>,
+    /// Origins with a typed answer the server has neither accepted nor rejected yet.
+    awaiting: Mutex<HashSet<OriginKey>>,
+    /// Origins whose last typed answer the server rejected; the next prompt says so.
+    typed_rejected: Mutex<HashSet<OriginKey>>,
     /// Bumped whenever cached sessions must be dropped (sign-out, certificate removed).
     invalidations: watch::Sender<u64>,
 }
 
 fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-fn store_error(e: &StoreError) -> AppError {
-    AppError::internal("The system credential store could not be used.").with_detail(e.to_string())
 }
 
 fn failure_info(f: &CertFailure) -> CertFailureInfo {
@@ -161,6 +168,9 @@ impl AuthBroker {
             timeout,
             pending: Mutex::new(HashMap::new()),
             stored_rejected: Mutex::default(),
+            offered: Mutex::default(),
+            awaiting: Mutex::default(),
+            typed_rejected: Mutex::default(),
             invalidations: watch::Sender::new(0),
         }
     }
@@ -187,11 +197,66 @@ impl AuthBroker {
     }
 
     /// Records that the server rejected the saved password of `origin`: it is not offered again
-    /// (by any transport, including ones created later) until the user saves new credentials
-    /// for the origin.
+    /// (by any transport, including ones created later, and after a restart) until the user
+    /// saves a password for the origin. The password itself stays in the store.
     fn withhold_stored(&self, origin: &OriginKey) {
         if locked(&self.stored_rejected).insert(origin.clone()) {
             tracing::info!(host = %origin.host, "saved password was rejected; not offering it again");
+        }
+        let username = locked(&self.offered).remove(origin).or_else(|| {
+            self.account(origin)
+                .and_then(|a| a.username)
+                .filter(|u| !u.is_empty())
+        });
+        if let Some(user) = username
+            && let Err(e) = self.db.account_mark_stale(
+                &origin.scheme,
+                &origin.host,
+                origin.port,
+                &origin.realm,
+                &user,
+            )
+        {
+            tracing::warn!(error = %e, "could not mark the saved password stale");
+        }
+    }
+
+    fn account(&self, origin: &OriginKey) -> Option<SavedAccount> {
+        match self
+            .db
+            .account_get(&origin.scheme, &origin.host, origin.port, &origin.realm)
+        {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read account metadata");
+                None
+            }
+        }
+    }
+
+    /// Whether the saved password of `origin` was rejected (now or in an earlier run).
+    fn stored_is_stale(&self, origin: &OriginKey) -> bool {
+        locked(&self.stored_rejected).contains(origin)
+            || self.account(origin).is_some_and(|a| a.stale)
+    }
+
+    /// The reason shown for a credentials prompt. The transport only knows its own history; the
+    /// broker adds what it remembers across transports and restarts: a typed answer rejected
+    /// earlier (`Rejected` at attempt 0) and a saved password marked stale (`Expired`).
+    fn prompt_reason(&self, req: &CredentialRequest) -> AuthPromptReason {
+        let origin = &req.origin;
+        match req.reason {
+            PromptReason::Rejected => {
+                if locked(&self.awaiting).remove(origin) {
+                    locked(&self.typed_rejected).insert(origin.clone());
+                }
+                AuthPromptReason::Rejected
+            }
+            PromptReason::Initial if locked(&self.typed_rejected).contains(origin) => {
+                AuthPromptReason::Rejected
+            }
+            PromptReason::Initial if self.stored_is_stale(origin) => AuthPromptReason::Expired,
+            other => map_reason(other),
         }
     }
 
@@ -199,11 +264,13 @@ impl AuthBroker {
     /// next connection asks again. Returns whether it was trusted.
     pub fn forget_certificate(&self, key: &opensvn_ipc::TrustedCertKey) -> Result<bool, AppError> {
         let removed = self.db.certs_remove(key)?;
-        self.trust.forget(&key.host, key.port, &key.sha256);
-        if removed {
+        // A pin may exist in memory only (its database write failed): the transport trusts it
+        // all the same, so dropping it must rebuild the transport too.
+        let forgotten = self.trust.forget(&key.host, key.port, &key.sha256);
+        if removed || forgotten {
             self.invalidate();
         }
-        Ok(removed)
+        Ok(removed || forgotten)
     }
 
     /// Number of prompts waiting for an answer.
@@ -237,26 +304,62 @@ impl AuthBroker {
         Ok(())
     }
 
-    /// Signs out of a realm: removes account metadata and stored secrets, and drops cached
-    /// sessions (which still hold the credentials) so the next connection asks again.
+    /// Signs out of a realm: removes the stored secrets, then the account metadata of each
+    /// secret that is gone, and drops cached sessions (which still hold the credentials) so the
+    /// next connection asks again.
+    ///
+    /// Secrets are deleted first and every account is tried: an account whose secret could not
+    /// be deleted keeps its row (so signing out again can retry; no secret is left without a
+    /// row pointing to it) and is marked stale so the secret is not offered any more. The
+    /// failures are reported together at the end.
     pub fn sign_out(&self, realm: &str) -> Result<(), AppError> {
-        let removed = self.db.account_delete_realm(realm)?;
-        self.invalidate();
-        for account in removed {
+        let accounts = self.db.accounts_of_realm(realm)?;
+        let mut failures = Vec::new();
+        for account in accounts {
             let origin = OriginKey {
                 scheme: account.scheme,
                 host: account.host,
                 port: account.port,
                 realm: realm.to_owned(),
             };
-            locked(&self.stored_rejected).remove(&origin);
-            if let Some(user) = account.username {
-                self.secrets
-                    .delete(&origin, &user)
-                    .map_err(|e| store_error(&e))?;
+            let where_ = format!("{}:{}", origin.host, origin.port);
+            let secret_gone = match &account.username {
+                Some(user) => self.secrets.delete(&origin, user).map(|_| ()),
+                None => Ok(()),
+            };
+            locked(&self.awaiting).remove(&origin);
+            locked(&self.typed_rejected).remove(&origin);
+            match secret_gone {
+                Ok(()) => {
+                    locked(&self.stored_rejected).remove(&origin);
+                    locked(&self.offered).remove(&origin);
+                    if let Err(e) = self.db.account_delete(
+                        &origin.scheme,
+                        &origin.host,
+                        origin.port,
+                        &origin.realm,
+                    ) {
+                        failures.push(format!("{where_}: {e}"));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(host = %origin.host, error = %e, "could not delete a saved password");
+                    failures.push(format!("{where_}: {e}"));
+                    // Not offered again while it lingers in the store.
+                    locked(&self.offered).remove(&origin);
+                    self.withhold_stored(&origin);
+                }
             }
         }
-        Ok(())
+        self.invalidate();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(
+                AppError::internal("Some saved passwords could not be removed.")
+                    .with_detail(failures.join("; ")),
+            )
+        }
     }
 
     /// Saves `password` for `origin` in the credential store (off the async runtime: OS stores
@@ -337,7 +440,7 @@ impl AuthPrompter for AuthBroker {
             realm: req.origin.realm.clone(),
             url: origin_url(&req.origin),
             cert: None,
-            reason: Some(map_reason(req.reason)),
+            reason: Some(self.prompt_reason(req)),
             attempt: req.attempt,
             offered: req.offered.iter().copied().map(method_kind).collect(),
         };
@@ -364,31 +467,55 @@ impl AuthPrompter for AuthBroker {
             req.offered[0]
         };
         let password = SecretString::from(password.expose().to_owned());
-        if save && method == AuthMethod::Basic {
-            let recorded = self.db.account_upsert(&AccountRecord {
-                scheme: &req.origin.scheme,
-                host: &req.origin.host,
-                port: req.origin.port,
-                realm: &req.origin.realm,
-                username: &username,
-                negotiate: false,
-            });
-            match recorded {
-                Ok(()) => {
-                    if self.save_secret(&req.origin, &username, &password).await {
-                        // The user replaced the saved password: it may be offered again.
-                        locked(&self.stored_rejected).remove(&req.origin);
-                    }
-                }
-                Err(e) => tracing::warn!(error = %e, "could not record account metadata"),
-            }
-        }
+        // Nothing is saved yet: the server has not seen the password. `credentials_accepted`
+        // saves it once a response accepted it; a rejected one is never stored.
+        locked(&self.awaiting).insert(req.origin.clone());
         Some(Credentials {
             username,
             password,
-            save,
+            save: save && method == AuthMethod::Basic,
             method,
         })
+    }
+
+    async fn credentials_accepted(&self, origin: &OriginKey, creds: &Credentials) {
+        locked(&self.awaiting).remove(origin);
+        locked(&self.typed_rejected).remove(origin);
+        if !creds.save || creds.method != AuthMethod::Basic || creds.username.is_empty() {
+            return;
+        }
+        let previous = self.account(origin).and_then(|a| a.username);
+        // Secret first: the row (which clears the stale flag) is written only once the store
+        // holds the accepted password, so a failed save cannot re-arm an old, rejected one.
+        if !self
+            .save_secret(origin, &creds.username, &creds.password)
+            .await
+        {
+            return;
+        }
+        let recorded = self.db.account_upsert(&AccountRecord {
+            scheme: &origin.scheme,
+            host: &origin.host,
+            port: origin.port,
+            realm: &origin.realm,
+            username: &creds.username,
+            negotiate: false,
+        });
+        if let Err(e) = recorded {
+            tracing::warn!(error = %e, "could not record account metadata");
+            return;
+        }
+        // The user replaced the saved password: it may be offered again.
+        locked(&self.stored_rejected).remove(origin);
+        if let Some(old) = previous.filter(|u| !u.is_empty() && *u != creds.username) {
+            // The account now belongs to another user name; its old secret has no row any more.
+            let (store, o) = (Arc::clone(&self.secrets), origin.clone());
+            match tokio::task::spawn_blocking(move || store.delete(&o, &old)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::warn!(error = %e, "could not delete the replaced password"),
+                Err(e) => tracing::warn!(error = %e, "credential store worker failed"),
+            }
+        }
     }
 
     async fn stored_credentials(&self, req: &CredentialRequest) -> Option<Credentials> {
@@ -399,19 +526,15 @@ impl AuthPrompter for AuthBroker {
         if locked(&self.stored_rejected).contains(origin) {
             return None;
         }
-        let (username, negotiate) =
-            match self
-                .db
-                .account_get(&origin.scheme, &origin.host, origin.port, &origin.realm)
-            {
-                Ok(Some(account)) => account,
-                Ok(None) => return None,
-                Err(e) => {
-                    tracing::warn!(error = %e, "could not read account metadata");
-                    return None;
-                }
-            };
-        let username = username.filter(|u| !u.is_empty() && !negotiate)?;
+        let account = self.account(origin)?;
+        if account.stale {
+            // Rejected earlier (maybe in another run): the user is asked instead, and background
+            // work fails without sending it.
+            return None;
+        }
+        let username = account
+            .username
+            .filter(|u| !u.is_empty() && !account.negotiate)?;
         let (store, o, u) = (Arc::clone(&self.secrets), origin.clone(), username.clone());
         let password = match tokio::task::spawn_blocking(move || store.get(&o, &u)).await {
             Ok(Ok(Some(p))) => p,
@@ -425,6 +548,7 @@ impl AuthPrompter for AuthBroker {
                 return None;
             }
         };
+        locked(&self.offered).insert(origin.clone(), username.clone());
         Some(Credentials {
             username,
             password,
@@ -434,7 +558,8 @@ impl AuthPrompter for AuthBroker {
     }
 
     async fn stored_credentials_rejected(&self, req: &CredentialRequest) {
-        // In-memory only: the transport does not race this call against cancellation.
+        // In memory first, then one small `UPDATE` on the local database: prompt enough for a
+        // call the transport does not race against cancellation.
         self.withhold_stored(&req.origin);
     }
 
