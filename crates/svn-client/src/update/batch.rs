@@ -27,7 +27,6 @@
 //! reports such a path so the editor flushes first.
 
 use std::collections::HashSet;
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use svn_types::{RelPath, Result};
@@ -132,5 +131,40 @@ pub(super) struct Staged {
     pub(super) settle: Unsettled,
     /// `syncfs` of the working copy, started after every file of `pending` and `settle` was
     /// written; `None` when nothing needs it (each file was synced on its own).
-    pub(super) ticket: Option<JoinHandle<std::io::Result<()>>>,
+    pub(super) ticket: Option<Barrier>,
+}
+
+/// A durability barrier (`syncfs` of the working copy, then the files on other devices) running
+/// on its own thread. Dropping it leaves the thread to finish on its own: nothing waits for it
+/// then, and nothing that relies on it is committed.
+pub(super) struct Barrier(std::sync::mpsc::Receiver<std::io::Result<()>>);
+
+impl Barrier {
+    pub(super) fn start(root: std::path::PathBuf, elsewhere: Vec<std::path::PathBuf>) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            // A slow disk, for the cancellation tests.
+            #[cfg(feature = "failpoints")]
+            fail::fail_point!("update.sync_barrier");
+            let _ = tx.send(Unsettled::sync(&root, true, &elsewhere));
+        });
+        Self(rx)
+    }
+
+    /// Waits for the barrier to finish; `None` when `deadline` passed first.
+    pub(super) fn wait(&self, deadline: Option<Instant>) -> Option<std::io::Result<()>> {
+        use std::sync::mpsc::RecvTimeoutError;
+        let got = match deadline {
+            None => self.0.recv().map_err(|_| ()),
+            Some(at) => match self
+                .0
+                .recv_timeout(at.saturating_duration_since(Instant::now()))
+            {
+                Ok(r) => Ok(r),
+                Err(RecvTimeoutError::Timeout) => return None,
+                Err(RecvTimeoutError::Disconnected) => Err(()),
+            },
+        };
+        Some(got.unwrap_or_else(|()| Err(std::io::Error::other("sync thread panicked"))))
+    }
 }

@@ -6,9 +6,10 @@
 //! [`super::batch`]), and cancellation or an aborted drive leaves `incomplete` markers so the next
 //! update resumes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use svn_types::{
     Checksum, DeltaEditor, Depth, DirId, ErrorCode, FileId, NodeKind, PropChange, RelPath, Result,
@@ -19,7 +20,7 @@ use svn_wc::db::{BaseNode, Node, Presence};
 use svn_wc::pristine::Sha1Digest;
 use svn_wc::workqueue::WorkItem;
 
-use super::batch::{Batch, Op, Staged};
+use super::batch::{Barrier, Batch, Op, Staged};
 use super::conflict_record::{self, NewConflict, Side};
 use super::state::{
     DirState, EntryProps, FileState, Outcome, OutcomeHandle, PendingTreeConflict, TextSlot,
@@ -46,6 +47,9 @@ macro_rules! failpoint {
 }
 pub(super) use failpoint;
 
+/// How long a cancelled drive waits for durability barriers before it gives up committing.
+const CANCEL_GRACE: Duration = Duration::from_millis(500);
+
 /// Applies an update, switch or checkout drive to a working copy.
 pub struct UpdateEditor {
     pub(super) s: UpdateSetup,
@@ -68,6 +72,15 @@ pub struct UpdateEditor {
     /// the committed state would no longer be a prefix of the drive (a file could land below a
     /// directory whose row was in the lost batch).
     poisoned: bool,
+    /// Pristine texts placed by this drive whose rows are not committed yet; never replaced
+    /// (see [`svn_wc::pristine::PristineStore::place`]).
+    pub(super) placed: HashSet<Sha1Digest>,
+    /// The working copy's filesystem honours one `syncfs` barrier per batch
+    /// ([`svn_wc::durable::batched_sync`]); otherwise every file is synced on its own.
+    pub(super) batched: bool,
+    /// Set when the drive is cancelled: waiting for a barrier stops there, and what it would
+    /// have covered is left uncommitted (the next update fetches it again).
+    deadline: Option<Instant>,
     /// `.svn/tmp` exists.
     tmp_ready: bool,
 }
@@ -98,6 +111,7 @@ impl UpdateEditor {
             None
         };
         let out: OutcomeHandle = Arc::new(Mutex::new(Outcome::default()));
+        let batched = svn_wc::durable::batched_sync(setup.db.wcroot());
         Ok((
             Self {
                 s: setup,
@@ -114,6 +128,9 @@ impl UpdateEditor {
                 staged: None,
                 unsettled: svn_wc::workqueue::Unsettled::default(),
                 poisoned: false,
+                placed: HashSet::new(),
+                batched,
+                deadline: None,
                 tmp_ready: false,
             },
             out,
@@ -193,11 +210,8 @@ impl UpdateEditor {
         }
         let pending = self.batch.take();
         let settle = std::mem::take(&mut self.unsettled);
-        let ticket = (pending.unsynced || settle.unsynced).then(|| {
-            let root = self.s.db.wcroot().to_path_buf();
-            let elsewhere = settle.elsewhere.clone();
-            std::thread::spawn(move || svn_wc::workqueue::Unsettled::sync(&root, true, &elsewhere))
-        });
+        let ticket = (pending.unsynced || settle.unsynced)
+            .then(|| Barrier::start(self.s.db.wcroot().to_path_buf(), settle.elsewhere.clone()));
         self.staged = Some(Staged {
             pending,
             settle,
@@ -213,12 +227,32 @@ impl UpdateEditor {
         self.commit_staged()?;
         let settle = std::mem::take(&mut self.unsettled);
         if !settle.is_empty() {
-            let root = self.s.db.wcroot();
-            svn_wc::workqueue::Unsettled::sync(root, settle.unsynced, &settle.elsewhere)
-                .map_err(|e| SvnError::from_io(format!("cannot sync '{}'", root.display()), &e))?;
+            if settle.unsynced {
+                let root = self.s.db.wcroot();
+                let barrier = Barrier::start(root.to_path_buf(), settle.elsewhere.clone());
+                self.await_barrier(&barrier)?;
+            }
             self.s.db.with_txn(|t| t.complete_work(&settle))?;
         }
         Ok(())
+    }
+
+    /// Waits for `barrier`, or until the cancellation deadline. Past the deadline nothing more
+    /// is committed by this drive (the barrier finishes on its own thread).
+    fn await_barrier(&mut self, barrier: &Barrier) -> Result<()> {
+        let root = self.s.db.wcroot();
+        match barrier.wait(self.deadline) {
+            Some(r) => {
+                r.map_err(|e| SvnError::from_io(format!("cannot sync '{}'", root.display()), &e))
+            }
+            None => {
+                self.poisoned = true;
+                Err(SvnError::new(
+                    ErrorCode::Cancelled,
+                    "cancelled while waiting for the disk; the next update finishes the work",
+                ))
+            }
+        }
     }
 
     /// Waits for the staged batch's barrier, commits it in one transaction (with the completion
@@ -230,14 +264,8 @@ impl UpdateEditor {
         let p = staged.pending;
         let has_ops = !p.ops.is_empty();
         let committed = (|| {
-            if let Some(ticket) = staged.ticket {
-                let root = self.s.db.wcroot();
-                ticket
-                    .join()
-                    .map_err(|_| SvnError::new(ErrorCode::Internal, "sync thread panicked"))?
-                    .map_err(|e| {
-                        SvnError::from_io(format!("cannot sync '{}'", root.display()), &e)
-                    })?;
+            if let Some(ticket) = &staged.ticket {
+                self.await_barrier(ticket)?;
             }
             if has_ops || !staged.settle.is_empty() {
                 let settle = staged.settle;
@@ -980,6 +1008,11 @@ impl DeltaEditor for UpdateEditor {
         // atomically, so the working copy is restartable as it stands. Queued work stays queued.
         // Nodes prepared before the failure are complete: commit them so the next update has
         // less to fetch (on failure they are simply not committed).
+        if self.s.cancel.is_cancelled() {
+            // The user is waiting: commit what is durable within the grace period and leave the
+            // rest (a barrier on a slow or busy disk can take long).
+            self.deadline = Some(Instant::now() + CANCEL_GRACE);
+        }
         if !self.finished
             && let Err(e) = self.drain()
         {

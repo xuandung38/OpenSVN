@@ -124,8 +124,10 @@ impl UpdateEditor {
                     size: nt.size,
                     hydrated: true,
                 };
-                let synced = !svn_wc::durable::BATCHED_SYNC;
-                let stored = db.pristine_store().place(nt.path, &record, synced)?;
+                let synced = !self.batched;
+                let stored =
+                    db.pristine_store()
+                        .place(nt.path, &record, synced, &mut self.placed)?;
                 if !stored {
                     self.batch.placed_text(record.size, synced);
                 }

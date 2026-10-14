@@ -359,3 +359,79 @@ fn rename_failure_keeps_its_classification() {
         "the I/O classification must survive: {svn:?}"
     );
 }
+
+/// A temp file holding `content` in the store's directory, with its record (as the update
+/// editor hands it to `place`).
+fn placed_text(
+    st: &PristineStore<MemIndex>,
+    content: &[u8],
+) -> (tempfile::TempPath, PristineRecord) {
+    use sha1::Digest as _;
+    let mut f = tempfile::NamedTempFile::new_in(&st.adm_dir).unwrap();
+    f.write_all(content).unwrap();
+    let record = PristineRecord {
+        sha1: Sha1Digest(sha1::Sha1::digest(content).into()),
+        md5: Md5Digest(md5::Md5::digest(content).into()),
+        size: content.len() as u64,
+        hydrated: true,
+    };
+    (f.into_temp_path(), record)
+}
+
+#[cfg(unix)]
+fn inode(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).unwrap().ino()
+}
+
+#[cfg(unix)]
+#[test]
+fn place_never_replaces_a_text_placed_but_not_committed() {
+    let (_d, mut st) = store();
+    let mut uncommitted = HashSet::new();
+    let (first, rec) = placed_text(&st, b"same text\n");
+    assert!(!st.place(first, &rec, false, &mut uncommitted).unwrap());
+    assert!(uncommitted.contains(&rec.sha1));
+    let dest = st.path_of(&rec.sha1);
+    let (ino, mtime) = (
+        inode(&dest),
+        std::fs::metadata(&dest).unwrap().modified().unwrap(),
+    );
+
+    // Same text again before the first row is committed (the next batch of the same drive):
+    // the stored file stays the one the earlier barrier covers; the new copy is dropped.
+    let (second, again) = placed_text(&st, b"same text\n");
+    let second_path = second.to_path_buf();
+    assert!(st.place(second, &again, false, &mut uncommitted).unwrap());
+    assert_eq!(inode(&dest), ino, "renamed over an uncommitted text");
+    assert_eq!(std::fs::metadata(&dest).unwrap().modified().unwrap(), mtime);
+    assert!(!second_path.exists(), "the dropped copy is removed");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"same text\n");
+
+    // Committed: the row answers first and nothing is renamed either.
+    st.index.record(&rec).unwrap();
+    let (third, again) = placed_text(&st, b"same text\n");
+    assert!(st.place(third, &again, false, &mut uncommitted).unwrap());
+    assert_eq!(inode(&dest), ino);
+}
+
+#[cfg(unix)]
+#[test]
+fn place_replaces_an_orphan_of_an_earlier_run() {
+    let (_d, mut st) = store();
+    let (file, rec) = placed_text(&st, b"hello\n");
+    let dest = st.path_of(&rec.sha1);
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    std::fs::write(&dest, b"hel").unwrap(); // partial leftover: no row, not placed by this drive
+    let ino = inode(&dest);
+    let mut uncommitted = HashSet::new();
+    assert!(!st.place(file, &rec, false, &mut uncommitted).unwrap());
+    assert_ne!(inode(&dest), ino);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"hello\n");
+
+    // A text in the set whose file has gone missing is placed again.
+    std::fs::remove_file(&dest).unwrap();
+    let (file, rec) = placed_text(&st, b"hello\n");
+    assert!(!st.place(file, &rec, false, &mut uncommitted).unwrap());
+    assert_eq!(std::fs::read(&dest).unwrap(), b"hello\n");
+}

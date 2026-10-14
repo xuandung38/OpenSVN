@@ -1596,7 +1596,10 @@ fn run_unsettled_leaves_completion_to_the_caller() {
     assert_eq!(ran, 2);
     assert_eq!(unsettled.ids, vec![1, 2]);
     assert_eq!(unsettled.fileinfo.len(), 1);
-    assert_eq!(unsettled.unsynced, crate::durable::BATCHED_SYNC);
+    assert_eq!(
+        unsettled.unsynced,
+        crate::durable::batched_sync(w.dir.path())
+    );
     // Nothing completed: a crash would run both again.
     assert_eq!(q.items.len(), 2);
     assert!(q.completions.is_empty());

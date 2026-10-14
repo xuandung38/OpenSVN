@@ -213,7 +213,8 @@ pub struct RunnerConfig<'a> {
     pub cancelled: Option<&'a dyn Fn() -> bool>,
     /// Install working files without one `fsync` each and run one
     /// [`sync_filesystem`](crate::durable::sync_filesystem) barrier before their completion
-    /// commits instead. Ignored where [`BATCHED_SYNC`](crate::durable::BATCHED_SYNC) is false.
+    /// commits instead. Ignored where [`batched_sync`](crate::durable::batched_sync) is false
+    /// for `wc_root`.
     pub defer_sync: bool,
 }
 
@@ -228,6 +229,8 @@ pub struct WorkQueueRunner<'a> {
     pending_fileinfo: Vec<FileInfoRecord>,
     /// `.svn/tmp`, created on first use.
     tmp_dir: Option<PathBuf>,
+    /// Installs defer their sync to a barrier (`defer_sync` and a filesystem that allows it).
+    batched: bool,
     /// Files were installed without their own sync since the last barrier.
     unsynced: bool,
     /// Unsynced files on another device than the working copy root (the barrier misses them).
@@ -245,12 +248,14 @@ impl<'a> WorkQueueRunner<'a> {
         ops: &'a mut dyn WorkingCopyOps,
         pristine: &'a dyn PristineSource,
     ) -> Self {
+        let batched = config.defer_sync && crate::durable::batched_sync(&config.wc_root);
         Self {
             config,
             ops,
             pristine,
             pending_fileinfo: Vec::new(),
             tmp_dir: None,
+            batched,
             unsynced: false,
             unsynced_elsewhere: Vec::new(),
             root_dev: None,
@@ -397,7 +402,7 @@ impl<'a> WorkQueueRunner<'a> {
 
     /// Whether installs skip their own sync (a barrier follows).
     fn deferring(&self) -> bool {
-        self.config.defer_sync && crate::durable::BATCHED_SYNC
+        self.batched
     }
 
     /// Notes an installed file whose sync was deferred to the next barrier.

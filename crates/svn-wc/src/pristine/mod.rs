@@ -22,6 +22,7 @@
 //! but refuses every write with [`PristineError::ReadOnlyFormat`]. Re-hydrating a dehydrated
 //! text is out of the MVP: `record` never flips `hydrated` from false to true.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -398,7 +399,15 @@ impl<I: PristineIndex> PristineStore<I> {
     /// commit leaves an orphan file, which the next install of the same text overwrites.
     ///
     /// `sync` = true syncs the file and its directory entry here (the [`install`](Self::install)
-    /// behaviour); pass `!`[`crate::durable::BATCHED_SYNC`] unless a barrier follows.
+    /// behaviour); pass false only when [`crate::durable::batched_sync`] allows a barrier and one
+    /// follows.
+    ///
+    /// `uncommitted` holds the texts this caller placed whose rows are not committed yet. Such a
+    /// text is never replaced: an earlier barrier covers the stored file and a transaction about
+    /// to commit relies on it, while a new inode renamed over it would be covered only by a later
+    /// barrier. The new file is dropped instead (the content is the same, by its checksum). An
+    /// orphan left by an earlier, interrupted run (no row, not in the set) is replaced, since it
+    /// may be partial. A text with a committed row is never touched either.
     ///
     /// Requires the WC write lock; see the module documentation.
     pub fn place(
@@ -406,12 +415,17 @@ impl<I: PristineIndex> PristineStore<I> {
         file: tempfile::TempPath,
         record: &PristineRecord,
         sync: bool,
+        uncommitted: &mut HashSet<Sha1Digest>,
     ) -> Result<bool, PristineError> {
         self.require_writable()?;
         match self.index.lookup(&record.sha1)? {
             Some(row) if row.hydrated => return Ok(true),
             Some(_) => return Err(PristineError::RehydrateUnsupported(record.sha1)),
             None => {}
+        }
+        if uncommitted.contains(&record.sha1) && self.path_of(&record.sha1).is_file() {
+            // `file` is removed when the guard drops.
+            return Ok(true);
         }
         if sync {
             fs::OpenOptions::new()
@@ -441,6 +455,7 @@ impl<I: PristineIndex> PristineStore<I> {
         if sync {
             sync_dir(parent)?;
         }
+        uncommitted.insert(record.sha1);
         Ok(false)
     }
 
