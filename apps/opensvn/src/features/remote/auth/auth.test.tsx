@@ -125,6 +125,42 @@ test("sign-in shows full origin, realm and the rejection counter", () => {
   expect(screen.getByRole("alert").textContent).toContain("Attempt 2 of 3");
 });
 
+test("sign-in explains an earlier rejection and a stale saved password", () => {
+  const { unmount } = withLang(
+    <SignInDialog
+      prompt={creds({ reason: "rejected", attempt: 0 })}
+      onSubmit={() => undefined}
+      onCancel={() => undefined}
+    />,
+  );
+  const earlier = screen.getByRole("alert").textContent ?? "";
+  expect(earlier).toContain("entered last time");
+  expect(earlier).not.toContain("Attempt");
+  unmount();
+  withLang(
+    <SignInDialog
+      prompt={creds({ reason: "expired" })}
+      onSubmit={() => undefined}
+      onCancel={() => undefined}
+    />,
+  );
+  expect(screen.getByRole("alert").textContent).toContain("saved password");
+});
+
+test("normalizeAuthPrompt keeps the expired reason", () => {
+  const p = normalizeAuthPrompt({
+    requestId: "r",
+    kind: "credentials",
+    realm: "x",
+    url: "https://h/",
+    cert: null,
+    reason: "expired",
+    attempt: 0,
+    offered: ["basic"],
+  });
+  expect(p?.kind === "credentials" && p.reason).toBe("expired");
+});
+
 test("sign-in submits trimmed username and the password, then Cancel answers cancel", async () => {
   const onSubmit = vi.fn();
   const onCancel = vi.fn();

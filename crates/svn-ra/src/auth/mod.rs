@@ -106,6 +106,12 @@ struct Credential {
     password: SecretString,
 }
 
+/// A prompt answer the server has not accepted yet; reported through
+/// `AuthPrompter::credentials_accepted` on the first success.
+struct Unconfirmed {
+    save: bool,
+}
+
 #[derive(Default)]
 struct FlightState {
     /// Bumped every time a prompt finishes (with credentials, cancel or give-up).
@@ -120,6 +126,8 @@ struct FlightState {
     /// The cached `credentials` came from `AuthPrompter::stored_credentials` and their
     /// rejection has not been reported yet.
     from_stored: bool,
+    /// The cached `credentials` were typed at the prompt and no response has accepted them yet.
+    unconfirmed: Option<Unconfirmed>,
 }
 
 #[derive(Default)]
@@ -127,6 +135,25 @@ struct Flight {
     /// Held across a prompt so concurrent 401s wait for one answer.
     gate: tokio::sync::Mutex<()>,
     state: Mutex<FlightState>,
+    /// True while a credentials prompt of this flight waits for the user. Unattended requests
+    /// fail instead of queueing behind it (a prompt may wait for minutes).
+    prompting: tokio::sync::watch::Sender<bool>,
+}
+
+/// Clears `Flight::prompting` when the prompt ends, also when the request future is dropped.
+struct Prompting<'a>(&'a tokio::sync::watch::Sender<bool>);
+
+impl<'a> Prompting<'a> {
+    fn start(flag: &'a tokio::sync::watch::Sender<bool>) -> Self {
+        flag.send_replace(true);
+        Self(flag)
+    }
+}
+
+impl Drop for Prompting<'_> {
+    fn drop(&mut self) {
+        self.0.send_replace(false);
+    }
 }
 
 /// Per-transport authentication state.
@@ -313,7 +340,10 @@ impl AuthManager {
         })
     }
 
-    /// Records that the server accepted the credentials carried by `sent`.
+    /// Records that the server accepted the credentials carried by `sent` (any response but a
+    /// 401). The first such response with credentials typed at the prompt is reported through
+    /// `AuthPrompter::credentials_accepted`, unless it is a server error, which proves nothing
+    /// about them.
     ///
     /// For Negotiate, the server's final token (if any) must pass mutual authentication;
     /// otherwise the response is not trusted and `NegotiateFailed` is returned.
@@ -321,6 +351,7 @@ impl AuthManager {
         &self,
         url: &Url,
         sent: &Attached,
+        status: reqwest::StatusCode,
         headers: &reqwest::header::HeaderMap,
         cancel: &CancelToken,
     ) -> Result<()> {
@@ -347,9 +378,31 @@ impl AuthManager {
         }
         if let (Some(origin), Some(_)) = (&sent.origin, &sent.header) {
             let flight = self.flight(origin);
-            let mut state = lock(&flight.state);
-            if state.generation == sent.generation {
-                state.failures = 0;
+            let accepted = {
+                let mut state = lock(&flight.state);
+                if state.generation != sent.generation {
+                    None
+                } else {
+                    state.failures = 0;
+                    if status.is_server_error() {
+                        None
+                    } else {
+                        match (state.unconfirmed.take(), &state.credentials) {
+                            (Some(u), Some(c)) => Some(svn_ra_api::Credentials {
+                                username: c.username.clone(),
+                                password: c.password.clone(),
+                                save: u.save,
+                                method: AuthMethod::Basic,
+                            }),
+                            _ => None,
+                        }
+                    }
+                }
+            };
+            if let Some(creds) = accepted {
+                // Not raced against `cancel`: a typed password the user asked to save is
+                // persisted only here, once the server took it.
+                self.prompter.credentials_accepted(origin, &creds).await;
             }
         }
         Ok(())
@@ -462,7 +515,27 @@ impl AuthManager {
         };
         // Generation observed before queueing: a request that carried no credentials may have
         // been sent at any earlier generation, so only the carried case is compared.
-        let _gate = or_cancel(cancel, flight.gate.lock()).await?;
+        let _gate = if interactive {
+            or_cancel(cancel, flight.gate.lock()).await?
+        } else {
+            // Background work must not sit behind a prompt that waits for the user.
+            let mut prompting = flight.prompting.subscribe();
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    return Err(cancel.check().err().unwrap_or_else(|| {
+                        SvnError::new(ErrorCode::Cancelled, "operation cancelled")
+                    }));
+                }
+                g = flight.gate.lock() => g,
+                _ = prompting.wait_for(|p| *p) => {
+                    return Err(auth_refused(
+                        "a sign-in prompt for this server is waiting for the user; the \
+                         unattended request does not wait for it",
+                    ));
+                }
+            }
+        };
 
         let mut stored_rejected = false;
         let attempt = {
@@ -490,6 +563,7 @@ impl AuthManager {
                 // The credentials we sent were rejected.
                 state.failures += 1;
                 state.credentials = None;
+                state.unconfirmed = None;
                 stored_rejected = std::mem::take(&mut state.from_stored);
             }
             if state.failures >= MAX_ATTEMPTS {
@@ -538,6 +612,7 @@ impl AuthManager {
             let mut state = lock(&flight.state);
             state.stored_used = true;
             state.from_stored = true;
+            state.unconfirmed = None;
             state.generation += 1;
             state.credentials = Some(Credential {
                 username: creds.username,
@@ -557,7 +632,10 @@ impl AuthManager {
                  credentials are stored; not prompting",
             ));
         }
-        let answer = or_cancel(cancel, self.prompter.credentials(&request)).await?;
+        let answer = {
+            let _prompting = Prompting::start(&flight.prompting);
+            or_cancel(cancel, self.prompter.credentials(&request)).await?
+        };
         let mut state = lock(&flight.state);
         state.generation += 1;
         let Some(creds) = answer else {
@@ -571,6 +649,7 @@ impl AuthManager {
         }
         let header = basic_header(&creds.username, &creds.password)?;
         state.from_stored = false;
+        state.unconfirmed = Some(Unconfirmed { save: creds.save });
         state.credentials = Some(Credential {
             username: creds.username,
             password: creds.password,

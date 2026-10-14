@@ -7,8 +7,17 @@
 //! * **One open per repository.** A session is opened (one `OPTIONS`) at the URL that was asked
 //!   for, so path-based authorization applies (a user allowed on `/trunk` only can still connect),
 //!   and is cached under its repository root. Later requests for any URL below that root reuse it
-//!   through [`HttpRaSession::reparent`], which sends nothing. Lookup is by longest root prefix;
-//!   scheme and host compare case-insensitively.
+//!   through [`HttpRaSession::reparent`], which sends nothing. Lookup is by longest root prefix
+//!   on whole path segments (`/svn/repo` never serves `/svn/repo2`); scheme and host compare
+//!   case-insensitively. The path compares exactly, except for a repository whose server showed
+//!   it ignores case (VisualSVN on Windows: a URL spelled `/svn/repo/...` opened a repository
+//!   announced as `/svn/Repo`). Below such a root, URLs match with the ASCII-only case folding
+//!   `svn-protocol` uses for the same server behaviour. Folding is learned per repository, never
+//!   assumed: on a case-sensitive server `/svn/Repo` and `/svn/repo` are different repositories.
+//! * **Opens never queue behind a prompt for another repository.** Opens are serialized per
+//!   requested URL, not per server, so a sign-in prompt that waits for the user (up to minutes)
+//!   does not hold up work on other repositories of the same server; unattended requests that
+//!   would have to wait for that prompt fail with `auth-required` instead (see the transport).
 //! * **Background work never prompts.** With `ConnectOptions::interactive == false` the session
 //!   is [`HttpRaSession::unattended`]: saved credentials and accepted certificates are used, a
 //!   request that would need the user fails with `auth-required` instead.
@@ -77,7 +86,16 @@ struct State {
     /// Bumped on every rebuild; an open that started before a rebuild is not cached.
     generation: u64,
     /// Root sessions by [`url_key`] of their repository root.
-    roots: HashMap<String, HttpRaSession>,
+    roots: HashMap<String, CachedRoot>,
+}
+
+/// A cached repository root session.
+#[derive(Clone)]
+struct CachedRoot {
+    session: HttpRaSession,
+    /// The server announced this root for a URL that spelled it in another ASCII case, so it
+    /// ignores case (VisualSVN on Windows) and URLs below it match case-insensitively.
+    folds_case: bool,
 }
 
 /// [`SessionConnector`] over one shared [`HttpTransport`] with a session cache per repository.
@@ -88,7 +106,8 @@ pub struct HttpConnector {
     invalidations: Mutex<watch::Receiver<u64>>,
     tweak: Option<ConfigTweak>,
     state: Mutex<State>,
-    /// Serializes opens per origin so concurrent operations on one repository open it once.
+    /// Serializes opens per requested URL so concurrent operations on one location open it
+    /// once, without making other repositories of the server wait (for example behind a prompt).
     open_gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -116,6 +135,46 @@ fn url_key(url: &RepoUrl) -> String {
     )
 }
 
+/// Whether `path` equals `prefix` or lies below it, on whole segments.
+fn under(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// [`under`] with ASCII-only case folding (as `svn-protocol` folds VisualSVN roots; full
+/// Unicode folding would match distinct names).
+fn under_folded(path: &str, prefix: &str) -> bool {
+    path.len() >= prefix.len()
+        && path.is_char_boundary(prefix.len())
+        && path[..prefix.len()].eq_ignore_ascii_case(prefix)
+        && (path.len() == prefix.len() || path.as_bytes()[prefix.len()] == b'/')
+}
+
+/// The key of the cached root for the URL key `wanted`, out of `(root key, folds case)` pairs:
+/// the longest exact root prefix, else the longest case-folded one among roots known to ignore
+/// case.
+fn find_root<'a>(
+    roots: impl Iterator<Item = (&'a str, bool)> + Clone,
+    wanted: &str,
+) -> Option<&'a str> {
+    let longest = |fold: bool| {
+        roots
+            .clone()
+            .filter(|&(root, folds_case)| {
+                if fold {
+                    folds_case && under_folded(wanted, root)
+                } else {
+                    under(wanted, root)
+                }
+            })
+            .max_by_key(|(root, _)| root.len())
+            .map(|(root, _)| root)
+    };
+    longest(false).or_else(|| longest(true))
+}
+
 impl HttpConnector {
     /// Connector whose transport asks `prompter` and trusts `trust`, configured from `settings`.
     /// Every change on `settings` (network keys) or `invalidations` drops the cached sessions.
@@ -129,7 +188,6 @@ impl HttpConnector {
     }
 
     /// Connector over the app's broker, trust store and settings.
-    #[allow(dead_code)] // called from `lib.rs` once the real engine is the default (WP7)
     pub(crate) fn from_services(services: &crate::app_state::EngineServices) -> Self {
         Self::new(
             services.auth.clone(),
@@ -218,23 +276,18 @@ impl HttpConnector {
             state.generation += 1;
             state.roots.clear();
         }
-        let wanted = url_key(url);
-        let cached = state
-            .roots
-            .iter()
-            .filter(|(root, _)| {
-                wanted == **root
-                    || wanted
-                        .strip_prefix(root.as_str())
-                        .is_some_and(|rest| rest.starts_with('/'))
-            })
-            .max_by_key(|(root, _)| root.len())
-            .map(|(_, session)| session.clone());
+        let roots = state.roots.iter().map(|(k, c)| (k.as_str(), c.folds_case));
+        let cached = find_root(roots, &url_key(url))
+            .and_then(|k| state.roots.get(k))
+            .map(|c| c.session.clone());
         (Arc::clone(&state.transport), state.generation, cached)
     }
 
     fn gate(&self, url: &RepoUrl) -> Arc<tokio::sync::Mutex<()>> {
-        Arc::clone(locked(&self.open_gates).entry(origin_key(url)).or_default())
+        let mut gates = locked(&self.open_gates);
+        // Forget gates nobody holds or waits for, so the map does not grow with every URL.
+        gates.retain(|_, g| Arc::strong_count(g) > 1);
+        Arc::clone(gates.entry(url_key(url)).or_default())
     }
 
     /// The root session of the repository containing `url`, opened if needed.
@@ -273,9 +326,17 @@ impl HttpConnector {
             HttpRaSession::open_unattended(transport, url.clone(), cancel).await?
         };
         let root = opened.reparent(opened.repos_root())?;
+        let (asked, root_key) = (url_key(url), url_key(root.repos_root()));
+        let folds_case = !under(&asked, &root_key) && under_folded(&asked, &root_key);
         let mut state = locked(&self.state);
         if state.generation == generation {
-            state.roots.insert(url_key(root.repos_root()), root.clone());
+            let entry = state.roots.entry(root_key).or_insert_with(|| CachedRoot {
+                session: root.clone(),
+                folds_case,
+            });
+            entry.session = root.clone();
+            // Once the server showed it ignores case, it keeps doing so for this repository.
+            entry.folds_case |= folds_case;
         }
         Ok(root)
     }
@@ -332,5 +393,88 @@ impl SessionConnector for HttpConnector {
             session.unattended()
         };
         Ok(Arc::new(session))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::{find_root, under_folded};
+
+    const O: &str = "https://svn.example:443";
+
+    fn key(path: &str) -> String {
+        format!("{O}{path}")
+    }
+
+    #[test]
+    fn a_root_never_serves_a_sibling_that_shares_its_prefix() {
+        let repo = key("/svn/repo");
+        let roots = [(repo.as_str(), false)];
+        assert_eq!(
+            find_root(roots.iter().copied(), &key("/svn/repo")),
+            Some(repo.as_str())
+        );
+        assert_eq!(
+            find_root(roots.iter().copied(), &key("/svn/repo/trunk")),
+            Some(repo.as_str())
+        );
+        assert_eq!(find_root(roots.iter().copied(), &key("/svn/repo2")), None);
+        assert_eq!(
+            find_root(roots.iter().copied(), &key("/svn/repo2/trunk")),
+            None
+        );
+        assert_eq!(find_root(roots.iter().copied(), &key("/svn/rep")), None);
+        // Folding does not loosen the segment rule either.
+        let folding = [(repo.as_str(), true)];
+        assert_eq!(
+            find_root(folding.iter().copied(), &key("/svn/REPO2/trunk")),
+            None
+        );
+    }
+
+    #[test]
+    fn the_longest_root_wins_and_both_siblings_resolve_to_their_own_root() {
+        let (repo, repo2, nested) = (key("/svn/repo"), key("/svn/repo2"), key("/svn/repo/sub"));
+        let roots = [
+            (repo.as_str(), false),
+            (repo2.as_str(), false),
+            (nested.as_str(), false),
+        ];
+        let find = |p: &str| find_root(roots.iter().copied(), &key(p));
+        assert_eq!(find("/svn/repo2/trunk"), Some(repo2.as_str()));
+        assert_eq!(find("/svn/repo/trunk"), Some(repo.as_str()));
+        assert_eq!(find("/svn/repo/sub/x"), Some(nested.as_str()));
+        assert_eq!(find("/svn/repo/subx"), Some(repo.as_str()));
+    }
+
+    #[test]
+    fn case_differing_urls_match_only_roots_known_to_ignore_case() {
+        let root = key("/svn/Repo");
+        let strict = [(root.as_str(), false)];
+        assert_eq!(
+            find_root(strict.iter().copied(), &key("/svn/repo/trunk")),
+            None
+        );
+        let visualsvn = [(root.as_str(), true)];
+        assert_eq!(
+            find_root(visualsvn.iter().copied(), &key("/svn/repo/trunk")),
+            Some(root.as_str())
+        );
+        // An exact match is preferred over a folded one.
+        let other = key("/svn/repo");
+        let both = [(root.as_str(), true), (other.as_str(), false)];
+        assert_eq!(
+            find_root(both.iter().copied(), &key("/svn/repo/trunk")),
+            Some(other.as_str())
+        );
+    }
+
+    #[test]
+    fn folding_is_ascii_only() {
+        // KELVIN SIGN folds to `k` under Unicode rules; svn-protocol does not fold it, nor do we.
+        assert!(!under_folded("/svn/\u{212A}", "/svn/k"));
+        assert!(under_folded("/svn/K/x", "/svn/k"));
+        assert!(!under_folded("/svn/kx", "/svn/k"));
     }
 }
