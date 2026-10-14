@@ -722,10 +722,11 @@ async fn a_server_error_does_not_confirm_typed_credentials() {
     });
     let _ = t.send(get(srv.url("/broken")), &CancelToken::new()).await;
     assert!(prompter.accepted().is_empty(), "a 500 proves nothing");
+    // A preemptive header on a URL that never challenged proves nothing either.
     t.send(get(srv.url("/ok")), &CancelToken::new())
         .await
         .unwrap();
-    assert_eq!(prompter.accepted().len(), 1);
+    assert!(prompter.accepted().is_empty());
     assert_eq!(prompter.credential_prompts(), 1);
 }
 
@@ -768,4 +769,206 @@ async fn unattended_request_does_not_wait_behind_a_prompt() {
     owner_cancel.cancel();
     let err = owner.await.unwrap().expect_err("cancelled");
     assert_eq!(err.code, ErrorCode::Cancelled);
+}
+
+/// Waits until `cond` holds (10 s at most).
+async fn wait_until(what: &str, cond: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !cond() {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_cancelled_first_prompt_does_not_block_the_next_interactive_request() {
+    // Issue #108: the cancel used to stick to the transport for good.
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
+    let prompter = Arc::new(ScriptedPrompter::default());
+    prompter.push_credentials(None);
+    prompter.push_credentials(Some(("alice", "pw")));
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let err = t
+        .send(get(srv.url("/a")), &CancelToken::new())
+        .await
+        .expect_err("cancelled");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    let second = t
+        .send(get(srv.url("/a")), &CancelToken::new())
+        .await
+        .expect("the user is asked again and signs in");
+    assert_eq!(second.status().as_u16(), 200);
+    assert_eq!(prompter.credential_prompts(), 2);
+    // Still a first attempt: a cancel is not a rejected password.
+    let calls = prompter.credential_calls.lock().unwrap().clone();
+    assert_eq!(calls[1].1, 0);
+    assert_eq!(
+        prompter.reasons.lock().unwrap()[1],
+        svn_ra_api::PromptReason::Initial
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_prompt_after_a_success_also_prompts_again() {
+    // With a `hosts` entry (credentials were produced before) the path differs; same outcome.
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw2")).await;
+    let prompter = Arc::new(ScriptedPrompter::default());
+    prompter.push_credentials(Some(("alice", "pw")));
+    prompter.push_credentials(None);
+    prompter.push_credentials(Some(("alice", "pw2")));
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let err = t
+        .send(get(srv.url("/a")), &CancelToken::new())
+        .await
+        .expect_err("rejected, then cancelled");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    let ok = t
+        .send(get(srv.url("/a")), &CancelToken::new())
+        .await
+        .expect("asked again");
+    assert_eq!(ok.status().as_u16(), 200);
+    assert_eq!(prompter.credential_prompts(), 3);
+}
+
+#[tokio::test]
+async fn unattended_request_after_a_cancelled_prompt_fails_without_prompting() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
+    let prompter = Arc::new(ScriptedPrompter::default());
+    prompter.push_credentials(None);
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let _ = t
+        .send(get(srv.url("/a")), &CancelToken::new())
+        .await
+        .expect_err("cancelled");
+    let err = t
+        .send_unattended(get(srv.url("/b")), &CancelToken::new())
+        .await
+        .expect_err("background work never prompts");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert_eq!(prompter.credential_prompts(), 1);
+}
+
+#[tokio::test]
+async fn requests_queued_behind_a_cancelled_prompt_all_fail_and_none_prompts() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
+    let prompter = Arc::new(ScriptedPrompter::default());
+    *prompter.delay.lock().unwrap() = Duration::from_millis(500);
+    prompter.push_credentials(None);
+    prompter.push_credentials(Some(("alice", "pw")));
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let send = |path: &str| {
+        let (t, url) = (Arc::clone(&t), srv.url(path));
+        tokio::spawn(async move { t.send(get(url), &CancelToken::new()).await.map(|_| ()) })
+    };
+    let owner = send("/owner");
+    wait_until("the first request never prompted", || {
+        prompter.credential_prompts() == 1
+    })
+    .await;
+    let queued: Vec<_> = ["/q1", "/q2", "/q3"].iter().map(|p| send(p)).collect();
+    wait_until("the queued requests never reached the server", || {
+        srv.requests().len() >= 4
+    })
+    .await;
+    for f in std::iter::once(owner).chain(queued) {
+        let err = tokio::time::timeout(Duration::from_secs(5), f)
+            .await
+            .expect("no request hangs after the cancel")
+            .unwrap()
+            .expect_err("the cancel fails every waiter");
+        assert_eq!(err.code, ErrorCode::AuthRequired);
+    }
+    assert_eq!(prompter.credential_prompts(), 1, "one prompt for the round");
+    // The round is over: the next request asks again.
+    t.send(get(srv.url("/later")), &CancelToken::new())
+        .await
+        .expect("asked again");
+    assert_eq!(prompter.credential_prompts(), 2);
+}
+
+#[tokio::test]
+async fn a_cancel_does_not_count_towards_the_three_attempt_cap() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "right")).await;
+    let prompter = Arc::new(ScriptedPrompter::default());
+    prompter.push_credentials(Some(("alice", "wrong")));
+    prompter.push_credentials(None);
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let _ = t
+        .send(get(srv.url("/")), &CancelToken::new())
+        .await
+        .expect_err("rejected, then cancelled");
+    // The rejection still counts, the cancel does not: two more wrong answers hit the cap.
+    *prompter.default_credentials.lock().unwrap() = Some(("alice".into(), "wrong".into()));
+    let err = t
+        .send(get(srv.url("/")), &CancelToken::new())
+        .await
+        .expect_err("cap");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    let attempts: Vec<u8> = prompter
+        .credential_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|c| c.1)
+        .collect();
+    assert_eq!(attempts, vec![0, 1, 1, 2]);
+    let credentialed = srv
+        .requests()
+        .iter()
+        .filter(|r| r.header("authorization").is_some())
+        .count();
+    assert_eq!(
+        credentialed, 3,
+        "three wrong passwords in total reach the server"
+    );
+}
+
+#[tokio::test]
+async fn an_anonymous_success_does_not_confirm_a_typed_password() {
+    // `/public` allows anonymous reads; `/secret` checks the password (slowly when wrong).
+    let handler: Arc<Handler> = Arc::new(|seen: &common::Seen| {
+        if seen.path == "/public" {
+            return Reply::ok("open");
+        }
+        match seen.header("authorization") {
+            Some(h) if h == basic("alice", "pw") => Reply::ok("secret"),
+            Some(_) => {
+                let mut r = Reply::unauthorized("r");
+                r.delay = Duration::from_millis(400);
+                r
+            }
+            None => Reply::unauthorized("r"),
+        }
+    });
+    let (ca, srv) = server(handler).await;
+    let prompter = Arc::new(ScriptedPrompter::default());
+    prompter.save_answers.store(true, Ordering::SeqCst);
+    prompter.push_credentials(Some(("alice", "typo")));
+    prompter.push_credentials(None);
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let secret = {
+        let (t, url) = (Arc::clone(&t), srv.url("/secret"));
+        tokio::spawn(async move { t.send(get(url), &CancelToken::new()).await.map(|_| ()) })
+    };
+    wait_until("the typed password never reached the server", || {
+        srv.requests()
+            .iter()
+            .any(|r| r.path == "/secret" && r.header("authorization").is_some())
+    })
+    .await;
+    // Sent preemptively with the unconfirmed password; the server does not check it here.
+    let open = t
+        .send(get(srv.url("/public")), &CancelToken::new())
+        .await
+        .expect("anonymous read");
+    assert_eq!(open.status().as_u16(), 200);
+    let err = secret
+        .await
+        .unwrap()
+        .expect_err("typo rejected, then cancelled");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert!(
+        prompter.accepted().is_empty(),
+        "a rejected password is never reported"
+    );
 }
