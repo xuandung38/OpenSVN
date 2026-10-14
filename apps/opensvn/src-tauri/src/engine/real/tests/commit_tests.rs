@@ -883,4 +883,34 @@ async fn a_commit_with_changes_below_a_switched_subtree_goes_through() {
     );
     assert_eq!(base_rev(&wc.root, "src/main.rs"), Some(3));
     assert_eq!(base_rev(&wc.root, "README.md"), Some(3));
+
+    // Changes below the switched subtree alone: anchored there, like svn (not at the root).
+    write(
+        &wc.root,
+        "src/main.rs",
+        "fn branch() { again(); }
+",
+    );
+    write(
+        &wc.root,
+        "src/new.rs",
+        "fn new() {}
+",
+    );
+    let rev = e
+        .commit(&wc, &["src"], true)
+        .await
+        .expect("switched-only commit");
+    assert_eq!(rev, Rev(4));
+    assert_eq!(
+        cat("branches/b/main.rs").await,
+        "fn branch() { again(); }\n"
+    );
+    assert_eq!(cat("branches/b/new.rs").await, "fn new() {}\n");
+    let st = e.status(&wc).await;
+    assert!(
+        st.iter()
+            .all(|s| s.path == "src" && s.text == NodeStatus::Normal),
+        "everything committed: {st:?}"
+    );
 }
