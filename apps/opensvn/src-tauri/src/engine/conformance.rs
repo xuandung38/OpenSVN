@@ -847,7 +847,8 @@ pub async fn needs_lock_unmodified_file_in_status(h: &dyn Harness) {
 }
 
 /// A lock held elsewhere refuses a lock with `LockedByOther`; `lock_conflicts` names its owner,
-/// comment and date (never the token), and only an explicit steal takes it over.
+/// comment and date (never the token), and only an explicit steal takes it over; a stale token
+/// cannot unlock it, only an explicit break can.
 pub async fn lock_held_elsewhere_and_steal(h: &dyn Harness) {
     let e = h.engine();
     let (holder, _) = checkout(h, "lock-holder", None).await;
@@ -910,9 +911,33 @@ pub async fn lock_held_elsewhere_and_steal(h: &dyn Harness) {
             .expect("conflicts after the steal")
             .is_empty()
     );
-    e.unlock(&scope(&other), false, &ctx())
+
+    // The first working copy's token is stale now: a plain unlock is refused, and only an
+    // explicit break removes the lock held elsewhere.
+    e.unlock(&scope(&holder), false, &ctx())
         .await
-        .expect("unlock the stolen lock");
+        .expect_err("a stolen lock cannot be released with the old token");
+    assert_eq!(
+        by_url_conflicts(h).await.len(),
+        1,
+        "the refused unlock kept the lock"
+    );
+    e.unlock(&scope(&holder), true, &ctx())
+        .await
+        .expect("break the lock held elsewhere");
+    assert!(by_url_conflicts(h).await.is_empty(), "the lock is broken");
+    assert!(
+        find(&status(h, &holder).await, "README.md").is_none_or(|s| s.lock.is_none()),
+        "the breaking working copy forgets its old token"
+    );
+}
+
+async fn by_url_conflicts(h: &dyn Harness) -> Vec<opensvn_ipc::LockConflict> {
+    let url = format!("{}/trunk/README.md", h.repo_url());
+    h.engine()
+        .lock_conflicts(&LockScope::Urls(vec![url]), &ctx())
+        .await
+        .expect("conflicts by URL")
 }
 
 /// Commit with `auto_add_remove` adds selected unversioned files and deletes selected missing

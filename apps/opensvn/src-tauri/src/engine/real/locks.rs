@@ -103,7 +103,14 @@ impl RealEngine {
                         .await?;
                     let held = self.lock_parent_dir(&wc.root, rel).await?;
                     let done = async {
-                        let token = recorded_token(&held.db, &loc).await?;
+                        // Like `svn unlock --force`: a break presents the server's current
+                        // token, not the recorded one (it may be stale after a steal, and
+                        // mod_dav_svn refuses a mismatched token with 400 even when breaking).
+                        let token = if break_lock {
+                            None
+                        } else {
+                            recorded_token(&held.db, &loc).await?
+                        };
                         session
                             .unlock(&path, token.as_deref(), break_lock, &ctx.cancel)
                             .await?;

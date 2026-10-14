@@ -18,9 +18,7 @@ pub use editor::HttpCommitEditor;
 use self::merge::DeleteAnswer;
 
 use crate::ops::update::{RaWire, headers_of};
-
-/// Client compatibility level announced to the server with the transaction.
-const COMPAT_VERSION: &str = "1.15.0";
+use crate::transport::{SVN_COMPAT_VERSION, USER_AGENT};
 
 /// Starts a commit: creates the transaction (with `message` and `rev_props` as revision
 /// properties), tells `observer` about it before any content is sent, and returns the editor.
@@ -60,11 +58,7 @@ pub async fn start_commit(
             props.push((p.name.clone(), v.to_vec()));
         }
     }
-    for (n, v) in ephemeral_txn_props(
-        wire.caps(),
-        COMPAT_VERSION,
-        concat!("OpenSVN/", env!("CARGO_PKG_VERSION")),
-    ) {
+    for (n, v) in ephemeral_txn_props(wire.caps(), SVN_COMPAT_VERSION, USER_AGENT) {
         props.push((n.to_owned(), v));
     }
     let refs: Vec<(&str, &[u8])> = props
