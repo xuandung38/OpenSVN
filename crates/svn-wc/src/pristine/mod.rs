@@ -447,6 +447,15 @@ impl<I: PristineIndex> PristineStore<I> {
     /// Opens the stored text for reading. Fails with [`PristineError::NotHydrated`] when the row says the
     /// text was dropped, and [`PristineError::NotInstalled`] when row or file is missing.
     pub fn open_text(&self, sha1: &Sha1Digest) -> Result<File, PristineError> {
+        self.open_text_with_row(sha1).map(|(_, file)| file)
+    }
+
+    /// [`open_text`](Self::open_text) that also returns the row it looked up (one lookup when
+    /// the caller needs both, for example to check the MD5 a delta expects).
+    pub fn open_text_with_row(
+        &self,
+        sha1: &Sha1Digest,
+    ) -> Result<(PristineRecord, File), PristineError> {
         let row = self
             .index
             .lookup(sha1)?
@@ -455,14 +464,15 @@ impl<I: PristineIndex> PristineStore<I> {
             return Err(PristineError::NotHydrated(*sha1));
         }
         let path = self.path_of(sha1);
-        File::open(&path).map_err(|e| match e.kind() {
+        let file = File::open(&path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => PristineError::NotInstalled(*sha1),
             _ => PristineError::Io {
                 op: "open",
                 path,
                 source: e,
             },
-        })
+        })?;
+        Ok((row, file))
     }
 
     /// Checks the stored text against the row's size and its SHA-1; `true` when both match.

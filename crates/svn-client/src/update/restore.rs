@@ -1,5 +1,7 @@
 //! Restoring versioned items that vanished from disk, which `svn update` does before it reports.
 
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 
 use svn_types::{Depth, NodeKind, RelPath, Result, SvnError};
@@ -9,9 +11,49 @@ use svn_wc::workqueue::WorkItem;
 
 use crate::wc::abs_path;
 
+/// Names present on disk in directory `rel` (any type), or `None` when the directory itself is
+/// missing. One `readdir` per directory instead of one `stat` per child, like svn's crawler.
+fn listing(db: &WcDb, rel: &RelPath) -> Result<Option<HashSet<OsString>>> {
+    let abs = abs_path(db, rel)?;
+    match fs::read_dir(&abs) {
+        Ok(entries) => {
+            let mut names = HashSet::new();
+            for e in entries {
+                let e = e.map_err(|e| SvnError::from_io(format!("cannot read '{rel}'"), &e))?;
+                names.insert(e.file_name());
+            }
+            Ok(Some(names))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(SvnError::from_io(format!("cannot read '{rel}'"), &e)),
+    }
+}
+
+/// Whether `node` exists on disk. A name found in its parent's listing (when one is given) is
+/// there; anything else is checked with a `stat`, which also matches names the filesystem
+/// folds (case, Unicode normalization) exactly as before.
+fn on_disk(db: &WcDb, node: &Node, parent: Option<&Option<HashSet<OsString>>>) -> Result<bool> {
+    let rel = &node.relpath;
+    if let Some(listing) = parent {
+        let name = rel.file_name().unwrap_or("");
+        match listing {
+            Some(names) if names.contains(OsStr::new(name)) => return Ok(true),
+            // The parent directory is missing: so is everything below it.
+            None => return Ok(false),
+            Some(_) => {}
+        }
+    }
+    match fs::symlink_metadata(abs_path(db, rel)?) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(SvnError::from_io(format!("cannot stat '{rel}'"), &e)),
+    }
+}
+
 fn walk(
     db: &WcDb,
     node: &Node,
+    parent: Option<&Option<HashSet<OsString>>>,
     depth: Depth,
     use_commit_times: bool,
     items: &mut Vec<Skel>,
@@ -22,11 +64,7 @@ fn walk(
     if node.op_depth != 0 || node.presence != Presence::Normal {
         return Ok(());
     }
-    let missing = match fs::symlink_metadata(abs_path(db, rel)?) {
-        Ok(_) => false,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-        Err(e) => return Err(SvnError::from_io(format!("cannot stat '{rel}'"), &e)),
-    };
+    let missing = !on_disk(db, node, parent)?;
     match node.kind {
         NodeKind::File | NodeKind::Symlink => {
             if missing {
@@ -61,9 +99,27 @@ fn walk(
                 Depth::Files | Depth::Immediates => Depth::Empty,
                 d => d,
             };
-            // One query per directory instead of one per child.
+            // One query and one directory listing per directory instead of one of each per
+            // child. Anything but a real directory (a missing one aside) keeps the per-child
+            // `stat`, which reports an obstruction as before.
+            let names = if missing {
+                Some(None)
+            } else {
+                match fs::symlink_metadata(abs_path(db, rel)?) {
+                    Ok(m) if m.file_type().is_dir() => Some(listing(db, rel)?),
+                    _ => None,
+                }
+            };
             for child in db.current_children(rel)? {
-                walk(db, &child, below, use_commit_times, items, restored)?;
+                walk(
+                    db,
+                    &child,
+                    names.as_ref(),
+                    below,
+                    use_commit_times,
+                    items,
+                    restored,
+                )?;
             }
         }
         _ => {}
@@ -86,6 +142,7 @@ pub fn queue_missing(
         walk(
             db,
             &node,
+            None,
             depth,
             use_commit_times,
             &mut items,

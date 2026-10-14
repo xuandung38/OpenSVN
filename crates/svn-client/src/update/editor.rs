@@ -879,9 +879,8 @@ impl DeltaEditor for UpdateEditor {
                 let sha1 = Sha1Digest::from_svn_string(cs)
                     .ok_or_else(|| corrupt("malformed checksum in wc.db"))?;
                 let store = self.s.db.pristine_store();
+                let (row, file) = store.open_text_with_row(&sha1)?;
                 if let Some(Checksum::Md5(expected)) = base_checksum
-                    && let Some(row) =
-                        svn_wc::pristine::PristineIndex::lookup(store.index(), &sha1)?
                     && row.md5.0 != expected
                 {
                     return Err(corrupt(format!(
@@ -890,7 +889,7 @@ impl DeltaEditor for UpdateEditor {
                     ))
                     .with_svn_code(200_014));
                 }
-                BaseSource::File(store.open_text(&sha1)?)
+                BaseSource::File(file)
             }
             None => BaseSource::Empty(std::io::Cursor::new(Vec::new())),
         };
