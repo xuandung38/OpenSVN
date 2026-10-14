@@ -29,6 +29,10 @@ const SMALL_BODY_LIMIT: usize = 4 << 20;
 pub struct RaWire {
     transport: Arc<HttpTransport>,
     session_url: RepoUrl,
+    /// Where the session was opened (its `OPTIONS` succeeded there); kept by
+    /// [`Self::reparent`]. Under path-based authorization this may be the only location the
+    /// user can read.
+    opened_url: RepoUrl,
     caps: Arc<Capabilities>,
     urls: Arc<UrlBuilder>,
     /// Session location relative to the repository root.
@@ -52,6 +56,7 @@ impl RaWire {
         let (session_url, session_rel) = locate_session(&urls, session_url)?;
         Ok(Self {
             transport,
+            opened_url: session_url.clone(),
             session_url,
             caps: Arc::new(caps),
             urls: Arc::new(urls),
@@ -184,6 +189,11 @@ impl RaWire {
     /// URL the session is rooted at.
     pub fn session_url(&self) -> &RepoUrl {
         &self.session_url
+    }
+
+    /// URL the session was opened at (before any [`Self::reparent`]).
+    pub fn opened_url(&self) -> &RepoUrl {
+        &self.opened_url
     }
 
     /// Session location relative to the repository root.

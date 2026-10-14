@@ -285,6 +285,9 @@ impl Harness for RecoveryHarness {
     fn write_file(&self, root: &Path, rel: &str, content: &str) -> Result<(), SvnError> {
         std::fs::write(root.join(rel), content).map_err(|e| SvnError::from_io("write", &e))
     }
+    fn remove_file(&self, root: &Path, rel: &str) -> Result<(), SvnError> {
+        std::fs::remove_file(root.join(rel)).map_err(|e| SvnError::from_io("remove", &e))
+    }
     fn scratch_dir(&self) -> std::path::PathBuf {
         self.scratch.path().to_path_buf()
     }

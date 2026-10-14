@@ -317,6 +317,15 @@ impl AuthManager {
         }
     }
 
+    /// User name of the Basic credentials cached for the host of `url`, if any.
+    pub(crate) fn basic_user(&self, url: &Url) -> Option<String> {
+        let key = HostKey::from_url(url).ok()?;
+        let origin = lock(&self.hosts).get(&key).cloned()?;
+        let flight = self.flight(&origin);
+        let state = lock(&flight.state);
+        state.credentials.as_ref().map(|c| c.username.clone())
+    }
+
     fn flight(&self, origin: &OriginKey) -> Arc<Flight> {
         Arc::clone(lock(&self.flights).entry(origin.clone()).or_default())
     }
