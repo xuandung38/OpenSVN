@@ -2,19 +2,26 @@
 //!
 //! `wc.db` appears under its final name only once it holds the complete schema and the root
 //! rows: it is built as `.svn/tmp/wc.db.creating`, closed, and renamed into place. A process
-//! killed before the rename leaves a `.svn` *skeleton* (`tmp`, maybe an empty `pristine`, and in
-//! `tmp` only the half-built temp database, its journal and the creation lock file) that no
-//! client takes for a working copy and that the next [`WcDb::create`] recognises and replaces,
-//! unless the creation lock shows that its creator is still at work. A process killed after the rename
+//! killed before the rename leaves a `.svn` *skeleton* that no client takes for a working copy:
+//! `tmp` holding the creation lock file `wc.db.creating.lock` and maybe the half-built database
+//! and its journal, and maybe an empty `pristine`. The next [`WcDb::create`] takes the skeleton
+//! over in place, unless its creator still holds the lock. A process killed after the rename
 //! leaves a regular working copy whose root is `incomplete`, which an update finishes.
 //!
 //! Earlier versions created `wc.db` in place, so a kill in the first milliseconds left an empty
-//! or schema-less `.svn/wc.db`. [`WcDb::open`] reports such a file as an interrupted checkout,
-//! and [`WcDb::create`] treats it as part of a skeleton too.
+//! or schema-less `.svn/wc.db` (plus `tmp` and `pristine`). [`WcDb::open`] reports such a file as
+//! an interrupted checkout, and [`WcDb::create`] takes that skeleton over too.
 //!
-//! Only verified skeletons are ever removed, file by file (only the names listed above), and the
-//! directories with a non-recursive `rmdir`, so anything unexpected that appears in between makes
-//! the removal fail instead of deleting it.
+//! # Ownership
+//! Whoever holds the OS lock on `.svn/tmp/wc.db.creating.lock` owns `.svn`. A creator makes
+//! `.svn` and `tmp` with exclusive `mkdir`s, then creates and locks the lock file; until it holds
+//! the lock it never deletes anything. Another caller takes a skeleton over only when it holds
+//! that same lock (checked to still be the file at that path) and the skeleton, inspected again
+//! under the lock, holds nothing but the names above. It then deletes only those files, one by
+//! one, never a directory, and reuses `tmp` and `pristine`. The lock file itself is deleted only
+//! by its holder: after the database is in place, or with the whole `.svn` when the creation
+//! fails. Anything else in `.svn` (user files, svn's own files, a complete or unreadable
+//! `wc.db`) makes the area foreign: it is rejected and never touched.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -28,8 +35,9 @@ use super::connection::{OpenMode, open_connection, open_existing, sql_err};
 use super::{ADM_DIR, DB_FILE, FORMAT_WRITE, LEGACY_FORMAT_MARKER, NewWc, WcDb, depth_word};
 use super::{failpoint, schema};
 
-/// Temp name of the database while it is built (inside `.svn/tmp`).
-const CREATING_DB: &str = "wc.db.creating";
+/// Temp name of the database while it is built (inside `.svn/tmp`). Every file of the creation
+/// starts with it.
+pub(super) const CREATING_DB: &str = "wc.db.creating";
 /// Its rollback journal (`TRUNCATE` mode leaves an empty one behind).
 const CREATING_JOURNAL: &str = "wc.db.creating-journal";
 /// Held (OS file lock) by the creating process for the whole creation.
@@ -39,6 +47,16 @@ const DB_JOURNAL: &str = "wc.db-journal";
 
 fn io_err(context: &str, path: &Path, err: &std::io::Error) -> SvnError {
     SvnError::from_io(format!("{context} '{}'", path.display()), err)
+}
+
+fn busy(wcroot: &Path) -> SvnError {
+    SvnError::new(
+        ErrorCode::WcBusy,
+        format!(
+            "another process is creating a working copy in '{}'",
+            wcroot.display()
+        ),
+    )
 }
 
 /// Whether `path` is a real directory (not a symlink).
@@ -51,12 +69,16 @@ fn regular_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
 }
 
-/// True when the database at `path` holds nothing at all: an empty file, or (after SQLite rolled
-/// back a hot journal) no schema object and `user_version` 0. Anything SQLite cannot read is
-/// *not* reported empty.
+/// True when the database at `path` holds nothing at all: an empty file (with no journal to roll
+/// back), or (after SQLite rolled back a hot journal) no schema object and `user_version` 0.
+/// Anything SQLite cannot read is *not* reported empty.
 pub(super) fn db_is_uninitialized(path: &Path) -> bool {
+    let mut journal = path.as_os_str().to_owned();
+    journal.push("-journal");
+    // A non-empty journal could hold pages to roll back: then SQLite has to look.
+    let journal_empty = fs::symlink_metadata(Path::new(&journal)).map_or(true, |m| m.len() == 0);
     match fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_file() && m.len() == 0 => return true,
+        Ok(m) if m.file_type().is_file() && m.len() == 0 && journal_empty => return true,
         Ok(m) if m.file_type().is_file() => {}
         _ => return false,
     }
@@ -69,12 +91,9 @@ pub(super) fn db_is_uninitialized(path: &Path) -> bool {
     matches!((version, objects), (Ok(0), Ok(0)))
 }
 
-/// Files (to remove one by one) and directories (to `rmdir`, deepest first) of a verified
-/// skeleton.
+/// Files of a verified skeleton that a takeover deletes (everything but the lock file).
 struct Skeleton {
-    files: Vec<PathBuf>,
-    dirs: Vec<PathBuf>,
-    lock: Option<PathBuf>,
+    junk: Vec<PathBuf>,
 }
 
 /// Inspects `adm`: `Some` when it is exactly the skeleton of an interrupted creation (see the
@@ -83,87 +102,99 @@ fn inspect_skeleton(adm: &Path) -> Result<Option<Skeleton>> {
     if !real_dir(adm) {
         return Ok(None);
     }
-    let mut sk = Skeleton {
-        files: Vec::new(),
-        dirs: Vec::new(),
-        lock: None,
-    };
+    let mut junk = Vec::new();
+    let (mut has_tmp, mut has_lock, mut has_db, mut has_db_journal) = (false, false, false, false);
     for entry in fs::read_dir(adm).map_err(|e| io_err("cannot read", adm, &e))? {
         let entry = entry.map_err(|e| io_err("cannot read", adm, &e))?;
         let path = entry.path();
         match entry.file_name().to_str() {
             Some("tmp") if real_dir(&path) => {
+                has_tmp = true;
                 for inner in fs::read_dir(&path).map_err(|e| io_err("cannot read", &path, &e))? {
                     let inner = inner.map_err(|e| io_err("cannot read", &path, &e))?;
                     let p = inner.path();
-                    let name = inner.file_name();
-                    let known = matches!(
-                        name.to_str(),
-                        Some(CREATING_DB | CREATING_JOURNAL | CREATING_LOCK)
-                    );
-                    if !known || !regular_file(&p) {
+                    if !regular_file(&p) {
                         return Ok(None);
                     }
-                    if name.to_str() == Some(CREATING_LOCK) {
-                        sk.lock = Some(p);
-                    } else {
-                        sk.files.push(p);
+                    match inner.file_name().to_str() {
+                        Some(CREATING_LOCK) => has_lock = true,
+                        Some(CREATING_DB | CREATING_JOURNAL) => junk.push(p),
+                        _ => return Ok(None),
                     }
                 }
-                sk.dirs.push(path);
             }
             Some("pristine") if real_dir(&path) => {
                 let mut it = fs::read_dir(&path).map_err(|e| io_err("cannot read", &path, &e))?;
                 if it.next().is_some() {
                     return Ok(None);
                 }
-                sk.dirs.push(path);
             }
-            Some(DB_FILE) if db_is_uninitialized(&path) => sk.files.push(path),
-            Some(DB_JOURNAL) if regular_file(&path) => sk.files.push(path),
+            Some(DB_FILE) if db_is_uninitialized(&path) => {
+                has_db = true;
+                junk.push(path);
+            }
+            Some(DB_JOURNAL) if regular_file(&path) => {
+                has_db_journal = true;
+                junk.push(path);
+            }
             _ => return Ok(None),
         }
     }
-    // A journal alone (no database next to it) is not something this engine leaves, and an
-    // area without `tmp` (an empty `.svn`, say) carries no sign of being ours at all.
-    let has = |name: &str| {
-        sk.files
-            .iter()
-            .any(|p| p.file_name() == Some(name.as_ref()))
-    };
-    if (has(DB_JOURNAL) && !has(DB_FILE)) || !sk.dirs.iter().any(|d| d.ends_with("tmp")) {
+    // Ours only with the evidence of a creation: the lock file of this version, or the empty
+    // in-place database of earlier ones. An empty `.svn`, or a `tmp` alone, proves nothing.
+    if !has_tmp || !(has_lock || has_db) || (has_db_journal && !has_db) {
         return Ok(None);
     }
-    sk.dirs.push(adm.to_path_buf());
-    Ok(Some(sk))
+    Ok(Some(Skeleton { junk }))
 }
 
-/// The OS lock on the creation lock file. Released on drop.
+/// The OS lock on `.svn/tmp/wc.db.creating.lock`. Released on drop.
 struct CreationLock {
     file: fs::File,
+    path: PathBuf,
 }
 
 impl CreationLock {
-    /// Opens the lock file (creating it when `create`) and takes it without waiting.
-    /// `Ok(None)`: the file does not exist (only without `create`); `Ok(Some(None))`: another
-    /// process holds it.
-    fn try_take(path: &Path, create: bool) -> Result<Option<Option<CreationLock>>> {
-        let opened = fs::OpenOptions::new()
+    /// Takes the lock file in `tmp` without waiting, creating it when it does not exist.
+    /// [`ErrorCode::WcBusy`] when another process holds it, or when the file at that path
+    /// changed while it was being taken.
+    fn take(tmp: &Path, wcroot: &Path) -> Result<CreationLock> {
+        let path = tmp.join(CREATING_LOCK);
+        let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(create)
+            .create(true)
             .truncate(false)
-            .open(path);
-        let file = match opened {
-            Ok(f) => f,
-            Err(e) if !create && e.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(io_err("cannot open", path, &e)),
-        };
+            .open(&path)
+            .map_err(|e| io_err("cannot open", &path, &e))?;
         match file.try_lock() {
-            Ok(()) => Ok(Some(Some(CreationLock { file }))),
-            Err(fs::TryLockError::WouldBlock) => Ok(Some(None)),
-            Err(fs::TryLockError::Error(e)) => Err(io_err("cannot lock", path, &e)),
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Err(busy(wcroot)),
+            Err(fs::TryLockError::Error(e)) => return Err(io_err("cannot lock", &path, &e)),
         }
+        let lock = CreationLock { file, path };
+        // The previous holder may have deleted the file (with `.svn`, or after finishing) between
+        // our open and our lock: then we hold a lock on a file nobody else can see.
+        if !lock.still_at_path() {
+            return Err(busy(wcroot));
+        }
+        Ok(lock)
+    }
+
+    #[cfg(unix)]
+    fn still_at_path(&self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        match (self.file.metadata(), fs::symlink_metadata(&self.path)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+
+    /// Windows keeps the name of a deleted file that is still open (delete pending), so the
+    /// path cannot be reused while we hold the handle; a deleted file is reported as missing.
+    #[cfg(not(unix))]
+    fn still_at_path(&self) -> bool {
+        regular_file(&self.path)
     }
 }
 
@@ -171,49 +202,6 @@ impl Drop for CreationLock {
     fn drop(&mut self) {
         let _ = self.file.unlock();
     }
-}
-
-/// Removes the skeleton of an interrupted creation in `adm`, after verifying it holds nothing
-/// else and that no live process is still creating it. `Ok(false)`: `adm` is not a skeleton.
-fn remove_skeleton(adm: &Path) -> Result<bool> {
-    let Some(sk) = inspect_skeleton(adm)? else {
-        return Ok(false);
-    };
-    let held = match &sk.lock {
-        Some(p) => match CreationLock::try_take(p, false)? {
-            Some(Some(l)) => Some(l),
-            Some(None) => {
-                return Err(SvnError::new(
-                    ErrorCode::WcBusy,
-                    format!(
-                        "another process is creating a working copy in '{}'",
-                        adm.parent().unwrap_or(adm).display()
-                    ),
-                ));
-            }
-            // Gone since the inspection: its creator just finished.
-            None => return Ok(false),
-        },
-        None => None,
-    };
-    // Look again while holding the lock: a creator that finished in between has renamed a
-    // complete database into place, which is no longer a skeleton.
-    let Some(sk) = inspect_skeleton(adm)? else {
-        return Ok(false);
-    };
-    for f in sk.files.iter().chain(sk.lock.iter()) {
-        match fs::remove_file(f) {
-            Ok(()) => {}
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(io_err("cannot remove", f, &e)),
-        }
-    }
-    drop(held);
-    for d in &sk.dirs {
-        // Non-recursive: fails when anything appeared since the inspection.
-        fs::remove_dir(d).map_err(|e| io_err("cannot remove", d, &e))?;
-    }
-    Ok(true)
 }
 
 /// Error for a `.svn` that already exists and is not a skeleton.
@@ -232,8 +220,9 @@ fn existing_adm(wcroot: &Path) -> SvnError {
     SvnError::new(
         ErrorCode::WcFormatUnsupported,
         format!(
-            "'{}' already has an administrative area without wc.db (pre-1.7 working copy or \
-             unknown files); upgrade it with the svn command line client or remove it",
+            "'{}' already has an administrative area without wc.db (pre-1.7 working copy, \
+             another checkout starting, or unknown files); upgrade it with the svn command line \
+             client or remove it",
             wcroot.display()
         ),
     )
@@ -254,58 +243,59 @@ impl WcDb {
     /// `.svn/{wc.db,format,entries,tmp,pristine}` plus the REPOSITORY, WCROOT and root BASE rows
     /// exactly as `svn_wc__db_init` inserts them.
     ///
-    /// Ownership: `.svn` is created with a non-recursive `mkdir`, which succeeds for exactly one
-    /// caller; that caller then takes the creation lock and owns everything below it, removing
-    /// it again on failure. An existing `.svn` is rejected without being touched, except the
-    /// verified skeleton of an interrupted creation whose creator is gone, which is removed and
-    /// created afresh (see the module documentation).
+    /// An existing `.svn` is rejected without being touched, except the verified skeleton of an
+    /// interrupted creation whose creator is gone, which is taken over (see the module
+    /// documentation for the ownership rules). On failure, the caller that holds the creation
+    /// lock removes `.svn` again.
     pub fn create(wcroot: &Path, new: &NewWc) -> Result<WcDb> {
         let adm = wcroot.join(ADM_DIR);
-        let mut replaced = false;
-        loop {
-            match fs::create_dir(&adm) {
-                Ok(()) => break,
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                    if !replaced && remove_skeleton(&adm)? {
-                        replaced = true;
-                        continue;
-                    }
-                    return Err(existing_adm(wcroot));
-                }
-                Err(e) => return Err(io_err("cannot create", &adm, &e)),
+        let tmp = adm.join("tmp");
+        let fresh = match fs::create_dir(&adm) {
+            Ok(()) => true,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => false,
+            Err(e) => return Err(io_err("cannot create", &adm, &e)),
+        };
+        if fresh {
+            // Not ours to clean up until the lock is held: never delete on these errors.
+            fs::create_dir(&tmp).map_err(|e| io_err("cannot create", &tmp, &e))?;
+        } else if inspect_skeleton(&adm)?.is_none() {
+            return Err(existing_adm(wcroot));
+        }
+        let lock = CreationLock::take(&tmp, wcroot)?;
+        // Look again under the lock: another caller may have taken our fresh area over before we
+        // held the lock, or finished or failed in between.
+        let Some(sk) = inspect_skeleton(&adm)? else {
+            // We hold the lock: nobody can need the lock file any more.
+            let _ = fs::remove_file(&lock.path);
+            return Err(existing_adm(wcroot));
+        };
+        for f in &sk.junk {
+            match fs::remove_file(f) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(io_err("cannot remove", f, &e)),
             }
         }
-        // Until the lock is held, another creator may still take `.svn` for a skeleton and
-        // replace it: never clean up on these errors, the directory may not be ours any more.
-        let tmp = adm.join("tmp");
-        fs::create_dir(&tmp).map_err(|e| io_err("cannot create", &tmp, &e))?;
-        let lock_path = tmp.join(CREATING_LOCK);
-        let lock = CreationLock::try_take(&lock_path, true)?
-            .flatten()
-            .ok_or_else(|| {
-                SvnError::new(
-                    ErrorCode::WcBusy,
-                    format!(
-                        "another process is creating a working copy in '{}'",
-                        wcroot.display()
-                    ),
-                )
-            })?;
         let built = Self::populate_new(wcroot, &adm, new);
         if built.is_err() {
-            // The lock was held throughout, so everything below `.svn` is this call's.
-            drop(lock);
+            // We hold the lock, so everything below `.svn` is this call's.
             let _ = fs::remove_dir_all(&adm);
+            drop(lock);
             return built;
         }
-        let _ = fs::remove_file(&lock_path);
+        let _ = fs::remove_file(&lock.path);
         drop(lock);
         built
     }
 
     fn populate_new(wcroot: &Path, adm: &Path, new: &NewWc) -> Result<WcDb> {
         let pristine = adm.join("pristine");
-        fs::create_dir(&pristine).map_err(|e| io_err("cannot create", &pristine, &e))?;
+        match fs::create_dir(&pristine) {
+            Ok(()) => {}
+            // Only a verified skeleton's empty `pristine` (a symlink is not `real_dir`).
+            Err(e) if e.kind() == ErrorKind::AlreadyExists && real_dir(&pristine) => {}
+            Err(e) => return Err(io_err("cannot create", &pristine, &e)),
+        }
         let tmp = adm.join("tmp");
         let building = tmp.join(CREATING_DB);
         let wc_id = {

@@ -36,6 +36,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use svn_types::{ErrorCode, LockOwnershipStore, RelPath, Result, SvnError};
 
 use super::connection::sql_err;
+use super::create::CREATING_DB;
 use super::nodes::{relpath_depth, strict_descendant};
 use super::{ADM_DIR, WcDb};
 use crate::skel::Skel;
@@ -363,7 +364,8 @@ impl WcDb {
     ///
     /// Only regular files whose name starts with one of [`ENGINE_TMP_PREFIXES`] are removed:
     /// every one of them is a temp file this engine creates with a random suffix and then
-    /// renames away, queues for removal, or removes itself. Lock markers
+    /// renames away, queues for removal, or removes itself. So are the files of the `wc.db`
+    /// creation (`wc.db.creating*`), which a working copy that has a `wc.db` no longer needs. Lock markers
     /// (`opensvn-lock-*`), svn's own temp files, directories, symlinks and anything else are
     /// left alone. Runs only while this handle holds the write lock on the whole working copy
     /// and the work queue is empty, so no live operation (of this or another engine process)
@@ -400,10 +402,11 @@ impl WcDb {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            if !ENGINE_TMP_PREFIXES
+            let creation_leftover = name.starts_with(CREATING_DB);
+            let engine_temp = ENGINE_TMP_PREFIXES
                 .iter()
-                .any(|p| name.len() > p.len() && name.starts_with(p))
-            {
+                .any(|p| name.len() > p.len() && name.starts_with(p));
+            if !(engine_temp || creation_leftover) {
                 continue;
             }
             let path = entry.path();

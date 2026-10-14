@@ -580,8 +580,11 @@ fn stale_tmp_files_of_the_engine_go_and_nothing_else() {
         "pristine-c3",
         "marker-d4",
         "external-e5",
+        "wc.db.creating",
+        "wc.db.creating-journal",
+        "wc.db.creating.lock",
     ];
-    let kept = ["svn-AbCd", "notes.txt", "wq-", "update", "random"];
+    let kept = ["svn-AbCd", "notes.txt", "wq-", "update", "random", "wc.db"];
     for n in ours.iter().chain(kept.iter()) {
         std::fs::write(t.join(n), b"x").expect("write");
     }

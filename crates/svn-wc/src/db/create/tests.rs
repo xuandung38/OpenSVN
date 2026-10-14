@@ -131,6 +131,23 @@ fn anything_else_in_the_admin_area_is_never_removed() {
 }
 
 #[test]
+fn areas_without_evidence_of_a_creation_are_not_skeletons() {
+    // An empty `.svn`, or `.svn/tmp` alone: what a creator has before it holds its lock, or
+    // anything else. Never taken over.
+    for with_tmp in [false, true] {
+        let t = tempfile::tempdir().unwrap();
+        fs::create_dir(t.path().join(".svn")).unwrap();
+        if with_tmp {
+            fs::create_dir(t.path().join(".svn/tmp")).unwrap();
+        }
+        let before = snapshot(&t.path().join(".svn"));
+        let err = WcDb::create(t.path(), &new_wc()).expect_err("foreign");
+        assert_eq!(err.code, ErrorCode::WcFormatUnsupported, "{}", err.message);
+        assert_eq!(snapshot(&t.path().join(".svn")), before);
+    }
+}
+
+#[test]
 fn skeleton_of_a_live_creator_is_left_alone() {
     let t = tempfile::tempdir().unwrap();
     skeleton(t.path(), b"");
@@ -178,4 +195,31 @@ fn snapshot(dir: &Path) -> Vec<(String, Option<Vec<u8>>)> {
     }
     out.sort();
     out
+}
+
+#[test]
+fn concurrent_takeovers_of_a_skeleton_have_one_winner() {
+    for legacy in [false, true] {
+        for _ in 0..20 {
+            let t = tempfile::tempdir().unwrap();
+            if legacy {
+                fs::create_dir_all(t.path().join(".svn/tmp")).unwrap();
+                fs::write(t.path().join(".svn").join(DB_FILE), b"").unwrap();
+            } else {
+                skeleton(t.path(), b"");
+            }
+            let results: Vec<_> = std::thread::scope(|s| {
+                let handles: Vec<_> = (0..4)
+                    .map(|_| s.spawn(|| WcDb::create(t.path(), &new_wc()).map(|db| db.wc_id())))
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            assert_eq!(
+                results.iter().filter(|r| r.is_ok()).count(),
+                1,
+                "{results:?}"
+            );
+            assert_fresh(t.path());
+        }
+    }
 }
