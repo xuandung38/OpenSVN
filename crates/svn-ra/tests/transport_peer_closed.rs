@@ -403,11 +403,16 @@ async fn a_body_cut_off_without_close_notify_is_a_typed_error() {
                 keep: 100,
             },
             Act::TruncateChunked,
+            // Cut exactly halfway: as many bytes received as are still missing.
+            Act::Truncate {
+                body: "y".repeat(1000),
+                keep: 500,
+            },
         ],
     )
     .await;
     let t = transport(&ca, |_| {});
-    for path in ["/length", "/chunked"] {
+    for path in ["/length", "/chunked", "/half"] {
         let err = body_of(&t, "GET", &server.url(path))
             .await
             .expect_err("truncated");
@@ -420,7 +425,7 @@ async fn a_body_cut_off_without_close_notify_is_a_typed_error() {
         assert!(err.message.contains("close_notify"), "{path}: {err:?}");
     }
     // A streamed body is never re-requested behind the caller's back.
-    assert_eq!(server.seen().len(), 2);
+    assert_eq!(server.seen().len(), 3);
 }
 
 #[tokio::test]

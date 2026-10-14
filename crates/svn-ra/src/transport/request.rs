@@ -171,6 +171,8 @@ pub struct HttpResponse {
     pub(crate) cancel: CancelToken,
     /// Connection slot; released as soon as the body ends or the response is dropped.
     pub(crate) _permit: Option<OwnedSemaphorePermit>,
+    /// `Content-Length` of the whole body, taken before any of it was read.
+    pub(crate) content_length: Option<u64>,
     /// Body bytes received so far.
     pub(crate) received: u64,
 }
@@ -229,7 +231,7 @@ impl HttpResponse {
                 }
                 Err(e) => {
                     let err = classify_error(e);
-                    if body_complete_before(&err, self.inner.content_length(), self.received) {
+                    if body_complete_before(&err, self.content_length, self.received) {
                         tracing::debug!(
                             error = %err.message,
                             "connection closed after the complete body; not an error"

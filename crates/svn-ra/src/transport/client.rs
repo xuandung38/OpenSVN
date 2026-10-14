@@ -580,6 +580,9 @@ impl HttpTransport {
                         status,
                         headers: resp.headers().clone(),
                         url: resp.url().clone(),
+                        // Read now: reqwest reports the length still to come once the body is
+                        // being read.
+                        content_length: resp.content_length(),
                         inner: resp,
                         cancel: cancel.clone(),
                         _permit: Some(permit),
