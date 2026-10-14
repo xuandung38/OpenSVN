@@ -5,5 +5,6 @@ mod commands_paths;
 mod commands_remote;
 mod commands_repo_manager;
 mod commands_settings;
+mod engine_startup;
 mod fixture;
 mod security;
