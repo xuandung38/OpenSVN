@@ -112,6 +112,8 @@ export const wcStrings = defineStrings({
     bannerNeedsCleanup: "Working copy is locked",
     bannerNeedsCleanupText: "A previous operation did not finish.",
     bannerCleanup: "Run cleanup",
+    bannerOpInProgress: "{title} in progress…",
+    bannerOpInProgressText: "The working copy is in use until it finishes.",
     bannerDismiss: "Dismiss",
     // Activity
     activityCancel: "Cancel",
@@ -224,6 +226,8 @@ export const wcStrings = defineStrings({
     bannerNeedsCleanup: "Working copy đang bị khóa",
     bannerNeedsCleanupText: "Một thao tác trước đó chưa hoàn tất.",
     bannerCleanup: "Chạy cleanup",
+    bannerOpInProgress: "{title} đang chạy…",
+    bannerOpInProgressText: "Working copy đang được dùng cho tới khi thao tác này xong.",
     bannerDismiss: "Ẩn",
     activityCancel: "Hủy",
     cancelRequested: "Đã yêu cầu hủy",

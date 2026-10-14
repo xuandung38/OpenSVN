@@ -169,3 +169,55 @@ test("event bus: notice phases update banners, never the operation's progress", 
   ]);
   bus.stop();
 });
+
+test("event bus: path logs, warnings and results stay with the operation; background checks leave", async () => {
+  const qc = new QueryClient();
+  const bus = createEventBus(mockAdapter, qc);
+  await bus.start();
+  mockEmit("op://started", {
+    opId: "k1",
+    kind: "checkout",
+    wcId: null,
+    title: "Checkout REPO",
+    rootPath: "/w/REPO",
+    background: false,
+  });
+  mockEmit("op://progress", {
+    opId: "k1",
+    phase: "checkout",
+    current: 2,
+    entries: [
+      { action: "added", path: "" },
+      { action: "added", path: "a" },
+    ],
+    entriesDropped: 0,
+  });
+  mockEmit("op://progress", { opId: "k1", phase: "external-warning", currentPath: "ext" });
+  mockEmit("op://progress", {
+    opId: "k1",
+    phase: "checkout",
+    current: 3,
+    entries: [{ action: "added", path: "b" }],
+    entriesDropped: 4,
+  });
+  mockEmit("op://finished", { opId: "k1", result: { kind: "checkedOut", wcId: "w9", newRev: 7 } });
+  let ops = qc.getQueryData<Record<string, OpState>>(queryKeys.ops) ?? {};
+  expect(ops.k1?.log.map((l) => l.path)).toEqual(["", "a", "b"]);
+  expect(ops.k1?.logDropped).toBe(4);
+  expect(ops.k1?.warnings).toEqual(["ext"]);
+  expect(ops.k1?.progress?.current).toBe(3);
+  expect(ops.k1?.result).toEqual({ kind: "checkedOut", wcId: "w9", newRev: 7 });
+  expect(ops.k1?.endedAt).not.toBeNull();
+
+  const bg = { opId: "b1", kind: "status-remote", wcId: "w9", title: "Check", rootPath: null };
+  mockEmit("op://started", { ...bg, background: true });
+  mockEmit("op://finished", { opId: "b1", result: { kind: "done" } });
+  ops = qc.getQueryData<Record<string, OpState>>(queryKeys.ops) ?? {};
+  expect(ops.b1).toBeUndefined();
+  mockEmit("op://started", { ...bg, opId: "b2", background: true });
+  mockEmit("op://failed", { opId: "b2", error: { code: "network", message: "offline" } });
+  ops = qc.getQueryData<Record<string, OpState>>(queryKeys.ops) ?? {};
+  expect(ops.b2?.state).toBe("failed");
+  expect(ops.b2?.appError?.message).toBe("offline");
+  bus.stop();
+});
