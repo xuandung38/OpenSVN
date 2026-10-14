@@ -476,6 +476,30 @@ async fn commit_of_a_parent_never_sends_an_edited_file_external() {
     assert!(e.journals().is_empty());
 }
 
+type Notices = Arc<std::sync::Mutex<Vec<crate::engine::context::ProgressUpdate>>>;
+
+/// An operation context that records its progress samples.
+fn recording_ctx() -> (Notices, crate::engine::OpContext) {
+    let notices: Notices = Arc::default();
+    let sink = Arc::clone(&notices);
+    let mut c = ctx();
+    c.progress = crate::engine::context::ProgressReporter::new(move |u| {
+        sink.lock().unwrap().push(u);
+    });
+    (notices, c)
+}
+
+/// Texts of the "nested working copy skipped" notices among `notices`.
+fn skipped(notices: &Notices) -> Vec<String> {
+    notices
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|u| u.phase == "nested-wc-skipped")
+        .filter_map(|u| u.current_path.clone())
+        .collect()
+}
+
 /// PR #105 review item 2: auto-add of an unversioned folder skips the working copies nested in
 /// it at any depth (svn's W150002), which stay unversioned with all they contain, while their
 /// siblings are added and committed.
@@ -492,8 +516,15 @@ async fn auto_add_never_adds_a_nested_working_copy_at_any_depth() {
     write(&wc.root, "x/keep.txt", "keep\n");
     write(&wc.root, "x/y/also.txt", "also\n");
 
-    let rev = e.commit(&wc, &["x"], true).await.expect("commit");
+    let (notices, rec) = recording_ctx();
+    let rev =
+        e.f.engine
+            .commit(&wc, &request(&wc, &["x"], true), &rec)
+            .await
+            .expect("commit");
     assert_eq!(rev, Rev(2));
+    // The user hears about every skipped nested working copy, not only the log.
+    assert_eq!(skipped(&notices).len(), 2, "{:?}", skipped(&notices));
     assert_eq!(e.kind_in_repo("trunk/x/keep.txt").await, NodeKind::File);
     assert_eq!(e.kind_in_repo("trunk/x/y/also.txt").await, NodeKind::File);
     for gone in ["trunk/x/nested", "trunk/x/y/deeper"] {
@@ -512,10 +543,14 @@ async fn auto_add_never_adds_a_nested_working_copy_at_any_depth() {
     let other = e.checkout("n3").await;
     std::fs::create_dir_all(wc.root.join("z/q")).unwrap();
     std::fs::rename(&other.root, wc.root.join("z/q/nested")).unwrap();
+    let (notices, rec) = recording_ctx();
     e.f.engine
-        .add_paths(&wc, &["z".to_owned()], &ctx())
+        .add_paths(&wc, &["z".to_owned()], &rec)
         .await
         .expect("add");
+    let skipped = skipped(&notices);
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert!(skipped[0].contains("nested"), "{skipped:?}");
     assert_eq!(e.text_of(&wc, "z/q").await, Some(NodeStatus::Added));
     assert_eq!(
         e.text_of(&wc, "z/q/nested").await,

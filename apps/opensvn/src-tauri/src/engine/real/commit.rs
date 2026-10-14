@@ -46,15 +46,12 @@ use svn_wc::WcDb;
 use super::local_util::{self, LocalEnv};
 use super::wc_read::{self, blocking};
 use super::{ConnectOptions, RealEngine};
-use crate::engine::context::{OpContext, ProgressUpdate};
+use crate::engine::context::{OpContext, PHASE_NEEDS_CLEANUP, ProgressReporter, ProgressUpdate};
 use crate::engine::facade::{EngineResult, WcRef};
 use crate::engine::text::percent_decode;
 
 /// Progress phase of a commit.
 pub(super) const PHASE_COMMIT: &str = "commit";
-/// Progress phase reported when the commit went through but the working copy needs cleanup
-/// (`current_path` carries the reason).
-pub(super) const PHASE_NEEDS_CLEANUP: &str = "needs-cleanup";
 
 /// Repository path of the session URL below the repository root (`""` at the root), decoded.
 fn session_prefix(session: &dyn RaSession) -> EngineResult<String> {
@@ -93,7 +90,12 @@ fn push_unique(list: &mut Vec<RelPath>, rel: RelPath) {
 ///
 /// Fails with `conflict-blocks-commit` before changing anything when a selected item is in
 /// conflict, as the commit would.
-fn auto_add_remove(db: &WcDb, env: &LocalEnv, rels: &[RelPath]) -> EngineResult<Vec<RelPath>> {
+fn auto_add_remove(
+    db: &WcDb,
+    env: &LocalEnv,
+    rels: &[RelPath],
+    progress: &ProgressReporter,
+) -> EngineResult<Vec<RelPath>> {
     let markers = local_util::conflict_markers(db)?;
     let mut add: Vec<RelPath> = Vec::new();
     let mut delete: Vec<RelPath> = Vec::new();
@@ -176,9 +178,7 @@ fn auto_add_remove(db: &WcDb, env: &LocalEnv, rels: &[RelPath]) -> EngineResult<
     // Nested working copies found while recursing are skipped (svn's W150002) and stay
     // unversioned: their content belongs to another repository location.
     let outcome = client_local::add_reporting(db, &env.cancel, &abs(&add)?, &opts, &env.add)?;
-    for w in &outcome.warnings {
-        tracing::warn!(warning = %w, "auto-add skipped a nested working copy");
-    }
+    super::progress::report_skipped_nested_wcs(progress, &outcome.warnings);
     let added = outcome.added;
     // Parents added on the way are new directories outside the selection: the commit must
     // include them, or the server is asked to add an item into a directory it does not have.
@@ -232,6 +232,7 @@ impl RealEngine {
         let client = self.client_ctx(ctx);
         let config = self.svn_config.clone();
         let (root, paths, auto) = (wc.root.clone(), req.paths.clone(), req.auto_add_remove);
+        let progress = ctx.progress.clone();
         let cancel = ctx.cancel.clone();
         let (db, targets) = blocking(move || {
             let db = local_util::open_wc_root(&client, &root)?;
@@ -242,7 +243,7 @@ impl RealEngine {
             }
             if auto && !rels.is_empty() {
                 let parents = client_local::lock::with_wc_lock(&db, &env.cancel, || {
-                    auto_add_remove(&db, &env, &rels)
+                    auto_add_remove(&db, &env, &rels, &progress)
                 })?;
                 for p in parents {
                     push_unique(&mut rels, p);
