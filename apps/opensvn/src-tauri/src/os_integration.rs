@@ -195,9 +195,9 @@ pub fn open_external(
     editor: Option<&ExternalDiffTool>,
     terminal: Option<&ExternalDiffTool>,
 ) -> Result<(), AppError> {
-    let path = resolve_in_wc(root, rel)?;
     match with {
         OpenWith::Default => {
+            let path = resolve_in_wc(root, rel)?;
             let rel = parse_rel(rel)?;
             // The launcher follows links, so a committed `README.txt -> Evil.app` would run the
             // target: refuse any link inside the working copy.
@@ -214,14 +214,19 @@ pub fn open_external(
             }
             opener.open_default(&path)
         }
+        // The editor and the terminal get the same rule as the file manager (see
+        // [`reveal_target`]): a versioned symlink (`notes.txt -> /etc/shadow`, `docs -> ~/.ssh`)
+        // must not hand a path outside the working copy to another program.
         OpenWith::Editor => {
             let tool = editor.ok_or_else(|| not_configured("editor"))?;
+            let path = reveal_target(root, rel)?;
             let mut args = tool.args.clone();
             args.push(path.to_string_lossy().into_owned());
             opener.run(&tool.path, &args, path.parent().unwrap_or(root))
         }
         OpenWith::Terminal => {
             let tool = terminal.ok_or_else(|| not_configured("terminal"))?;
+            let path = reveal_target(root, rel)?;
             let dir = if path.is_dir() {
                 path.clone()
             } else {

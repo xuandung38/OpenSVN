@@ -80,6 +80,7 @@ pub(super) async fn drive_update(
         tree_target,
         send_text: req.mode != UpdateMode::Status,
         max_open_files,
+        requested_depth: req.depth,
     };
     let ops = plan(&input)?;
 

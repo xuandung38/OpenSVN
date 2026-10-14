@@ -28,7 +28,7 @@ const lockMine = (): LockInfo => ({
   owner: "you",
   comment: null,
   createdAt: "2026-10-13T08:00:00Z",
-  token: "tok-1",
+  token: null,
   mine: true,
 });
 

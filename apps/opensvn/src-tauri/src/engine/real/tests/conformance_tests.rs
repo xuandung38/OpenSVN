@@ -3,9 +3,9 @@
 //! the HTTP connector hands them out).
 //!
 //! One test per scenario so a failure names the scenario. Every scenario of
-//! `conformance::run_all` passes except the known gaps at the end of this file, which are
-//! `should_panic` tests pinned to the exact refusal (reason and tracking issue next to each): when
-//! a gap is closed the test fails and must move to the passing list.
+//! `conformance::run_all` passes. A future known gap goes at the end as a `should_panic` test
+//! pinned to the exact refusal (reason and tracking issue next to it), so closing it fails the
+//! test and moves it to the passing list.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -88,14 +88,5 @@ scenario!(open_recovers_dead_locks_and_reports_foreign_ones);
 scenario!(locked_unmodified_file_in_status);
 scenario!(commit_with_auto_add_remove);
 scenario!(update_ends_in_conflict);
-
-// ---- known gaps ----
-
-/// `mark_move` has no `svn-client` API yet and is refused with a user-facing error
-/// (https://github.com/xuandung38/OpenSVN/issues/90); `set_depth` after it is refused the same
-/// way (https://github.com/xuandung38/OpenSVN/issues/109).
-#[tokio::test(flavor = "multi_thread")]
-#[should_panic(expected = "mark_move: SvnError { code: WcInvalidOperation")]
-async fn mark_move_and_set_depth_is_a_known_gap() {
-    conformance::mark_move_and_set_depth(&harness()).await;
-}
+scenario!(mark_move_and_set_depth);
+scenario!(update_of_sub_paths);

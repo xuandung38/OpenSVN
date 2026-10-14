@@ -103,7 +103,11 @@ pub struct AuthBroker {
     /// Sign-outs per realm. A typed answer records the count when it is typed and is saved only
     /// if no sign-out of its realm happened since (a request still in flight at sign-out must
     /// not save the password back).
-    sign_outs: Mutex<HashMap<String, u64>>,
+    ///
+    /// Also the account gate: [`AuthPrompter::credentials_accepted`] holds it across the count
+    /// check, the keychain write and `account_upsert`, and [`Self::sign_out`] across the count
+    /// bump and its deletions, so a save and a sign-out never interleave.
+    sign_outs: Arc<Mutex<HashMap<String, u64>>>,
     /// `sign_outs` count of the realm when the last answer for each origin was typed.
     typed_at: Mutex<HashMap<OriginKey, u64>>,
     /// Bumped whenever cached sessions must be dropped (sign-out, certificate removed).
@@ -179,7 +183,7 @@ impl AuthBroker {
             offered: Mutex::default(),
             awaiting: Mutex::default(),
             typed_rejected: Mutex::default(),
-            sign_outs: Mutex::default(),
+            sign_outs: Arc::default(),
             typed_at: Mutex::default(),
             invalidations: watch::Sender::new(0),
         }
@@ -208,11 +212,6 @@ impl AuthBroker {
 
     fn sign_out_count(&self, realm: &str) -> u64 {
         locked(&self.sign_outs).get(realm).copied().unwrap_or(0)
-    }
-
-    /// Whether the answer typed for `origin` was typed after the last sign-out of its realm.
-    fn typed_since_sign_out(&self, origin: &OriginKey) -> bool {
-        locked(&self.typed_at).get(origin).copied() == Some(self.sign_out_count(&origin.realm))
     }
 
     /// Records that the server rejected the saved password of `origin`: it is not offered again
@@ -332,8 +331,11 @@ impl AuthBroker {
     /// row pointing to it) and is marked stale so the secret is not offered any more. The
     /// failures are reported together at the end.
     pub fn sign_out(&self, realm: &str) -> Result<(), AppError> {
+        // Held to the end: a save in progress finishes first (and is then deleted here), or
+        // starts after and sees the new count.
+        let mut sign_outs = locked(&self.sign_outs);
         // First, so an answer typed before now cannot be saved by a request still in flight.
-        *locked(&self.sign_outs).entry(realm.to_owned()).or_default() += 1;
+        *sign_outs.entry(realm.to_owned()).or_default() += 1;
         let accounts = self.db.accounts_of_realm(realm)?;
         let mut failures = Vec::new();
         for account in accounts {
@@ -372,6 +374,7 @@ impl AuthBroker {
                 }
             }
         }
+        drop(sign_outs);
         self.invalidate();
         if failures.is_empty() {
             Ok(())
@@ -380,24 +383,6 @@ impl AuthBroker {
                 AppError::internal("Some saved passwords could not be removed.")
                     .with_detail(failures.join("; ")),
             )
-        }
-    }
-
-    /// Saves `password` for `origin` in the credential store (off the async runtime: OS stores
-    /// may block on IPC). Returns whether it was stored.
-    async fn save_secret(&self, origin: &OriginKey, user: &str, password: &SecretString) -> bool {
-        let (store, origin, user) = (Arc::clone(&self.secrets), origin.clone(), user.to_owned());
-        let password = SecretString::from(password.expose_secret().to_owned());
-        match tokio::task::spawn_blocking(move || store.set(&origin, &user, &password)).await {
-            Ok(Ok(())) => true,
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "could not save the password");
-                false
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "credential store worker failed");
-                false
-            }
         }
     }
 
@@ -450,6 +435,57 @@ pub(crate) fn map_cert_decision(decision: IpcDecision, failure: &CertFailure) ->
 
 fn origin_url(o: &OriginKey) -> String {
     format!("{}://{}:{}", o.scheme, o.host, o.port)
+}
+
+/// Saves an accepted typed password: the secret first, then the account row (which clears the
+/// stale flag), so a failed save cannot re-arm an old, rejected password. Runs under the account
+/// gate (`sign_outs`) and does nothing if the realm was signed out since the answer was typed
+/// (`typed_at`). Returns whether the password and its row were recorded.
+fn save_accepted(
+    gate: &Mutex<HashMap<String, u64>>,
+    store: &dyn CredentialStore,
+    db: &AppDb,
+    origin: &OriginKey,
+    username: &str,
+    password: &SecretString,
+    typed_at: u64,
+) -> bool {
+    let sign_outs = locked(gate);
+    if sign_outs.get(&origin.realm).copied().unwrap_or(0) != typed_at {
+        tracing::info!(host = %origin.host, "signed out since the password was typed; not saving it");
+        return false;
+    }
+    let previous = match db.account_get(&origin.scheme, &origin.host, origin.port, &origin.realm) {
+        Ok(a) => a.and_then(|a| a.username),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read account metadata");
+            None
+        }
+    };
+    if let Err(e) = store.set(origin, username, password) {
+        tracing::warn!(error = %e, "could not save the password");
+        return false;
+    }
+    let recorded = db.account_upsert(&AccountRecord {
+        scheme: &origin.scheme,
+        host: &origin.host,
+        port: origin.port,
+        realm: &origin.realm,
+        username,
+        negotiate: false,
+    });
+    if let Err(e) = recorded {
+        tracing::warn!(error = %e, "could not record account metadata");
+        return false;
+    }
+    if let Some(old) = previous.filter(|u| !u.is_empty() && u != username) {
+        // The account now belongs to another user name; its old secret has no row any more.
+        if let Err(e) = store.delete(origin, &old) {
+            tracing::warn!(error = %e, "could not delete the replaced password");
+        }
+    }
+    drop(sign_outs);
+    true
 }
 
 #[async_trait]
@@ -507,57 +543,27 @@ impl AuthPrompter for AuthBroker {
         if !creds.save || creds.method != AuthMethod::Basic || creds.username.is_empty() {
             return;
         }
-        if !self.typed_since_sign_out(origin) {
-            tracing::info!(host = %origin.host, "signed out since the password was typed; not saving it");
+        let Some(typed_at) = locked(&self.typed_at).get(origin).copied() else {
             return;
-        }
-        let previous = self.account(origin).and_then(|a| a.username);
-        // Secret first: the row (which clears the stale flag) is written only once the store
-        // holds the accepted password, so a failed save cannot re-arm an old, rejected one.
-        if !self
-            .save_secret(origin, &creds.username, &creds.password)
-            .await
-        {
-            return;
-        }
-        if !self.typed_since_sign_out(origin) {
-            // Signed out while the secret was being written: take it back out.
-            let (store, o, u) = (
-                Arc::clone(&self.secrets),
-                origin.clone(),
-                creds.username.clone(),
-            );
-            match tokio::task::spawn_blocking(move || store.delete(&o, &u)).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "could not delete a password saved during sign-out")
-                }
-                Err(e) => tracing::warn!(error = %e, "credential store worker failed"),
-            }
-            return;
-        }
-        let recorded = self.db.account_upsert(&AccountRecord {
-            scheme: &origin.scheme,
-            host: &origin.host,
-            port: origin.port,
-            realm: &origin.realm,
-            username: &creds.username,
-            negotiate: false,
+        };
+        // Off the async runtime (OS stores may block on IPC), under the account gate.
+        let (gate, store, db) = (
+            Arc::clone(&self.sign_outs),
+            Arc::clone(&self.secrets),
+            self.db.clone(),
+        );
+        let (o, user) = (origin.clone(), creds.username.clone());
+        let password = SecretString::from(creds.password.expose_secret().to_owned());
+        let saved = tokio::task::spawn_blocking(move || {
+            save_accepted(&gate, &*store, &db, &o, &user, &password, typed_at)
         });
-        if let Err(e) = recorded {
-            tracing::warn!(error = %e, "could not record account metadata");
-            return;
-        }
-        // The user replaced the saved password: it may be offered again.
-        locked(&self.stored_rejected).remove(origin);
-        if let Some(old) = previous.filter(|u| !u.is_empty() && *u != creds.username) {
-            // The account now belongs to another user name; its old secret has no row any more.
-            let (store, o) = (Arc::clone(&self.secrets), origin.clone());
-            match tokio::task::spawn_blocking(move || store.delete(&o, &old)).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => tracing::warn!(error = %e, "could not delete the replaced password"),
-                Err(e) => tracing::warn!(error = %e, "credential store worker failed"),
+        match saved.await {
+            Ok(true) => {
+                // The user replaced the saved password: it may be offered again.
+                locked(&self.stored_rejected).remove(origin);
             }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "credential store worker failed"),
         }
     }
 
