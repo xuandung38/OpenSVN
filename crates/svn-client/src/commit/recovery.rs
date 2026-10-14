@@ -19,6 +19,13 @@
 //! A journal whose outcome is unknown is never dropped without that check, and no journal is
 //! dropped because it could not be read: a file of an unknown format version stays untouched,
 //! a corrupt one is moved aside under a new name, an unreadable one stays.
+//!
+//! Files that cannot be used (unknown format without a readable root, corrupt, unreadable) are
+//! attributed by the owner hint in their name ([`JournalStore::may_belong_to`]): one rule for all
+//! three. Such a file that may belong to a working copy blocks that copy's commits
+//! ([`finalize_pending_for_wc`]) and is reported by its recovery ([`recover_wc_commits`]); a
+//! corrupt one is moved aside there (never deleted) and reported once, after which it no longer
+//! blocks. A file that carries another working copy's hint is left to that working copy.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -103,9 +110,11 @@ pub async fn recover_commits(
     Ok(report)
 }
 
-/// Processes the journals of the working copy `db` in `state_dir` (other working copies'
-/// journals are not touched; a corrupt journal, whose working copy cannot be known, is moved
-/// aside and reported).
+/// Processes the journals of the working copy `db` in `state_dir`. Other working copies'
+/// journals are not touched, judged by their content or, for a file that cannot be used, by the
+/// owner hint in its name. A file that may belong to this working copy and cannot be used is
+/// reported: an unknown format (in `needs_user`, also when it names no root), an unreadable file
+/// (in `failed`, kept) or a corrupt one (in `failed`, moved aside).
 ///
 /// Without `ra` only what needs no server is done: merged commits are finalized, journals that
 /// never reached the server are dropped, and the rest is reported in `failed` and kept. With a
@@ -122,11 +131,16 @@ pub async fn recover_wc_commits(
     let mut report = WcCommitRecovery::default();
     let mut authenticated = false;
     for path in store.list()? {
+        if !JournalStore::may_belong_to(&path, db.wcroot()) {
+            continue;
+        }
         let data = match JournalStore::load(&path) {
             Ok(d) if d.wcroot == db.wcroot() => d,
             Ok(_) => continue,
             Err(JournalLoadError::UnsupportedVersion { wcroot, error, .. }) => {
-                if wcroot.as_deref() == Some(db.wcroot()) {
+                // Without a readable root it may be this working copy's: it blocks its commits
+                // (see `finalize_pending_for_wc`), so it is reported here too.
+                if wcroot.as_deref().is_none_or(|w| w == db.wcroot()) {
                     report.needs_user.push((path.display().to_string(), error));
                 }
                 continue;
@@ -168,19 +182,25 @@ fn load_failure(store: &JournalStore, path: &Path, e: JournalLoadError) -> SvnEr
 /// a commit never starts from a BASE that misses an earlier merged revision.
 ///
 /// Refuses (`WcNeedsCleanup`) while a journal of this working copy has an unknown outcome or a
-/// format this build does not know, and while a journal file cannot be read at all (its working
-/// copy is unknown, so it may be this one with a `MERGE` already sent): committing again before
-/// it is resolved could commit the same change twice or build on a BASE that misses a revision.
-/// Journals of other working copies, journals that only name a transaction and corrupt files
-/// (recovery sets them aside and reports them) are left to recovery.
+/// format this build does not know, and while a journal file that may belong to it (by its owner
+/// hint, or without one) cannot be used: unreadable, corrupt, or of an unknown format without a
+/// readable root. Its commit may have had its `MERGE` sent, so committing again before it is
+/// resolved could commit the same change twice or build on a BASE that misses a revision.
+/// Recovery ([`recover_wc_commits`]) reports such files and sets corrupt ones aside, which lifts
+/// the block for those. Journals of other working copies and journals that only name a
+/// transaction are left to recovery.
 pub(crate) fn finalize_pending_for_wc(store: &JournalStore, db: &WcDb) -> Result<()> {
     for path in store.list()? {
+        if !JournalStore::may_belong_to(&path, db.wcroot()) {
+            continue;
+        }
         let data = match JournalStore::load(&path) {
             Ok(d) => d,
-            Err(JournalLoadError::UnsupportedVersion { wcroot, error, .. })
-                if wcroot.as_deref().is_none_or(|w| w == db.wcroot()) =>
-            {
-                return Err(error);
+            Err(JournalLoadError::UnsupportedVersion { wcroot, error, .. }) => {
+                if wcroot.as_deref().is_none_or(|w| w == db.wcroot()) {
+                    return Err(error);
+                }
+                continue;
             }
             Err(JournalLoadError::Unreadable(e)) => {
                 return Err(SvnError::new(
@@ -194,7 +214,19 @@ pub(crate) fn finalize_pending_for_wc(store: &JournalStore, db: &WcDb) -> Result
                 )
                 .with_child(e));
             }
-            Err(_) => continue,
+            Err(JournalLoadError::Corrupt(e)) => {
+                return Err(SvnError::new(
+                    ErrorCode::WcNeedsCleanup,
+                    format!(
+                        "the commit journal '{}' is damaged, so it is unknown whether an earlier \
+                         commit of this working copy was applied; commit recovery (when the working \
+                         copy is opened) sets the file aside; check the repository log before \
+                         committing",
+                        path.display()
+                    ),
+                )
+                .with_child(e));
+            }
         };
         if data.wcroot != db.wcroot() {
             continue;

@@ -13,7 +13,12 @@
 //!    over an unattended session (opening never prompts): a merged commit is finalized, a leaked
 //!    transaction deleted, a commit whose `MERGE` outcome is unknown looked up in the log.
 //!    Whatever cannot be settled stays on disk and is reported for the user. Nothing is done
-//!    while a foreign lock or unfinished work is left.
+//!    while a foreign lock or unfinished work is left. The repository part (session and
+//!    recovery) is bounded by [`RECOVERY_NETWORK_TIMEOUT`]: a server that does not answer cannot
+//!    hold the working copy's write slot longer; the journals stay and are retried on the next
+//!    open. Journal files are attributed to working copies by the owner hint in their names
+//!    ([`JournalStore::may_belong_to`]), so a file that cannot be read is reported (and blocks
+//!    commits) only for the working copy it may belong to.
 //!
 //! The commit journal of earlier app builds (`<state_dir>/commit-journal/<sha1>.json`) is no
 //! longer read: a file left for this working copy is moved aside to `<file>.legacy` (never
@@ -21,11 +26,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use sha1::{Digest, Sha1};
 use svn_client::commit::WcCommitRecovery;
-use svn_client::commit::journal::{JournalLoadError, JournalStore};
+use svn_client::commit::journal::{JournalLoadError, JournalStore, move_no_replace};
 use svn_ra_api::RaSession;
 use svn_types::{ErrorCode, LockOwnershipStore, RepoUrl};
 use svn_wc::WcDb;
@@ -42,6 +48,11 @@ const JOURNAL_DIR: &str = "commit-journals";
 const LEGACY_JOURNAL_DIR: &str = "commit-journal";
 /// How many set-aside copies of one legacy journal may exist.
 const LEGACY_SLOTS: usize = 8;
+/// Longest time opening a working copy spends on the repository for commit recovery (connecting
+/// included). Network calls are only awaited between journal writes and working copy updates
+/// that are each complete on their own, so stopping there leaves every journal as it was or
+/// settled; what is left is reported and retried on the next open.
+pub(super) const RECOVERY_NETWORK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Steps of crash recovery that need the working copy layer.
 #[async_trait]
@@ -146,6 +157,10 @@ fn scan_journals(dir: &Path, wcroot: &Path) -> EngineResult<JournalScan> {
     let store = JournalStore::new(dir);
     let mut scan = JournalScan::default();
     for path in store.list()? {
+        // Another working copy's file (by the owner hint in its name), readable or not.
+        if !JournalStore::may_belong_to(&path, wcroot) {
+            continue;
+        }
         match JournalStore::load(&path) {
             Ok(data) if data.wcroot == wcroot => {
                 scan.relevant = true;
@@ -171,41 +186,6 @@ fn legacy_journal_file(state_dir: &Path, wcroot: &Path) -> PathBuf {
     state_dir
         .join(LEGACY_JOURNAL_DIR)
         .join(format!("{name}.json"))
-}
-
-/// Moves `from` to `to` without ever replacing an existing `to` (hard link, then removal of the
-/// original; a copy into a `create_new` file where hard links are not available). On any error
-/// `from` is left as it was.
-fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::io::Write;
-    match std::fs::hard_link(from, to) {
-        Ok(()) => {}
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound
-            ) =>
-        {
-            return Err(e);
-        }
-        Err(_) => {
-            let data = std::fs::read(from)?;
-            let mut out = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(to)?;
-            if let Err(e) = out.write_all(&data).and_then(|()| out.sync_all()) {
-                drop(out);
-                let _ = std::fs::remove_file(to);
-                return Err(e);
-            }
-        }
-    }
-    if let Err(e) = std::fs::remove_file(from) {
-        let _ = std::fs::remove_file(to);
-        return Err(e);
-    }
-    Ok(())
 }
 
 /// Sets the legacy journal `file` aside under the first free name of `<file>.legacy`,
@@ -406,25 +386,39 @@ impl RealEngine {
         }
         // Opening never prompts: without a usable session only what needs no server is done,
         // the rest is reported and retried on the next open.
-        let session = if scan.needs_session {
-            match self.unattended_session(repo_root_url, ctx).await {
-                Ok(s) => Some(s),
-                Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
-                Err(e) => {
-                    tracing::warn!(error = %e, "no repository session for commit recovery");
-                    None
+        let run = async {
+            let session = if scan.needs_session {
+                match self.unattended_session(repo_root_url, ctx).await {
+                    Ok(s) => Some(s),
+                    Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "no repository session for commit recovery");
+                        None
+                    }
                 }
-            }
-        } else {
-            None
+            } else {
+                None
+            };
+            Ok(
+                svn_client::commit::recover_wc_commits(&dir, db, session.as_deref(), &ctx.cancel)
+                    .await,
+            )
         };
-        let outcome =
-            svn_client::commit::recover_wc_commits(&dir, db, session.as_deref(), &ctx.cancel).await;
+        let outcome = tokio::time::timeout(self.recovery_network_timeout, run).await;
         ctx.check()?;
         match outcome {
-            Ok(outcome) => apply_commit_recovery(&outcome, report),
-            Err(e) => {
+            Ok(Ok(Ok(outcome))) => apply_commit_recovery(&outcome, report),
+            Ok(Err(e)) => return Err(e),
+            Ok(Ok(Err(e))) => {
                 tracing::warn!(error = %e, "commit recovery failed");
+                add_once(&mut report.needs_user_action, ROOT);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout_secs = self.recovery_network_timeout.as_secs(),
+                    "commit recovery stopped: the repository did not answer in time; retried on \
+                     the next open"
+                );
                 add_once(&mut report.needs_user_action, ROOT);
             }
         }
