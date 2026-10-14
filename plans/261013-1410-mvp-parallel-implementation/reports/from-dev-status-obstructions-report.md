@@ -122,7 +122,46 @@ All twelve variants match svn 1.15. The two tests fail on main (NODES rows diffe
 | crash suite, sigkill (Apache + mod_dav_svn) | 35 cases, 0 failed |
 | crash suite, named failpoints | 90 cases, 0 failed |
 
-BENCH_PLACEHOLDER
+## Benchmark (release build, same 4-vCPU VM, svn 1.15.0)
+
+`compare-svn --files 20000 --binaries 1 --binary-mb 16 --update-files 2000 --reps 3` (Apache +
+mod_dav_svn on 127.0.0.1, the #139 configuration). The table shows the median, with the minimum
+in brackets. Each run measures svn as well.
+
+| status | main `aaa9269` (engine / svn) | this branch (engine / svn) |
+|---|---:|---:|
+| first run, page cache dropped | 0.13 s / 0.37 s | 0.13 s / 0.32 s |
+| repeat run (svn's checkout) | 0.07 s / 0.07 s | 0.06 s / 0.06 s |
+| repeat run, own checkout | 0.05 s / 0.05 s | 0.07 s / 0.07 s ¹ |
+
+¹ This row moved for svn too, so it is noise. The bench rounds to 10 ms.
+
+21 interleaved runs (median, min) of `compare-svn engine status` on one 10k-file working copy:
+- main: 26.6 ms (24.4)
+- branch: 26.0 ms (24.8)
+- svn: 24.9 ms (24.3)
+
+There is no status regression.
+
+Stress (#145): 300 status runs on a 10k-file working copy for each configuration below, with a
+concurrent writer. Two writers were used:
+- (a) svn `update -r1/-r2` + `propset/propdel` in a loop;
+- (b) a sqlite connection doing `BEGIN IMMEDIATE`, an update, a 30 ms hold and `COMMIT`, in a
+  loop.
+
+| status of | writer (a) | writer (b) |
+|---|---:|---:|
+| main | 0 / 300 failed | 0 / 300 failed |
+| branch | 0 / 300 failed | 0 / 300 failed |
+| svn 1.15 | 0 / 300 failed | 0 / 300 failed |
+
+This harness did not reproduce the 4/300 seen on main, so the timing window was not hit here.
+The two deterministic regression tests above do reproduce both causes on main:
+- `WcBusy` after 10.2 s;
+- 11.6 s deadlock, then failure.
+
+Both pass on the branch. No run took more than 5 s.
+
 
 ## Adversarial self-review
 
