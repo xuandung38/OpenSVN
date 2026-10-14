@@ -532,6 +532,75 @@ async fn a_typed_password_the_server_rejects_is_never_saved_and_the_next_prompt_
     );
 }
 
+#[tokio::test]
+async fn a_password_typed_before_a_sign_out_is_not_saved_by_a_late_response() {
+    use secure_store::CredentialStore;
+    let store = Arc::new(secure_store::MemoryStore::new());
+    let db = AppDb::open_in_memory().unwrap();
+    let events = Arc::new(RecordingEvents::default());
+    let broker = Arc::new(AuthBroker::new(events.clone(), db.clone(), store.clone()));
+    let initial =
+        CredentialRequest::new(origin(), 0, vec![AuthMethod::Basic], PromptReason::Initial);
+    let (_, creds) = typed(&broker, &events, &initial, 0, "pw", true).await;
+    // The user signs out while the request carrying the answer is still in flight.
+    broker.sign_out(&origin().realm).unwrap();
+    broker.credentials_accepted(&origin(), &creds).await;
+    assert!(db.accounts_list().unwrap().is_empty(), "sign-out stands");
+    assert!(store.get(&origin(), "alice").unwrap().is_none());
+    assert!(broker.stored_credentials(&initial).await.is_none());
+
+    // An answer typed after the sign-out is saved as usual.
+    let (_, creds) = typed(&broker, &events, &initial, 1, "pw", true).await;
+    broker.credentials_accepted(&origin(), &creds).await;
+    assert_eq!(db.accounts_list().unwrap().len(), 1);
+    assert!(broker.stored_credentials(&initial).await.is_some());
+
+    // A sign-out of another realm does not affect it.
+    let (_, creds) = typed(&broker, &events, &initial, 2, "pw2", true).await;
+    broker.sign_out("some other realm").unwrap();
+    broker.credentials_accepted(&origin(), &creds).await;
+    use secrecy::ExposeSecret;
+    assert_eq!(
+        store
+            .get(&origin(), "alice")
+            .unwrap()
+            .unwrap()
+            .expose_secret(),
+        "pw2"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_saved_password_is_not_worded_as_the_one_typed_last_time() {
+    let store = Arc::new(secure_store::MemoryStore::new());
+    let db = AppDb::open_in_memory().unwrap();
+    let events = Arc::new(RecordingEvents::default());
+    let broker = Arc::new(AuthBroker::new(events.clone(), db.clone(), store.clone()));
+    let initial =
+        CredentialRequest::new(origin(), 0, vec![AuthMethod::Basic], PromptReason::Initial);
+    let (_, creds) = typed(&broker, &events, &initial, 0, "old", true).await;
+    broker.credentials_accepted(&origin(), &creds).await;
+    // A typed answer that never got a response (its request was cancelled)...
+    let (_, _unanswered) = typed(&broker, &events, &initial, 1, "x", false).await;
+    // ...then another transport offers the saved password and the server rejects it.
+    assert!(broker.stored_credentials(&initial).await.is_some());
+    let rejected =
+        CredentialRequest::new(origin(), 1, vec![AuthMethod::Basic], PromptReason::Rejected);
+    broker.stored_credentials_rejected(&rejected).await;
+    let (b, r) = (broker.clone(), rejected.clone());
+    let task = tokio::spawn(async move { b.credentials(&r).await });
+    let prompt = next_prompt_after(&events, 2).await;
+    assert_eq!(prompt.reason, Some(AuthPromptReason::Rejected));
+    broker
+        .respond(&prompt.request_id, AuthResponse::Cancel)
+        .unwrap();
+    assert!(task.await.unwrap().is_none());
+    // The rejected password was the saved one: a later first prompt says so, not "the password
+    // you entered last time".
+    let (prompt, _) = typed(&broker, &events, &initial, 3, "y", false).await;
+    assert_eq!(prompt.reason, Some(AuthPromptReason::Expired));
+}
+
 /// Credential store whose `delete` fails for one host.
 struct FailingDelete {
     inner: secure_store::MemoryStore,
