@@ -76,13 +76,22 @@ interface Conflict { path: string; kind: 'text' | 'property' | 'tree';
   treeReason?: 'edited' | 'deleted' | 'missing' | 'moved' | 'added' | 'replaced';
   treeAction?: 'edit' | 'delete' | 'add' | 'replace' | 'move'; }
 
-interface OperationHandle { opId: OpId; kind: OperationKind; wcId?: WcId; title: string; }
+interface OperationHandle { opId: OpId; kind: OperationKind; wcId?: WcId; title: string;
+  rootPath?: string;      // thư mục WC mà thao tác ghi/đọc (checkout: thư mục đích, chưa có wcId)
+  background: boolean; }  // app tự chạy (kiểm tra cập nhật định kỳ): UI báo lỗi nhẹ, không hiện dòng đỏ
 type OperationKind = 'checkout' | 'update' | 'switch' | 'commit' | 'revert' | 'cleanup' | 'lock'
   | 'unlock' | 'status-remote' | 'log' | 'blame' | 'remote-edit' | 'set-depth' | 'upgrade' | 'merge'
   | 'status-refresh' | 'add' | 'delete' | 'move' | 'copy' | 'save';
 
 interface Progress { opId: OpId; phase: string; current?: number; total?: number;
-  bytesDone?: number; bytesTotal?: number; currentPath?: string; }
+  bytesDone?: number;     // byte đã nhận từ server (transport đếm theo CancelToken của thao tác)
+  bytesTotal?: number; currentPath?: string;
+  stage?: 'connecting' | 'fetching' | 'finishing';
+  entries: { action: PathAction; path: string }[]; // path đã xử lý từ event trước, mới nhất cuối
+  entriesDropped: number; // path bị bỏ khỏi entries vì quá ENTRY_BATCH_LIMIT (200) giữa hai event
+  counts?: ActionCounts; } // đếm cộng dồn theo action, luôn chính xác
+type PathAction = 'added' | 'deleted' | 'updated' | 'merged' | 'conflicted' | 'tree-conflicted'
+  | 'existed' | 'restored' | 'skipped';                            // A D U G C C E R S
 
 // Tham số dạng union: tagged enum theo `kind` (camelCase).
 type LogTarget = { kind: 'url'; url: string } | { kind: 'wc'; wcId: WcId; path: string };
@@ -230,7 +239,7 @@ type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'negotiate-failed' | 
 | Event | Payload | Dùng cho |
 |---|---|---|
 | `op://started` | `OperationHandle` | Activity |
-| `op://progress` | `Progress` (throttle ≤ 10/s/op). Phase thông báo không bị throttle bỏ: `needs-cleanup` (thao tác xong nhưng WC cần cleanup, `currentPath` = lý do → UI hiện banner "needs cleanup" của WC), `nested-wc-skipped` (add bỏ qua WC lồng, W150002, `currentPath` = nội dung cảnh báo → UI hiện toast) | Activity, nút Update, banner, toast |
+| `op://progress` | `Progress` (gộp, ≤ 20/s/op: mỗi sample được gộp vào trạng thái của thao tác, path dồn vào `entries` của event kế tiếp; một ticker gửi trạng thái còn giữ khi engine im lặng). Phase thông báo không bị gộp: `external-warning` (external lỗi/bỏ qua), `needs-cleanup` (thao tác xong nhưng WC cần cleanup, `currentPath` = lý do → UI hiện banner "needs cleanup" của WC), `nested-wc-skipped` (add bỏ qua WC lồng, W150002, `currentPath` = nội dung cảnh báo → UI hiện toast) | Activity, nút Update, banner, toast |
 | `op://finished` | `{ opId, result }` (kết quả theo loại, vd `{ kind: 'newRev', newRev }`; checkout: `{ kind: 'checkedOut', wcId: WcId \| null, newRev }`) | toast, invalidate query; checkout → mở WC mới |
 | `op://failed` | `{ opId, error: AppError }` | Activity, banner |
 | `wc://status-changed` | `{ wcId, changed: FileStatus[], removed: string[] }` (delta) | tab Changes |

@@ -198,6 +198,19 @@ export type Account = {
 
 export type AccountMethod = "basic" | "negotiate";
 
+/**  Paths handled so far per action (cumulative over the whole operation). */
+export type ActionCounts = {
+	added: number,
+	deleted: number,
+	updated: number,
+	merged: number,
+	conflicted: number,
+	treeConflicted: number,
+	existed: number,
+	restored: number,
+	skipped: number,
+};
+
 /**  Error returned by every command. `message` is user-displayable; never a bare string error. */
 export type AppError = {
 	code: ErrorCode,
@@ -671,6 +684,15 @@ export type OpResult =
 /**  Blame result. */
 { kind: "blame"; lines: BlameLine[] };
 
+/**  Coarse stage of a long operation, for the progress details. */
+export type OpStage = 
+/**  Opening the session (TLS, authentication). */
+"connecting" | 
+/**  Receiving the tree and file contents and writing them to the working copy. */
+"fetching" | 
+/**  The server drive is over; recording the result (externals, working copy info). */
+"finishing";
+
 export type OpStarted = OperationHandle;
 
 export type OpenWith = "default" | "editor" | "terminal";
@@ -680,6 +702,17 @@ export type OperationHandle = {
 	kind: OperationKind,
 	wcId: WcId | null,
 	title: string,
+	/**
+	 *  Working copy folder the operation writes to or reads (a checkout's target folder, which
+	 *  has no `wc_id` until it finishes). The UI matches it against a working copy's `root_path`
+	 *  to tell its own lock from a stale one.
+	 */
+	rootPath: string | null,
+	/**
+	 *  Started by the app itself (periodic update check), not by the user: the UI reports its
+	 *  failure quietly instead of as an error row.
+	 */
+	background: boolean,
 };
 
 export type OperationKind = "checkout" | "update" | "switch" | "commit" | "revert" | "cleanup" | "lock" | "unlock" | "status-remote" | "log" | "blame" | "remote-edit" | "set-depth" | "upgrade" | "merge" | 
@@ -689,6 +722,27 @@ export type OperationKind = "checkout" | "update" | "switch" | "commit" | "rever
 "copy" | 
 /**  Download of a repository file to disk (`repo_save`). */
 "save";
+
+/**  What happened to one path, as `svn` prints it in the first column (`A`, `U`, `D`, ...). */
+export type PathAction = 
+/**  `A` */
+"added" | 
+/**  `D` */
+"deleted" | 
+/**  `U` */
+"updated" | 
+/**  `G` */
+"merged" | 
+/**  `C` */
+"conflicted" | 
+/**  `C` (tree conflict) */
+"tree-conflicted" | 
+/**  `E` */
+"existed" | 
+/**  `R` (restored) */
+"restored" | 
+/**  Skipped */
+"skipped";
 
 /**  Opaque, single-use, time-limited handle to a path chosen by the user. */
 export type PathGrantId = string;
@@ -718,14 +772,31 @@ export type PickRequest =
  */
 export type ProgramKind = "diff-tool" | "merge-tool" | "editor" | "terminal";
 
+/**
+ *  Progress sample of a running operation. Samples are coalesced by the backend (at most 20 per
+ *  second); `entries` carries the paths handled since the previous sample, newest last, of which
+ *  only the most recent are kept when there were many (`entriesDropped` counts the others).
+ */
 export type Progress = {
 	opId: OpId,
 	phase: string,
 	current: Size | null,
 	total: Size | null,
+	/**  Bytes received from the server so far (or written, for a download). */
 	bytesDone: Size | null,
 	bytesTotal: Size | null,
 	currentPath: string | null,
+	stage: OpStage | null,
+	entries: ProgressEntry[],
+	entriesDropped: number,
+	counts: ActionCounts | null,
+};
+
+/**  One line of an operation's path log. */
+export type ProgressEntry = {
+	action: PathAction,
+	/**  Working copy relative path (`""` for the root). */
+	path: string,
 };
 
 export type PropChange = {

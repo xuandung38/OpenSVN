@@ -12,6 +12,17 @@ use crate::app_state::{AppState, leaf};
 use crate::boundary::guard;
 use crate::engine::OpContext;
 
+/// Refusal of a command that would interfere with our own running operation `title`.
+pub(crate) fn busy_with(title: &str) -> AppError {
+    let mut e = AppError::internal(format!(
+        "\"{title}\" is still running on this working copy. Wait for it to finish (or cancel it), \
+         then try again."
+    ));
+    e.code = ErrorCode::WcBusy;
+    e.retryable = true;
+    e
+}
+
 fn mvp_limit(msg: &str) -> AppError {
     let mut e = crate::errors::invalid_argument(msg);
     e.code = ErrorCode::WcFormatUnsupported;
@@ -55,35 +66,33 @@ pub async fn checkout(
         };
         let title = format!("Checkout {}", leaf(&request.url));
         let wcs = std::sync::Arc::clone(&state.wcs);
-        Ok(state.start_op(
-            OperationKind::Checkout,
-            title,
-            move |engine, ctx| async move {
-                let info = match engine.checkout(&plan, &ctx).await {
-                    Ok(info) => info,
-                    Err(e) => {
-                        // A checkout that already wrote its working copy stays resumable: it is
-                        // listed as incomplete and an update finishes it.
-                        if wcs.add_unfinished(&target.path).await.is_none() {
-                            target.discard_if_empty();
-                        }
-                        return Err(e);
+        let engine = std::sync::Arc::clone(&state.engine);
+        let spec = crate::ops::OpSpec::new(OperationKind::Checkout, None, title).at(&target.path);
+        Ok(state.ops.spawn_with(spec, move |ctx| async move {
+            let info = match engine.checkout(&plan, &ctx).await {
+                Ok(info) => info,
+                Err(e) => {
+                    // A checkout that already wrote its working copy stays resumable: it is
+                    // listed as incomplete and an update finishes it.
+                    if wcs.add_unfinished(&target.path).await.is_none() {
+                        target.discard_if_empty();
                     }
-                };
-                // Register the new working copy so the UI can open it right after `op://finished`.
-                let wc_id = match wcs.add_existing(&info.root_path).await {
-                    Ok(wc) => Some(wc.id),
-                    Err(e) => {
-                        tracing::warn!(code = ?e.code, "checked out working copy was not registered");
-                        None
-                    }
-                };
-                Ok(OpResult::CheckedOut {
-                    wc_id,
-                    new_rev: info.base_rev,
-                })
-            },
-        ))
+                    return Err(AppError::from(&e));
+                }
+            };
+            // Register the new working copy so the UI can open it right after `op://finished`.
+            let wc_id = match wcs.add_existing(&info.root_path).await {
+                Ok(wc) => Some(wc.id),
+                Err(e) => {
+                    tracing::warn!(code = ?e.code, "checked out working copy was not registered");
+                    None
+                }
+            };
+            Ok(OpResult::CheckedOut {
+                wc_id,
+                new_rev: info.base_rev,
+            })
+        }))
     })
     .await
 }
@@ -262,7 +271,13 @@ pub async fn cleanup(
 ) -> Result<OperationHandle, AppError> {
     guard(async {
         let wc_id = request.wc_id.clone();
-        let name = state.wcs.resolve(&wc_id)?.row.name;
+        let resolved = state.wcs.resolve(&wc_id)?;
+        // The lock of an operation we are running is not stale: cleaning up now would break
+        // into that operation (a checkout does not queue behind the working copy's actor).
+        if let Some(op) = state.ops.running_on(&resolved.wc.root) {
+            return Err(busy_with(&op.title));
+        }
+        let name = resolved.row.name;
         state.start_wc_op(
             OperationKind::Cleanup,
             &wc_id,

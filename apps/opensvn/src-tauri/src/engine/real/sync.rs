@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use opensvn_ipc::{Depth, Rev, UpdateRequest, WcFormat};
+use opensvn_ipc::{Depth, OpStage, Rev, UpdateRequest, WcFormat};
 use svn_ra_api::RaSession;
 use svn_types::{CancelToken, ErrorCode, RelPath, RepoUrl, Revnum, SvnError};
 
@@ -81,8 +81,8 @@ fn is_inside(root: &RepoUrl, url: &RepoUrl) -> bool {
 }
 
 /// Phase of the progress sample sent for an external that failed or kept local changes; its
-/// `current_path` is the external's path in the working copy.
-pub(super) const PHASE_EXTERNAL_WARNING: &str = "external-warning";
+/// `current_path` is the external's path in the working copy. A notice: never coalesced away.
+pub(super) use crate::engine::context::PHASE_EXTERNAL_WARNING;
 
 /// Opens an authenticated session anchored exactly at `url` through `connector`.
 async fn open_at(
@@ -209,7 +209,11 @@ impl RealEngine {
                 "checkout path must be absolute",
             ));
         }
+        ctx.progress
+            .report(ProgressUpdate::stage(PHASE_CHECKOUT, OpStage::Connecting));
         let session = self.session_at(&plan.url, ctx).await?;
+        ctx.progress
+            .report(ProgressUpdate::stage(PHASE_CHECKOUT, OpStage::Fetching));
         let summary = svn_client::checkout(
             &self.sync_ctx(ctx, PHASE_CHECKOUT, plan.ignore_externals),
             session.as_ref(),
@@ -220,6 +224,8 @@ impl RealEngine {
             &ctx.cancel,
         )
         .await?;
+        ctx.progress
+            .report(ProgressUpdate::stage(PHASE_CHECKOUT, OpStage::Finishing));
         report_external_warnings(&summary, ctx);
         wc_read::wc_info(&plan.path, ctx).await
     }
@@ -240,7 +246,11 @@ impl RealEngine {
                 .collect::<EngineResult<_>>()?,
         };
         let info = wc_read::wc_info(&wc.root, ctx).await?;
+        ctx.progress
+            .report(ProgressUpdate::stage(PHASE_UPDATE, OpStage::Connecting));
         let session = self.session_at(&info.url, ctx).await?;
+        ctx.progress
+            .report(ProgressUpdate::stage(PHASE_UPDATE, OpStage::Fetching));
         // Every path goes to the same revision, even when a commit lands in between.
         let rev = match req.rev {
             Some(r) => Revnum(r.0),
@@ -260,6 +270,8 @@ impl RealEngine {
             .await?;
             report_external_warnings(&summary, ctx);
         }
+        ctx.progress
+            .report(ProgressUpdate::stage(PHASE_UPDATE, OpStage::Finishing));
         Ok(Rev(rev.0))
     }
 

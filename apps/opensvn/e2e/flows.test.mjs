@@ -76,6 +76,13 @@ test("10.1 first use: checkout with certificate trust and sign-in opens an empty
   // trunk/branches/tags layout: the toolbar shows the branch, not the in-repo path (#129).
   assert.match(text, /Branch\s+trunk/);
   assert.match(text, /0 changed/);
+  // The Activity row opens the checkout's details: its path log and summary stay after it ends.
+  await app.click("button", "Show details of Checkout trunk");
+  await app.waitText("At revision 1");
+  const details = await app.bodyText();
+  assert.match(details, /Added: \d+/);
+  assert.match(details, /A\s*src\/main\.c/);
+  await app.click("button", "Close");
 });
 
 test("10.2 daily commit: edit, see the diff, commit with Mod+Enter, list empties", async () => {
