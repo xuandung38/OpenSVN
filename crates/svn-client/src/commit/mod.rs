@@ -615,7 +615,11 @@ async fn after_failed_close(
             let _ = observer.on_merged(&info);
             AfterClose::Merged(info)
         }
-        Ok(Reconciled::Ambiguous(why) | Reconciled::NotSearched(why)) => AfterClose::Failed(
+        Ok(
+            Reconciled::Ambiguous(why)
+            | Reconciled::NotSearched(why)
+            | Reconciled::Unconfirmed(why),
+        ) => AfterClose::Failed(
             SvnError::new(
                 ErrorCode::WcNeedsCleanup,
                 format!(

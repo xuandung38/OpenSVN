@@ -241,8 +241,12 @@ pub trait RaSession: Send + Sync {
     ///
     /// [`TxnAbort::Deleted`] proves the transaction was not merged (it existed until this call
     /// removed it). [`TxnAbort::Gone`] means the server no longer has it: it was merged into a
-    /// revision, or deleted earlier (by a cleanup, an administrator or a failed commit). Errors
-    /// (network, authentication, an answer that says neither) leave the question open.
+    /// revision, or deleted earlier (by a cleanup, an administrator or a failed commit).
+    /// [`TxnAbort::Unknown`] means the `DELETE` failed on the way (a server error such as svn
+    /// 1.15's "Transaction cleanup failed" when it races the commit's own purge, or a broken
+    /// connection): the transaction may still exist, or may have become a revision. Other errors
+    /// (authentication, authorization, cancellation, an answer that says neither) leave the
+    /// question open and stop the caller.
     ///
     /// The default cannot tell the two cases apart and fails with `ServerUnsupported`, so a
     /// caller never mistakes "unknown" for "deleted".
@@ -256,10 +260,13 @@ pub trait RaSession: Send + Sync {
 }
 
 /// Result of [`RaSession::abort_txn_checked`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TxnAbort {
     /// The transaction existed and is now deleted: it was never merged.
     Deleted,
     /// The server has no such transaction (already merged or already deleted).
     Gone,
+    /// The `DELETE` failed with a server error (5xx) or in transport: whether the transaction
+    /// still exists, and whether it was merged, is unknown. Never a proof of either; the reason.
+    Unknown(String),
 }
