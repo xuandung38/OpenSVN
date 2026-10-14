@@ -10,9 +10,10 @@
 //! * the `MERGE` may have been sent but no revision is recorded (crash during the `MERGE`, an
 //!   unknown outcome, or a failure while recording the revision): the journal is reconciled with
 //!   the server by [`reconcile`]. Transaction deleted by that call: never merged, the journal is
-//!   dropped. Transaction gone: the log after the journal's start revision is searched for the
-//!   commit (author when known, log message and changed paths); exactly one match is finalized,
-//!   anything else keeps the journal and reports it as needing the user;
+//!   dropped. Transaction gone, or its `DELETE` failed with a 5xx or in transport (outcome
+//!   unknown): the log after the journal's start revision is searched for the commit (author
+//!   when known, log message and changed paths); exactly one match is finalized, anything else
+//!   keeps the journal and reports it as needing the user;
 //! * only a transaction is recorded: it is deleted on the server and the journal is dropped;
 //! * nothing reached the server: the journal is dropped.
 //!
@@ -337,7 +338,8 @@ async fn process(
             }
             Reconciled::NoMatch(why)
             | Reconciled::Ambiguous(why)
-            | Reconciled::NotSearched(why) => Ok(Outcome::NeedsUser(SvnError::new(
+            | Reconciled::NotSearched(why)
+            | Reconciled::Unconfirmed(why) => Ok(Outcome::NeedsUser(SvnError::new(
                 ErrorCode::WcNeedsCleanup,
                 format!(
                     "cannot tell whether the commit '{}' (transaction '{}') was applied: \
@@ -383,6 +385,11 @@ pub(crate) enum Reconciled {
     /// The transaction is gone and more revisions than [`RECOVERY_LOG_SEARCH_LIMIT`] were made
     /// since the commit started: the log was not searched; the reason.
     NotSearched(String),
+    /// The server failed to answer the `DELETE` of the transaction (a 5xx, or a broken
+    /// connection), so the transaction may still exist, and the log does not show the commit
+    /// exactly once (no match, or no revision since the commit started); the reason. Unlike
+    /// [`Reconciled::NoMatch`] this never counts as "not committed": the journal is kept.
+    Unconfirmed(String),
 }
 
 /// Most revisions the log search of [`reconcile`] looks at. A journal settled long after the
@@ -394,6 +401,12 @@ pub const RECOVERY_LOG_SEARCH_LIMIT: u64 = 1000;
 /// exists (then it was never merged), otherwise searches the revisions made since the commit
 /// started for the commit: same author (when the journal knows it), same log message, same set
 /// of changed paths, and the same text (MD5) for every file whose text was uploaded.
+///
+/// A `DELETE` the server fails with a 5xx (svn 1.15 FSFS answers 500 "Transaction cleanup
+/// failed" when it races the commit's own purge after the revision was written) or that breaks
+/// in transport proves nothing: the log is searched as for a transaction that is gone, exactly
+/// one match settles the commit, and anything else is [`Reconciled::Unconfirmed`] (the
+/// transaction may still exist, so it is never taken as "not committed").
 ///
 /// A deletion that races a `MERGE` still running on the server is possible in theory (FSFS
 /// purges the transaction after the revision is written); it is the same window
@@ -418,9 +431,49 @@ async fn reconcile_within(
             "the journal names no transaction".to_owned(),
         ));
     };
-    if ra.abort_txn_checked(txn, cancel).await? == TxnAbort::Deleted {
-        return Ok(Reconciled::NotCommitted);
+    let state = match ra.abort_txn_checked(txn, cancel).await? {
+        TxnAbort::Deleted => return Ok(Reconciled::NotCommitted),
+        TxnAbort::Gone => TxnState::Gone,
+        TxnAbort::Unknown(why) => TxnState::Unknown(why),
+    };
+    let found = search_log(data, ra, cancel, max_revisions, &state).await?;
+    Ok(match (&state, found) {
+        (TxnState::Unknown(_), Reconciled::NotCommitted) => Reconciled::Unconfirmed(format!(
+            "{} and no revision was made since the commit started",
+            state.describe()
+        )),
+        (TxnState::Unknown(_), Reconciled::NoMatch(why)) => Reconciled::Unconfirmed(why),
+        (_, found) => found,
+    })
+}
+
+/// What the `DELETE` of [`reconcile`] said about a transaction it did not delete.
+enum TxnState {
+    /// The server has no such transaction.
+    Gone,
+    /// The `DELETE` failed (5xx or transport); the reason.
+    Unknown(String),
+}
+
+impl TxnState {
+    fn describe(&self) -> String {
+        match self {
+            Self::Gone => "the transaction is gone".to_owned(),
+            Self::Unknown(why) => {
+                format!("the server could not tell whether the transaction still exists ({why})")
+            }
+        }
     }
+}
+
+/// The log part of [`reconcile_within`], for a transaction the `DELETE` did not prove unmerged.
+async fn search_log(
+    data: &JournalData,
+    ra: &dyn RaSession,
+    cancel: &CancelToken,
+    max_revisions: u64,
+    state: &TxnState,
+) -> Result<Reconciled> {
     let Some(start) = data.start_youngest else {
         return Ok(Reconciled::NoMatch(
             "the journal does not record the revision the commit started from".to_owned(),
@@ -432,8 +485,9 @@ async fn reconcile_within(
     }
     if head - start > max_revisions {
         return Ok(Reconciled::NotSearched(format!(
-            "the transaction is gone and {} revisions (r{}..r{head}) were made since the commit \
-             started, more than the {max_revisions} the automatic search covers",
+            "{} and {} revisions (r{}..r{head}) were made since the commit started, more than \
+             the {max_revisions} the automatic search covers",
+            state.describe(),
             head - start,
             start + 1
         )));
@@ -494,7 +548,8 @@ async fn reconcile_within(
             author: one.author.clone(),
         }),
         [] => Reconciled::NoMatch(format!(
-            "the transaction is gone but none of r{}..r{head} matches the commit",
+            "{} but none of r{}..r{head} matches the commit",
+            state.describe(),
             start + 1
         )),
         many => Reconciled::Ambiguous(format!(
