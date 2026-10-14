@@ -3,14 +3,20 @@ import { useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Sheet } from "../../../components/ui/sheet";
 import { useToast } from "../../../components/ui/toast";
-import { ipc, unwrap } from "../../../ipc/client";
+import { IpcError, ipc, unwrap } from "../../../ipc/client";
 import { useSettings } from "../../../ipc/queries";
 import { queryKeys } from "../../../ipc/query-keys";
 import { cn } from "../../../lib/cn";
 import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
 import { applyTheme } from "../../../lib/theme";
-import { type Draft, validateDraft, withoutUnchanged } from "./settings-model";
+import {
+  type Draft,
+  type FieldError,
+  rejectedKey,
+  validateDraft,
+  withoutUnchanged,
+} from "./settings-model";
 import {
   AccountsPage,
   AdvancedPage,
@@ -31,6 +37,28 @@ type PageId =
   | "integrations"
   | "network"
   | "advanced";
+/**
+ * Footer text for a failed Save. A refused value is explained on its field; the backend's own
+ * validation message (English, with the dotted key) is never shown.
+ */
+function saveErrorText(
+  e: Error,
+  onField: boolean,
+  t: (key: "saveFailed" | "saveFailedField") => string,
+): string {
+  if (onField) return t("saveFailedField");
+  if (e instanceof IpcError && e.appError.code === "invalid-argument") return t("saveFailed");
+  return `${t("saveFailed")}: ${e.message}`;
+}
+
+/** The page that shows a setting, from its dotted key's section. */
+function pageOf(key: string): PageId {
+  const section = key.split(".")[0] ?? "";
+  if (section === "diff" || section === "tools") return "diffMerge";
+  if (section === "cache" || section === "wc") return "advanced";
+  return (PAGES as string[]).includes(section) ? (section as PageId) : "general";
+}
+
 const PAGES: PageId[] = [
   "general",
   "accounts",
@@ -60,10 +88,19 @@ export function SettingsSheet({ open, onClose }: { open: boolean; onClose: () =>
       setDraft({});
       onClose();
     },
+    // A value the backend refused is shown on its field, on its page.
+    onError: (e) => {
+      const key = rejectedKey(e, settings.data);
+      if (key) setPage(pageOf(key));
+    },
   });
 
   const s = settings.data;
-  const errors = s ? validateDraft(s, draft) : {};
+  const rejected = rejectedKey(save.error, s);
+  const errors: Record<string, FieldError> = {
+    ...(rejected ? { [rejected]: "rejected" as const } : {}),
+    ...(s ? validateDraft(s, draft) : {}),
+  };
   const dirty = Object.keys(draft).length > 0;
   const canSave = !!s && dirty && Object.keys(errors).length === 0 && !save.isPending;
 
@@ -78,7 +115,11 @@ export function SettingsSheet({ open, onClose }: { open: boolean; onClose: () =>
         settings: s,
         draft,
         errors,
-        set: (p) => setDraft((d) => withoutUnchanged(s, { ...d, ...p })),
+        set: (p) => {
+          // Editing again clears a refusal from the last Save.
+          if (save.error) save.reset();
+          setDraft((d) => withoutUnchanged(s, { ...d, ...p }));
+        },
       }
     : null;
 
@@ -91,7 +132,7 @@ export function SettingsSheet({ open, onClose }: { open: boolean; onClose: () =>
         <>
           {save.error && (
             <span className="mr-auto text-bad-text" role="alert">
-              {t("saveFailed")}: {save.error.message}
+              {saveErrorText(save.error, rejected !== null, t)}
             </span>
           )}
           <Button onClick={close}>{c("cancel")}</Button>

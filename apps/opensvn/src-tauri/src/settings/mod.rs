@@ -17,6 +17,12 @@ use tokio::sync::watch;
 use crate::db::AppDb;
 
 pub use defaults::{defaults, system_locale};
+pub use validate::{SETTING_RANGES, range_of};
+
+/// [`SETTING_RANGES`] keyed by setting, as exported to the UI (`SETTING_RANGES` in the bindings).
+pub fn setting_ranges() -> std::collections::BTreeMap<&'static str, opensvn_ipc::SettingRange> {
+    SETTING_RANGES.into_iter().collect()
+}
 
 /// Dotted keys that launch programs. A test asserts this list equals the set of nullable keys of
 /// [`Settings`], so a new program-launching setting cannot be forgotten. `SettingsPatch` has none
@@ -58,8 +64,9 @@ pub struct SettingsService {
 }
 
 impl SettingsService {
-    /// Loads stored settings over the defaults. A stored value that no longer parses or
-    /// validates is ignored (the default applies) rather than blocking start-up.
+    /// Loads stored settings over the defaults. A stored number outside its range (an older
+    /// version may have allowed more) is clamped into it; any other value that no longer parses
+    /// or validates is ignored (the default applies) rather than blocking start-up.
     pub fn load(db: AppDb, locale: Option<&str>) -> Result<Self, AppError> {
         let mut map = to_map(&defaults(locale))?;
         for (key, raw) in db.settings_all()? {
@@ -70,14 +77,25 @@ impl SettingsService {
             let Some(slot) = map.get_mut(&key) else {
                 continue; // key from another version
             };
+            let clamped = validate::clamp_stored(&key, &value);
             let previous = std::mem::replace(slot, value);
-            let ok = from_map(map.clone())
-                .and_then(|s| validate::validate(&s))
-                .is_ok();
-            if !ok {
-                tracing::warn!(key, "ignoring invalid stored setting");
-                map.insert(key, previous);
+            let valid = |m: &Map<String, Value>| {
+                from_map(m.clone())
+                    .and_then(|s| validate::validate(&s))
+                    .is_ok()
+            };
+            if valid(&map) {
+                continue;
             }
+            if let Some(c) = clamped {
+                map.insert(key.clone(), c);
+                if valid(&map) {
+                    tracing::warn!(key, "clamped out-of-range stored setting");
+                    continue;
+                }
+            }
+            tracing::warn!(key, "ignoring invalid stored setting");
+            map.insert(key, previous);
         }
         let current = from_map(map)?;
         let (tx, _rx) = watch::channel(current);

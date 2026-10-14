@@ -1,19 +1,21 @@
 import type { Commands, IpcAdapter } from "../adapter";
-import type {
-  AppError,
-  CopyLocationRequest,
-  EngineCapabilities,
-  LockRequest,
-  LogGetRequest,
-  OperationHandle,
-  OperationKind,
-  OpResult,
-  ProgramKind,
-  RemoteEditRequest,
-  Settings,
-  SettingsPatch_Deserialize,
-  UnlockRequest,
+import {
+  type AppError,
+  type CopyLocationRequest,
+  type EngineCapabilities,
+  type LockRequest,
+  type LogGetRequest,
+  type OperationHandle,
+  type OperationKind,
+  type OpResult,
+  type ProgramKind,
+  type RemoteEditRequest,
+  SETTING_RANGES,
+  type Settings,
+  type SettingsPatch_Deserialize,
+  type UnlockRequest,
 } from "../bindings";
+import { isValidEventName } from "../events";
 import { mockSettings } from "./data";
 import {
   MOCK_REPO_ROOT,
@@ -32,8 +34,12 @@ import { wcMockCommands } from "./wc-mock-commands";
 type Handler = (payload: unknown) => void;
 const listeners = new Map<string, Set<Handler>>();
 
-/** Emit an event to mock subscribers (also used by the dev gallery to simulate backend pushes). */
+/**
+ * Emit an event to mock subscribers (also used by the dev gallery to simulate backend pushes).
+ * Refuses names Tauri refuses, as Rust's `emit` does.
+ */
 export function mockEmit(name: string, payload: unknown = null): void {
+  if (!isValidEventName(name)) throw new Error(`mock: illegal event name ${name}`);
   for (const h of listeners.get(name) ?? []) h(payload);
 }
 
@@ -56,6 +62,12 @@ const errCode = (code: AppError["code"], message: string, detail: string | null 
       actions: null,
     } satisfies AppError,
   });
+
+/** A setting the mock backend refuses on Save (a backend-only rule; tests). */
+let refusedSetting: string | null = null;
+export function setMockRefusedSetting(key: string | null): void {
+  refusedSetting = key;
+}
 
 let opSeq = 0;
 let opDurationMs = 2000;
@@ -313,7 +325,26 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     Object.assign(mockSettings, { "general.checkoutRoot": "/Users/dev/projects" });
     return ok({ ...mockSettings });
   },
+  // Validates like the Rust validator: same ranges (SETTING_RANGES), same error shape.
   settingsSet: (patch: SettingsPatch_Deserialize) => {
+    const next = { ...mockSettings, ...patch } as Record<string, unknown>;
+    for (const [key, { min, max }] of Object.entries(SETTING_RANGES)) {
+      const v = next[key];
+      if (typeof v !== "number" || !Number.isInteger(v) || v < min || v > max) {
+        return errCode(
+          "invalid-argument",
+          `Invalid value for setting ${key}: must be between ${min} and ${max}.`,
+          key,
+        );
+      }
+    }
+    if (refusedSetting && refusedSetting in patch) {
+      return errCode(
+        "invalid-argument",
+        `Invalid value for setting ${refusedSetting}: refused by the backend.`,
+        refusedSetting,
+      );
+    }
     Object.assign(mockSettings, patch);
     return ok({ ...mockSettings });
   },
@@ -337,6 +368,8 @@ export const mockAdapter: IpcAdapter = {
   kind: "mock",
   commands: commandsProxy,
   async listen(name, handler) {
+    // Like Tauri's `listen`, which rejects such a name before subscribing.
+    if (!isValidEventName(name)) throw new Error(`mock: illegal event name ${name}`);
     const set = listeners.get(name) ?? new Set<Handler>();
     listeners.set(name, set);
     set.add(handler);

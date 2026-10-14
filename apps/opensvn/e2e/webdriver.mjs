@@ -103,6 +103,7 @@ export class Session {
 
 export const Keys = {
   Control: "",
+  Meta: "",
   Shift: "",
   Enter: "",
   Escape: "",

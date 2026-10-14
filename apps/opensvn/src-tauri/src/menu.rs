@@ -1,11 +1,12 @@
 //! Native application menu (docs/system-design/01 section 8). This is the only menu bar.
 //!
 //! The menu is described as data ([`menu_spec`]) so its structure can be tested on any host, then
-//! turned into a Tauri menu. Activating an item emits the event `menu://<id>` for the UI, which
-//! owns the behavior and runs the same action as the matching keyboard shortcut (the UI ignores
-//! the echo when one key press reaches it both as a menu event and as a keydown). The few items
-//! that act on the window or the process (zoom, Exit) are handled here instead ([`native_action`]),
-//! and predefined items (copy, paste, quit, ...) are native roles. A test pins that every item is
+//! turned into a Tauri menu. Activating an item emits `menu://<id>` ([`event_name`]: dots become
+//! slashes, e.g. `menu://wc/update`) for the UI, which owns the behavior and runs the same action
+//! as the matching keyboard shortcut (the UI ignores the echo when one key press reaches it both
+//! as a menu event and as a keydown). The few items that act on the window or the process (zoom,
+//! Exit) are handled here instead ([`native_action`]), and predefined items (copy, paste, quit,
+//! ...) are native roles. A test pins that every item is
 //! one of these: subscribed by the UI (`MENU_EVENTS` in `src/ipc/events.ts`) or native.
 //! Accelerators use `Mod` = Cmd on macOS and Ctrl elsewhere.
 
@@ -207,7 +208,7 @@ pub fn menu_spec(os: Os, has_layout: bool) -> Vec<Entry> {
     ];
     if !mac {
         file.push(Entry::Separator);
-        file.push(item("app.settings", "Settings…", Some("Ctrl+,")));
+        file.push(item("app.settings", "Settings…", Some("Mod+,")));
         file.push(Entry::Separator);
         file.push(item("app.exit", "Exit", Some("Ctrl+Q")));
     }
@@ -234,7 +235,7 @@ pub fn menu_spec(os: Os, has_layout: bool) -> Vec<Entry> {
                 Entry::Predefined(Predef::About),
                 item("app.check-app-updates", "Check for app updates…", None),
                 Entry::Separator,
-                item("app.settings", "Settings…", Some("Cmd+,")),
+                item("app.settings", "Settings…", Some("Mod+,")),
                 Entry::Separator,
                 Entry::Predefined(Predef::Hide),
                 Entry::Separator,
@@ -269,9 +270,11 @@ pub fn accelerator(spec: &str) -> String {
     spec.replace("Mod+", "CmdOrCtrl+")
 }
 
-/// Event name the UI listens to for a menu item.
+/// Event name the UI listens to for a menu item: `menu://` plus the id with `.` turned into `/`
+/// (`wc.update` -> `menu://wc/update`). Tauri refuses event names with characters other than
+/// alphanumerics, `-`, `/`, `:` and `_`, on `emit` and on the UI's `listen` alike.
 pub fn event_name(id: &str) -> String {
-    format!("menu://{id}")
+    format!("menu://{}", id.replace('.', "/"))
 }
 
 fn has_item_id(entries: &[Entry], wanted: &str) -> bool {

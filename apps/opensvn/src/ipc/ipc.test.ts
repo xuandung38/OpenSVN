@@ -1,7 +1,14 @@
 import { QueryClient } from "@tanstack/react-query";
 import { expect, test, vi } from "vitest";
 import { unwrap } from "./client";
-import { createEventBus, MAX_OPS, type OpState } from "./events";
+import {
+  createEventBus,
+  EVENT_NAMES,
+  isValidEventName,
+  MAX_OPS,
+  MENU_EVENTS,
+  type OpState,
+} from "./events";
 import { mockAdapter, mockEmit } from "./mock/adapter";
 import { queryKeys } from "./query-keys";
 
@@ -36,8 +43,8 @@ test("event bus folds op://* events into the ops cache and invalidates on wc://*
 
   const menu = vi.fn();
   bus.onMenu(menu);
-  mockEmit("menu://wc.commit");
-  expect(menu).toHaveBeenCalledWith("menu://wc.commit");
+  mockEmit("menu://wc/commit");
+  expect(menu).toHaveBeenCalledWith("menu://wc/commit");
 
   bus.stop();
   mockEmit("wc://incoming", { wcId: "wc-main", count: 1, latestRev: 2 });
@@ -167,6 +174,34 @@ test("event bus: notice phases update banners, never the operation's progress", 
   expect(qc.getQueryData(queryKeys.banners("wc-main"))).toEqual([
     { wcId: "wc-main", kind: "needs-cleanup", data: ["file in use"] },
   ]);
+  bus.stop();
+});
+
+test("every subscribed event name is one Tauri accepts", () => {
+  for (const name of [...EVENT_NAMES, ...MENU_EVENTS]) {
+    expect(isValidEventName(name), name).toBe(true);
+  }
+  expect(MENU_EVENTS).toContain("menu://app/settings");
+  // Tauri refuses `.` (and spaces, CR, ...) in event names, on emit and on listen.
+  for (const bad of ["menu://app.settings", "", "a b", "x\r"]) {
+    expect(isValidEventName(bad), bad).toBe(false);
+  }
+});
+
+test("event bus: one refused subscription does not stop the later ones", async () => {
+  const qc = new QueryClient();
+  const refused = "menu://file/checkout";
+  const adapter = {
+    ...mockAdapter,
+    listen: (name: string, handler: (payload: unknown) => void) =>
+      name === refused ? Promise.reject(new Error("refused")) : mockAdapter.listen(name, handler),
+  };
+  const bus = createEventBus(adapter, qc);
+  const menu = vi.fn();
+  bus.onMenu(menu);
+  await expect(bus.start()).rejects.toThrow(/menu:\/\/file\/checkout: refused/);
+  mockEmit("menu://app/settings");
+  expect(menu).toHaveBeenCalledWith("menu://app/settings");
   bus.stop();
 });
 

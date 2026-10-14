@@ -1,17 +1,64 @@
 //! Semantic validation of a complete settings value.
 
-use opensvn_ipc::{AppError, ExternalDiffTool, ProxySetting, Settings, WcFormat};
+use opensvn_ipc::{AppError, ExternalDiffTool, ProxySetting, SettingRange, Settings, WcFormat};
+use serde_json::Value;
+
+/// Every numeric setting and its inclusive range. This table is the only definition: [`validate`]
+/// checks it, [`clamp_stored`] applies it to stored values, and the UI reads it from the generated
+/// bindings (`SETTING_RANGES`) for its own checks, labels and `<input min/max>`.
+///
+/// - `general.checkIntervalMin`: minutes between background checks; the poller has no "off".
+/// - `network.maxConnections`: the HTTP transport supports 1..=8 per host
+///   (`svn_ra::transport::config::MAX_CONNECTIONS`); default 4, like svn.
+/// - `network.timeoutSec`: below 5 s a slow TLS handshake already fails.
+/// - `cache.maxSizeGb`: up to 4 TB.
+pub const SETTING_RANGES: [(&str, SettingRange); 4] = [
+    (
+        "general.checkIntervalMin",
+        SettingRange { min: 1, max: 1440 },
+    ),
+    ("network.maxConnections", SettingRange { min: 1, max: 8 }),
+    ("network.timeoutSec", SettingRange { min: 5, max: 3600 }),
+    ("cache.maxSizeGb", SettingRange { min: 1, max: 4096 }),
+];
+
+/// The range of a key of [`SETTING_RANGES`].
+pub fn range_of(key: &str) -> Option<SettingRange> {
+    SETTING_RANGES
+        .iter()
+        .find_map(|(k, r)| (*k == key).then_some(*r))
+}
+
+/// A stored value of a ranged key, clamped into its range (an older version may have allowed
+/// more). `None` when `key` has no range or `value` is not a number.
+pub fn clamp_stored(key: &str, value: &Value) -> Option<Value> {
+    let range = range_of(key)?;
+    let n = value.as_f64()?;
+    if !n.is_finite() {
+        return None;
+    }
+    let clamped = n.round().clamp(f64::from(range.min), f64::from(range.max));
+    // In range of u32 after the clamp, so the cast is exact.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(Value::from(clamped as u32))
+}
 
 fn invalid(key: &str, why: &str) -> AppError {
     crate::errors::invalid_argument(format!("Invalid value for setting {key}: {why}."))
         .with_detail(key)
 }
 
-fn check_range(key: &str, v: u32, min: u32, max: u32) -> Result<(), AppError> {
-    if (min..=max).contains(&v) {
+fn check_range(key: &str, v: u32) -> Result<(), AppError> {
+    let Some(r) = range_of(key) else {
+        return Err(AppError::internal(format!("no range for setting {key}")));
+    };
+    if r.contains(v) {
         Ok(())
     } else {
-        Err(invalid(key, &format!("must be between {min} and {max}")))
+        Err(invalid(
+            key,
+            &format!("must be between {} and {}", r.min, r.max),
+        ))
     }
 }
 
@@ -73,20 +120,13 @@ pub fn validate(s: &Settings) -> Result<(), AppError> {
     if s.general_checkout_root.trim().is_empty() || s.general_checkout_root.contains('\0') {
         return Err(invalid("general.checkoutRoot", "must not be empty"));
     }
-    check_range(
-        "general.checkIntervalMin",
-        s.general_check_interval_min,
-        1,
-        1440,
-    )?;
+    check_range("general.checkIntervalMin", s.general_check_interval_min)?;
     check_range(
         "network.maxConnections",
         u32::from(s.network_max_connections),
-        1,
-        8,
     )?;
-    check_range("network.timeoutSec", s.network_timeout_sec, 5, 3600)?;
-    check_range("cache.maxSizeGb", s.cache_max_size_gb, 1, 4096)?;
+    check_range("network.timeoutSec", s.network_timeout_sec)?;
+    check_range("cache.maxSizeGb", s.cache_max_size_gb)?;
     if s.wc_default_format != WcFormat::V31 {
         return Err(invalid("wc.defaultFormat", "only format 31 can be written"));
     }
@@ -114,6 +154,62 @@ pub fn validate(s: &Settings) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use crate::settings::defaults::defaults;
+
+    #[test]
+    fn every_bound_is_enforced_and_inclusive() {
+        for (key, r) in SETTING_RANGES {
+            let set = |v: u32| {
+                let mut s = defaults(None);
+                match key {
+                    "general.checkIntervalMin" => s.general_check_interval_min = v,
+                    "network.maxConnections" => {
+                        s.network_max_connections = u8::try_from(v).unwrap();
+                    }
+                    "network.timeoutSec" => s.network_timeout_sec = v,
+                    "cache.maxSizeGb" => s.cache_max_size_gb = v,
+                    other => panic!("no field for ranged key {other}"),
+                }
+                validate(&s)
+            };
+            set(r.min).unwrap();
+            set(r.max).unwrap();
+            let low = set(r.min - 1).unwrap_err();
+            assert_eq!(low.detail.as_deref(), Some(key), "{key}");
+            set(r.max + 1).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn the_connection_limit_matches_the_transport() {
+        use svn_ra::transport::{DEFAULT_CONNECTIONS, MAX_CONNECTIONS, MIN_CONNECTIONS};
+        let r = range_of("network.maxConnections").unwrap();
+        assert_eq!(usize::try_from(r.min).unwrap(), MIN_CONNECTIONS);
+        assert_eq!(usize::try_from(r.max).unwrap(), MAX_CONNECTIONS);
+        assert_eq!(
+            usize::from(defaults(None).network_max_connections),
+            DEFAULT_CONNECTIONS
+        );
+    }
+
+    #[test]
+    fn stored_values_are_clamped_into_range() {
+        use serde_json::json;
+        assert_eq!(
+            clamp_stored("network.maxConnections", &json!(16)),
+            Some(json!(8))
+        );
+        assert_eq!(
+            clamp_stored("network.timeoutSec", &json!(1)),
+            Some(json!(5))
+        );
+        assert_eq!(
+            clamp_stored("general.checkIntervalMin", &json!(0)),
+            Some(json!(1))
+        );
+        assert_eq!(clamp_stored("cache.maxSizeGb", &json!(-3)), Some(json!(1)));
+        assert_eq!(clamp_stored("network.proxy", &json!(3)), None);
+        assert_eq!(clamp_stored("network.timeoutSec", &json!("x")), None);
+    }
 
     #[test]
     fn defaults_are_valid() {

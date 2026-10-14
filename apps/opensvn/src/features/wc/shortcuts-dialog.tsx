@@ -34,6 +34,7 @@ const names = defineStrings<ShortcutId>({
     newBranch: "New branch",
     newTag: "New tag",
     showShortcuts: "Keyboard shortcuts",
+    settings: "Settings",
   },
   vi: {
     commit: "Commit",
@@ -63,6 +64,7 @@ const names = defineStrings<ShortcutId>({
     newBranch: "Nhánh mới",
     newTag: "Tag mới",
     showShortcuts: "Phím tắt",
+    settings: "Cài đặt",
   },
 });
 

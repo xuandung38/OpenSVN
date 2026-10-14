@@ -4,6 +4,15 @@ use std::collections::HashSet;
 
 use super::*;
 
+/// Whether Tauri accepts `name` as an event name (`tauri::event::event_name`, which it does not
+/// export).
+fn is_valid_event_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '/' | ':' | '_'))
+}
+
 fn labels(spec: &[Entry]) -> Vec<&'static str> {
     spec.iter()
         .filter_map(|e| {
@@ -189,28 +198,86 @@ fn ids_are_unique_and_accelerators_do_not_collide_per_platform() {
 #[test]
 fn accelerators_and_event_names_follow_the_tauri_conventions() {
     assert_eq!(accelerator("Mod+Shift+K"), "CmdOrCtrl+Shift+K");
-    assert_eq!(accelerator("Ctrl+,"), "Ctrl+,");
-    assert_eq!(event_name("wc.update"), "menu://wc.update");
+    assert_eq!(accelerator("Mod+,"), "CmdOrCtrl+,");
+    assert_eq!(accelerator("Ctrl+Q"), "Ctrl+Q");
+    assert_eq!(event_name("wc.update"), "menu://wc/update");
+    assert_eq!(event_name("app.settings"), "menu://app/settings");
+    assert!(is_valid_event_name("menu://view/diff-mode"));
+    for bad in ["menu://wc.update", "", "a b", "x\r"] {
+        assert!(!is_valid_event_name(bad), "{bad:?}");
+    }
+}
+
+/// Tauri refuses an event name outside `[alnum - / : _]` on `emit` (Rust) and on `listen` (the
+/// UI's subscription fails): a menu item whose event breaks that rule silently does nothing.
+#[test]
+fn every_menu_event_is_a_name_tauri_accepts() {
+    for os in [Os::Darwin, Os::Windows, Os::Linux] {
+        for layout in [true, false] {
+            let spec = menu_spec(os, layout);
+            let mut all = Vec::new();
+            flatten(&spec, &mut all);
+            for e in all {
+                if let Entry::Item { id, .. } = e
+                    && let Some(name) = event_for(id)
+                {
+                    assert!(is_valid_event_name(&name), "{name} ({os:?})");
+                }
+            }
+        }
+    }
+    let ui = ui_menu_events();
+    assert!(ui.contains("menu://app/settings"), "{ui:?}");
+    for name in ui {
+        assert!(is_valid_event_name(&name), "{name} in MENU_EVENTS");
+    }
+}
+
+/// The same check through Tauri itself: emitting a menu event succeeds, a dotted name fails.
+#[test]
+fn tauri_emits_the_menu_events() {
+    use tauri::Emitter;
+    let app = tauri::test::mock_app();
+    for id in [
+        "app.settings",
+        "wc.update",
+        "view.diff-mode",
+        "window.conflicts",
+    ] {
+        let name = event_for(id).unwrap();
+        app.emit(&name, ())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+    assert!(app.emit("menu://app.settings", ()).is_err());
+}
+
+/// Settings opens with Cmd+, on macOS (app menu) and Ctrl+, elsewhere (File menu).
+#[test]
+fn settings_is_mod_comma_on_every_os() {
+    for os in [Os::Darwin, Os::Windows, Os::Linux] {
+        let spec = menu_spec(os, true);
+        assert_eq!(accel_of(&spec, "app.settings"), Some("Mod+,"), "{os:?}");
+    }
 }
 
 #[test]
 fn only_items_of_the_spec_become_events() {
     assert_eq!(
         event_for("file.checkout").as_deref(),
-        Some("menu://file.checkout")
+        Some("menu://file/checkout")
     );
     assert_eq!(
         event_for("file.switch-repo").as_deref(),
-        Some("menu://file.switch-repo")
+        Some("menu://file/switch-repo")
     );
     // the Branch-only item and the macOS-only item are known in every state
     assert!(event_for("branch.merge").is_some());
     assert!(event_for("window.conflicts").is_some());
     assert_eq!(
         event_for("app.settings").as_deref(),
-        Some("menu://app.settings")
+        Some("menu://app/settings")
     );
-    for id in ["quit", "copy", "", "../../x", "menu://wc.update"] {
+    for id in ["quit", "copy", "", "../../x", "menu://wc/update"] {
         assert_eq!(event_for(id), None, "{id}");
     }
 }
@@ -227,12 +294,21 @@ fn the_native_menu_builds_for_every_os_description() {
     }
 }
 
-/// Menu ids the UI subscribes to (`MENU_EVENTS` in `src/ipc/events.ts`).
-fn ui_menu_ids() -> HashSet<&'static str> {
+/// Event names the UI subscribes to (`MENU_EVENTS` in `src/ipc/events.ts`).
+fn ui_menu_events() -> HashSet<String> {
     let ts = include_str!("../../../src/ipc/events.ts");
     ts.split("\"menu://")
         .skip(1)
         .filter_map(|rest| rest.split('"').next())
+        .map(|rest| format!("menu://{rest}"))
+        .collect()
+}
+
+/// Menu item ids behind [`ui_menu_events`] (`menu://wc/update` -> `wc.update`).
+fn ui_menu_ids() -> HashSet<String> {
+    ui_menu_events()
+        .into_iter()
+        .map(|name| name["menu://".len()..].replace('/', "."))
         .collect()
 }
 
@@ -240,7 +316,7 @@ fn ui_menu_ids() -> HashSet<&'static str> {
 fn every_menu_event_the_ui_subscribes_to_is_an_item_of_this_menu() {
     let ids = ui_menu_ids();
     assert!(ids.len() >= 10, "{ids:?}");
-    for id in ids {
+    for id in &ids {
         assert!(
             event_for(id).is_some(),
             "the UI listens to unknown or natively handled menu id {id}"
@@ -263,7 +339,7 @@ fn every_item_of_this_menu_is_handled_by_the_ui_or_natively() {
                     continue;
                 };
                 let native = native_action(id).is_some();
-                let in_ui = ui.contains(id);
+                let in_ui = ui.contains(*id);
                 assert!(
                     native ^ in_ui,
                     "{id} (accelerator {accel:?}, {os:?}) must be handled by exactly one of the UI ({in_ui}) or Rust ({native})"
@@ -319,14 +395,17 @@ fn ui_shortcuts() -> std::collections::HashMap<String, (String, bool, bool)> {
         .collect()
 }
 
-/// `MENU_ACTIONS` in `src/features/wc/use-wc-shortcuts.ts`: menu id -> action.
+/// `MENU_ACTIONS` in `src/features/wc/use-wc-shortcuts.ts`: menu item id -> action.
 fn ui_menu_actions() -> Vec<(String, String)> {
     let ts = include_str!("../../../src/features/wc/use-wc-shortcuts.ts");
     ts.lines()
         .filter_map(|line| {
             let rest = line.trim().strip_prefix("\"menu://")?;
             let (id, action) = rest.split_once("\": \"")?;
-            Some((id.to_owned(), action.trim_end_matches("\",").to_owned()))
+            Some((
+                id.replace('/', "."),
+                action.trim_end_matches("\",").to_owned(),
+            ))
         })
         .collect()
 }

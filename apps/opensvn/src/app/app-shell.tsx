@@ -197,6 +197,9 @@ function ShellBody({
   return (
     <>
       <DropToAddWorkingCopy />
+      {/* Outside `main`: the Welcome screen (no working copy yet, as on a fresh install) has the
+          same gear button and menu item, so Settings must open from there too. */}
+      <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <MainWindow
         toolbar={
           <AppToolbar
@@ -262,7 +265,6 @@ function ShellBody({
                   browse: current ? <RemoteBrowse wc={current} links={links} /> : noWc,
                 }}
               />
-              <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} />
               {createKind && current && (
                 <CreateBranchTagDialog
                   kind={createKind}

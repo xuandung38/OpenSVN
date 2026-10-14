@@ -13,7 +13,8 @@ mod tls;
 
 pub use client::HttpTransport;
 pub use config::{
-    DEFAULT_POOL_IDLE_TIMEOUT, ProxyConfig, SVN_COMPAT_VERSION, TransportConfig, USER_AGENT,
+    DEFAULT_CONNECTIONS, DEFAULT_POOL_IDLE_TIMEOUT, MAX_CONNECTIONS, MIN_CONNECTIONS, ProxyConfig,
+    SVN_COMPAT_VERSION, TransportConfig, USER_AGENT,
 };
 pub use redact::{
     RedactedHeaders, RedactingMakeWriter, RedactingWriter, redact_text, redacted_url,

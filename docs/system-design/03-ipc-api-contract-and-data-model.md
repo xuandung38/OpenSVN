@@ -212,7 +212,7 @@ Grant dùng một lần, hết hạn sau 5 phút, gắn với cửa sổ `main`;
 
 ### 3.7 Menu native
 Menu bar do Rust dựng (`menu.rs`, `menu_spec`): một menu duy nhất, cấu trúc và phím tắt theo doc 01 §8 (OpenSVN trên macOS · File · Edit · View · Working Copy · Branch/Location · Selection · Window trên macOS · Help). Mỗi mục là một trong ba loại, có test Rust giữ đúng theo cả hai chiều:
-- **Mục của UI:** phát event không payload `menu://<id>` (id = id mục, ví dụ `menu://wc.update`, `menu://file.checkout`, `menu://edit.find`, `menu://view.diff-mode`). UI đăng ký đúng danh sách `MENU_EVENTS` (`src/ipc/events.ts`), mỗi event có hành động trong `MENU_ACTIONS` (`use-wc-shortcuts.ts`, cùng tập khóa, có test). Mục chưa làm (phase sau, ví dụ Merge, Properties, Sparse) báo "chưa có" bằng toast thay vì không làm gì.
+- **Mục của UI:** phát event không payload `menu://<id>`, trong đó dấu `.` của id mục đổi thành `/` vì Tauri chỉ nhận tên event gồm chữ, số, `-`, `/`, `:` và `_` (ví dụ `menu://wc/update`, `menu://file/checkout`, `menu://edit/find`, `menu://view/diff-mode`). UI đăng ký đúng danh sách `MENU_EVENTS` (`src/ipc/events.ts`), mỗi event có hành động trong `MENU_ACTIONS` (`use-wc-shortcuts.ts`, cùng tập khóa, có test). Mục chưa làm (phase sau, ví dụ Merge, Properties, Sparse) báo "chưa có" bằng toast thay vì không làm gì.
 - **Mục Rust tự xử lý** (`native_action`): Zoom in/out/Actual size (đổi zoom webview) và Exit; không phát event.
 - **Mục native** (undo/redo/cut/copy/paste/select all, hide, quit, minimize, full screen, about): vai trò của hệ điều hành; không phát event.
 
@@ -313,7 +313,7 @@ Log theo path dùng `log_path_by_path`; khi khoảng revision chưa nằm trong 
 | Key | Kiểu | Mặc định |
 |---|---|---|
 | `general.checkoutRoot` | string (chỉ đọc qua `settings_set`; đổi bằng `checkout_root_choose`) | `~/svn` |
-| `general.checkIntervalMin` | number | 10 |
+| `general.checkIntervalMin` | number 1–1440 | 10 |
 | `general.language` | `'vi' \| 'en'` | theo OS |
 | `appearance.theme` | `'system' \| 'light' \| 'dark'` | system |
 | `diff.mode` | `'split' \| 'unified'` | split |
@@ -323,11 +323,13 @@ Log theo path dùng `log_path_by_path`; khi khoảng revision chưa nằm trong 
 | `tools.editor` | `{ path, args } \| null` (chỉ đổi qua `program_choose`) | null |
 | `tools.terminal` | `{ path, args } \| null` (chỉ đổi qua `program_choose`) | null |
 | `network.maxConnections` | number 1–8 | 4 |
-| `network.timeoutSec` | number | 60 |
+| `network.timeoutSec` | number 5–3600 | 60 |
 | `network.proxy` | `'system' \| { url }` | system |
 | `network.negotiate` | boolean — SSO Kerberos (Negotiate) khi server đề nghị; tắt thì không bao giờ thử Kerberos, server có Basic sẽ hỏi tên/mật khẩu. Đổi giá trị dựng lại transport (bỏ session cache) | true |
 | `wc.defaultFormat` | 31 (MVP chỉ ghi 31; 32 sau MVP) | 31 |
 | `wc.readSubversionConfig` | boolean | true |
-| `cache.maxSizeGb` | number | 2 |
+| `cache.maxSizeGb` | number 1–4096 | 2 |
 | `integrations.webRevisionUrl` | string | `https://{server}/!/#{repo}/commit/r{rev}/` |
 | `integrations.webFileUrl` | string | `https://{server}/!/#{repo}/view/{revSpec}/{path}` — `{revSpec}`: `head` hoặc `r<N>`; `{path}`: relpath từ repo root, percent-encode UTF-8 từng segment, giữ `/` |
+
+Khoảng giá trị của các key số do validator Rust (`settings/validate.rs`, `SETTING_RANGES`) định nghĩa, và chỉ định nghĩa ở đó. Bindings sinh ra mang hằng `SETTING_RANGES` để UI dùng cho kiểm tra, nhãn và `min`/`max` của ô nhập. Khi load, giá trị cũ nằm ngoài khoảng bị kẹp (clamp) về biên gần nhất.

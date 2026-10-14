@@ -1,12 +1,15 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { beforeAll, expect, test, vi } from "vitest";
-import { mockCalls } from "../../../ipc/mock/adapter";
+import { SETTING_RANGES } from "../../../ipc/bindings";
+import { mockAdapter, mockCalls, setMockRefusedSetting } from "../../../ipc/mock/adapter";
 import { mockSettings } from "../../../ipc/mock/data";
 import { installFakeClock, renderApp, setupMockIpc } from "../../../test-utils";
 import {
   inRange,
   isHttpsTemplate,
   isProxyUrl,
+  RANGED_KEYS,
+  rangeOf,
   validateDraft,
   withoutUnchanged,
 } from "./settings-model";
@@ -144,4 +147,140 @@ test("withoutUnchanged compares objects deeply", () => {
   expect(
     withoutUnchanged(s, { "network.proxy": { mode: "system" }, "network.timeoutSec": 5 }),
   ).toEqual({ "network.timeoutSec": 5 });
+});
+
+// The ranges of the Rust validator (settings/validate.rs SETTING_RANGES), as the bindings carry
+// them. A Rust test checks the bindings against the validator; this pins what the UI enforces.
+const BACKEND_RANGES = {
+  "general.checkIntervalMin": { min: 1, max: 1440 },
+  "network.maxConnections": { min: 1, max: 8 },
+  "network.timeoutSec": { min: 5, max: 3600 },
+  "cache.maxSizeGb": { min: 1, max: 4096 },
+};
+
+test("every ranged setting uses the backend's bounds, inclusive", () => {
+  expect(new Set(RANGED_KEYS)).toEqual(new Set(Object.keys(BACKEND_RANGES)));
+  for (const key of RANGED_KEYS) {
+    const r = BACKEND_RANGES[key];
+    expect(rangeOf(key), key).toEqual(r);
+    const errs = (n: number) => validateDraft({ ...mockSettings }, { [key]: n })[key];
+    expect(errs(r.min), key).toBeUndefined();
+    expect(errs(r.max), key).toBeUndefined();
+    expect(errs(r.min - 1), key).toBe("range");
+    expect(errs(r.max + 1), key).toBe("range");
+    expect(errs(r.min + 0.5), key).toBe("range");
+  }
+});
+
+test("URL fields refuse credentials, like the backend", () => {
+  expect(isProxyUrl("http://u:p@proxy:3128")).toBe(false);
+  expect(isHttpsTemplate("https://u:p@{server}/r{rev}")).toBe(false);
+});
+
+/** Opens the sheet on `page` and returns the dialog and its Save button. */
+async function openOn(page: string) {
+  renderApp(<SettingsSheet open onClose={() => undefined} />);
+  const dialog = await screen.findByRole("dialog", { name: /Settings|Cài đặt/, hidden: true });
+  // The language comes from the settings query, so the page button may appear a moment later.
+  await user().click(await within(dialog).findByRole("button", { name: page }));
+  const save = within(dialog).getByRole("button", { name: /^(Save|Lưu)$/ }) as HTMLButtonElement;
+  return { dialog, save };
+}
+
+test("the number inputs carry the backend's min/max, and labels show the range", async () => {
+  const { dialog } = await openOn("Network");
+  const conns = (await within(dialog).findByLabelText(
+    "Parallel connections (1–8)",
+  )) as HTMLInputElement;
+  expect([conns.min, conns.max]).toEqual(["1", "8"]);
+  const timeout = within(dialog).getByLabelText("Timeout (seconds, 5–3600)") as HTMLInputElement;
+  expect([timeout.min, timeout.max]).toEqual(["5", "3600"]);
+  await user().click(within(dialog).getByRole("button", { name: "General" }));
+  const interval = (await within(dialog).findByLabelText(
+    "Check for updates every (minutes, 1–1440)",
+  )) as HTMLInputElement;
+  expect([interval.min, interval.max]).toEqual(["1", "1440"]);
+  await user().click(within(dialog).getByRole("button", { name: "Advanced" }));
+  const cache = (await within(dialog).findByLabelText(
+    "Maximum cache size (GB, 1–4096)",
+  )) as HTMLInputElement;
+  expect([cache.min, cache.max]).toEqual(["1", "4096"]);
+  for (const input of [conns, timeout, interval, cache]) {
+    expect(Object.values(SETTING_RANGES).some((r) => String(r.max) === input.max)).toBe(true);
+  }
+});
+
+test("16 connections: inline error before Save, Save stays disabled until the value is valid", async () => {
+  mockCalls.length = 0;
+  const { dialog, save } = await openOn("Network");
+  const conns = await within(dialog).findByLabelText(/Parallel connections/);
+  await user().clear(conns);
+  await user().type(conns, "16");
+  expect(await within(dialog).findByText("Enter a whole number from 1 to 8")).toBeTruthy();
+  expect(conns.getAttribute("aria-invalid")).toBe("true");
+  expect(save.disabled).toBe(true);
+  await user().click(save);
+  expect(mockCalls.some((c) => c.name === "settingsSet")).toBe(false);
+  await user().clear(conns);
+  await user().type(conns, "8");
+  await waitFor(() =>
+    expect(within(dialog).queryByText("Enter a whole number from 1 to 8")).toBeNull(),
+  );
+  expect(save.disabled).toBe(false);
+});
+
+test("the inline range error is localized (vi)", async () => {
+  await mockAdapter.commands.settingsSet({ "general.language": "vi" });
+  try {
+    const { dialog, save } = await openOn("Mạng");
+    const conns = await within(dialog).findByLabelText("Số kết nối song song (1–8)");
+    await user().clear(conns);
+    await user().type(conns, "16");
+    expect(await within(dialog).findByText("Nhập số nguyên từ 1 đến 8")).toBeTruthy();
+    expect(save.disabled).toBe(true);
+  } finally {
+    await mockAdapter.commands.settingsSet({ "general.language": "en" });
+  }
+});
+
+test("a value the backend still refuses is shown on its field, never as the raw message", async () => {
+  setMockRefusedSetting("network.proxy");
+  try {
+    const { dialog, save } = await openOn("Network");
+    await user().selectOptions(within(dialog).getByRole("combobox"), "custom");
+    const url = await within(dialog).findByLabelText("Custom proxy URL", { selector: "input" });
+    await user().type(url, "http://proxy.example:3128");
+    expect(save.disabled).toBe(false);
+    await user().click(save);
+    expect(await within(dialog).findByText("The app did not accept this value")).toBeTruthy();
+    expect(
+      within(dialog).getByText("Could not save settings: check the highlighted field"),
+    ).toBeTruthy();
+    expect(dialog.textContent).not.toMatch(/Invalid value for setting/);
+    expect(save.disabled).toBe(true);
+    // Editing the field clears the refusal.
+    await user().type(url, "1");
+    await waitFor(() =>
+      expect(within(dialog).queryByText("The app did not accept this value")).toBeNull(),
+    );
+    expect(save.disabled).toBe(false);
+  } finally {
+    setMockRefusedSetting(null);
+  }
+});
+
+test("a number in range that the backend refuses says so, not 'enter a whole number'", async () => {
+  setMockRefusedSetting("network.timeoutSec");
+  try {
+    const { dialog, save } = await openOn("Network");
+    const timeout = await within(dialog).findByLabelText("Timeout (seconds, 5–3600)");
+    await user().clear(timeout);
+    await user().type(timeout, "30");
+    await user().click(save);
+    expect(await within(dialog).findByText("The app did not accept this value")).toBeTruthy();
+    expect(within(dialog).queryByText("Enter a whole number from 5 to 3600")).toBeNull();
+    expect(timeout.getAttribute("aria-invalid")).toBe("true");
+  } finally {
+    setMockRefusedSetting(null);
+  }
 });
