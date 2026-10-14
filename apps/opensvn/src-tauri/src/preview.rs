@@ -28,6 +28,8 @@ pub fn prepare_private_dir(data_dir: &Path, name: &str) -> Result<PathBuf, AppEr
     let dir = data_dir.join(name);
     std::fs::create_dir_all(data_dir)
         .map_err(|e| refuse(name, &format!("cannot create the data folder ({e})")))?;
+    // `mut` is only needed for the Unix permission mode.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {

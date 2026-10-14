@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::atomic::Ordering;
 
 use opensvn_ipc::{
