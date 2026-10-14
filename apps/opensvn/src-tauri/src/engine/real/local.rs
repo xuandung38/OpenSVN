@@ -214,7 +214,7 @@ impl RealEngine {
         paths: &[String],
         ctx: &OpContext,
     ) -> EngineResult<()> {
-        let paths = paths.to_vec();
+        let (paths, progress) = (paths.to_vec(), ctx.progress.clone());
         self.with_local(wc, ctx, move |db, env| {
             let targets = local_util::targets(db, &paths)?;
             let opts = AddOptions {
@@ -223,9 +223,7 @@ impl RealEngine {
                 ..AddOptions::default()
             };
             let outcome = client_local::add_reporting(db, &env.cancel, &targets, &opts, &env.add)?;
-            for w in &outcome.warnings {
-                tracing::warn!(warning = %w, "add skipped a nested working copy");
-            }
+            super::progress::report_skipped_nested_wcs(&progress, &outcome.warnings);
             Ok(())
         })
         .await

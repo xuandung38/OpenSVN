@@ -129,7 +129,13 @@ impl OperationManager {
             interactive: true,
             cancel,
             progress: ProgressReporter::new(move |u| {
+                let notice = u.is_notice();
                 let sample = to_progress(&progress_id, u);
+                if notice {
+                    // Notices are for the user: delivered at once, never coalesced away.
+                    progress_events.op_progress(&sample);
+                    return;
+                }
                 let allowed = throttle
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)

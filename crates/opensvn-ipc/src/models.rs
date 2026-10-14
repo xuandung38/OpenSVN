@@ -112,6 +112,10 @@ pub struct EngineCapabilities {
     /// `svn --ignore-externals` whatever `CheckoutRequest.ignore_externals` says
     /// (https://github.com/xuandung38/OpenSVN/issues/97).
     pub externals: bool,
+    /// The in-memory demo engine runs in a release build: nothing is read from or written to a
+    /// real repository, and the UI says so with a permanent banner. Always `false` in debug builds,
+    /// where the demo engine is the development default.
+    pub demo: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]

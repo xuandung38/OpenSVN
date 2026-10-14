@@ -52,7 +52,22 @@ pub async fn accounts_sign_out(state: State<'_, AppState>, realm: String) -> Res
 pub async fn engine_capabilities(
     state: State<'_, AppState>,
 ) -> Result<EngineCapabilities, AppError> {
-    guard(async { Ok(state.engine.capabilities()) }).await
+    guard(async {
+        Ok(visible_capabilities(
+            state.engine.capabilities(),
+            !cfg!(debug_assertions),
+        ))
+    })
+    .await
+}
+
+/// What the UI is told: the demo-engine banner only in release builds (in debug builds the demo
+/// engine is the development default and needs no warning).
+pub(crate) fn visible_capabilities(caps: EngineCapabilities, release: bool) -> EngineCapabilities {
+    EngineCapabilities {
+        demo: caps.demo && release,
+        ..caps
+    }
 }
 
 #[tauri::command]
