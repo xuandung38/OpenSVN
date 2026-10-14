@@ -277,8 +277,17 @@ pub async fn drive_update(
         && matches!(params.kind, UpdateKind::Update)
         && let Some(rev) = reached
     {
-        record_unseen_children(session, &db, &target_wc, &target, params.depth, rev, cancel)
-            .await?;
+        // The update itself succeeded; markers it cannot record leave the working copy as it
+        // was before this was implemented, so only cancellation is reported.
+        if let Err(e) =
+            record_unseen_children(session, &db, &target_wc, &target, params.depth, rev, cancel)
+                .await
+        {
+            if e.code == ErrorCode::Cancelled {
+                return Err(e);
+            }
+            tracing::warn!("could not record children outside the update depth: {e}");
+        }
     }
     let out = outcome.lock().unwrap_or_else(PoisonError::into_inner);
     let mut events: Vec<UpdateEvent> = restored
