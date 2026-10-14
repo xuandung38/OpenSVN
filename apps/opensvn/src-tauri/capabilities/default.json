@@ -15,6 +15,7 @@
       ]
     },
     "allow-repo-info",
+    "allow-repo-resolve-url",
     "allow-repo-list",
     "allow-repo-cat",
     "allow-repo-save",

@@ -89,6 +89,8 @@ pub fn open_connection(path: &Path, mode: OpenMode) -> Result<Connection> {
     };
     let conn = Connection::open_with_flags(path, flags).map_err(sql_err)?;
     conn.busy_timeout(BUSY_TIMEOUT).map_err(sql_err)?;
+    // Room for every hot statement of a drive (see `cached_row`); rusqlite keeps 16 by default.
+    conn.set_prepared_statement_cache_capacity(128);
     apply_pragmas(&conn, mode != OpenMode::ReadOnly)?;
     register_functions(&conn)?;
     Ok(conn)
@@ -107,6 +109,12 @@ fn apply_pragmas(conn: &Connection, writable: bool) -> Result<()> {
         }
         // svn uses OFF; OpenSVN keeps pristine/work-queue ordering durable across power loss.
         conn.execute_batch("PRAGMA synchronous = FULL;")
+            .map_err(sql_err)?;
+        // Room for the tree an update or checkout works through (the default is 2 MiB). Only
+        // for writers: this pragma loads the schema, which takes the shared lock, and a
+        // read-only helper connection opened while another one holds a read transaction must
+        // not wait for a writer that waits for that transaction (see `subtree::helper_rows`).
+        conn.execute_batch("PRAGMA cache_size = -16384;")
             .map_err(sql_err)?;
     }
     conn.execute_batch(
@@ -143,4 +151,28 @@ fn register_functions(conn: &Connection) -> Result<()> {
         },
     )
     .map_err(sql_err)
+}
+
+/// `conn.query_row` through the prepared statement cache: hot statements of an update or
+/// checkout run tens of thousands of times, and parsing them each time showed up in profiles.
+pub(crate) fn cached_row<T, P, F>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+    f: F,
+) -> rusqlite::Result<T>
+where
+    P: rusqlite::Params,
+    F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+{
+    conn.prepare_cached(sql)?.query_row(params, f)
+}
+
+/// `conn.execute` through the prepared statement cache (see [`cached_row`]).
+pub(crate) fn cached_exec<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> rusqlite::Result<usize> {
+    conn.prepare_cached(sql)?.execute(params)
 }

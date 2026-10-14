@@ -28,6 +28,9 @@ tempfile.workspace = true
 jiff.workspace = true
 fail = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 opensvn-svn-oracle = { path = "../../tests/svn-oracle" }
 proptest.workspace = true

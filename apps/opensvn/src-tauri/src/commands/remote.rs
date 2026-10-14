@@ -4,7 +4,8 @@
 use opensvn_ipc::{
     AppError, BranchNode, CopyLocationRequest, Layout, LayoutDetection, LockRequest, LockTargets,
     LogGetRequest, LogPage, LogTarget, OpResult, OperationHandle, OperationKind, PathGrantId,
-    RemoteEditRequest, RemoteOp, RepoEntry, RepoInfo, Rev, TextSide, UnlockRequest,
+    RemoteEditRequest, RemoteOp, RepoEntry, RepoInfo, ResolvedRepoUrl, Rev, TextSide,
+    UnlockRequest,
 };
 use tauri::State;
 
@@ -31,6 +32,60 @@ pub async fn repo_info(state: State<'_, AppState>, url: String) -> Result<RepoIn
         Ok(info)
     })
     .await
+}
+
+/// Turns a VisualSVN web-interface link (`https://host/!/#Repo/view/head/trunk`) into the
+/// repository URL it shows (`https://host/svn/Repo/trunk`), confirmed by asking the server.
+/// Any other input comes back unchanged so the usual URL checks report it.
+///
+/// The probe goes to the scheme, host and port the user typed (the parser never changes them)
+/// through the normal connect path: the user's sign-in prompts and certificate trust apply.
+/// A failure is `invalid-argument` with detail [`VISUALSVN_WEB_LINK`], whatever the cause, so
+/// the UI can tell the user to copy the repository URL from VisualSVN instead.
+#[tauri::command]
+#[specta::specta]
+pub async fn repo_resolve_url(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<ResolvedRepoUrl, AppError> {
+    guard(async {
+        let Some(parsed) = svn_types::parse_visualsvn_web_link(&url) else {
+            return Ok(ResolvedRepoUrl {
+                url,
+                converted: false,
+                peg_rev: None,
+            });
+        };
+        let link = parsed.map_err(web_link_err)?;
+        let candidate = link.repo_url.to_string();
+        state
+            .engine
+            .repo_info(&candidate, &OpContext::detached())
+            .await
+            .map_err(|e| match e.code {
+                svn_types::ErrorCode::Cancelled => engine_err(e),
+                _ => web_link_err(e),
+            })?;
+        Ok(ResolvedRepoUrl {
+            url: candidate,
+            converted: true,
+            peg_rev: link.peg_rev.map(|r| Rev(r.0)),
+        })
+    })
+    .await
+}
+
+/// `detail` of the error `repo_resolve_url` returns when a web link cannot be converted.
+pub const VISUALSVN_WEB_LINK: &str = "visualsvn-web-link";
+
+fn web_link_err(e: svn_types::SvnError) -> AppError {
+    let mut err = crate::errors::invalid_argument(format!(
+        "This is a VisualSVN web-interface link, not a repository URL, and no repository was \
+         found for it ({}). In VisualSVN, use \"Copy URL to clipboard\" and paste that URL.",
+        e.message
+    ));
+    err.detail = Some(VISUALSVN_WEB_LINK.to_owned());
+    err
 }
 
 #[tauri::command]

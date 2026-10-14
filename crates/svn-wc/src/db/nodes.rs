@@ -277,6 +277,40 @@ fn query_one(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> Result<O
         .transpose()
 }
 
+/// BASE rows of the children of `parent`, sorted by path (one query instead of one per child).
+pub(crate) fn base_children(conn: &Connection, wc_id: i64, parent: &RelPath) -> Result<Vec<Node>> {
+    let sql = format!(
+        "SELECT {NODE_COLUMNS} FROM nodes WHERE wc_id = ?1 AND parent_relpath = ?2 \
+         AND op_depth = 0 ORDER BY local_relpath"
+    );
+    rows_of(conn, &sql, params![wc_id, parent.as_str()])
+}
+
+/// Highest-`op_depth` row of every child of `parent` (the `NODES_CURRENT` rows), sorted by path.
+pub(crate) fn current_children(
+    conn: &Connection,
+    wc_id: i64,
+    parent: &RelPath,
+) -> Result<Vec<Node>> {
+    let sql = format!(
+        "SELECT {NODE_COLUMNS} FROM nodes AS n WHERE wc_id = ?1 AND parent_relpath = ?2 \
+         AND op_depth = (SELECT MAX(op_depth) FROM nodes AS m \
+         WHERE m.wc_id = n.wc_id AND m.local_relpath = n.local_relpath) \
+         ORDER BY local_relpath"
+    );
+    rows_of(conn, &sql, params![wc_id, parent.as_str()])
+}
+
+fn rows_of(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> Result<Vec<Node>> {
+    let mut stmt = conn.prepare_cached(sql).map_err(sql_err)?;
+    let mut rows = stmt.query(p).map_err(sql_err)?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().map_err(sql_err)? {
+        out.push(node_from_row(r)?);
+    }
+    Ok(out)
+}
+
 /// Distinct child paths (any layer, any presence) of `parent`, sorted.
 pub(crate) fn children(conn: &Connection, wc_id: i64, parent: &RelPath) -> Result<Vec<RelPath>> {
     let mut stmt = conn

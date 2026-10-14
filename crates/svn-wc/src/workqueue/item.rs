@@ -167,6 +167,20 @@ impl WorkItem {
         }
     }
 
+    /// True when the item reads only wc.db and the pristine store and writes only its own path:
+    /// running it again after any later item of the queue gives the same result, so its
+    /// completion may be committed together with its neighbours'. An install from a temporary
+    /// file is not (a later item removes that file), nor is anything that changes wc.db.
+    pub fn is_self_contained(&self) -> bool {
+        match self {
+            Self::FileInstall { source, .. } => source.is_none(),
+            Self::DirInstall { .. } | Self::SyncFileFlags { .. } | Self::RecordFileinfo { .. } => {
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Builds the skel svn would write for this item.
     pub fn to_skel(&self) -> Skel {
         let mut v = vec![s(self.op_name())];

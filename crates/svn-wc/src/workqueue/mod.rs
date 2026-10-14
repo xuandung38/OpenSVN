@@ -26,8 +26,8 @@ pub mod runner;
 pub use error::WorkQueueError;
 pub use item::WorkItem;
 pub use runner::{
-    FileInfoRecord, NodeInstallInfo, PristineSource, RunnerConfig, WorkQueueRunner, WorkQueueStore,
-    WorkingCopyOps,
+    FileInfoRecord, NodeInstallInfo, PristineSource, RunnerConfig, Unsettled, WorkQueueRunner,
+    WorkQueueStore, WorkingCopyOps,
 };
 
 #[cfg(test)]

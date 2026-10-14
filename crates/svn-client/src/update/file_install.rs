@@ -12,14 +12,14 @@ use svn_wc::conflicts::markers::{
 };
 use svn_wc::conflicts::{PropConflict, TextConflict, TreeReason};
 use svn_wc::db::{BaseNode, Node, Presence, Props, WcDb};
-use svn_wc::pristine::{Md5Digest, Sha1Digest};
+use svn_wc::pristine::{Md5Digest, PristineRecord, Sha1Digest};
 use svn_wc::skel::Skel;
 use svn_wc::workqueue::WorkItem;
 
 use super::conflict_record::{self, NewConflict};
 use super::editor::{UpdateEditor, failpoint};
 use super::props::merge_props;
-use super::state::{FileState, NewText, tmp_dir};
+use super::state::{FileState, tmp_dir};
 use crate::ctx::UpdateAction;
 use crate::wc::inspect;
 
@@ -72,7 +72,7 @@ impl UpdateEditor {
         f: FileState,
         text_checksum: Option<Checksum>,
     ) -> Result<()> {
-        let new_text = f.text.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let mut new_text = f.text.lock().unwrap_or_else(PoisonError::into_inner).take();
         if let (Some(cs), Some(nt)) = (&text_checksum, &new_text) {
             let ok = match cs {
                 Checksum::Md5(m) => *m == nt.md5,
@@ -112,18 +112,28 @@ impl UpdateEditor {
         };
         let pm = merge_props(&old_pristine, &f.prop_changes, &actual);
 
-        // 1. New pristine text.
-        let (new_checksum, new_sha) = match &new_text {
+        // 1. New pristine text: the delta result was hashed while it was written, so the file
+        // moves into the store as it is. Its row is recorded with the node (see `super::batch`);
+        // without a per-file sync, the batch syncs the filesystem before it commits.
+        let mut new_pristine: Option<PristineRecord> = None;
+        let (new_checksum, new_sha) = match new_text.take() {
             Some(nt) => {
-                let mut store = db.pristine_store();
-                let mut file = File::open(&nt.path)
-                    .map_err(|e| SvnError::from_io("cannot open the new text", &e))?;
-                let rec = store.install(
-                    &mut file,
-                    Some(&Sha1Digest(nt.sha1)),
-                    Some(&Md5Digest(nt.md5)),
-                )?;
-                (Some(rec.sha1.to_svn_string()), Some(rec.sha1))
+                let record = PristineRecord {
+                    sha1: Sha1Digest(nt.sha1),
+                    md5: Md5Digest(nt.md5),
+                    size: nt.size,
+                    hydrated: true,
+                };
+                let synced = !self.batched;
+                let stored =
+                    db.pristine_store()
+                        .place(nt.path, &record, synced, &mut self.placed)?;
+                if !stored {
+                    self.batch.placed_text(record.size, synced);
+                }
+                let sha = record.sha1;
+                new_pristine = Some(record);
+                (Some(sha.to_svn_string()), Some(sha))
             }
             None => {
                 let cs = old.as_ref().and_then(|b| b.checksum.clone());
@@ -134,7 +144,7 @@ impl UpdateEditor {
             }
         };
         let old_checksum = old.as_ref().and_then(|b| b.checksum.clone());
-        let text_changed = new_text.is_some() && new_checksum != old_checksum;
+        let text_changed = new_pristine.is_some() && new_checksum != old_checksum;
 
         // 2. Decide what happens to the working file.
         let rel_str = wc.as_str().to_owned();
@@ -204,14 +214,10 @@ impl UpdateEditor {
                 );
             } else {
                 keep_fileinfo = false;
-                let nt = new_text
-                    .as_ref()
-                    .ok_or_else(|| corrupt("text change without text"))?;
                 let merged = self.merge_local(
                     &db,
                     &wc,
                     base_node,
-                    nt,
                     new_sha.ok_or_else(|| corrupt("missing new checksum"))?,
                     &pm.new_pristine,
                     &actual,
@@ -341,34 +347,39 @@ impl UpdateEditor {
         let file_external = self
             .s
             .file_external
-            .as_ref()
+            .clone()
             .filter(|_| wc == self.target_wc);
         failpoint!("update.after_merge3_before_txn");
-        db.with_txn(|t| {
-            t.base_add(&wc, &node)?;
-            if let Some(ext) = file_external {
-                t.mark_file_external(&wc)?;
-                t.external_add(&wc, ext)?;
+        // The queue owns the merge results once the batch commits (it removes them after
+        // installing); until then they are removed again on failure.
+        for tmp in merge_tmp {
+            self.batch.keep_on_commit(tmp);
+        }
+        let path = wc.clone();
+        let shadow = f.shadow;
+        let had_base = old.is_some();
+        self.defer(Box::new(move |t| {
+            if let Some(record) = &new_pristine {
+                t.record_pristine(record)?;
             }
-            if let Some(op_depth) = f.shadow.filter(|d| *d > 0) {
-                t.mark_base_deleted_at(&wc, NodeKind::File, op_depth)?;
+            t.base_add(&path, &node)?;
+            if let Some(ext) = &file_external {
+                t.mark_file_external(&path)?;
+                t.external_add(&path, ext)?;
+            }
+            if let Some(op_depth) = shadow.filter(|d| *d > 0) {
+                t.mark_base_deleted_at(&path, NodeKind::File, op_depth)?;
             } else if obstructed {
-                t.mark_base_deleted(&wc, NodeKind::File)?;
+                t.mark_base_deleted(&path, NodeKind::File)?;
             }
-            if !shadowed && (old.is_some() || overlay.is_some()) {
-                t.set_actual_props(&wc, overlay.as_ref())?;
+            if !shadowed && (had_base || overlay.is_some()) {
+                t.set_actual_props(&path, overlay.as_ref())?;
             }
             if !conflicts.is_empty() {
-                conflict_record::record(t, &wc, &info, conflicts)?;
+                conflict_record::record(t, &path, &info, conflicts)?;
             }
             t.queue_work(&work)
-        })?;
-        // Committed: the queue owns the merge results now (it removes them after installing).
-        for tmp in merge_tmp {
-            let _ = tmp.keep();
-        }
-        failpoint!("update.after_txn_before_queue");
-        self.run_queue()?;
+        }))?;
         if f.shadow.is_some() {
             // Shadowed by an obstruction: only BASE changed, nothing to report.
             return Ok(());
@@ -389,7 +400,6 @@ impl UpdateEditor {
         db: &WcDb,
         wc: &RelPath,
         base: &Node,
-        new_text: &NewText,
         new_sha: Sha1Digest,
         new_props: &Props,
         actual: &Props,
@@ -412,13 +422,16 @@ impl UpdateEditor {
             .or_else(|| inspect::prop_value(actual, "svn:mime-type"))
             .and_then(|v| std::str::from_utf8(v).ok());
         let store = db.pristine_store();
+        // The new text sits in the store already; its row is still pending (see `super::batch`),
+        // so it is read by path.
+        let new_text_path = store.path_of(&new_sha);
         let sources_ok = {
             let old_size = store
                 .path_of(&old_sha)
                 .metadata()
                 .map(|m| m.len())
                 .unwrap_or(0);
-            let new_size = fs::metadata(&new_text.path).map(|m| m.len()).unwrap_or(0);
+            let new_size = fs::metadata(&new_text_path).map(|m| m.len()).unwrap_or(0);
             let mine_size = fs::metadata(crate::wc::abs_path(db, wc)?)
                 .map(|m| m.len())
                 .unwrap_or(0);
@@ -449,7 +462,7 @@ impl UpdateEditor {
         let base_bytes = read_limited(store.open_text(&old_sha)?, MAX_MERGE_BYTES)?
             .ok_or_else(|| corrupt("base text too large to merge"))?;
         let theirs = read_limited(
-            File::open(&new_text.path)
+            File::open(&new_text_path)
                 .map_err(|e| SvnError::from_io("cannot open the new text", &e))?,
             MAX_MERGE_BYTES,
         )?
