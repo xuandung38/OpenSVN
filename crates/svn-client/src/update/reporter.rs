@@ -174,10 +174,21 @@ pub fn build_report(
         } else {
             Depth::Infinity
         };
-        let report_depth = if depth == Depth::Unknown || sticky {
-            recorded
-        } else {
+        // Like svn's crawler: a narrower requested depth is reported as the target's depth
+        // (`honor_depth_exclude`), anything else reports what the working copy has.
+        let narrower = |d: Depth| match d {
+            Depth::Empty => 0,
+            Depth::Files => 1,
+            Depth::Immediates => 2,
+            _ => 3,
+        };
+        let report_depth = if !sticky
+            && !matches!(depth, Depth::Unknown | Depth::Exclude)
+            && narrower(depth) < narrower(recorded)
+        {
             depth
+        } else {
+            recorded
         };
         let parent_repos = match target_wc.parent() {
             Some(p) => db.read_base(&p)?.and_then(|n| n.repos_relpath),

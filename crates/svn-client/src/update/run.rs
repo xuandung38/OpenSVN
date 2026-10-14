@@ -247,8 +247,14 @@ pub async fn drive_update(
     );
     let req = UpdateRequest {
         revision: params.revision,
-        target,
-        depth: params.depth,
+        target: target.clone(),
+        // Like svn against a depth-aware server: only a sticky depth is sent; otherwise the
+        // report carries the depths and the editor applies the requested one.
+        depth: if params.sticky_depth {
+            params.depth
+        } else {
+            Depth::Unknown
+        },
         mode,
         send_copyfrom: false,
         ignore_ancestry: params.ignore_ancestry,
@@ -262,6 +268,17 @@ pub async fn drive_update(
         let _ = blocking(move || crate::wc::run_work_queue(&db2, &CancelToken::new()).map(|_| ()))
             .await;
         return Err(e);
+    }
+    let reached = outcome
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .revision;
+    if !params.sticky_depth
+        && matches!(params.kind, UpdateKind::Update)
+        && let Some(rev) = reached
+    {
+        record_unseen_children(session, &db, &target_wc, &target, params.depth, rev, cancel)
+            .await?;
     }
     let out = outcome.lock().unwrap_or_else(PoisonError::into_inner);
     let mut events: Vec<UpdateEvent> = restored
@@ -277,4 +294,111 @@ pub async fn drive_update(
         revision: out.revision,
         events,
     })
+}
+
+/// svn issue #3569: an update at a depth narrower than the recorded one does not hear about
+/// additions outside that depth, so the directory would claim at the new revision to lack
+/// children the repository has. Like svn's update editor (`fetch_dirents_func`), the target
+/// directory (and, for `immediates`, its subdirectories) is listed at the reached revision and
+/// every child the working copy does not know gets a `not-present` BASE row.
+async fn record_unseen_children(
+    session: &dyn RaSession,
+    db: &Arc<WcDb>,
+    target_wc: &RelPath,
+    target: &RelPath,
+    depth: Depth,
+    rev: Revnum,
+    cancel: &CancelToken,
+) -> Result<()> {
+    if !matches!(depth, Depth::Empty | Depth::Files | Depth::Immediates) {
+        return Ok(());
+    }
+    let rank = |d: Depth| match d {
+        Depth::Empty => 0,
+        Depth::Files => 1,
+        Depth::Immediates => 2,
+        _ => 3,
+    };
+    let dir_depth = |n: &svn_wc::db::Node| n.depth.unwrap_or(Depth::Infinity);
+    let Some(node) = db.read_base(target_wc)? else {
+        return Ok(());
+    };
+    if node.kind != NodeKind::Dir || node.presence != svn_wc::db::Presence::Normal {
+        return Ok(());
+    }
+    // (working copy dir, session-relative dir, ambient depth)
+    let mut dirs = Vec::new();
+    if rank(dir_depth(&node)) > rank(depth) {
+        dirs.push((target_wc.clone(), target.clone(), dir_depth(&node)));
+    }
+    if depth == Depth::Immediates {
+        for child in db.children(target_wc)? {
+            let Some(c) = db.read_base(&child)? else {
+                continue;
+            };
+            if c.kind == NodeKind::Dir
+                && c.presence == svn_wc::db::Presence::Normal
+                && rank(dir_depth(&c)) > rank(Depth::Empty)
+            {
+                let name = RelPath::new(child.file_name().unwrap_or(""))?;
+                dirs.push((child, wc::join_rel(target, &name)?, dir_depth(&c)));
+            }
+        }
+    }
+    for (wc_dir, session_dir, ambient) in dirs {
+        let entries = session
+            .list(&session_dir, Some(rev), Depth::Immediates, cancel)
+            .await?;
+        let Some(parent) = db.read_base(&wc_dir)? else {
+            continue;
+        };
+        let parent_repos = parent.repos_relpath.clone().unwrap_or_default();
+        for e in entries {
+            let kind = if e.kind == NodeKind::Dir {
+                NodeKind::Dir
+            } else {
+                NodeKind::File
+            };
+            if rank(ambient) < rank(Depth::Immediates) && kind == NodeKind::Dir {
+                continue;
+            }
+            cancel.check()?;
+            let name = RelPath::from_server(&e.name)?;
+            if name.is_root() || name.as_str().contains('/') {
+                continue;
+            }
+            let child = wc::join_rel(&wc_dir, &name)?;
+            let repos_relpath = super::editor::repos_child(&parent_repos, name.as_str());
+            let repos_id = parent.repos_id.unwrap_or_default();
+            db.with_txn(|t| {
+                if t.read_base(&child)?.is_some() {
+                    return Ok(());
+                }
+                let (repos_root_url, repos_uuid) = t.repository(repos_id)?;
+                t.base_add(
+                    &child,
+                    &svn_wc::db::BaseNode {
+                        kind,
+                        presence: svn_wc::db::Presence::NotPresent,
+                        repos_root_url,
+                        repos_uuid,
+                        repos_relpath,
+                        revision: rev.0,
+                        changed_rev: None,
+                        changed_date: None,
+                        changed_author: None,
+                        depth: None,
+                        properties: None,
+                        checksum: None,
+                        symlink_target: None,
+                        translated_size: None,
+                        last_mod_time: None,
+                        inherited_props: None,
+                        dav_cache: None,
+                    },
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
