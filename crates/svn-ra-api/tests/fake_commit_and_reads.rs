@@ -1166,6 +1166,25 @@ async fn lost_merge_answers_and_checked_abort() {
         s.abort_txn_checked(&name, &c).await.expect("gone"),
         TxnAbort::Gone
     );
+
+    // A failing DELETE (5xx) proves nothing either way and leaves the transactions alone.
+    s.fail_next_merge(FakeMergeFault::LostBeforeMerge);
+    commit_b(&s, Arc::new(Recorder::default()), "z")
+        .await
+        .expect_err("unknown");
+    let open = s.open_txns();
+    assert_eq!(open.len(), 1);
+    s.fail_txn_deletes(Some("Transaction cleanup failed"));
+    assert_eq!(
+        s.abort_txn_checked(&open[0], &c).await.expect("unknown"),
+        TxnAbort::Unknown("Transaction cleanup failed".to_owned())
+    );
+    assert_eq!(s.open_txns(), open, "nothing deleted");
+    s.fail_txn_deletes(None);
+    assert_eq!(
+        s.abort_txn_checked(&open[0], &c).await.expect("abort"),
+        TxnAbort::Deleted
+    );
 }
 
 /// Observer whose "MERGE sent" record cannot be written.

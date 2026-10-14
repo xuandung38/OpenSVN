@@ -161,6 +161,13 @@ impl FakeRaSession {
         self.guard().merge_fault = Some(fault);
     }
 
+    /// Makes every `abort_txn_checked` answer [`TxnAbort::Unknown`] with `reason` (a 5xx to the
+    /// `DELETE`, such as svn 1.15's "Transaction cleanup failed"), without touching the
+    /// transactions; `None` restores normal answers.
+    pub fn fail_txn_deletes(&self, reason: Option<&str>) {
+        self.guard().txn_delete_fault = reason.map(str::to_owned);
+    }
+
     /// Names of commit transactions that are still open.
     pub fn open_txns(&self) -> Vec<String> {
         let mut v: Vec<String> = self.guard().txns.iter().cloned().collect();
@@ -705,7 +712,11 @@ impl RaSession for FakeRaSession {
 
     async fn abort_txn_checked(&self, txn_name: &str, cancel: &CancelToken) -> Result<TxnAbort> {
         cancel.check()?;
-        Ok(if self.guard().txns.remove(txn_name) {
+        let mut state = self.guard();
+        if let Some(reason) = &state.txn_delete_fault {
+            return Ok(TxnAbort::Unknown(reason.clone()));
+        }
+        Ok(if state.txns.remove(txn_name) {
             TxnAbort::Deleted
         } else {
             TxnAbort::Gone
