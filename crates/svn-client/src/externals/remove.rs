@@ -39,13 +39,48 @@ pub(super) async fn remove(
         ctx.lock_owner.clone(),
         ctx.config.global_ignores.clone(),
     );
-    blocking(move || match ext.kind {
-        NodeKind::File | NodeKind::Symlink => remove_file_external(&db, &ext, &cancel),
+    blocking(move || {
+        let r = remove_blocking(&db, &ext, &owner, globals.as_deref(), &cancel)?;
+        if r.action == ExternalAction::Removed {
+            prune_empty_parents(&db, &ext.local_relpath)?;
+        }
+        Ok(r)
+    })
+    .await
+}
+
+/// Removes the directories left empty above a removed external, up to the nearest versioned
+/// one (an update that deleted the defining directory could not remove it while the external
+/// was still inside).
+fn prune_empty_parents(db: &WcDb, local: &RelPath) -> Result<()> {
+    let mut cur = local.parent();
+    while let Some(dir) = cur {
+        if dir.is_root() || db.read_node(&dir)?.is_some_and(|n| n.presence.is_present()) {
+            break;
+        }
+        let abs = wc::abs_path(db, &dir)?;
+        if !abs.symlink_metadata().is_ok_and(|m| m.is_dir()) || std::fs::remove_dir(&abs).is_err() {
+            break;
+        }
+        cur = dir.parent();
+    }
+    Ok(())
+}
+
+fn remove_blocking(
+    db: &Arc<WcDb>,
+    ext: &External,
+    owner: &LockOwner,
+    globals: Option<&[String]>,
+    cancel: &CancelToken,
+) -> Result<ExternalReport> {
+    match ext.kind {
+        NodeKind::File | NodeKind::Symlink => remove_file_external(db, ext, cancel),
         _ => {
-            let abs = wc::abs_path(&db, &ext.local_relpath)?;
-            let removal = remove_wc(&owner, &abs, globals.as_deref(), &cancel)?;
+            let abs = wc::abs_path(db, &ext.local_relpath)?;
+            let removal = remove_wc(owner, &abs, globals, cancel)?;
             {
-                let _lock = lock_nearest(&db, &ext.def_local_relpath, &cancel)?;
+                let _lock = lock_nearest(db, &ext.def_local_relpath, cancel)?;
                 db.with_txn(|t| t.external_remove(&ext.local_relpath))?;
             }
             Ok(match removal {
@@ -69,8 +104,7 @@ pub(super) async fn remove(
                 },
             })
         }
-    })
-    .await
+    }
 }
 
 /// Locks `dir`, or its nearest versioned ancestor when `dir` is gone (a defining directory the
