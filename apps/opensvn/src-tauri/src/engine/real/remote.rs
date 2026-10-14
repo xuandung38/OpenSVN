@@ -84,6 +84,40 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ProgressWriter<W> {
     }
 }
 
+/// Fills the locks of the children of `dir` from a `get-locks` request. The listing still
+/// shows when the locks cannot be read (an old server, a path-based authorization rule):
+/// only cancellation fails it.
+async fn add_locks(
+    session: &dyn RaSession,
+    dir: &RelPath,
+    entries: &mut [svn_types::DirEntry],
+    ctx: &OpContext,
+) -> EngineResult<()> {
+    let locks = match session
+        .get_locks(dir, svn_types::Depth::Immediates, &ctx.cancel)
+        .await
+    {
+        Ok(locks) => locks,
+        Err(err) if err.code == ErrorCode::Cancelled => return Err(err),
+        Err(err) => {
+            tracing::warn!(code = ?err.code, "listing without locks: {}", err.message);
+            return Ok(());
+        }
+    };
+    for lock in locks {
+        let Some((parent, name)) = lock.path.as_str().rsplit_once('/') else {
+            continue;
+        };
+        if parent.trim_start_matches('/') != dir.as_str() {
+            continue;
+        }
+        if let Some(entry) = entries.iter_mut().find(|e| e.name == name) {
+            entry.lock = Some(lock);
+        }
+    }
+    Ok(())
+}
+
 impl RealEngine {
     pub(super) async fn do_repo_info(&self, url: &str, ctx: &OpContext) -> EngineResult<RepoInfo> {
         let (session, path) = self.locate(url, ctx).await?;
@@ -113,7 +147,7 @@ impl RealEngine {
         ctx: &OpContext,
     ) -> EngineResult<Vec<RepoEntry>> {
         let (session, path) = self.locate(url, ctx).await?;
-        let entries = session
+        let mut entries = session
             .list(
                 &path,
                 revnum(rev),
@@ -121,6 +155,11 @@ impl RealEngine {
                 &ctx.cancel,
             )
             .await?;
+        // A DAV listing carries no locks (`svn ls` asks for them separately too). Locks only
+        // exist in HEAD, so they are added to a HEAD listing only.
+        if rev.is_none() && !entries.is_empty() && entries.iter().all(|e| e.lock.is_none()) {
+            add_locks(session.as_ref(), &path, &mut entries, ctx).await?;
+        }
         let mut out: Vec<RepoEntry> = entries
             .into_iter()
             .map(|e| RepoEntry {
