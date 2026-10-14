@@ -7,8 +7,8 @@
 //! (`WcActor`), so no app-level lock is added. Request paths are validated with
 //! [`local_util::target`] before anything is touched.
 //!
-//! Marking a move made outside the app and changing the working copy format are not supported
-//! by `svn-client` yet and fail with a user-facing error.
+//! Changing the working copy format is not supported yet (only format 31 is written) and fails
+//! with a user-facing error.
 
 use opensvn_ipc::{
     CleanupRequest, IgnoreAddRequest, IgnoreScope, ResolveChoice, ResolveRequest, RevertRequest,
@@ -25,9 +25,6 @@ use super::local_util::{self, LocalEnv};
 use super::wc_read::blocking;
 use crate::engine::context::OpContext;
 use crate::engine::facade::{EngineResult, WcRef};
-
-/// Issue tracking `svn-client` support for the operations this engine refuses.
-const UNSUPPORTED_ISSUE: &str = "https://github.com/xuandung38/OpenSVN/issues/90";
 
 /// `ResolveChoice` of the app -> `--accept` choice of `svn-client`.
 pub(super) fn accept_of(choice: ResolveChoice) -> Accept {
@@ -116,21 +113,23 @@ impl RealEngine {
         .await
     }
 
+    /// Records that `from` was moved to `to` outside OpenSVN (TortoiseSVN's "Repair move"):
+    /// the rows `svn move` writes, without touching the disk. Recording the same move again is
+    /// a no-op.
     pub(super) async fn do_mark_move(
         &self,
-        _wc: &WcRef,
-        _from: &str,
-        _to: &str,
+        wc: &WcRef,
+        from: &str,
+        to: &str,
         ctx: &OpContext,
     ) -> EngineResult<()> {
-        ctx.check()?;
-        Err(SvnError::new(
-            ErrorCode::WcInvalidOperation,
-            format!(
-                "Marking a move made outside OpenSVN is not supported yet. Revert both paths and \
-                 move the item with OpenSVN's Move command instead (tracked in {UNSUPPORTED_ISSUE})."
-            ),
-        ))
+        let (from, to) = (from.to_owned(), to.to_owned());
+        self.with_local(wc, ctx, move |db, env| {
+            let (_, src) = local_util::target(db, &from)?;
+            let (_, dst) = local_util::target(db, &to)?;
+            client_local::mark_move(db, &env.cancel, &src, &dst).map(|_| ())
+        })
+        .await
     }
 
     pub(super) async fn do_resolve(
@@ -325,17 +324,10 @@ impl RealEngine {
     ) -> EngineResult<()> {
         ctx.check()?;
         let root = wc.root.clone();
-        let current = blocking(move || Ok(super::wc_read::open_db(&root)?.format())).await?;
-        if u32::from(to) == current {
-            return Ok(()); // already in that format
-        }
-        Err(SvnError::new(
-            ErrorCode::WcFormatUnsupported,
-            format!(
-                "Changing the working copy format from {current} to {to} is not supported yet. \
-                 Check out a new working copy in the format you need (tracked in \
-                 {UNSUPPORTED_ISSUE})."
-            ),
-        ))
+        blocking(move || {
+            let db = super::wc_read::open_db(&root)?;
+            svn_client::wc::upgrade_format(&db, u32::from(to))
+        })
+        .await
     }
 }
