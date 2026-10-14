@@ -403,9 +403,9 @@ impl<'a> WorkQueueRunner<'a> {
         }
         let translator =
             ContentTranslator::to_working(&tinfo, &Self::keyword_context(&info), self.config.tz);
-        let tmp_dir = dst_abs
-            .parent()
-            .map_or_else(|| self.config.wc_root.clone(), Path::to_path_buf);
+        // Never next to the destination: a crash between create and rename would leave a
+        // `wq-*` file in the user's folder (#120). `.svn/tmp` is on the same filesystem.
+        let tmp_dir = self.tmp_dir()?;
         let src_perms = fs::metadata(&src_abs).ok().map(|m| m.permissions());
         write_atomically(&dst_abs, &tmp_dir, &mut reader, translator, |tmp| {
             if let Some(p) = &src_perms {

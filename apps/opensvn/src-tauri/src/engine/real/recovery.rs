@@ -72,7 +72,9 @@ impl RecoveryHooks for ClientRecovery {
         let (db, cancel) = (db.clone(), ctx.cancel.clone());
         blocking(move || {
             svn_client::local::lock::with_wc_lock(&db, &cancel, || {
-                svn_client::wc::run_work_queue(&db, &cancel).map(|_| ())
+                svn_client::wc::run_work_queue(&db, &cancel)?;
+                // Same lock, queue now empty: crash leftovers in `.svn/tmp` can go (#120).
+                db.remove_stale_tmp_files().map(|_| ())
             })
         })
         .await
