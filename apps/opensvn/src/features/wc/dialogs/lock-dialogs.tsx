@@ -1,59 +1,98 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { BadBox, WarnBox } from "../../../components/ui/dialog";
 import { Input, Textarea } from "../../../components/ui/fields";
+import { SafeText } from "../../../components/ui/safe-text";
 import { useToast } from "../../../components/ui/toast";
+import type { AppError, FileStatus, LockConflict } from "../../../ipc/bindings";
 import { IpcError, ipc, toAppError, unwrap } from "../../../ipc/client";
+import { useOperationOutcome } from "../../../ipc/queries";
+import { relativeTime } from "../../../lib/format";
 import { useT } from "../../../lib/i18n/i18n";
 import { useWcActions } from "../use-wc-actions";
 import { useWcSession } from "../wc-session";
-import { wcStrings } from "../wc-strings";
 import { ActionDialog, PathList } from "./action-dialog";
 import { dialogStrings } from "./dialog-strings";
 
 /**
- * Lock to edit / unlock files of the working copy (doc 01 4.7, flow 10.4). A lock held by someone
- * else can only be stolen (or broken) after an explicit confirmation; a `locked-by-other` answer
- * from the server reveals that option too.
+ * Lock to edit / unlock files of the working copy (doc 01 4.7, flow 10.4). The dialog stays open
+ * until the operation ends: the server's refusal arrives with the operation result, and a lock
+ * held by someone else is then shown with its owner, comment and date (`lockConflicts`). Stealing
+ * (or breaking) is never done silently: it needs the steal box and an explicit confirmation.
  */
 export function WcLockDialog({
   mode,
   paths,
+  conflicts: initialConflicts = [],
   onClose,
 }: {
   mode: "lock" | "unlock";
   paths: string[];
+  /** Locks already known to refuse this request (a failed lock reopened from the activity). */
+  conflicts?: readonly LockConflict[];
   onClose: () => void;
 }) {
   const d = useT(dialogStrings);
-  const t = useT(wcStrings);
   const toast = useToast();
   const { wc, files } = useWcSession();
   const targets = files.filter((f) => paths.includes(f.path));
-  const others = targets.filter((f) => f.lock && !f.lock.mine);
   const mine = targets.filter((f) => f.lock?.mine);
   const [comment, setComment] = useState("");
-  const [serverSaysLocked, setServerSaysLocked] = useState(false);
+  const [conflicts, setConflicts] = useState<readonly LockConflict[]>(initialConflicts);
+  const [serverSaysLocked, setServerSaysLocked] = useState(initialConflicts.length > 0);
   const [steal, setSteal] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
+  const [opId, setOpId] = useState<string | undefined>();
+  const [opError, setOpError] = useState<AppError | null>(null);
+  const outcome = useOperationOutcome(opId);
+  const isLock = mode === "lock";
 
-  const showSteal = others.length > 0 || serverSaysLocked;
-  const owner = others[0]?.lock?.owner ?? "";
-  const alreadyMine = mode === "lock" && mine.length === targets.length && targets.length > 0;
+  // Locks of others: what the server just said, else what the status knows.
+  const held = heldElsewhere(targets, conflicts);
+  const showSteal = held.length > 0 || serverSaysLocked;
+  // Every owner the steal would take a lock from, named in the steal box and its warning.
+  const owner = [...new Set(held.map((c) => c.owner))].join(", ");
+  const alreadyMine = isLock && mine.length === targets.length && targets.length > 0;
+  const running = opId !== undefined;
   // Stealing/breaking needs the tick; plain lock/unlock does not.
   const needsConfirm = steal;
-  const canSubmit = wc !== null && !alreadyMine && (!needsConfirm || confirmed);
-  const isLock = mode === "lock";
+  const canSubmit = wc !== null && !running && !alreadyMine && (!needsConfirm || confirmed);
+
+  // React once to the end of the lock/unlock operation.
+  useEffect(() => {
+    if (!opId || !outcome) return;
+    setOpId(undefined);
+    if (outcome.status === "ok") {
+      toast.show(d(isLock ? "lockDone" : "unlockDone", { count: paths.length }));
+      onClose();
+      return;
+    }
+    if (outcome.error.code === "cancelled") return;
+    setOpError(outcome.error);
+    if (refusedByLock(outcome.error, isLock)) {
+      setServerSaysLocked(true);
+      setConflicts(outcome.error.lockConflicts ?? []);
+    }
+  }, [opId, outcome, onClose, toast, d, isLock, paths.length]);
 
   return (
     <ActionDialog
       title={isLock ? d("lockTitle") : d("unlockTitle")}
-      submitLabel={steal ? d("stealAction") : isLock ? d("lockAction") : d("unlockAction")}
+      submitLabel={
+        running
+          ? d(isLock ? "lockRunning" : "unlockRunning")
+          : steal
+            ? d("stealAction")
+            : isLock
+              ? d("lockAction")
+              : d("unlockAction")
+      }
       danger={steal}
       canSubmit={canSubmit}
       onClose={onClose}
       onSubmit={async () => {
         if (!wc) return;
+        setOpError(null);
         const t0 = { kind: "wc" as const, wcId: wc.id, paths };
         try {
           const h = isLock
@@ -61,20 +100,46 @@ export function WcLockDialog({
                 ipc().commands.lock({ targets: t0, comment: comment.trim() || null, steal }),
               )
             : await unwrap(ipc().commands.unlock({ targets: t0, breakLock: steal }));
-          toast.show(t("opStarted", { title: h.title }));
-          onClose();
+          setOpId(h.opId);
         } catch (e) {
-          if (e instanceof IpcError && e.appError.code === "locked-by-other")
+          if (e instanceof IpcError && refusedByLock(e.appError, isLock)) {
             setServerSaysLocked(true);
+            setConflicts(e.appError.lockConflicts ?? []);
+          }
           throw e;
         }
       }}
     >
       <PathList paths={paths} label={d("files")} />
       {alreadyMine && <WarnBox>{d("alreadyYours")}</WarnBox>}
-      {others.map((f) => (
-        <WarnBox key={f.path}>{d("lockedBy", { owner: f.lock?.owner ?? "" })}</WarnBox>
+      {held.map((c) => (
+        <WarnBox key={c.path}>
+          <SafeText as="span" className="block">
+            {c.createdAt
+              ? d("lockedBySince", {
+                  path: c.path,
+                  owner: c.owner,
+                  when: relativeTime(c.createdAt),
+                })
+              : `${c.path}: ${d("lockedBy", { owner: c.owner })}`}
+          </SafeText>
+          {c.comment && (
+            <SafeText as="span" className="block">
+              {d("lockConflictComment", { comment: c.comment })}
+            </SafeText>
+          )}
+        </WarnBox>
       ))}
+      {held.length > 0 && isLock && (
+        <SafeText as="p" className="m-0 text-muted-text">
+          {d("contactOwner", { owner })}
+        </SafeText>
+      )}
+      {opError && (
+        <SafeText as="p" className="m-0 break-words text-bad-text">
+          <span role="alert">{opError.message}</span>
+        </SafeText>
+      )}
       {isLock && !alreadyMine && (
         <label className="flex flex-col gap-1">
           {d("lockComment")}
@@ -87,6 +152,7 @@ export function WcLockDialog({
             <input
               type="checkbox"
               checked={steal}
+              disabled={running}
               onChange={(e) => {
                 setSteal(e.target.checked);
                 setConfirmed(false);
@@ -102,6 +168,7 @@ export function WcLockDialog({
                 <input
                   type="checkbox"
                   checked={confirmed}
+                  disabled={running}
                   onChange={(e) => setConfirmed(e.target.checked)}
                   className="accent-[var(--accent)]"
                 />
@@ -113,6 +180,33 @@ export function WcLockDialog({
       )}
     </ActionDialog>
   );
+}
+
+/** Whether `e` refused the request because of someone else's lock (unlock: no own token). */
+function refusedByLock(e: AppError, isLock: boolean): boolean {
+  return e.code === "locked-by-other" || (!isLock && e.code === "lock-token-invalid");
+}
+
+/**
+ * Locks held by someone else on the targets: the server's answer per path wins over the status
+ * (which only knows a foreign lock after a remote check).
+ */
+function heldElsewhere(
+  targets: readonly FileStatus[],
+  conflicts: readonly LockConflict[],
+): LockConflict[] {
+  const out = [...conflicts];
+  for (const f of targets) {
+    if (f.lock && !f.lock.mine && !out.some((c) => c.path === f.path)) {
+      out.push({
+        path: f.path,
+        owner: f.lock.owner,
+        comment: f.lock.comment,
+        createdAt: f.lock.createdAt,
+      });
+    }
+  }
+  return out;
 }
 
 /** Put files into a named changelist, or remove them from theirs (`changelist_set`). */

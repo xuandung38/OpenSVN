@@ -368,6 +368,13 @@ fn node_status(
     }))
 }
 
+/// True when the entry of a versioned node is reported with `opts`.
+fn wanted(opts: &StatusOptions, s: &WcStatus) -> bool {
+    opts.show_unmodified
+        || is_interesting(s)
+        || (opts.include_needs_lock && s.needs_lock && s.kind == NodeKind::File)
+}
+
 /// True when the plain listing would show the entry (svn's non-verbose rule).
 fn is_interesting(s: &WcStatus) -> bool {
     s.text != NodeStatus::Normal
@@ -548,7 +555,7 @@ impl Lister<'_> {
                     continue;
                 };
                 if let Some(s) = node_status(snap, &child, &child_abs, &cur, child_disk.as_ref())?
-                    && (self.opts.show_unmodified || is_interesting(&s))
+                    && wanted(self.opts, &s)
                 {
                     items.push(Item::Status(Box::new(s)));
                 }
@@ -782,7 +789,7 @@ fn status_of_rows(
         return Ok(out);
     };
     if let Some(s) = node_status(&snap, rel, &abs, &cur, disk.as_ref())?
-        && (opts.show_unmodified || is_interesting(&s))
+        && wanted(opts, &s)
     {
         out.push(s);
     }

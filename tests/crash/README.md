@@ -33,8 +33,9 @@ Every case uses its own copy of the repository and of the template:
      First, an uninterrupted run counts the hits. Then the worker is killed at the first hit, the
      last hit and random hits in between. Examples: `commit.after_merge_before_finalize` is
      "after MERGE"; `update.after_txn_before_queue` #k is "mid-update with local edits" after k
-     files; `wc.txn.*`, `wc.wq.*`, `pristine.install.before_rename` cover every database
-     transaction, work item and pristine install.
+     files; `wc.create.*` is a checkout killed while it builds `wc.db`; `wc.txn.*`, `wc.wq.*`,
+     `pristine.install.before_rename` cover every database transaction, work item and pristine
+     install.
 2. Right after the kill: `PRAGMA integrity_check` and `foreign_key_check`, no NODES row without a
    parent, and every referenced pristine exists.
 3. **Next open recovers**: `crash-worker recover` must succeed and leave no work item, no lock row

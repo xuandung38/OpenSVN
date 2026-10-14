@@ -13,10 +13,13 @@
 //! Failpoints (feature `failpoints`): `wc.txn.before_commit` fires after the closure succeeded and
 //! before COMMIT (the transaction rolls back), `wc.txn.after_commit` fires after COMMIT but before
 //! the caller learns about it; both turn the configured `return` action into an error.
+//! `wc.create.before_schema` and `wc.create.before_rename` fire while a new `wc.db` is built
+//! under its temp name (see `create.rs`).
 
 mod actual;
 mod bindings;
 mod connection;
+mod create;
 mod externals;
 mod mark_move;
 mod misc;
@@ -31,7 +34,6 @@ mod txn;
 mod wc_lock;
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -52,7 +54,7 @@ pub use repos_info::ReposInfo;
 pub use schema::{FORMAT_MAX_READ, FORMAT_WRITE, check_supported_format, read_user_version};
 pub use subtree::{ActualRow, LockRow, SubtreeRows};
 pub use txn::WcTxn;
-pub use wc_lock::{LockCleanup, LockOwner, LockState, ObtainMode};
+pub use wc_lock::{ENGINE_TMP_PREFIXES, LockCleanup, LockOwner, LockState, ObtainMode};
 
 /// Name of the administrative directory.
 pub const ADM_DIR: &str = ".svn";
@@ -159,121 +161,7 @@ fn depth_word(depth: Depth) -> &'static str {
     }
 }
 
-/// Error for a `.svn` that already exists when a creation was requested.
-fn existing_adm(wcroot: &Path) -> SvnError {
-    let adm = wcroot.join(ADM_DIR);
-    if adm.join(DB_FILE).exists() {
-        return SvnError::new(
-            ErrorCode::Internal,
-            format!(
-                "'{}' already holds a working copy database",
-                wcroot.display()
-            ),
-        );
-    }
-    SvnError::new(
-        ErrorCode::WcFormatUnsupported,
-        format!(
-            "'{}' already has an administrative area without wc.db (pre-1.7 working copy or an \
-             unfinished creation); upgrade it with the svn command line client or remove it",
-            wcroot.display()
-        ),
-    )
-}
-
-fn io_err(context: &str, path: &Path, err: &std::io::Error) -> SvnError {
-    SvnError::from_io(format!("{context} '{}'", path.display()), err)
-}
-
 impl WcDb {
-    /// Creates a new format 31 working copy administrative area in `wcroot` (which must exist and
-    /// must not contain a `.svn` entry of any kind): `.svn/{wc.db,format,entries,tmp,pristine}`
-    /// plus the REPOSITORY, WCROOT and root BASE rows exactly as `svn_wc__db_init` inserts them.
-    ///
-    /// Ownership: `.svn` is created with a non-recursive `mkdir`, which succeeds for exactly one
-    /// caller. That caller owns everything below it and removes it again on failure; every other
-    /// caller (concurrent creator, existing wc-ng or pre-1.7 working copy, leftovers of a crashed
-    /// creation) is rejected without touching the directory.
-    pub fn create(wcroot: &Path, new: &NewWc) -> Result<WcDb> {
-        let adm = wcroot.join(ADM_DIR);
-        match fs::create_dir(&adm) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(existing_adm(wcroot));
-            }
-            Err(e) => return Err(io_err("cannot create", &adm, &e)),
-        }
-        let built = Self::populate_new(wcroot, &adm, new);
-        if built.is_err() {
-            // Only this call ever wrote below `.svn`, so removing it cannot hit a winner's files.
-            let _ = fs::remove_dir_all(&adm);
-        }
-        built
-    }
-
-    fn populate_new(wcroot: &Path, adm: &Path, new: &NewWc) -> Result<WcDb> {
-        for dir in [adm.join("tmp"), adm.join("pristine")] {
-            fs::create_dir(&dir).map_err(|e| io_err("cannot create", &dir, &e))?;
-        }
-        let db = Self::build_new(wcroot, &adm.join(DB_FILE), new)?;
-        for name in ["format", "entries"] {
-            let p = adm.join(name);
-            fs::write(&p, LEGACY_FORMAT_MARKER).map_err(|e| io_err("cannot write", &p, &e))?;
-        }
-        Ok(db)
-    }
-
-    fn build_new(wcroot: &Path, db_path: &Path, new: &NewWc) -> Result<WcDb> {
-        let mut conn = open_connection(db_path, OpenMode::Create)?;
-        schema::create_schema(&mut conn)?;
-        let wc_id = {
-            let tx = conn.transaction().map_err(sql_err)?;
-            tx.execute(
-                "INSERT INTO repository (root, uuid) VALUES (?1, ?2)",
-                (&new.repos_root_url, &new.repos_uuid),
-            )
-            .map_err(sql_err)?;
-            let repos_id = tx.last_insert_rowid();
-            tx.execute("INSERT INTO wcroot (local_abspath) VALUES (NULL)", [])
-                .map_err(sql_err)?;
-            let wc_id = tx.last_insert_rowid();
-            let revision = i64::try_from(new.revision)
-                .map_err(|_| SvnError::new(ErrorCode::Internal, "revision out of range"))?;
-            let presence = if new.revision > 0 {
-                "incomplete"
-            } else {
-                "normal"
-            };
-            tx.execute(
-                "INSERT INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, repos_id, \
-                 repos_path, revision, presence, depth, kind) \
-                 VALUES (?1, '', 0, NULL, ?2, ?3, ?4, ?5, ?6, 'dir')",
-                (
-                    wc_id,
-                    repos_id,
-                    &new.repos_relpath,
-                    revision,
-                    presence,
-                    depth_word(new.depth),
-                ),
-            )
-            .map_err(sql_err)?;
-            tx.commit().map_err(sql_err)?;
-            wc_id
-        };
-        Ok(WcDb {
-            wcroot: wcroot.to_path_buf(),
-            wc_id,
-            format: FORMAT_WRITE,
-            writable: true,
-            store_pristine: true,
-            conn: Mutex::new(conn),
-            owned_locks: Mutex::new(BTreeMap::new()),
-            lock_owner: Mutex::new(None),
-            lock_gate: Mutex::new(()),
-        })
-    }
-
     /// Opens the working copy whose root is exactly `wcroot` (use [`find_wcroot`] first).
     /// Format 31 opens read/write; format 32 opens read only; other formats are rejected.
     pub fn open(wcroot: &Path) -> Result<WcDb> {
@@ -289,8 +177,19 @@ impl WcDb {
         // never modified beyond that recovery.
         let (probe, probe_writable) = open_existing(&db_path)?;
         let probed = read_user_version(&probe)?;
-        check_supported_format(probed)?;
         drop(probe);
+        if probed == 0 && create::db_is_uninitialized(&db_path) {
+            // Left by a checkout of an earlier version killed before it wrote the schema.
+            return Err(SvnError::new(
+                ErrorCode::NotAWorkingCopy,
+                format!(
+                    "'{}' holds the remains of an interrupted checkout (its working copy \
+                     database is empty); run the checkout again to restart it",
+                    wcroot.display()
+                ),
+            ));
+        }
+        check_supported_format(probed)?;
         let writable = probed == FORMAT_WRITE && probe_writable;
         let conn = if writable {
             open_connection(&db_path, OpenMode::ReadWrite)?

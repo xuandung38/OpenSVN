@@ -446,6 +446,51 @@ async fn url_locks_are_visible_in_listings_until_released() {
     );
 }
 
+/// mod_dav_svn listings carry no locks: a HEAD listing asks for them separately, an older
+/// revision's listing shows none (locks only exist in HEAD).
+#[tokio::test]
+async fn dav_listings_get_their_locks_from_get_locks() {
+    use std::sync::Arc;
+
+    use super::support::{StaticConnector, fixture_on, standard_repo};
+    use crate::engine::real::ClientRecovery;
+
+    let repo = standard_repo().without_listed_locks();
+    let f = fixture_on(
+        repo.clone(),
+        Arc::new(StaticConnector(vec![repo])),
+        Arc::new(ClientRecovery),
+    );
+    let scope = LockScope::Urls(vec![format!("{URL}/trunk/README.md")]);
+    f.engine
+        .lock(&scope, Some("editing"), false, &ctx())
+        .await
+        .unwrap();
+    let lock_of = |list: &[opensvn_ipc::RepoEntry]| {
+        list.iter()
+            .find(|e| e.name == "README.md")
+            .and_then(|e| e.lock.clone())
+    };
+    let head = f
+        .engine
+        .repo_list(&format!("{URL}/trunk"), None, &ctx())
+        .await
+        .unwrap();
+    let lock = lock_of(&head).expect("lock in a HEAD listing");
+    assert_eq!(lock.comment.as_deref(), Some("editing"));
+    let root = f.engine.repo_list(URL, None, &ctx()).await.unwrap();
+    assert!(
+        root.iter().all(|e| e.lock.is_none()),
+        "a lock below a child is not the child's: {root:?}"
+    );
+    let old = f
+        .engine
+        .repo_list(&format!("{URL}/trunk"), Some(Rev(1)), &ctx())
+        .await
+        .unwrap();
+    assert!(lock_of(&old).is_none(), "{old:?}");
+}
+
 fn wc_ref(root: &Path) -> WcRef {
     WcRef {
         id: WcId("wc".into()),

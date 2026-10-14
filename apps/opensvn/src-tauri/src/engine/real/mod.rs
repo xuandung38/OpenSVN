@@ -536,6 +536,14 @@ impl EngineFacade for RealEngine {
         self.do_unlock(scope, break_lock, ctx).await
     }
 
+    async fn lock_conflicts(
+        &self,
+        scope: &LockScope,
+        ctx: &OpContext,
+    ) -> EngineResult<Vec<opensvn_ipc::LockConflict>> {
+        self.do_lock_conflicts(scope, ctx).await
+    }
+
     async fn remote_edit(&self, plan: &RemoteEditPlan, ctx: &OpContext) -> EngineResult<Rev> {
         self.do_remote_edit(plan, ctx).await
     }

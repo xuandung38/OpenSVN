@@ -98,6 +98,13 @@ impl RaWire {
         let resp = send_with(&transport, req, body, unattended, cancel).await?;
         let head = svn_protocol::ResponseHead::new(resp.status().as_u16(), headers_of(&resp));
         let body = read_limited(resp, ParserLimits::default().max_error_body_bytes, cancel).await?;
+        // mod_dav_svn answers a bare 500 (no `D:error`) on an `SVNParentPath` location.
+        if head.status == 500
+            && svn_protocol::errors::parse_dav_error(&body).is_none()
+            && let Some(err) = parent_path_check(&transport, &session_url, unattended, cancel).await
+        {
+            return Err(err);
+        }
         let caps = Capabilities::from_options_response(&session_url, &head, &body)?;
         let mut wire = Self::new(transport, session_url, caps)?;
         wire.unattended = unattended;
@@ -280,6 +287,37 @@ impl RaWire {
             r = resp.bytes(SMALL_BODY_LIMIT) => r,
         }
     }
+}
+
+/// Largest listing page read when telling a repository list from a server error.
+const PARENT_LISTING_LIMIT: usize = 256 << 10;
+
+/// When `url` is the repository list of an `SVNParentPath` location (VisualSVN Server's
+/// `https://host/svn/`), the error that says so and names the repositories. `None` for any
+/// other answer: the caller then reports the original failure. Cancellation is reported.
+async fn parent_path_check(
+    transport: &HttpTransport,
+    url: &RepoUrl,
+    unattended: bool,
+    cancel: &CancelToken,
+) -> Option<SvnError> {
+    let req = svn_protocol::parent_listing_request(url).ok()?;
+    let body = buffered_body(&req).ok()?;
+    let resp = match send_with(transport, req, body, unattended, cancel).await {
+        Ok(resp) => resp,
+        Err(err) if err.code == ErrorCode::Cancelled => return Some(err),
+        Err(_) => return None,
+    };
+    if !resp.status().is_success() {
+        return None;
+    }
+    let page = match read_limited(resp, PARENT_LISTING_LIMIT, cancel).await {
+        Ok(page) => page,
+        Err(err) if err.code == ErrorCode::Cancelled => return Some(err),
+        Err(_) => return None,
+    };
+    let names = svn_protocol::parent_path_listing(&page)?;
+    Some(svn_protocol::parent_path_error(url, &names))
 }
 
 /// Transport body for a protocol request that carries no stream.

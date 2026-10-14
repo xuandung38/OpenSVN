@@ -24,6 +24,25 @@
 //! `AuthzSVNAccessFile` set to a file the test may append to, named by
 //! `OPENSVN_COMPAT_LOCAL_AUTHZ` (its first rule must grant `tester` the other repositories). The
 //! compat containers have no `mod_authz_svn`, so there the case reports that it was skipped.
+//!
+//! When the local server runs as another user (Apache as `www-data` while the tests run as root),
+//! `OPENSVN_COMPAT_LOCAL_SVNADMIN` names the `svnadmin` to use (a wrapper that runs it as that
+//! user); see `scripts/test-env/visualsvn-like.sh`.
+//!
+//! Kerberos single sign-on: with `OPENSVN_COMPAT_AUTH=negotiate` the tests answer no credential
+//! prompt at all and fail when one is shown; the server must accept the Kerberos ticket of the
+//! test process (`KRB5CCNAME`) through Negotiate. Build with `negotiate-gssapi` on macOS/Linux:
+//!
+//! ```text
+//! eval "$(scripts/test-env/visualsvn-like.sh env)"
+//! OPENSVN_COMPAT_AUTH=negotiate \
+//!   OPENSVN_COMPAT_LOCAL_URL=https://svn.opensvn.test:18443/svn-sso \
+//!   cargo test -p opensvn --features real-engine,negotiate-gssapi,engine-conformance \
+//!   --test real_engine_dav -- --ignored
+//! ```
+//!
+//! The authz case then writes its rules for the ticket's user (`OPENSVN_COMPAT_AUTHZ_USER`,
+//! default `alice` for Negotiate and `tester` for Basic).
 #![cfg(all(feature = "real-engine", feature = "engine-conformance"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -98,13 +117,42 @@ fn ca_path() -> PathBuf {
         )
 }
 
-/// Answers every credential request with the fixed test account; rejects unknown certificates
-/// (the server certificate must chain to the test CA).
+/// Single sign-on (`OPENSVN_COMPAT_AUTH=negotiate`): no prompt may be answered.
+fn negotiate_mode() -> bool {
+    std::env::var("OPENSVN_COMPAT_AUTH").is_ok_and(|v| v.eq_ignore_ascii_case("negotiate"))
+}
+
+/// User the server sees (authz rules are written for it).
+fn authz_user() -> String {
+    std::env::var("OPENSVN_COMPAT_AUTHZ_USER")
+        .unwrap_or_else(|_| if negotiate_mode() { "alice" } else { "tester" }.to_owned())
+}
+
+/// Credential prompts shown so far (all tests of the process).
+static PROMPTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Fails when single sign-on needed a prompt.
+fn assert_no_prompt() {
+    if negotiate_mode() {
+        let prompts = PROMPTS.lock().unwrap();
+        assert!(
+            prompts.is_empty(),
+            "SSO showed credential prompts: {prompts:?}"
+        );
+    }
+}
+
+/// Answers every credential request with the fixed test account (none in Negotiate mode);
+/// rejects unknown certificates (the server certificate must chain to the test CA).
 struct TesterPrompter;
 
 #[async_trait]
 impl AuthPrompter for TesterPrompter {
-    async fn credentials(&self, _req: &CredentialRequest) -> Option<Credentials> {
+    async fn credentials(&self, req: &CredentialRequest) -> Option<Credentials> {
+        PROMPTS.lock().unwrap().push(format!("{req:?}"));
+        if negotiate_mode() {
+            return None;
+        }
         Some(Credentials {
             username: "tester".into(),
             password: secrecy::SecretString::from("tester-pass".to_owned()),
@@ -223,7 +271,10 @@ impl Scratch {
                     c
                 }
                 Host::Local { repos, .. } => {
-                    let mut c = Command::new("svnadmin");
+                    let mut c = Command::new(
+                        std::env::var_os("OPENSVN_COMPAT_LOCAL_SVNADMIN")
+                            .unwrap_or_else(|| "svnadmin".into()),
+                    );
                     c.args(args).arg(repos.join(&name));
                     c
                 }
@@ -349,6 +400,7 @@ macro_rules! scenario {
                 eprintln!("{}: server {version}", stringify!($name));
                 conformance::$name(&harness(&host, stringify!($name))).await;
             }
+            assert_no_prompt();
         }
     };
 }
@@ -365,6 +417,8 @@ scenario!(switch_to_a_branch);
 scenario!(repository_content_tools);
 scenario!(open_recovers_dead_locks_and_reports_foreign_ones);
 scenario!(locked_unmodified_file_in_status);
+scenario!(needs_lock_unmodified_file_in_status);
+scenario!(lock_held_elsewhere_and_steal);
 scenario!(commit_with_auto_add_remove);
 scenario!(update_ends_in_conflict);
 scenario!(update_of_sub_paths);
@@ -414,6 +468,7 @@ async fn authz_denied_at_root_allowed_on_trunk() {
     };
     let h = harness(&host, "authz");
     let name = h.scratch.name.clone();
+    let user = authz_user();
     {
         let mut f = std::fs::OpenOptions::new()
             .append(true)
@@ -421,7 +476,7 @@ async fn authz_denied_at_root_allowed_on_trunk() {
             .expect("authz file");
         write!(
             f,
-            "\n[{name}:/]\ntester =\n\n[{name}:/trunk]\ntester = rw\n"
+            "\n[{name}:/]\n{user} =\n\n[{name}:/trunk]\n{user} = rw\n"
         )
         .unwrap();
     }
@@ -559,6 +614,7 @@ async fn authz_denied_at_root_allowed_on_trunk() {
         ErrorCode::Forbidden,
         "copy outside trunk: {err:?}"
     );
+    assert_no_prompt();
 }
 
 // ---- issue #111: commit below a switched subtree ----
@@ -667,5 +723,38 @@ async fn commit_with_changes_below_a_switched_subtree() {
                 .unwrap_or_else(|err| panic!("cat {path}: {err}"));
             assert_eq!(text.content, expected, "{path} at r{}", rev.0);
         }
+
+        // Changes below the switched subtree alone: the session is anchored at the branch,
+        // condensed over the items like svn.
+        h.write_file(&wc.root, "src/main.rs", "fn main() { again(); }\n")
+            .unwrap();
+        h.write_file(&wc.root, "src/new.rs", "fn new() {}\n")
+            .unwrap();
+        let rev = e
+            .commit(
+                &wc,
+                &CommitRequest {
+                    wc_id: wc.id.clone(),
+                    paths: vec!["src".into()],
+                    message: "Branch only".into(),
+                    keep_locks: false,
+                    auto_add_remove: true,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("switched-only commit");
+        for (path, expected) in [
+            ("branches/b/main.rs", "fn main() { again(); }\n"),
+            ("branches/b/new.rs", "fn new() {}\n"),
+            ("trunk/src/main.rs", "fn main() {}\n"),
+        ] {
+            let text = e
+                .repo_cat(&format!("{url}/{path}"), Some(rev), &ctx())
+                .await
+                .unwrap_or_else(|err| panic!("cat {path}: {err}"));
+            assert_eq!(text.content, expected, "{path} at r{}", rev.0);
+        }
     }
+    assert_no_prompt();
 }

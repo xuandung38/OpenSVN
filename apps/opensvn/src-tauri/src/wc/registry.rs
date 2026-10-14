@@ -1,10 +1,9 @@
 //! Registry of working copies: persisted list plus one [`WcActor`] per working copy.
 
+use opensvn_ipc::{AppError, BranchRef, ErrorCode, WcEntry, WcId, WorkingCopy};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-
-use opensvn_ipc::{AppError, ErrorCode, WcEntry, WcId, WorkingCopy};
 
 use super::actor::{RetryPolicy, WcActor};
 use crate::db::{AppDb, WcRow, now_iso};
@@ -116,14 +115,24 @@ impl WcRegistry {
         })
     }
 
-    async fn describe(&self, row: &WcRow) -> Result<WorkingCopy, AppError> {
+    /// Branch of the working copy at `url`, from the URL and the stored layout of the repository.
+    /// Local data only: listing working copies never waits on a server.
+    fn branch_of(&self, repo_uuid: &str, repo_root_url: &str, url: &str) -> Option<BranchRef> {
+        let layout = self.db.layout_get(repo_uuid).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "could not read the repository layout");
+            None
+        });
+        crate::layout::branch_from_url(repo_root_url, url, layout.as_ref())
+    }
+
+    /// What the engine reads from the working copy itself.
+    async fn info_of(&self, row: &WcRow) -> Result<WcInfo, AppError> {
         let wc = WcRef {
             id: WcId(row.id.clone()),
             root: PathBuf::from(&row.root_path),
         };
         let engine = Arc::clone(&self.engine);
-        let info: WcInfo = self
-            .actor_for(&row.root_path)
+        self.actor_for(&row.root_path)
             .read(|| {
                 let (engine, root) = (Arc::clone(&engine), wc.root.clone());
                 async move {
@@ -133,7 +142,12 @@ impl WcRegistry {
                         .map_err(|e| AppError::from(&e))
                 }
             })
-            .await?;
+            .await
+    }
+
+    async fn describe(&self, row: &WcRow) -> Result<WorkingCopy, AppError> {
+        let info = self.info_of(row).await?;
+        let branch = self.branch_of(&info.repo_uuid, &info.repo_root_url, &info.url);
         let live = self.live(&row.id);
         Ok(WorkingCopy {
             id: WcId(row.id.clone()),
@@ -146,7 +160,7 @@ impl WcRegistry {
             rev_range: info.rev_range,
             format: info.format,
             store_pristine: info.store_pristine,
-            branch: None,
+            branch,
             path_in_repo: info.path_in_repo,
             incoming: live.incoming,
             last_checked_at: live.last_checked_at,
@@ -172,8 +186,8 @@ impl WcRegistry {
     pub async fn entries(&self) -> Result<Vec<WcEntry>, AppError> {
         let mut out = Vec::new();
         for row in self.db.wc_list()? {
-            let (url, incomplete, problem) = match self.describe(&row).await {
-                Ok(wc) => (Some(wc.url), wc.incomplete, None),
+            let (url, incomplete, problem) = match self.info_of(&row).await {
+                Ok(info) => (Some(info.url), info.incomplete, None),
                 Err(e) => (None, false, Some(e.message)),
             };
             out.push(WcEntry {

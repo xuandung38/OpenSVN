@@ -33,6 +33,9 @@ pub struct StatusOptions {
     pub include_unversioned: bool,
     /// Report ignored items.
     pub include_ignored: bool,
+    /// Also report unmodified files that have `svn:needs-lock` (they are read-only until locked,
+    /// so a client lists them to offer "lock to edit"). `svn status` itself does not.
+    pub include_needs_lock: bool,
 }
 
 impl Default for StatusOptions {
@@ -42,6 +45,7 @@ impl Default for StatusOptions {
             show_unmodified: false,
             include_unversioned: true,
             include_ignored: false,
+            include_needs_lock: false,
         }
     }
 }
