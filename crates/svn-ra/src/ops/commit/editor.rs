@@ -2,7 +2,10 @@
 //!
 //! Directories are created (`MKCOL`/`COPY`) and entries deleted at once. File text is uploaded
 //! by background tasks (bounded), and property changes are collected and sent as one
-//! `PROPPATCH` when the node is closed, after the file's upload has finished.
+//! `PROPPATCH` when the node is closed. A closed file finishes in the background too (its
+//! upload, then its `PROPPATCH`), so the drive goes on with the next file while earlier ones are
+//! still on the wire; `close_edit` waits for all of them before the `MERGE`, and the first
+//! failure fails the commit before anything is merged.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -101,6 +104,9 @@ pub struct HttpCommitEditor {
     /// Session-relative paths deleted so far; mod_dav removes the lock of a deleted node itself.
     deleted: HashSet<RelPath>,
     slots: Arc<Semaphore>,
+    /// Closed files still finishing in the background (upload, then `PROPPATCH`), in close
+    /// order.
+    closing: Vec<Upload>,
     /// The edit ended (`close_edit` or `abort_edit` ran), or a `MERGE` was sent: `Drop` must not
     /// delete the transaction.
     settled: bool,
@@ -128,6 +134,7 @@ impl HttpCommitEditor {
             files: HashMap::new(),
             deleted: HashSet::new(),
             slots,
+            closing: Vec::new(),
             settled: false,
         }
     }
@@ -221,20 +228,17 @@ impl HttpCommitEditor {
         base_rev: Option<Revnum>,
         props: &[PropChange],
     ) -> Result<()> {
-        if props.is_empty() {
-            return Ok(());
-        }
-        let lock = self.lock_for(session_path).map(LockToken);
-        let req = proppatch_request(
-            self.wire.urls(),
+        let lock = self.lock_for(session_path);
+        send_proppatch(
+            &self.wire,
             &self.txn,
             repo_path,
             props,
             base_rev,
             lock,
-        )?;
-        let resp = self.wire.send_ok(req, &self.cancel).await?;
-        check_proppatch(&RaWire::read_small(resp, &self.cancel).await?)
+            &self.cancel,
+        )
+        .await
     }
 
     /// Deletes the transaction after a failure; its own failure must not hide the cause.
@@ -243,9 +247,25 @@ impl HttpCommitEditor {
         let _ = cleanup_txn(&self.wire, &self.txn).await;
     }
 
-    async fn finish_upload(&mut self, file: u32) -> Result<()> {
-        if let Some(up) = self.files.get_mut(&file).and_then(|f| f.upload.take()) {
-            up.finish().await?;
+    /// Collects the closed files that already finished, so a failure stops the drive early
+    /// and the list stays short.
+    async fn reap_closed(&mut self) -> Result<()> {
+        let mut pending = Vec::with_capacity(self.closing.len());
+        for task in std::mem::take(&mut self.closing) {
+            if task.0.is_finished() {
+                task.finish().await?;
+            } else {
+                pending.push(task);
+            }
+        }
+        self.closing = pending;
+        Ok(())
+    }
+
+    /// Waits until every closed file is on the server; the first failure is returned.
+    async fn wait_closed(&mut self) -> Result<()> {
+        for task in std::mem::take(&mut self.closing) {
+            task.finish().await?;
         }
         Ok(())
     }
@@ -259,6 +279,8 @@ impl HttpCommitEditor {
             )
             .into());
         }
+        self.wait_closed().await?;
+        self.cancel.check()?;
         let tokens = self.locks.clone();
         // The caller journals that the MERGE may be in flight; if it cannot, nothing is sent
         // and the transaction is deleted like any other failure before the MERGE.
@@ -414,8 +436,6 @@ impl CommitEditor for HttpCommitEditor {
         result_md5: Checksum,
     ) -> Result<()> {
         self.cancel.check()?;
-        // The text is sent as a full-text svndiff; the base only matters through its checksum.
-        let _ = base;
         let result_md5 = require_md5(&result_md5, "result checksum")?;
         let base_md5 = base_md5
             .as_ref()
@@ -439,6 +459,7 @@ impl CommitEditor for HttpCommitEditor {
             txn: self.txn.clone(),
             path: self.wire.repo_path(&path)?,
             target,
+            base,
             base_rev,
             base_md5,
             result_md5,
@@ -499,19 +520,33 @@ impl CommitEditor for HttpCommitEditor {
 
     async fn close_file(&mut self, file: FileId) -> Result<()> {
         self.cancel.check()?;
-        self.finish_upload(file.0).await?;
-        let state = self
+        let mut state = self
             .files
             .remove(&file.0)
             .ok_or_else(|| SvnError::new(ErrorCode::Internal, "close_file: unknown file"))?;
-        let repo = self.wire.repo_path(&state.path)?;
+        let upload = state.upload.take();
         // A new file without text still has to exist.
-        if state.added && !state.copied && !state.text_sent {
-            let lock = self.lock_for(&state.path).map(str::to_owned);
-            put_empty(&self.wire, &self.txn, &repo, lock.as_deref(), &self.cancel).await?;
+        let create_empty = state.added && !state.copied && !state.text_sent;
+        if upload.is_none() && !create_empty && state.props.is_empty() {
+            return Ok(());
         }
-        self.proppatch(&state.path, &repo, state.base_rev, &state.props)
-            .await
+        let job = CloseJob {
+            wire: self.wire.clone(),
+            txn: self.txn.clone(),
+            repo: self.wire.repo_path(&state.path)?,
+            base_rev: state.base_rev,
+            props: state.props,
+            create_empty,
+            lock: self.lock_for(&state.path).map(str::to_owned),
+            slots: Arc::clone(&self.slots),
+            cancel: self.cancel.clone(),
+        };
+        self.closing
+            .push(Upload(tokio::spawn(finish_file(upload, job))));
+        if self.closing.len() % 64 == 0 {
+            self.reap_closed().await?;
+        }
+        Ok(())
     }
 
     async fn close_directory(&mut self, dir: DirId) -> Result<()> {
@@ -560,6 +595,7 @@ impl CommitEditor for HttpCommitEditor {
     async fn abort_edit(mut self: Box<Self>) -> Result<()> {
         // Stop uploads first so nothing writes into the transaction while it is deleted.
         drop(std::mem::take(&mut self.files));
+        drop(std::mem::take(&mut self.closing));
         self.settled = true;
         cleanup_txn(&self.wire, &self.txn).await
     }
@@ -572,6 +608,7 @@ impl Drop for HttpCommitEditor {
         }
         // Uploads stop with their handles; then the transaction is deleted in the background.
         drop(std::mem::take(&mut self.files));
+        drop(std::mem::take(&mut self.closing));
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             let wire = self.wire.clone();
             let txn = self.txn.clone();
@@ -581,6 +618,80 @@ impl Drop for HttpCommitEditor {
             });
         }
     }
+}
+
+/// `PROPPATCH` of a node's collected property changes (nothing to send for none).
+async fn send_proppatch(
+    wire: &RaWire,
+    txn: &TxnName,
+    repo_path: &RelPath,
+    props: &[PropChange],
+    base_rev: Option<Revnum>,
+    lock: Option<&str>,
+    cancel: &CancelToken,
+) -> Result<()> {
+    if props.is_empty() {
+        return Ok(());
+    }
+    let req = proppatch_request(
+        wire.urls(),
+        txn,
+        repo_path,
+        props,
+        base_rev,
+        lock.map(LockToken),
+    )?;
+    let resp = wire.send_ok(req, cancel).await?;
+    check_proppatch(&RaWire::read_small(resp, cancel).await?)
+}
+
+/// What finishing a closed file needs; owned so it can run in the background.
+struct CloseJob {
+    wire: RaWire,
+    txn: TxnName,
+    /// Repository-relative path of the file.
+    repo: RelPath,
+    base_rev: Option<Revnum>,
+    props: Vec<PropChange>,
+    /// The file was added without text: create it empty.
+    create_empty: bool,
+    lock: Option<String>,
+    slots: Arc<Semaphore>,
+    cancel: CancelToken,
+}
+
+/// Finishes a closed file: waits for its upload, then creates it empty if it had no text, then
+/// sends its property changes. The requests of this step take an upload slot too, so the
+/// number of requests in flight stays bounded.
+async fn finish_file(upload: Option<Upload>, job: CloseJob) -> Result<()> {
+    if let Some(up) = upload {
+        up.finish().await?;
+    }
+    if !job.create_empty && job.props.is_empty() {
+        return Ok(());
+    }
+    let _slot = tokio::select! {
+        biased;
+        () = job.cancel.cancelled() => return job.cancel.check(),
+        p = job.slots.clone().acquire_owned() => p.map_err(|_| {
+            SvnError::new(ErrorCode::Internal, "upload scheduler closed")
+        })?,
+    };
+    job.cancel.check()?;
+    let lock = job.lock.as_deref();
+    if job.create_empty {
+        put_empty(&job.wire, &job.txn, &job.repo, lock, &job.cancel).await?;
+    }
+    send_proppatch(
+        &job.wire,
+        &job.txn,
+        &job.repo,
+        &job.props,
+        job.base_rev,
+        lock,
+        &job.cancel,
+    )
+    .await
 }
 
 /// A lock token as it may appear in an `If:` header (`opaquelocktoken:...`, no brackets,

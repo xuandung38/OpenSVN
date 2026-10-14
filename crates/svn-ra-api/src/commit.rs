@@ -131,7 +131,9 @@ pub trait CommitEditor: Send {
         rev: Option<Revnum>,
         parent: DirId,
     ) -> Result<()>;
-    /// Closes a file.
+    /// Closes a file. An implementation may finish the file (its upload and property changes)
+    /// in the background: a failure then surfaces from a later call, and from `close_edit` at
+    /// the latest, before anything is merged.
     async fn close_file(&mut self, file: FileId) -> Result<()>;
     /// Closes a directory.
     async fn close_directory(&mut self, dir: DirId) -> Result<()>;

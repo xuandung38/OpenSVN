@@ -1,5 +1,5 @@
-//! svndiff writer. Only full-text deltas are produced (every byte travels as new data), which is
-//! all a commit needs.
+//! svndiff writer: full-text windows, or any window built elsewhere (see
+//! [`crate::delta_window`]).
 
 use bytes::Bytes;
 use svn_types::{Result, TxDeltaWindow};
