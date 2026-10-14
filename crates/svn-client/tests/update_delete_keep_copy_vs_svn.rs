@@ -254,20 +254,51 @@ async fn incoming_delete_refuses_to_copy_a_server_excluded_node_like_svn() {
         "rows below d differ from svn"
     );
     assert_eq!(read(&ours.join("d/x.txt")), "x\nedited\n");
-    // The interrupted update leaves the root `incomplete` at the new revision, as svn does.
-    assert_eq!(
-        nodes_snapshot(&ours),
-        nodes_snapshot(&theirs),
-        "NODES rows differ"
-    );
-    assert_eq!(
-        svn_status(&oracle, &ours, &[]),
-        svn_status(&oracle, &theirs, &[]),
-        "svn status differs"
-    );
     assert_eq!(
         tree_snapshot(&ours),
         tree_snapshot(&theirs),
         "working files differ"
     );
+    // The root row is the one deliberate difference. svn has already committed the root as
+    // `incomplete` at r3 when the copy fails; our editor commits wc.db in batches
+    // (`update::batch`) and the failed batch rolls back whole, so the root stays at r1. Both
+    // resume on the next update, which the last step checks.
+    let not_root = |rows: Vec<String>| -> Vec<String> {
+        rows.into_iter().filter(|r| !r.starts_with('|')).collect()
+    };
+    assert_eq!(
+        not_root(nodes_snapshot(&ours)),
+        not_root(nodes_snapshot(&theirs)),
+        "NODES rows differ"
+    );
+    let ours_root = nodes_snapshot(&ours)[0].clone();
+    assert!(
+        ours_root.starts_with("|0|normal|dir|Some(1)|")
+            || ours_root.starts_with("|0|incomplete|dir|Some(3)|"),
+        "root row: {ours_root}"
+    );
+    let status_without_root = |wc: &Path| -> String {
+        svn_status(&oracle, wc, &[])
+            .lines()
+            .filter(|l| !l.ends_with(" ."))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        status_without_root(&ours),
+        status_without_root(&theirs),
+        "svn status differs"
+    );
+
+    // Once the user gives up the local edit, nothing needs a copy: both updates finish and
+    // delete `d`, the excluded node with it.
+    for wc in [&theirs, &ours] {
+        write(&wc.join("d/x.txt"), "x\n");
+    }
+    let (ok, err) = svn_update(&repo, &theirs, 3);
+    assert!(ok, "svn update after the revert failed: {err}");
+    our_update(&repo, &ours, 3)
+        .await
+        .expect("update after the revert");
+    assert_same(&oracle, &theirs, &ours, "after the revert");
 }
