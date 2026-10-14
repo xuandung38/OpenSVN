@@ -539,6 +539,24 @@ pub async fn working_copy_metadata_operations(h: &dyn Harness) {
         .expect("clear changelist");
     assert!(find(&status(h, &wc).await, "README.md").is_none());
 
+    // A line break would smuggle a second pattern into `svn:ignore`: refused in both scopes.
+    for scope in [IgnoreScope::SvnIgnore, IgnoreScope::Local] {
+        for pattern in ["*.tmp\n*", "a\rb"] {
+            e.ignore_add(
+                &wc,
+                &IgnoreAddRequest {
+                    wc_id: wc.id.clone(),
+                    pattern: pattern.into(),
+                    dir: String::new(),
+                    scope,
+                },
+                &ctx(),
+            )
+            .await
+            .expect_err("a pattern with a line break");
+        }
+    }
+
     h.write_file(&wc.root, "build.log", "x\n").expect("write");
     e.ignore_add(
         &wc,

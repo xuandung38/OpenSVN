@@ -699,8 +699,9 @@ async fn a_diff_against_a_revision_reads_the_left_side_from_the_repository() {
     assert_eq!(rows, vec![("x:k", Some("v"), None)]);
     let fake_diff = fake.diff(&fw, "README.md", Some(Rev(2))).await;
     assert_eq!(
-        (&diff.left, &diff.right),
-        (&fake_diff.left, &fake_diff.right)
+        (&diff.left, &diff.right, &diff.prop_changes),
+        (&fake_diff.left, &fake_diff.right, &fake_diff.prop_changes),
+        "both engines send the property rows of a diff against a revision"
     );
 
     // The binary decision uses the properties of the compared revision too.
