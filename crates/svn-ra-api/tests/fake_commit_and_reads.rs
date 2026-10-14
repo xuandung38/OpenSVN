@@ -1168,10 +1168,17 @@ async fn lost_merge_answers_and_checked_abort() {
     );
 
     // A failing DELETE (5xx) proves nothing either way and leaves the transactions alone.
-    s.fail_next_merge(FakeMergeFault::LostBeforeMerge);
-    commit_b(&s, Arc::new(Recorder::default()), "z")
+    let editor = s
+        .commit_editor(
+            "m",
+            &[],
+            &[],
+            false,
+            Arc::new(Recorder::default()),
+            &CancelToken::new(),
+        )
         .await
-        .expect_err("unknown");
+        .expect("editor");
     let open = s.open_txns();
     assert_eq!(open.len(), 1);
     s.fail_txn_deletes(Some("Transaction cleanup failed"));
@@ -1185,6 +1192,7 @@ async fn lost_merge_answers_and_checked_abort() {
         s.abort_txn_checked(&open[0], &c).await.expect("abort"),
         TxnAbort::Deleted
     );
+    drop(editor);
 }
 
 /// Observer whose "MERGE sent" record cannot be written.
