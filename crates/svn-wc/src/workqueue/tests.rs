@@ -242,16 +242,22 @@ impl MemQueue {
 }
 
 impl WorkQueueStore for MemQueue {
-    fn next_item(
+    fn next_items(
         &mut self,
-        completed: Option<u64>,
+        completed: &[u64],
         fileinfo: &[FileInfoRecord],
-    ) -> Result<Option<(u64, Vec<u8>)>, WorkQueueError> {
-        if let Some(id) = completed {
-            self.items.retain(|(i, _)| *i != id);
-        }
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(u64, Vec<u8>)>, WorkQueueError> {
+        self.items.retain(|(i, _)| !completed.contains(i));
         self.fileinfo.extend_from_slice(fileinfo);
-        Ok(self.items.first().cloned())
+        Ok(self
+            .items
+            .iter()
+            .filter(|(i, _)| after.is_none_or(|a| *i > a))
+            .take(limit)
+            .cloned()
+            .collect())
     }
 }
 
@@ -350,6 +356,7 @@ fn run(wc: &Wc, ops: &mut FakeOps, queue: &mut MemQueue) -> Result<usize, WorkQu
         wc_root: wc.dir.path().to_path_buf(),
         tz: &utc_offset_zero,
         cancelled: None,
+        defer_sync: true,
     };
     WorkQueueRunner::new(config, ops, &wc.pristine).run(queue)
 }
@@ -787,6 +794,7 @@ fn cancellation_stops_between_items() {
         wc_root: w.dir.path().to_path_buf(),
         tz: &utc_offset_zero,
         cancelled: Some(&cancel),
+        defer_sync: true,
     };
     let err = WorkQueueRunner::new(config, &mut ops, &w.pristine)
         .run(&mut q)

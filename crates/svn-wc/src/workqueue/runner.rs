@@ -36,17 +36,20 @@ pub struct FileInfoRecord {
 
 /// Persistent queue (the `WORK_QUEUE` table).
 ///
-/// **Crash idempotency contract:** `next_item` may be called again with the same `completed` id
-/// after a crash; deleting an already deleted item and re-storing the same file info must be
+/// **Crash idempotency contract:** `next_items` may be called again with the same `completed`
+/// ids after a crash; deleting an already deleted item and re-storing the same file info must be
 /// harmless.
 pub trait WorkQueueStore {
-    /// Atomically (one transaction) deletes the `completed` item, stores `fileinfo`, and returns
-    /// the next item by ascending id, or `None` when the queue is empty.
-    fn next_item(
+    /// Atomically (one transaction) deletes the `completed` items, stores `fileinfo`, and returns
+    /// up to `limit` of the remaining items with an id above `after` (all of them when `after` is
+    /// `None`) by ascending id. `limit` = 0 only completes.
+    fn next_items(
         &mut self,
-        completed: Option<u64>,
+        completed: &[u64],
         fileinfo: &[FileInfoRecord],
-    ) -> Result<Option<(u64, Vec<u8>)>, WorkQueueError>;
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(u64, Vec<u8>)>, WorkQueueError>;
 }
 
 /// What the runner needs to know about a node to install its file
@@ -152,6 +155,44 @@ impl<I: PristineIndex> PristineSource for PristineStore<I> {
     }
 }
 
+/// Work items that ran but whose completion is not committed yet; see
+/// [`WorkQueueRunner::run_unsettled`]. Their completion must commit only after their files are
+/// durable: after a [`sync_filesystem`](crate::durable::sync_filesystem) of the working copy
+/// started once they ran, plus a sync of each file in `elsewhere`, when `unsynced` is set.
+#[derive(Debug, Default)]
+pub struct Unsettled {
+    /// Queue ids, ascending.
+    pub ids: Vec<u64>,
+    /// Stat caches to store with the completion.
+    pub fileinfo: Vec<FileInfoRecord>,
+    /// Files written without their own sync on another device than the working copy root.
+    pub elsewhere: Vec<PathBuf>,
+    /// Some of the files were written without their own sync.
+    pub unsynced: bool,
+}
+
+impl Unsettled {
+    /// True when nothing waits for completion.
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty() && self.fileinfo.is_empty()
+    }
+
+    /// Makes the files durable (the barrier described on the type), on any thread.
+    pub fn sync(wc_root: &Path, unsynced: bool, elsewhere: &[PathBuf]) -> std::io::Result<()> {
+        if !unsynced {
+            return Ok(());
+        }
+        crate::durable::sync_filesystem(wc_root)?;
+        for path in elsewhere {
+            match crate::durable::sync_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Static configuration of a runner.
 pub struct RunnerConfig<'a> {
     /// Working copy root.
@@ -160,7 +201,14 @@ pub struct RunnerConfig<'a> {
     pub tz: UtcOffsetAt<'a>,
     /// Polled between items; returning `true` stops the run with [`ErrorCode::Cancelled`].
     pub cancelled: Option<&'a dyn Fn() -> bool>,
+    /// Install working files without one `fsync` each and run one
+    /// [`sync_filesystem`](crate::durable::sync_filesystem) barrier before their completion
+    /// commits instead. Ignored where [`BATCHED_SYNC`](crate::durable::BATCHED_SYNC) is false.
+    pub defer_sync: bool,
 }
+
+/// Items fetched per query and completed per transaction.
+const BATCH: usize = 4096;
 
 /// Executes the queue.
 pub struct WorkQueueRunner<'a> {
@@ -168,6 +216,16 @@ pub struct WorkQueueRunner<'a> {
     ops: &'a mut dyn WorkingCopyOps,
     pristine: &'a dyn PristineSource,
     pending_fileinfo: Vec<FileInfoRecord>,
+    /// `.svn/tmp`, created on first use.
+    tmp_dir: Option<PathBuf>,
+    /// Files were installed without their own sync since the last barrier.
+    unsynced: bool,
+    /// Unsynced files on another device than the working copy root (the barrier misses them).
+    unsynced_elsewhere: Vec<PathBuf>,
+    /// Device of the working copy root, once known.
+    root_dev: Option<Option<u64>>,
+    /// Last directory checked against `root_dev`, and whether the barrier covers it.
+    last_dir: Option<(PathBuf, bool)>,
 }
 
 impl<'a> WorkQueueRunner<'a> {
@@ -182,35 +240,174 @@ impl<'a> WorkQueueRunner<'a> {
             ops,
             pristine,
             pending_fileinfo: Vec::new(),
+            tmp_dir: None,
+            unsynced: false,
+            unsynced_elsewhere: Vec::new(),
+            root_dev: None,
+            last_dir: None,
         }
     }
 
     /// Runs items until the queue is empty and returns how many ran. A failing item stays in the
-    /// queue and the run stops with [`WorkQueueError::ItemFailed`].
+    /// queue and the run stops with [`WorkQueueError::ItemFailed`]; the items before it are
+    /// completed.
+    ///
+    /// Items that only depend on wc.db and the pristine store ([`WorkItem::is_self_contained`])
+    /// are completed together, up to [`BATCH`] per transaction: running such an item again after a
+    /// crash gives the same result whatever ran after it. Any other item is completed on its own
+    /// before the next item starts, exactly like svn's `wq_record_and_fetch_next` loop, because
+    /// it may consume what an earlier item needs (an install from a temp file and the removal of
+    /// that file). Before a completion commits, the files of the completed items are durable.
     pub fn run(&mut self, store: &mut dyn WorkQueueStore) -> Result<usize, WorkQueueError> {
+        self.run_with(store, Unsettled::default(), true)
+            .map(|(ran, _)| ran)
+    }
+
+    /// Like [`run`](Self::run), but the self-contained items that ran last are not completed:
+    /// they come back as [`Unsettled`] for the caller to complete in a later transaction of its
+    /// own, after a durability barrier that covers their files (the update editor folds them
+    /// into its next batch). `carried` are such items from an earlier run: they are completed
+    /// first when an item that must run on its own comes up, and returned again otherwise.
+    /// Until completed, the items stay queued, so a crash runs them again (they are
+    /// idempotent).
+    pub fn run_unsettled(
+        &mut self,
+        store: &mut dyn WorkQueueStore,
+        carried: Unsettled,
+    ) -> Result<(usize, Unsettled), WorkQueueError> {
+        self.run_with(store, carried, false)
+    }
+
+    fn run_with(
+        &mut self,
+        store: &mut dyn WorkQueueStore,
+        carried: Unsettled,
+        settle: bool,
+    ) -> Result<(usize, Unsettled), WorkQueueError> {
         let mut ran = 0;
-        let mut completed = None;
+        let mut done = carried.ids;
+        self.pending_fileinfo = carried.fileinfo;
+        self.unsynced |= carried.unsynced;
+        self.unsynced_elsewhere.extend(carried.elsewhere);
+        let mut after = done.iter().max().copied();
         loop {
-            let records = std::mem::take(&mut self.pending_fileinfo);
-            let next = store.next_item(completed, &records)?;
-            if let Some(cancel) = self.config.cancelled
-                && cancel()
-            {
-                return Err(SvnError::new(ErrorCode::Cancelled, "work queue run cancelled").into());
-            }
-            let Some((id, bytes)) = next else {
-                return Ok(ran);
+            let items = if settle {
+                self.barrier(&done)?;
+                let records = std::mem::take(&mut self.pending_fileinfo);
+                let items = store.next_items(&done, &records, after, BATCH)?;
+                done.clear();
+                items
+            } else {
+                store.next_items(&[], &[], after, BATCH)?
             };
-            let outcome = WorkItem::decode(&bytes).and_then(|item| self.execute(&item));
-            if let Err(source) = outcome {
-                return Err(WorkQueueError::ItemFailed {
-                    id,
-                    skel: String::from_utf8_lossy(&bytes).into_owned(),
-                    source: Box::new(source),
-                });
+            if items.is_empty() {
+                return Ok((
+                    ran,
+                    Unsettled {
+                        ids: done,
+                        fileinfo: std::mem::take(&mut self.pending_fileinfo),
+                        elsewhere: std::mem::take(&mut self.unsynced_elsewhere),
+                        unsynced: std::mem::take(&mut self.unsynced),
+                    },
+                ));
             }
-            completed = Some(id);
-            ran += 1;
+            for (id, bytes) in items {
+                if let Some(cancel) = self.config.cancelled
+                    && cancel()
+                {
+                    self.complete(store, &mut done)?;
+                    return Err(
+                        SvnError::new(ErrorCode::Cancelled, "work queue run cancelled").into(),
+                    );
+                }
+                let item = WorkItem::decode(&bytes);
+                let alone = !item.as_ref().is_ok_and(WorkItem::is_self_contained);
+                if alone {
+                    self.complete(store, &mut done)?;
+                }
+                if let Err(source) = item.and_then(|item| self.execute(&item)) {
+                    self.complete(store, &mut done)?;
+                    return Err(WorkQueueError::ItemFailed {
+                        id,
+                        skel: String::from_utf8_lossy(&bytes).into_owned(),
+                        source: Box::new(source),
+                    });
+                }
+                done.push(id);
+                after = Some(id);
+                ran += 1;
+                if alone {
+                    self.complete(store, &mut done)?;
+                }
+            }
+        }
+    }
+
+    /// Commits the completion of `done` (and the pending file info) after a durability barrier.
+    fn complete(
+        &mut self,
+        store: &mut dyn WorkQueueStore,
+        done: &mut Vec<u64>,
+    ) -> Result<(), WorkQueueError> {
+        if done.is_empty() && self.pending_fileinfo.is_empty() {
+            return Ok(());
+        }
+        self.barrier(done)?;
+        let records = std::mem::take(&mut self.pending_fileinfo);
+        store.next_items(done, &records, None, 0)?;
+        done.clear();
+        Ok(())
+    }
+
+    /// Makes the files installed without their own sync durable (one filesystem barrier), before
+    /// the completion of the items that wrote them commits.
+    fn barrier(&mut self, done: &[u64]) -> Result<(), WorkQueueError> {
+        if done.is_empty() || !self.unsynced {
+            return Ok(());
+        }
+        let root = &self.config.wc_root;
+        crate::durable::sync_filesystem(root).map_err(WorkQueueError::io("sync", root))?;
+        for path in std::mem::take(&mut self.unsynced_elsewhere) {
+            match crate::durable::sync_file(&path) {
+                Ok(()) => {}
+                // Removed again by a later item of the batch: nothing left to make durable.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(WorkQueueError::Io {
+                        op: "sync",
+                        path,
+                        source: e,
+                    });
+                }
+            }
+        }
+        self.unsynced = false;
+        Ok(())
+    }
+
+    /// Whether installs skip their own sync (a barrier follows).
+    fn deferring(&self) -> bool {
+        self.config.defer_sync && crate::durable::BATCHED_SYNC
+    }
+
+    /// Notes an installed file whose sync was deferred to the next barrier.
+    fn note_unsynced(&mut self, abs: &Path) {
+        self.unsynced = true;
+        let root_dev = *self
+            .root_dev
+            .get_or_insert_with(|| crate::durable::device_of(&self.config.wc_root));
+        let parent = abs.parent().unwrap_or(abs);
+        // Files arrive directory by directory: stat each directory once.
+        let covered = match &self.last_dir {
+            Some((dir, covered)) if dir == parent => *covered,
+            _ => {
+                let covered = root_dev.is_some() && crate::durable::device_of(parent) == root_dev;
+                self.last_dir = Some((parent.to_path_buf(), covered));
+                covered
+            }
+        };
+        if !covered {
+            self.unsynced_elsewhere.push(abs.to_path_buf());
         }
     }
 
@@ -234,9 +431,13 @@ impl<'a> WorkQueueRunner<'a> {
         resolve_operand(&self.config.wc_root, relpath, true)
     }
 
-    fn tmp_dir(&self) -> Result<PathBuf, WorkQueueError> {
+    fn tmp_dir(&mut self) -> Result<PathBuf, WorkQueueError> {
+        if let Some(dir) = &self.tmp_dir {
+            return Ok(dir.clone());
+        }
         let dir = self.config.wc_root.join(crate::db::ADM_DIR).join("tmp");
         fs::create_dir_all(&dir).map_err(WorkQueueError::io("create directory", &dir))?;
+        self.tmp_dir = Some(dir.clone());
         Ok(dir)
     }
 
@@ -364,7 +565,8 @@ impl<'a> WorkQueueRunner<'a> {
                 info.props.contains_key("svn:needs-lock") && !info.has_lock && !info.is_added;
             let executable = info.props.contains_key("svn:executable");
             let tmp_dir = self.tmp_dir()?;
-            write_atomically(&abs, &tmp_dir, reader.as_mut(), translator, |tmp| {
+            let defer = self.deferring();
+            write_atomically(&abs, &tmp_dir, reader.as_mut(), translator, !defer, |tmp| {
                 if let Some(m) = mtime {
                     set_mtime(tmp, m)?;
                 }
@@ -374,6 +576,9 @@ impl<'a> WorkQueueRunner<'a> {
                 }
                 Ok(())
             })?;
+            if defer {
+                self.note_unsynced(&abs);
+            }
         }
         if record_fileinfo && let Some(rec) = stat_record(relpath, &abs)? {
             self.pending_fileinfo.push(rec);
@@ -407,7 +612,7 @@ impl<'a> WorkQueueRunner<'a> {
             .parent()
             .map_or_else(|| self.config.wc_root.clone(), Path::to_path_buf);
         let src_perms = fs::metadata(&src_abs).ok().map(|m| m.permissions());
-        write_atomically(&dst_abs, &tmp_dir, &mut reader, translator, |tmp| {
+        write_atomically(&dst_abs, &tmp_dir, &mut reader, translator, true, |tmp| {
             if let Some(p) = &src_perms {
                 // Best effort, like svn_io_copy_perms.
                 let _ = fs::set_permissions(tmp, p.clone());
@@ -418,15 +623,18 @@ impl<'a> WorkQueueRunner<'a> {
 }
 
 /// Translates `reader` into a temp file in `tmp_dir`, lets `prepare` adjust it, and renames it
-/// over `dest`.
+/// over `dest`. `sync` = false leaves the sync to a later barrier (see [`crate::durable`]).
 fn write_atomically(
     dest: &Path,
     tmp_dir: &Path,
     reader: &mut dyn Read,
     translator: ContentTranslator,
+    sync: bool,
     prepare: impl FnOnce(&Path) -> Result<(), WorkQueueError>,
 ) -> Result<(), WorkQueueError> {
-    if let Some(parent) = dest.parent() {
+    if let Some(parent) = dest.parent()
+        && !parent.is_dir()
+    {
         fs::create_dir_all(parent).map_err(WorkQueueError::io("create directory", parent))?;
     }
     let mut tmp = tempfile::Builder::new()
@@ -434,12 +642,16 @@ fn write_atomically(
         .tempfile_in(tmp_dir)
         .map_err(WorkQueueError::io("create temp file in", tmp_dir))?;
     translate_stream(reader, &mut tmp, translator)?;
-    tmp.as_file()
-        .sync_all()
-        .map_err(WorkQueueError::io("sync", tmp.path()))?;
+    if sync {
+        tmp.as_file()
+            .sync_all()
+            .map_err(WorkQueueError::io("sync", tmp.path()))?;
+    }
     let tmp_path = tmp.into_temp_path();
     prepare(&tmp_path)?;
     rename_replacing(&tmp_path, dest)?;
+    // Renamed away: nothing left for the guard to delete.
+    let _ = tmp_path.keep();
     Ok(())
 }
 

@@ -5230,6 +5230,7 @@ dependencies = [
  "opensvn-svn-oracle",
  "proptest",
  "rusqlite",
+ "rustix",
  "sha1",
  "svn-diff",
  "svn-types",

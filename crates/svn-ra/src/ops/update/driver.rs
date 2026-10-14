@@ -216,7 +216,7 @@ pub async fn run_update(
     editor: Box<dyn DeltaEditor>,
     cancel: &CancelToken,
 ) -> Result<()> {
-    let handle = EditorWorker::spawn(editor, DEFAULT_COMMAND_CAPACITY);
+    let handle = EditorWorker::spawn_pipelined(editor, DEFAULT_COMMAND_CAPACITY);
     match drive(wire, req, report, &handle, cancel).await {
         Ok(()) => handle.close_edit().await,
         Err(e) => {

@@ -58,7 +58,8 @@ fn require_live_parent(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<
 /// Appends serialized work items to the queue in the caller's transaction.
 pub(crate) fn queue_work(conn: &Connection, items: &[Skel]) -> Result<()> {
     for item in items {
-        conn.execute(
+        super::connection::cached_exec(
+            conn,
             "INSERT INTO work_queue (work) VALUES (?1)",
             [item.unparse()],
         )
@@ -69,16 +70,19 @@ pub(crate) fn queue_work(conn: &Connection, items: &[Skel]) -> Result<()> {
 
 /// Returns `REPOSITORY.id` for `(root, uuid)`, inserting the row when missing.
 pub(crate) fn ensure_repository(conn: &Connection, root: &str, uuid: &str) -> Result<i64> {
-    let found: Option<i64> = conn
-        .query_row("SELECT id FROM repository WHERE root = ?1", [root], |r| {
-            r.get(0)
-        })
-        .optional()
-        .map_err(sql_err)?;
+    let found: Option<i64> = super::connection::cached_row(
+        conn,
+        "SELECT id FROM repository WHERE root = ?1",
+        [root],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(sql_err)?;
     if let Some(id) = found {
         return Ok(id);
     }
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         "INSERT INTO repository (root, uuid) VALUES (?1, ?2)",
         [root, uuid],
     )
@@ -134,7 +138,7 @@ pub(crate) fn base_add(conn: &Connection, wc_id: i64, path: &RelPath, n: &BaseNo
     let to_i64 = |v: u64| {
         i64::try_from(v).map_err(|_| SvnError::new(ErrorCode::Internal, "revision out of range"))
     };
-    conn.execute(
+    super::connection::cached_exec(conn,
         "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, repos_id, \
          repos_path, revision, presence, kind, depth, checksum, symlink_target, changed_revision, \
          changed_date, changed_author, translated_size, last_mod_time, properties, \
@@ -172,12 +176,14 @@ pub(crate) fn base_add(conn: &Connection, wc_id: i64, path: &RelPath, n: &BaseNo
 pub(crate) fn base_remove(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<()> {
     let scope = scope_sql();
     detach_moves(conn, wc_id, path, 0)?;
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         &format!("DELETE FROM nodes WHERE wc_id = ?1 AND {scope} AND op_depth = 0"),
         params![wc_id, path.as_str()],
     )
     .map_err(sql_err)?;
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         &format!(
             "DELETE FROM nodes WHERE wc_id = ?1 AND {scope} AND presence = 'base-deleted' \
              AND NOT EXISTS (SELECT 1 FROM nodes l WHERE l.wc_id = nodes.wc_id \
@@ -199,13 +205,13 @@ pub(crate) fn set_depth(conn: &Connection, wc_id: i64, path: &RelPath, depth: De
             "set_depth needs a concrete depth",
         ));
     }
-    let n = conn
-        .execute(
-            "UPDATE nodes SET depth = ?3 WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = 0 \
+    let n = super::connection::cached_exec(
+        conn,
+        "UPDATE nodes SET depth = ?3 WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = 0 \
              AND kind = 'dir'",
-            params![wc_id, path.as_str(), depth_word(depth)],
-        )
-        .map_err(sql_err)?;
+        params![wc_id, path.as_str(), depth_word(depth)],
+    )
+    .map_err(sql_err)?;
     if n == 0 {
         return Err(not_versioned(path));
     }
@@ -220,8 +226,7 @@ pub(crate) fn record_fileinfo(
     translated_size: Option<i64>,
     last_mod_time: Option<i64>,
 ) -> Result<()> {
-    let n = conn
-        .execute(
+    let n = super::connection::cached_exec(conn,
             "UPDATE nodes SET translated_size = ?3, last_mod_time = ?4 \
              WHERE wc_id = ?1 AND local_relpath = ?2 \
              AND op_depth = (SELECT MAX(op_depth) FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2)",
@@ -257,7 +262,8 @@ pub(crate) fn detach_moves(
     let scope = scope_sql();
     // Source side loses its destination: the delete layer vanishes, so clear nothing here;
     // destination side being removed: forget the source's moved_to pointing at it.
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         &format!(
             "UPDATE nodes SET moved_to = NULL WHERE wc_id = ?1 AND moved_to IN \
              (SELECT local_relpath FROM nodes WHERE wc_id = ?1 AND {scope} AND op_depth >= ?3 \
@@ -280,7 +286,8 @@ pub(crate) fn detach_moves(
         .map_err(sql_err)?;
     for dest in dests {
         let dest = nodes::rel(dest)?;
-        conn.execute(
+        super::connection::cached_exec(
+            conn,
             &format!(
                 "UPDATE nodes SET moved_here = NULL WHERE wc_id = ?1 AND op_depth = ?3 \
                  AND (local_relpath = ?2 OR {})",
@@ -315,7 +322,7 @@ pub(crate) fn op_add(
             format!("'{path}' is already under version control"),
         ));
     }
-    conn.execute(
+    super::connection::cached_exec(conn,
         "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, presence, \
          kind, depth, symlink_target, changed_date) VALUES (?1, ?2, ?3, ?4, 'normal', ?5, ?6, ?7, 0)",
         params![
@@ -353,13 +360,15 @@ pub(crate) fn op_delete(conn: &Connection, wc_id: i64, path: &RelPath) -> Result
     let scope = scope_sql();
     detach_moves(conn, wc_id, path, d)?;
     // Layers at or above the delete are subsumed by it (added files below, earlier deletes ...).
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         &format!("DELETE FROM nodes WHERE wc_id = ?1 AND {scope} AND op_depth >= ?3"),
         params![wc_id, path.as_str(), d],
     )
     .map_err(sql_err)?;
     // Whatever is still visible below becomes a base-deleted layer rooted here.
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         &format!(
             "INSERT INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, presence, kind) \
              SELECT wc_id, local_relpath, ?3, parent_relpath, 'base-deleted', kind FROM nodes AS n \
@@ -509,7 +518,8 @@ pub(crate) fn op_copy(
                 || node.repos_id != parent.repos_id
                 || node.repos_relpath.as_deref() != Some(expected.as_str())
             {
-                conn.execute(
+                super::connection::cached_exec(
+                    conn,
                     "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
                      repos_id, repos_path, revision, presence, kind) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'not-present', ?8)",
@@ -532,7 +542,8 @@ pub(crate) fn op_copy(
             layers.insert(p.target.as_str().to_owned(), (layer, node.clone()));
         }
         if node.presence == Presence::NotPresent {
-            conn.execute(
+            super::connection::cached_exec(
+                conn,
                 "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
                  repos_id, repos_path, revision, presence, kind, changed_date) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'not-present', ?8, 0)",
@@ -550,7 +561,7 @@ pub(crate) fn op_copy(
             .map_err(sql_err)?;
             continue;
         }
-        conn.execute(
+        super::connection::cached_exec(conn,
             "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, repos_id, \
              repos_path, revision, presence, depth, kind, changed_revision, changed_date, \
              changed_author, checksum, properties, symlink_target, moved_here, translated_size, \
@@ -583,7 +594,7 @@ pub(crate) fn op_copy(
         .map_err(sql_err)?;
         for del in &p.carried_deletes {
             let shifted = del.op_depth - src_depth + dst_depth;
-            conn.execute(
+            super::connection::cached_exec(conn,
                 "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, presence, kind, changed_date) \
                  VALUES (?1, ?2, ?3, ?4, 'base-deleted', ?5, 0)",
                 params![wc_id, p.target.as_str(), shifted, parent_text(&p.target), kind_word(del.kind)],
@@ -606,17 +617,18 @@ pub(crate) fn op_copy(
 /// plain local copy is a copy of it plus removal, like svn.
 pub(crate) fn op_move(conn: &Connection, wc_id: i64, src: &RelPath, dst: &RelPath) -> Result<()> {
     let d = relpath_depth(src);
-    let has_lower: bool = conn
-        .query_row(
-            "SELECT EXISTS (SELECT 1 FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+    let has_lower: bool = super::connection::cached_row(
+        conn,
+        "SELECT EXISTS (SELECT 1 FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
              AND op_depth < ?3 AND presence IN ('normal', 'incomplete'))",
-            params![wc_id, src.as_str(), d],
-            |r| r.get(0),
-        )
-        .map_err(sql_err)?;
+        params![wc_id, src.as_str(), d],
+        |r| r.get(0),
+    )
+    .map_err(sql_err)?;
     op_copy(conn, wc_id, src, dst, has_lower)?;
     op_delete(conn, wc_id, src)?;
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         "UPDATE nodes SET moved_to = ?3 WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = ?4 \
          AND presence = 'base-deleted'",
         params![wc_id, src.as_str(), dst.as_str(), d],
@@ -651,8 +663,7 @@ pub(crate) fn op_revert(
             ));
         }
         if !recursive {
-            let nested: bool = conn
-                .query_row(
+            let nested: bool = super::connection::cached_row(conn,
                     &format!(
                         "SELECT EXISTS (SELECT 1 FROM nodes WHERE wc_id = ?1 AND {sub} AND op_depth > ?3)"
                     ),
@@ -669,7 +680,8 @@ pub(crate) fn op_revert(
             }
         }
         detach_moves(conn, wc_id, path, d)?;
-        conn.execute(
+        super::connection::cached_exec(
+            conn,
             &format!("DELETE FROM nodes WHERE wc_id = ?1 AND {scope} AND op_depth >= ?3"),
             params![wc_id, path.as_str(), d],
         )
@@ -681,7 +693,8 @@ pub(crate) fn op_revert(
         // The node itself is unchanged BASE; every working layer below it belongs to an
         // operation rooted inside the subtree.
         detach_moves(conn, wc_id, path, 1)?;
-        conn.execute(
+        super::connection::cached_exec(
+            conn,
             &format!("DELETE FROM nodes WHERE wc_id = ?1 AND {scope} AND op_depth > 0"),
             params![wc_id, path.as_str()],
         )
@@ -803,13 +816,15 @@ pub(crate) fn commit_node(
         let base = read_base(conn, wc_id, path)?;
         let scope = scope_sql();
         detach_moves(conn, wc_id, path, 0)?;
-        conn.execute(
+        super::connection::cached_exec(
+            conn,
             &format!("DELETE FROM nodes WHERE wc_id = ?1 AND {scope}"),
             params![wc_id, path.as_str()],
         )
         .map_err(sql_err)?;
         if let Some(b) = base {
-            conn.execute(
+            super::connection::cached_exec(
+                conn,
                 "INSERT INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, repos_id, \
                  repos_path, revision, presence, kind, changed_date) \
                  VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, 'not-present', ?7, 0)",
@@ -846,7 +861,8 @@ pub(crate) fn commit_node(
     let checksum = info.checksum.clone().or_else(|| cur.checksum.clone());
     let (author, date) = (info.author.clone(), info.date);
     if cur.op_depth == 0 {
-        conn.execute(
+        super::connection::cached_exec(
+            conn,
             "UPDATE nodes SET revision = ?3, changed_revision = ?3, changed_date = ?4, \
              changed_author = ?5, checksum = ?6, properties = ?7, translated_size = ?8, \
              last_mod_time = ?9 WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = 0",
@@ -895,7 +911,8 @@ pub(crate) fn commit_node(
         // for their own commit.
         if read_base(conn, wc_id, path)?.is_some() {
             detach_moves(conn, wc_id, path, 0)?;
-            conn.execute(
+            super::connection::cached_exec(
+                conn,
                 &format!(
                     "DELETE FROM nodes WHERE wc_id = ?1 AND {} AND op_depth = 0",
                     scope_sql()
@@ -903,7 +920,7 @@ pub(crate) fn commit_node(
                 params![wc_id, path.as_str()],
             )
             .map_err(sql_err)?;
-            conn.execute(
+            super::connection::cached_exec(conn,
                 &format!(
                     "DELETE FROM nodes WHERE wc_id = ?1 AND {} AND presence = 'base-deleted' AND op_depth = ?3",
                     scope_sql()
@@ -948,7 +965,7 @@ pub(crate) fn commit_node(
                     node.changed_author.clone(),
                 )
             };
-            conn.execute(
+            super::connection::cached_exec(conn,
                 "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, repos_id, \
                  repos_path, revision, presence, kind, depth, checksum, symlink_target, changed_revision, \
                  changed_date, changed_author, translated_size, last_mod_time, properties) \
@@ -985,7 +1002,8 @@ pub(crate) fn commit_node(
                 .strip_prefix(path.as_str())
                 .unwrap_or("")
                 .trim_start_matches('/');
-            conn.execute(
+            super::connection::cached_exec(
+                conn,
                 "DELETE FROM nodes WHERE wc_id = ?1 AND op_depth = 0 \
                  AND (local_relpath = ?2 OR local_relpath LIKE ?2 || '/%' ESCAPE '\\')",
                 params![
@@ -996,7 +1014,7 @@ pub(crate) fn commit_node(
                 ],
             )
             .map_err(sql_err)?;
-            conn.execute(
+            super::connection::cached_exec(conn,
                 "INSERT INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, repos_id, repos_path, \
                  revision, presence, kind, changed_date) VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, 'not-present', ?7, 0)",
                 params![
@@ -1006,13 +1024,13 @@ pub(crate) fn commit_node(
             )
             .map_err(sql_err)?;
         }
-        conn.execute(
+        super::connection::cached_exec(conn,
             &format!("DELETE FROM nodes WHERE wc_id = ?1 AND {scope} AND presence = 'base-deleted' AND op_depth > ?3"),
             params![wc_id, path.as_str(), cur.op_depth],
         )
         .map_err(sql_err)?;
         detach_moves(conn, wc_id, path, cur.op_depth)?;
-        conn.execute(
+        super::connection::cached_exec(conn,
             &format!("DELETE FROM nodes WHERE wc_id = ?1 AND {scope} AND op_depth = ?3 AND presence IN ('normal', 'incomplete')"),
             params![wc_id, path.as_str(), cur.op_depth],
         )

@@ -36,7 +36,8 @@ const ALL_EMPTY: &str = "properties IS NULL AND conflict_old IS NULL AND conflic
     AND older_checksum IS NULL AND left_checksum IS NULL AND right_checksum IS NULL";
 
 fn ensure_row(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<()> {
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         "INSERT OR IGNORE INTO actual_node (wc_id, local_relpath, parent_relpath) \
          VALUES (?1, ?2, ?3)",
         params![wc_id, path.as_str(), parent_text(path)],
@@ -47,7 +48,8 @@ fn ensure_row(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<()> {
 
 /// Deletes the row of `path` when nothing is recorded in it any more.
 pub(crate) fn prune(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<()> {
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         &format!("DELETE FROM actual_node WHERE wc_id = ?1 AND local_relpath = ?2 AND {ALL_EMPTY}"),
         params![wc_id, path.as_str()],
     )
@@ -57,14 +59,14 @@ pub(crate) fn prune(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<()>
 
 /// Locally modified properties, or `None` when the row holds no property change.
 pub(crate) fn read_props(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<Option<Props>> {
-    let blob: Option<Option<Vec<u8>>> = conn
-        .query_row(
-            "SELECT properties FROM actual_node WHERE wc_id = ?1 AND local_relpath = ?2",
-            params![wc_id, path.as_str()],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(sql_err)?;
+    let blob: Option<Option<Vec<u8>>> = super::connection::cached_row(
+        conn,
+        "SELECT properties FROM actual_node WHERE wc_id = ?1 AND local_relpath = ?2",
+        params![wc_id, path.as_str()],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(sql_err)?;
     blob.flatten().as_deref().map(decode_props).transpose()
 }
 
@@ -79,14 +81,16 @@ pub(crate) fn write_props(
     match props {
         Some(p) => {
             ensure_row(conn, wc_id, path)?;
-            conn.execute(
+            super::connection::cached_exec(
+                conn,
                 "UPDATE actual_node SET properties = ?3 WHERE wc_id = ?1 AND local_relpath = ?2",
                 params![wc_id, path.as_str(), encode_props(p)],
             )
             .map_err(sql_err)?;
         }
         None => {
-            conn.execute(
+            super::connection::cached_exec(
+                conn,
                 "UPDATE actual_node SET properties = NULL WHERE wc_id = ?1 AND local_relpath = ?2",
                 params![wc_id, path.as_str()],
             )
@@ -102,14 +106,14 @@ pub(crate) fn read_changelist(
     wc_id: i64,
     path: &RelPath,
 ) -> Result<Option<String>> {
-    let v: Option<Option<String>> = conn
-        .query_row(
-            "SELECT changelist FROM actual_node WHERE wc_id = ?1 AND local_relpath = ?2",
-            params![wc_id, path.as_str()],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(sql_err)?;
+    let v: Option<Option<String>> = super::connection::cached_row(
+        conn,
+        "SELECT changelist FROM actual_node WHERE wc_id = ?1 AND local_relpath = ?2",
+        params![wc_id, path.as_str()],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(sql_err)?;
     Ok(v.flatten())
 }
 
@@ -122,7 +126,8 @@ pub(crate) fn write_changelist(
     if name.is_some() {
         ensure_row(conn, wc_id, path)?;
     }
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         "UPDATE actual_node SET changelist = ?3 WHERE wc_id = ?1 AND local_relpath = ?2",
         params![wc_id, path.as_str(), name],
     )
@@ -141,15 +146,15 @@ pub(crate) fn read_conflict(
         Option<String>,
         Option<String>,
     );
-    let row: Option<Cols> = conn
-        .query_row(
-            "SELECT conflict_data, older_checksum, left_checksum, right_checksum \
+    let row: Option<Cols> = super::connection::cached_row(
+        conn,
+        "SELECT conflict_data, older_checksum, left_checksum, right_checksum \
              FROM actual_node WHERE wc_id = ?1 AND local_relpath = ?2",
-            params![wc_id, path.as_str()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()
-        .map_err(sql_err)?;
+        params![wc_id, path.as_str()],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )
+    .optional()
+    .map_err(sql_err)?;
     match row {
         Some((Some(blob), older, left, right)) => Ok(Some(ConflictRecord {
             skel: Skel::parse(&blob)?,
@@ -166,7 +171,8 @@ pub(crate) fn write_conflict(
     record: &ConflictRecord,
 ) -> Result<()> {
     ensure_row(conn, wc_id, path)?;
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         "UPDATE actual_node SET conflict_data = ?3, older_checksum = ?4, left_checksum = ?5, \
          right_checksum = ?6 WHERE wc_id = ?1 AND local_relpath = ?2",
         params![
@@ -190,7 +196,8 @@ pub(crate) fn write_conflict_data(
     skel: &Skel,
 ) -> Result<()> {
     ensure_row(conn, wc_id, path)?;
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         "UPDATE actual_node SET conflict_data = ?3 WHERE wc_id = ?1 AND local_relpath = ?2",
         params![wc_id, path.as_str(), skel.unparse()],
     )
@@ -200,7 +207,8 @@ pub(crate) fn write_conflict_data(
 
 /// Clears every conflict column of `path`.
 pub(crate) fn clear_conflict(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<()> {
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         "UPDATE actual_node SET conflict_data = NULL, older_checksum = NULL, left_checksum = NULL, \
          right_checksum = NULL, conflict_old = NULL, conflict_new = NULL, conflict_working = NULL, \
          prop_reject = NULL, tree_conflict_data = NULL WHERE wc_id = ?1 AND local_relpath = ?2",
@@ -224,7 +232,8 @@ pub(crate) fn clear_modifications(
     } else {
         "local_relpath = ?2".to_owned()
     };
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         &format!(
             "UPDATE actual_node SET properties = NULL, text_mod = NULL, conflict_data = NULL, \
              older_checksum = NULL, left_checksum = NULL, right_checksum = NULL, \
@@ -234,7 +243,8 @@ pub(crate) fn clear_modifications(
         params![wc_id, path.as_str()],
     )
     .map_err(sql_err)?;
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         &format!("DELETE FROM actual_node WHERE wc_id = ?1 AND {scope} AND {ALL_EMPTY}"),
         params![wc_id, path.as_str()],
     )
@@ -246,7 +256,8 @@ pub(crate) fn clear_modifications(
 /// conflict.
 pub(crate) fn drop_orphans(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<()> {
     let sub = super::nodes::strict_descendant("local_relpath", "?2");
-    conn.execute(
+    super::connection::cached_exec(
+        conn,
         &format!(
             "DELETE FROM actual_node WHERE wc_id = ?1 AND (local_relpath = ?2 OR {sub}) \
              AND conflict_data IS NULL AND tree_conflict_data IS NULL \

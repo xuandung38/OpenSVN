@@ -3,7 +3,7 @@
 use std::fs;
 
 use svn_types::{Depth, NodeKind, RelPath, Result, SvnError};
-use svn_wc::db::{Presence, WcDb};
+use svn_wc::db::{Node, Presence, WcDb};
 use svn_wc::skel::Skel;
 use svn_wc::workqueue::WorkItem;
 
@@ -11,15 +11,13 @@ use crate::wc::abs_path;
 
 fn walk(
     db: &WcDb,
-    rel: &RelPath,
+    node: &Node,
     depth: Depth,
     use_commit_times: bool,
     items: &mut Vec<Skel>,
     restored: &mut Vec<(RelPath, NodeKind)>,
 ) -> Result<()> {
-    let Some(node) = db.read_node(rel)? else {
-        return Ok(());
-    };
+    let rel = &node.relpath;
     // Only plain BASE nodes: scheduled deletes, additions and copies are the user's business.
     if node.op_depth != 0 || node.presence != Presence::Normal {
         return Ok(());
@@ -63,7 +61,8 @@ fn walk(
                 Depth::Files | Depth::Immediates => Depth::Empty,
                 d => d,
             };
-            for child in db.children(rel)? {
+            // One query per directory instead of one per child.
+            for child in db.current_children(rel)? {
                 walk(db, &child, below, use_commit_times, items, restored)?;
             }
         }
@@ -83,7 +82,16 @@ pub fn queue_missing(
 ) -> Result<Vec<(RelPath, NodeKind)>> {
     let mut items = Vec::new();
     let mut restored = Vec::new();
-    walk(db, root, depth, use_commit_times, &mut items, &mut restored)?;
+    if let Some(node) = db.read_node(root)? {
+        walk(
+            db,
+            &node,
+            depth,
+            use_commit_times,
+            &mut items,
+            &mut restored,
+        )?;
+    }
     if !items.is_empty() {
         db.queue_work(&items)?;
     }

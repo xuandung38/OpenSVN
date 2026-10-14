@@ -89,6 +89,8 @@ pub fn open_connection(path: &Path, mode: OpenMode) -> Result<Connection> {
     };
     let conn = Connection::open_with_flags(path, flags).map_err(sql_err)?;
     conn.busy_timeout(BUSY_TIMEOUT).map_err(sql_err)?;
+    // Room for every hot statement of a drive (see `cached_row`); rusqlite keeps 16 by default.
+    conn.set_prepared_statement_cache_capacity(128);
     apply_pragmas(&conn, mode != OpenMode::ReadOnly)?;
     register_functions(&conn)?;
     Ok(conn)
@@ -143,4 +145,28 @@ fn register_functions(conn: &Connection) -> Result<()> {
         },
     )
     .map_err(sql_err)
+}
+
+/// `conn.query_row` through the prepared statement cache: hot statements of an update or
+/// checkout run tens of thousands of times, and parsing them each time showed up in profiles.
+pub(crate) fn cached_row<T, P, F>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+    f: F,
+) -> rusqlite::Result<T>
+where
+    P: rusqlite::Params,
+    F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+{
+    conn.prepare_cached(sql)?.query_row(params, f)
+}
+
+/// `conn.execute` through the prepared statement cache (see [`cached_row`]).
+pub(crate) fn cached_exec<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> rusqlite::Result<usize> {
+    conn.prepare_cached(sql)?.execute(params)
 }

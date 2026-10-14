@@ -30,6 +30,19 @@ pub fn run_work_queue(db: &WcDb, cancel: &CancelToken) -> Result<usize> {
     db.run_work_queue_with(&mut ops, Some(&cancelled))
 }
 
+/// [`run_work_queue`] that leaves the completion of the self-contained items to the caller
+/// (see [`WcDb::run_work_queue_unsettled`]); `carried` are such items from an earlier run.
+pub fn run_work_queue_unsettled(
+    db: &WcDb,
+    cancel: &CancelToken,
+    carried: svn_wc::workqueue::Unsettled,
+) -> Result<svn_wc::workqueue::Unsettled> {
+    let cancelled = || cancel.is_cancelled();
+    let mut ops = DbWorkingCopyOps::new(db).with_file_commit(file_commit_fixup);
+    db.run_work_queue_unsettled(&mut ops, Some(&cancelled), carried)
+        .map(|(_, unsettled)| unsettled)
+}
+
 /// Serializes `items` for the `WcDb` writers that queue work in their own transaction.
 pub fn skels(items: &[WorkItem]) -> Vec<Skel> {
     items.iter().map(WorkItem::to_skel).collect()

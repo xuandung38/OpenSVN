@@ -83,6 +83,9 @@ pub struct DirState {
     pub wc: RelPath,
     /// Directory is new.
     pub added: bool,
+    /// Added by this drive (not a resumed one) and not skipped: wc.db holds nothing below it
+    /// yet, so its children need no lookups.
+    pub fresh: bool,
     /// Directory lies in the part of the tree being updated (not just on the way to it).
     pub in_target: bool,
     /// Ignore every change below (conflict or obstruction).
@@ -121,6 +124,8 @@ pub struct NewText {
     pub md5: [u8; 16],
     /// SHA-1 of the text.
     pub sha1: [u8; 20],
+    /// Size of the text in bytes.
+    pub size: u64,
 }
 
 /// Slot a text sink fills when its delta ends.

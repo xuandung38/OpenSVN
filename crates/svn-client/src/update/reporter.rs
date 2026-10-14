@@ -1,6 +1,7 @@
 //! Builds the working copy report (`set_path` / `delete_path` / `link_path`) that precedes an
 //! update, switch or status drive.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use svn_ra_api::ReportFn;
@@ -10,12 +11,11 @@ use svn_wc::db::{Node, Presence, WcDb};
 use super::editor::repos_child;
 use crate::wc::join_rel;
 
-fn lock_token(db: &WcDb, wc: &RelPath) -> Result<Option<String>> {
-    Ok(db.repos_lock(wc)?.map(|l| l.token))
-}
-
 struct Ctx<'a> {
     db: &'a WcDb,
+    /// Lock tokens of the BASE nodes of the reported tree, read once (one query instead of one
+    /// per file).
+    locks: HashMap<RelPath, String>,
     anchor: &'a RelPath,
     root_url: RepoUrl,
     /// `--set-depth`: excluded nodes are reported as missing so the server sends them again
@@ -45,7 +45,7 @@ impl Ctx<'_> {
         let rev = Revnum(node.revision.unwrap_or(0));
         let start_empty = node.presence == Presence::Incomplete;
         let token = if node.kind == NodeKind::File {
-            lock_token(self.db, wc)?
+            self.locks.get(wc).cloned()
         } else {
             None
         };
@@ -85,10 +85,9 @@ impl Ctx<'_> {
     ) -> Result<()> {
         let recursive = matches!(depth, Depth::Infinity | Depth::Unknown);
         let dir_repos = dir.repos_relpath.clone().unwrap_or_default();
-        for child in self.db.children(wc)? {
-            let Some(node) = self.db.read_base(&child)? else {
-                continue;
-            };
+        // One query per directory, like svn's crawler (`svn_wc__db_base_get_children_info`).
+        for node in self.db.base_children(wc)? {
+            let child = node.relpath.clone();
             let name = child.file_name().unwrap_or("");
             let child_report = join_rel(report_path, &RelPath::new(name)?)?;
             match node.presence {
@@ -181,8 +180,14 @@ pub fn build_report(
                 format!("'{target_wc}' is not under version control"),
             )
         })?;
+        let locks = db
+            .repos_locks_below(&target_wc)?
+            .into_iter()
+            .map(|(path, _, lock)| (path, lock.token))
+            .collect();
         let ctx = Ctx {
             db: &db,
+            locks,
             anchor: &anchor,
             root_url: RepoUrl::parse(&repos_root)?,
             sticky,

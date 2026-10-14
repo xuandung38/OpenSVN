@@ -387,6 +387,63 @@ impl<I: PristineIndex> PristineStore<I> {
         Ok(record)
     }
 
+    /// Moves an already hashed text file into the store **without recording its row**, and
+    /// returns whether the store already held the text (the file is then dropped).
+    ///
+    /// For callers that computed `record` while writing `file` (the update editor hashes the
+    /// delta result as it applies it), so the text is neither copied nor hashed again. The caller
+    /// must record the row ([`crate::db::WcTxn::record_pristine`]) in the transaction that
+    /// references the text, and, when `sync` is false, run [`crate::durable::sync_filesystem`]
+    /// on the administrative directory before that transaction commits. A crash before the
+    /// commit leaves an orphan file, which the next install of the same text overwrites.
+    ///
+    /// `sync` = true syncs the file and its directory entry here (the [`install`](Self::install)
+    /// behaviour); pass `!`[`crate::durable::BATCHED_SYNC`] unless a barrier follows.
+    ///
+    /// Requires the WC write lock; see the module documentation.
+    pub fn place(
+        &mut self,
+        file: tempfile::TempPath,
+        record: &PristineRecord,
+        sync: bool,
+    ) -> Result<bool, PristineError> {
+        self.require_writable()?;
+        match self.index.lookup(&record.sha1)? {
+            Some(row) if row.hydrated => return Ok(true),
+            Some(_) => return Err(PristineError::RehydrateUnsupported(record.sha1)),
+            None => {}
+        }
+        if sync {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&file)
+                .and_then(|f| f.sync_all())
+                .map_err(PristineError::io("sync", &file))?;
+        }
+        let dest = self.path_of(&record.sha1);
+        let parent = dest.parent().unwrap_or(&self.adm_dir);
+        if !parent.is_dir() {
+            fs::create_dir_all(parent).map_err(PristineError::io("create directory", parent))?;
+        }
+        #[cfg(feature = "failpoints")]
+        fail::fail_point!("pristine.install.before_rename", |_| Err(
+            PristineError::index("failpoint pristine.install.before_rename")
+        ));
+        rename_replacing(&file, &dest)?;
+        // The rename consumed the temp file; do not let the guard remove the stored text.
+        let _ = file.keep();
+        let mut perms = fs::metadata(&dest)
+            .map_err(PristineError::io("stat", &dest))?
+            .permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&dest, perms)
+            .map_err(PristineError::io("set permissions of", &dest))?;
+        if sync {
+            sync_dir(parent)?;
+        }
+        Ok(false)
+    }
+
     /// Opens the stored text for reading. Fails with [`PristineError::NotHydrated`] when the row says the
     /// text was dropped, and [`PristineError::NotInstalled`] when row or file is missing.
     pub fn open_text(&self, sha1: &Sha1Digest) -> Result<File, PristineError> {
