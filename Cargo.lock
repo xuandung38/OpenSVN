@@ -3551,6 +3551,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "md-5",
  "notify",
  "opensvn-ipc",
@@ -3571,6 +3572,7 @@ dependencies = [
  "svn-client",
  "svn-delta",
  "svn-diff",
+ "svn-protocol",
  "svn-ra",
  "svn-ra-api",
  "svn-types",
@@ -3589,8 +3591,19 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "opensvn-bench"
+version = "0.0.0"
+dependencies = [
+ "opensvn-crash",
+ "svn-types",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -3603,6 +3616,23 @@ dependencies = [
  "serde-saphyr",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "opensvn-crash"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "fail",
+ "opensvn-svn-oracle",
+ "rusqlite",
+ "svn-client",
+ "svn-ra",
+ "svn-ra-api",
+ "svn-types",
+ "svn-wc",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

@@ -40,7 +40,7 @@ use svn_types::{Depth, ErrorCode, RelPath, Result, SvnError};
 pub use actual::{ConflictRecord, ConflictTexts};
 pub use bindings::{DbPristineIndex, DbWorkQueue, DbWorkingCopyOps, FileCommitFn};
 pub use connection::{BUSY_TIMEOUT, OpenMode, open_connection, open_existing, sql_err};
-pub use externals::External;
+pub use externals::{External, NewExternal};
 pub use mark_move::MarkMove;
 pub use misc::LockInfo;
 pub use node_api::FileInfo;

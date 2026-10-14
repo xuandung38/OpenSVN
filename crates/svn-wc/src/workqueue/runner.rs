@@ -496,7 +496,7 @@ fn move_file(src: &Path, dst: &Path) -> Result<(), WorkQueueError> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn copy_then_remove_for_tests(src: &Path, dst: &Path) -> Result<(), WorkQueueError> {
     copy_then_remove(src, dst)
 }
