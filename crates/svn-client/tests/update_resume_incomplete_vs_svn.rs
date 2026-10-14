@@ -199,6 +199,9 @@ async fn our_update(repo: &Repo, wc: &Path, rev: u64) {
     .unwrap_or_else(|e| panic!("update to r{rev}: {e}"));
 }
 
+/// A local change made before the interruption.
+type Local = fn(&Path);
+
 fn untouched(_: &Path) {}
 
 #[cfg(unix)]
@@ -217,7 +220,7 @@ async fn resumed_update_matches_svn() {
     let repo = Repo::new(&oracle);
     build(&repo);
     let sb = Sandbox::new();
-    let mut cases: Vec<(&str, fn(&Path))> = vec![("plain", untouched), ("edited", edited)];
+    let mut cases: Vec<(&str, Local)> = vec![("plain", untouched), ("edited", edited)];
     #[cfg(unix)]
     cases.push(("link", dangling_link));
     for (name, local) in cases {

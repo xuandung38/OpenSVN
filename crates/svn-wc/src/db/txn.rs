@@ -441,6 +441,19 @@ impl WcTxn<'_> {
         last_op_depth: u32,
         mut shadowed: bool,
     ) -> Result<()> {
+        let presence: String = self
+            .conn
+            .query_row(
+                "SELECT presence FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+                 AND op_depth = 0",
+                params![self.wc_id, path.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+        if presence == "server-excluded" {
+            // Never part of a copy (svn refuses the whole copy); it just goes with BASE.
+            return Ok(());
+        }
         let mut op_depth = relpath_depth(path);
         let mut have_row = false;
         if last_op_depth != op_depth {
