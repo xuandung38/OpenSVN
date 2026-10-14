@@ -1,9 +1,12 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { beforeAll, expect, test, vi } from "vitest";
+import type { WorkingCopy } from "../../../ipc/bindings";
 import { mockCalls } from "../../../ipc/mock/adapter";
+import { mockWorkingCopies } from "../../../ipc/mock/data";
 import { MOCK_REPO_ROOT, MOCK_REPO_UUID } from "../../../ipc/mock/remote-data";
 import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../../test-utils";
 import { type LayoutContext, parseRevision, projectRootOf, refContainerUrl } from "./branch-model";
+import { BranchSwitchList } from "./branch-switch-list";
 import { CreateBranchTagDialog } from "./create-branch-tag-dialog";
 
 beforeAll(async () => {
@@ -216,4 +219,53 @@ test("unknown project with nodes in several folders is ambiguous, not guessed", 
     { kind: "branch" as const, name: "b", url: `${ROOT}/B/Forks/b` },
   ];
   expect(refContainerUrl("branch", ctx({ nodes }))).toBeNull();
+});
+
+test("branch picker lists the other branches and tags and switches on click", async () => {
+  mockCalls.length = 0;
+  const switched = vi.fn();
+  const wc = mockWorkingCopies[0] as WorkingCopy;
+  renderApp(<BranchSwitchList wc={wc} changed={0} onSwitched={switched} />);
+  const list = await screen.findByRole("list", { name: "Switch to" });
+  const names = within(list)
+    .getAllByRole("button")
+    .map((b) => b.textContent);
+  expect(names.some((n) => n?.startsWith("trunk"))).toBe(false);
+  expect(names.some((n) => n?.startsWith("v1.0.0"))).toBe(true);
+  await user().click(within(list).getByRole("button", { name: "feature-x" }));
+  await waitFor(() => expect(switched).toHaveBeenCalled());
+  expect(mockCalls.find((c) => c.name === "switch")?.args).toEqual([
+    wc.id,
+    `${MOCK_REPO_ROOT}/branches/feature-x`,
+    null,
+  ]);
+});
+
+test("branch picker asks before carrying local changes, and Cancel switches nothing", async () => {
+  mockCalls.length = 0;
+  const wc = mockWorkingCopies[0] as WorkingCopy;
+  renderApp(<BranchSwitchList wc={wc} changed={2} onSwitched={() => undefined} />);
+  const list = await screen.findByRole("list", { name: "Switch to" });
+  await user().click(within(list).getByRole("button", { name: "release-1.0" }));
+  expect(screen.getByText(/2 local change\(s\) will be carried over to release-1.0/)).toBeTruthy();
+  await user().click(screen.getByRole("button", { name: "Cancel" }));
+  expect(mockCalls.some((c) => c.name === "switch")).toBe(false);
+  await user().click(
+    within(await screen.findByRole("list", { name: "Switch to" })).getByRole("button", {
+      name: "release-1.0",
+    }),
+  );
+  await user().click(screen.getByRole("button", { name: "Carry changes and switch" }));
+  await waitFor(() => expect(mockCalls.some((c) => c.name === "switch")).toBe(true));
+  expect(mockCalls.find((c) => c.name === "switch")?.args[1]).toBe(
+    `${MOCK_REPO_ROOT}/branches/release-1.0`,
+  );
+});
+
+test("no branch picker without a trunk/branches/tags layout", () => {
+  const wc = mockWorkingCopies[1] as WorkingCopy;
+  const { container } = renderApp(
+    <BranchSwitchList wc={wc} changed={0} onSwitched={() => undefined} />,
+  );
+  expect(container.textContent).toBe("");
 });
