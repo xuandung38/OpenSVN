@@ -1,6 +1,7 @@
 //! Orchestration of one update, switch or checkout drive.
 
 use std::sync::{Arc, PoisonError};
+use std::time::Duration;
 
 use svn_ra_api::{RaSession, UpdateMode, UpdateRequest};
 use svn_types::{
@@ -41,6 +42,19 @@ pub struct UpdateParams {
     /// `svn update --set-depth`: record `depth` and let the drive widen the working copy to it.
     /// The caller crops first when the depth shrinks.
     pub sticky_depth: bool,
+}
+
+/// Delays before resuming an update drive that broke off on a failed connection; the length is
+/// the number of automatic resumes.
+pub(crate) const RECONNECT_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
+
+/// Whether a failed drive is resumed automatically: an update or checkout (not a switch, whose
+/// half-applied state is left for the user to finish) that broke off because the connection
+/// failed (see [`svn_types::ConnectionFailure`]).
+fn can_reconnect(kind: &UpdateKind, err: &SvnError) -> bool {
+    matches!(kind, UpdateKind::Update)
+        && err.code != ErrorCode::Cancelled
+        && err.connection_failure().is_some()
 }
 
 /// Releases the working copy lock when dropped, also on error and cancellation.
@@ -249,53 +263,85 @@ pub async fn drive_update(
         ),
     };
     let (root, uuid) = wc::repos_identity(&db)?;
-    let setup = UpdateSetup {
-        db: Arc::clone(&db),
-        anchor: anchor.clone(),
-        target: target.clone(),
-        switch_relpath,
-        depth: params.depth,
-        sticky_depth: params.sticky_depth,
-        allow_unversioned_obstructions: params.allow_unversioned_obstructions,
-        repos_root: root.clone(),
-        uuid,
-        ctx: ctx.clone(),
-        cancel: cancel.clone(),
-        file_external: None,
-    };
-    let (editor, outcome) = UpdateEditor::new(setup)?;
-    let report = build_report(
-        Arc::clone(&db),
-        anchor,
-        target.clone(),
-        params.depth,
-        params.sticky_depth,
-        root,
-    );
-    let req = UpdateRequest {
-        revision: params.revision,
-        target: target.clone(),
-        // Like svn against a depth-aware server: only a sticky depth is sent; otherwise the
-        // report carries the depths and the editor applies the requested one.
-        depth: if params.sticky_depth {
-            params.depth
-        } else {
-            Depth::Unknown
-        },
-        mode,
-        send_copyfrom: false,
-        ignore_ancestry: params.ignore_ancestry,
-    };
-    let result = session
-        .do_update(req, report, Box::new(editor), cancel)
-        .await;
-    if let Err(e) = result {
+    let mut revision = params.revision;
+    // Notifications of drives that broke off on a failed connection.
+    let mut earlier_events: Vec<UpdateEvent> = Vec::new();
+    let mut reconnects = 0usize;
+    let outcome = loop {
+        let setup = UpdateSetup {
+            db: Arc::clone(&db),
+            anchor: anchor.clone(),
+            target: target.clone(),
+            switch_relpath: switch_relpath.clone(),
+            depth: params.depth,
+            sticky_depth: params.sticky_depth,
+            allow_unversioned_obstructions: params.allow_unversioned_obstructions,
+            repos_root: root.clone(),
+            uuid: uuid.clone(),
+            ctx: ctx.clone(),
+            cancel: cancel.clone(),
+            file_external: None,
+        };
+        let (editor, outcome) = UpdateEditor::new(setup)?;
+        let report = build_report(
+            Arc::clone(&db),
+            anchor.clone(),
+            target.clone(),
+            params.depth,
+            params.sticky_depth,
+            root.clone(),
+        );
+        let req = UpdateRequest {
+            revision,
+            target: target.clone(),
+            // Like svn against a depth-aware server: only a sticky depth is sent; otherwise the
+            // report carries the depths and the editor applies the requested one.
+            depth: if params.sticky_depth {
+                params.depth
+            } else {
+                Depth::Unknown
+            },
+            mode: mode.clone(),
+            send_copyfrom: false,
+            ignore_ancestry: params.ignore_ancestry,
+        };
+        let result = session
+            .do_update(req, report, Box::new(editor), cancel)
+            .await;
+        let Err(e) = result else {
+            break outcome;
+        };
         // Nodes committed before the failure have queued work; finish it so the tree matches.
         let db2 = Arc::clone(&db);
         let _ = blocking(move || crate::wc::run_work_queue(&db2, &CancelToken::new()).map(|_| ()))
             .await;
-        return Err(e);
-    }
+        let delay = RECONNECT_DELAYS.get(reconnects).copied();
+        let (Some(delay), true) = (delay, can_reconnect(&params.kind, &e)) else {
+            return Err(e);
+        };
+        reconnects += 1;
+        // The working copy is consistent: directories the broken drive did not finish are
+        // still `incomplete`, so the next report asks only for what is missing (the way an
+        // interrupted checkout is resumed by `update`). It goes to the revision the broken
+        // drive was reaching, not to a newer HEAD.
+        {
+            let out = outcome.lock().unwrap_or_else(PoisonError::into_inner);
+            revision = revision.or(out.revision);
+            earlier_events.extend(out.events.iter().cloned());
+        }
+        tracing::info!(
+            failure = ?e.connection_failure(),
+            attempt = reconnects,
+            "connection failed during the update drive; resuming on a fresh connection"
+        );
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                cancel.check()?;
+            }
+            () = tokio::time::sleep(delay) => {}
+        }
+    };
     let reached = outcome
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -325,6 +371,7 @@ pub async fn drive_update(
             action: UpdateAction::Restored,
         })
         .collect();
+    events.extend(earlier_events);
     events.extend(out.events.iter().cloned());
     Ok(UpdateSummary {
         revision: out.revision,

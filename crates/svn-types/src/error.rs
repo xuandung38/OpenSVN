@@ -98,6 +98,28 @@ pub enum ErrorCode {
     Internal,
 }
 
+/// How a network connection failed, for errors with [`ErrorCode::Network`] or
+/// [`ErrorCode::Timeout`] that the transport could classify. The UI uses it for a friendly text;
+/// the engine uses it to retry read-only work on a fresh connection.
+///
+/// Every variant means the request may not have completed. Whether it took effect on the server
+/// is unknown for a write; read-only requests are safe to send again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConnectionFailure {
+    /// The server (or a proxy) closed the connection before the response was complete:
+    /// a reused keep-alive connection closed under the request, or an end of stream in the
+    /// middle of a response.
+    ConnectionClosedByServer,
+    /// The connection was reset (TCP RST) or aborted, or a write found it already closed.
+    ConnectionReset,
+    /// No response bytes arrived within the configured read timeout.
+    Timeout,
+    /// The TLS stream ended without a `close_notify` alert before the response was complete
+    /// ("peer closed connection without sending TLS close_notify"). Apache on Windows, IIS and
+    /// many proxies close this way; when the body was already complete it is not an error.
+    TlsClosedUncleanly,
+}
+
 /// Engine error with an optional chain of causes, mirroring `svn_error_t`.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{code:?}: {message}")]
@@ -108,6 +130,8 @@ pub struct SvnError {
     pub message: String,
     /// Original Subversion error code when the error came from a server.
     pub svn_code: Option<u32>,
+    /// How the connection failed, when this is a classified network failure.
+    pub connection: Option<ConnectionFailure>,
     /// Underlying cause.
     #[source]
     pub child: Option<Box<SvnError>>,
@@ -123,8 +147,28 @@ impl SvnError {
             code,
             message: message.into(),
             svn_code: None,
+            connection: None,
             child: None,
         }
+    }
+
+    /// Records how the connection failed.
+    #[must_use]
+    pub fn with_connection(mut self, failure: ConnectionFailure) -> Self {
+        self.connection = Some(failure);
+        self
+    }
+
+    /// The connection failure of this error or of its first cause that has one.
+    pub fn connection_failure(&self) -> Option<ConnectionFailure> {
+        let mut e = Some(self);
+        while let Some(err) = e {
+            if err.connection.is_some() {
+                return err.connection;
+            }
+            e = err.child.as_deref();
+        }
+        None
     }
 
     /// Attaches a cause.

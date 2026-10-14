@@ -13,8 +13,10 @@ use url::Url;
 
 use super::config::{ProxyConfig, TransportConfig};
 use super::redact::{RedactedHeaders, redacted_url};
-use super::request::{HttpRequest, HttpResponse};
-use super::retry::{classify_error, error_chain, is_idempotent, is_transient_status};
+use super::request::{BufferedResponse, HttpRequest, HttpResponse};
+use super::retry::{
+    classify_error, error_chain, is_connection_failure, is_idempotent, is_transient_status,
+};
 use super::tls::{
     CertProblem, OriginTls, PinAction, TrustStore, make_client_config, tls_server_end_point,
 };
@@ -164,6 +166,79 @@ impl HttpTransport {
         self.send_mode(req, cancel, Interaction::Forbidden).await
     }
 
+    /// Sends a request and reads its whole body, failing with `Corrupt` above `limit` bytes.
+    ///
+    /// Like [`Self::send`], and more: when the body of a read-only request ([`is_idempotent`]:
+    /// `GET`, `PROPFIND`, `REPORT`, `OPTIONS`, `HEAD`) breaks off because the connection failed
+    /// (closed or reset by the server or a proxy, TLS ended without `close_notify`, read
+    /// timeout; see [`svn_types::ConnectionFailure`]), the partial body is dropped and the
+    /// request is sent again on a fresh connection, at most as often as the retry policy allows
+    /// and after its delays. A write is never sent twice: its failure is returned as is.
+    pub async fn send_and_read(
+        &self,
+        req: HttpRequest,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<BufferedResponse> {
+        self.send_and_read_mode(req, limit, cancel, Interaction::Allowed)
+            .await
+    }
+
+    /// [`Self::send_and_read`] without prompts, as [`Self::send_unattended`].
+    pub async fn send_and_read_unattended(
+        &self,
+        req: HttpRequest,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<BufferedResponse> {
+        self.send_and_read_mode(req, limit, cancel, Interaction::Forbidden)
+            .await
+    }
+
+    async fn send_and_read_mode(
+        &self,
+        mut req: HttpRequest,
+        limit: usize,
+        cancel: &CancelToken,
+        interaction: Interaction,
+    ) -> Result<BufferedResponse> {
+        let mut retries = 0usize;
+        loop {
+            let again = if is_idempotent(&req.method) {
+                req.try_clone()
+            } else {
+                None
+            };
+            let resp = self.send_mode(req, cancel, interaction).await?;
+            let (status, headers) = (resp.status, resp.headers.clone());
+            match resp.bytes(limit).await {
+                Ok(body) => {
+                    return Ok(BufferedResponse {
+                        status,
+                        headers,
+                        body,
+                    });
+                }
+                Err(e) if is_connection_failure(&e) => {
+                    let (Some(next), Some(delay)) =
+                        (again, self.config.retry.delays.get(retries).copied())
+                    else {
+                        return Err(e);
+                    };
+                    retries += 1;
+                    tracing::debug!(
+                        error = %e.message,
+                        failure = ?e.connection,
+                        "response body broke off, sending the request again"
+                    );
+                    backoff(delay, cancel).await?;
+                    req = next;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     async fn send_mode(
         &self,
         mut req: HttpRequest,
@@ -242,6 +317,8 @@ impl HttpTransport {
             .connect_timeout(self.config.connect_timeout)
             .read_timeout(self.config.read_timeout)
             .pool_max_idle_per_host(self.config.effective_connections())
+            // Drop idle connections before the server's keep-alive timeout closes them.
+            .pool_idle_timeout(self.config.pool_idle_timeout)
             .user_agent(self.config.user_agent.clone())
             // Exposes the server certificate per response, for Negotiate channel bindings.
             .tls_info(true)
@@ -489,6 +566,7 @@ impl HttpTransport {
                         inner: resp,
                         cancel: cancel.clone(),
                         _permit: Some(permit),
+                        received: 0,
                     });
                 }
                 Err(e) => {
@@ -497,19 +575,29 @@ impl HttpTransport {
                     {
                         return Err(AttemptError::Tls(Box::new(p)));
                     }
+                    let builder = e.is_builder();
+                    let err = classify_error(e);
                     if retriable
-                        && !e.is_builder()
+                        && !builder
                         && let Some(d) = delay
                     {
+                        // A pooled connection the server (or a proxy) closed or reset under the
+                        // request: the next attempt opens a fresh one, so it need not wait.
+                        let d = if retries == 0 && is_connection_failure(&err) {
+                            Duration::ZERO
+                        } else {
+                            d
+                        };
                         retries += 1;
                         tracing::debug!(
-                            error = %error_chain(&e.without_url()),
+                            error = %err.message,
+                            failure = ?err.connection,
                             "transient failure, retrying"
                         );
                         backoff(d, cancel).await?;
                         continue;
                     }
-                    return Err(AttemptError::Other(classify_error(e)));
+                    return Err(AttemptError::Other(err));
                 }
             }
         }

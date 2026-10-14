@@ -12,10 +12,12 @@ mod retry;
 mod tls;
 
 pub use client::HttpTransport;
-pub use config::{ProxyConfig, SVN_COMPAT_VERSION, TransportConfig, USER_AGENT};
+pub use config::{
+    DEFAULT_POOL_IDLE_TIMEOUT, ProxyConfig, SVN_COMPAT_VERSION, TransportConfig, USER_AGENT,
+};
 pub use redact::{
     RedactedHeaders, RedactingMakeWriter, RedactingWriter, redact_text, redacted_url,
 };
-pub use request::{BodyStream, HttpRequest, HttpResponse, RequestBody};
+pub use request::{BodyStream, BufferedResponse, HttpRequest, HttpResponse, RequestBody};
 pub use retry::{RetryPolicy, classify_status, is_idempotent};
 pub use tls::{MemoryTrustStore, TrustStore, sha256_fingerprint};

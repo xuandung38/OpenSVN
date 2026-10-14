@@ -758,3 +758,145 @@ async fn commit_with_changes_below_a_switched_subtree() {
     }
     assert_no_prompt();
 }
+
+// ---- connections closed or recycled by the server ----
+
+/// Dump of one more revision with `dirs` x `files` files of `size` bytes below `trunk/bulk`.
+fn bulk_dump(dirs: usize, files: usize, size: usize) -> Vec<u8> {
+    let empty = "PROPS-END\n";
+    let rev_props = "K 10\nsvn:author\nV 5\nalice\nK 8\nsvn:date\nV 27\n\
+                     2026-01-02T00:00:00.000000Z\nK 7\nsvn:log\nV 4\nBulk\nPROPS-END\n";
+    let mut out = format!(
+        "SVN-fs-dump-format-version: 2\n\nRevision-number: 2\nProp-content-length: {0}\n\
+         Content-length: {0}\n\n{rev_props}\n",
+        rev_props.len()
+    );
+    let add_dir = |out: &mut String, path: &str| {
+        out.push_str(&format!(
+            "Node-path: {path}\nNode-kind: dir\nNode-action: add\nProp-content-length: {0}\n\
+             Content-length: {0}\n\n{empty}\n\n",
+            empty.len()
+        ));
+    };
+    add_dir(&mut out, "trunk/bulk");
+    for d in 0..dirs {
+        add_dir(&mut out, &format!("trunk/bulk/d{d:03}"));
+        for f in 0..files {
+            let line = format!("dir {d} file {f}\n");
+            let text: String = line.repeat(size / line.len() + 1)[..size].to_owned();
+            out.push_str(&format!(
+                "Node-path: trunk/bulk/d{d:03}/f{f:03}.txt\nNode-kind: file\nNode-action: add\n\
+                 Prop-content-length: {}\nText-content-length: {}\nContent-length: {}\n\n\
+                 {empty}{text}\n\n",
+                empty.len(),
+                text.len(),
+                empty.len() + text.len()
+            ));
+        }
+    }
+    out.into_bytes()
+}
+
+impl Scratch {
+    /// Loads one more revision from `dump` (renumbered after the youngest).
+    fn load(&self, dump: &[u8]) {
+        let mut c = match &self.host {
+            Host::Docker { container, .. } => {
+                let mut c = Command::new("docker");
+                c.args(["exec", "-i", "-u", "33:33", container, "svnadmin"]);
+                c
+            }
+            Host::Local { .. } => Command::new(
+                std::env::var_os("OPENSVN_COMPAT_LOCAL_SVNADMIN")
+                    .unwrap_or_else(|| "svnadmin".into()),
+            ),
+        };
+        c.args(["load", "-q"]);
+        match &self.host {
+            Host::Docker { .. } => c.arg(format!("/var/svn/repos/{}", self.name)),
+            Host::Local { repos, .. } => c.arg(repos.join(&self.name)),
+        };
+        run(c, Some(dump));
+    }
+}
+
+/// Files below `root`, `.svn` excluded.
+fn count_files(root: &Path) -> usize {
+    let mut n = 0;
+    for entry in std::fs::read_dir(root).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name() == ".svn" {
+            continue;
+        }
+        if entry.file_type().unwrap().is_dir() {
+            n += count_files(&entry.path());
+        } else {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// A large checkout and repeated remote status checks ("check for updates") of another working
+/// copy run at the same time over the app's one shared transport, as in the app. Against a server
+/// that recycles connections often (`VSVN_KEEPALIVE_TIMEOUT=1 VSVN_MAX_KEEPALIVE_REQUESTS=5`) or
+/// through `scripts/test-env/flaky-tls-proxy.py`, both must succeed and the checkout must be
+/// complete and clean.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn checkout_and_remote_status_at_the_same_time() {
+    const DIRS: usize = 40;
+    const FILES: usize = 25;
+    for (version, host) in servers() {
+        eprintln!("server {version}");
+        let h = harness(&host, "concurrent");
+        let e = h.engine();
+        let small = checkout_trunk(&h, "small").await;
+        h.scratch.load(&bulk_dump(DIRS, FILES, 4096));
+        let plan = CheckoutPlan {
+            url: format!("{}/trunk", h.repo_url()),
+            path: h.work_dir().join("big"),
+            rev: None,
+            depth: Depth::Infinity,
+            sparse: None,
+            format: WcFormat::V31,
+            store_pristine: true,
+            ignore_externals: false,
+        };
+        let op = ctx();
+        let checkout = e.checkout(&plan, &op);
+        let checks = async {
+            let mut scans = Vec::new();
+            for _ in 0..8 {
+                scans.push(e.status_remote(&small, &ctx()).await);
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+            scans
+        };
+        let (info, scans) = tokio::join!(checkout, checks);
+        let info = info.unwrap_or_else(|err| panic!("checkout next to remote status: {err:?}"));
+        for scan in scans {
+            let scan = scan.unwrap_or_else(|err| panic!("remote status next to checkout: {err:?}"));
+            assert_eq!(scan.incoming, 1, "{scan:?}");
+        }
+        let root = PathBuf::from(info.root_path);
+        assert_eq!(count_files(&root), DIRS * FILES + 2);
+        let big = WcRef {
+            id: WcId("big".into()),
+            root,
+        };
+        let query = StatusQuery {
+            include_ignored: false,
+            include_unversioned: true,
+        };
+        let changed: Vec<_> = e
+            .status(&big, query, &ctx())
+            .await
+            .expect("status of the checkout")
+            .into_iter()
+            .filter(|s| s.text != opensvn_ipc::NodeStatus::Normal)
+            .collect();
+        assert!(changed.is_empty(), "{changed:?}");
+    }
+    assert_no_prompt();
+}

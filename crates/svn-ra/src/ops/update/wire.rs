@@ -16,7 +16,7 @@ use svn_protocol::{
 use svn_types::{CancelToken, ErrorCode, RelPath, RepoUrl, Result, SvnError};
 
 use crate::ops::read::ListLimits;
-use crate::transport::{HttpRequest, HttpResponse, HttpTransport, RequestBody};
+use crate::transport::{BufferedResponse, HttpRequest, HttpResponse, HttpTransport, RequestBody};
 
 /// Default number of parallel connections assumed when the caller does not say.
 const DEFAULT_CONNECTIONS: usize = 4;
@@ -277,6 +277,49 @@ impl RaWire {
             .await
     }
 
+    /// Sends a protocol request (buffered or empty body) and reads the whole answer (at most
+    /// 4 MiB). The answer of a read-only request that breaks off on a failed connection is
+    /// fetched again on a fresh connection (see [`HttpTransport::send_and_read`]).
+    pub async fn fetch_small(
+        &self,
+        req: svn_protocol::HttpRequest,
+        cancel: &CancelToken,
+    ) -> Result<BufferedResponse> {
+        let body = buffered_body(&req)?;
+        cancel.check()?;
+        let req = convert(req, body)?;
+        let fetch = async {
+            if self.unattended {
+                self.transport
+                    .send_and_read_unattended(req, SMALL_BODY_LIMIT, cancel)
+                    .await
+            } else {
+                self.transport
+                    .send_and_read(req, SMALL_BODY_LIMIT, cancel)
+                    .await
+            }
+        };
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(SvnError::new(ErrorCode::Cancelled, "operation cancelled")),
+            r = fetch => r,
+        }
+    }
+
+    /// [`Self::fetch_small`] that fails with the server's error unless the status is 2xx.
+    pub async fn fetch_small_ok(
+        &self,
+        req: svn_protocol::HttpRequest,
+        cancel: &CancelToken,
+    ) -> Result<Bytes> {
+        let resp = self.fetch_small(req, cancel).await?;
+        if resp.status.is_success() {
+            Ok(resp.body)
+        } else {
+            Err(buffered_error(&resp))
+        }
+    }
+
     /// Sends a request and fails with the server's error unless the status is 2xx.
     pub async fn send_ok(
         &self,
@@ -382,7 +425,16 @@ pub(crate) fn join_rel(base: &RelPath, rel: &RelPath) -> Result<RelPath> {
 
 /// Converts the headers of a transport response into the protocol layer's header list.
 pub(crate) fn headers_of(resp: &HttpResponse) -> Headers {
-    Headers::from_pairs(resp.headers().iter().filter_map(|(n, v)| {
+    protocol_headers(resp.headers())
+}
+
+/// [`headers_of`] for an answer read with [`RaWire::fetch_small`].
+pub(crate) fn buffered_headers(resp: &BufferedResponse) -> Headers {
+    protocol_headers(&resp.headers)
+}
+
+fn protocol_headers(headers: &HeaderMap) -> Headers {
+    Headers::from_pairs(headers.iter().filter_map(|(n, v)| {
         v.to_str()
             .ok()
             .map(|v| (n.as_str().to_owned(), v.to_owned()))
@@ -407,6 +459,14 @@ pub(crate) async fn read_limited(
         }
     }
     Ok(buf.freeze())
+}
+
+/// Error for a non-success answer read with [`RaWire::fetch_small`].
+pub(crate) fn buffered_error(resp: &BufferedResponse) -> SvnError {
+    let headers = buffered_headers(resp);
+    let limit = ParserLimits::default().max_error_body_bytes;
+    let body = &resp.body[..resp.body.len().min(limit)];
+    error_from_response(resp.status.as_u16(), &headers, body)
 }
 
 /// Error for a non-success response: the server's `D:error` chain or a status-based fallback.

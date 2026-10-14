@@ -8,7 +8,7 @@ use futures_util::Stream;
 use reqwest::header::HeaderMap;
 use reqwest::{Method, StatusCode};
 use svn_ra_api::ReplayableSource;
-use svn_types::{CancelToken, ErrorCode, Result, SvnError};
+use svn_types::{CancelToken, ConnectionFailure, ErrorCode, Result, SvnError};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::io::ReaderStream;
 use url::Url;
@@ -132,6 +132,33 @@ impl HttpRequest {
             body: RequestBody::Empty,
         }
     }
+
+    /// A copy to send again, when the body can be produced again (`None` for a one-shot stream).
+    pub(crate) fn try_clone(&self) -> Option<Self> {
+        let body = match &self.body {
+            RequestBody::Empty => RequestBody::Empty,
+            RequestBody::Bytes(b) => RequestBody::Bytes(b.clone()),
+            RequestBody::File(src) => RequestBody::File(src.clone()),
+            RequestBody::Stream { .. } => return None,
+        };
+        Some(Self {
+            method: self.method.clone(),
+            url: self.url.clone(),
+            headers: self.headers.clone(),
+            body,
+        })
+    }
+}
+
+/// A response read completely (see [`super::HttpTransport::send_and_read`]).
+#[derive(Debug, Clone)]
+pub struct BufferedResponse {
+    /// Status code.
+    pub status: StatusCode,
+    /// Response headers.
+    pub headers: HeaderMap,
+    /// The whole body.
+    pub body: Bytes,
 }
 
 /// Response with a streaming body. Dropping it closes the stream and releases the
@@ -144,6 +171,8 @@ pub struct HttpResponse {
     pub(crate) cancel: CancelToken,
     /// Connection slot; released as soon as the body ends or the response is dropped.
     pub(crate) _permit: Option<OwnedSemaphorePermit>,
+    /// Body bytes received so far.
+    pub(crate) received: u64,
 }
 
 impl std::fmt::Debug for HttpResponse {
@@ -177,18 +206,39 @@ impl HttpResponse {
 
     /// Next body chunk, `None` at the end. Fails with `Cancelled` as soon as the request's
     /// [`CancelToken`] fires, even while waiting for the network.
+    ///
+    /// A connection that closes or resets after the whole `Content-Length` arrived (Apache on
+    /// Windows, IIS and many proxies end TLS without `close_notify`) ends the body normally:
+    /// the HTTP framing already proves the body complete, as the rustls documentation advises
+    /// for HTTP. Any other failure is an error whose [`SvnError::connection`] tells how the
+    /// connection broke.
     pub async fn chunk(&mut self) -> Result<Option<Bytes>> {
         self.cancel.check()?;
         tokio::select! {
             biased;
             () = self.cancel.cancelled() => self.cancel.check().map(|()| None),
-            r = self.inner.chunk() => {
-                let chunk = r.map_err(classify_error)?;
-                if chunk.is_none() {
+            r = self.inner.chunk() => match r {
+                Ok(Some(chunk)) => {
+                    self.received += chunk.len() as u64;
+                    Ok(Some(chunk))
+                }
+                Ok(None) => {
                     // Body finished: free the slot even if the caller keeps the response.
                     self._permit = None;
+                    Ok(None)
                 }
-                Ok(chunk)
+                Err(e) => {
+                    let err = classify_error(e);
+                    if body_complete_before(&err, self.inner.content_length(), self.received) {
+                        tracing::debug!(
+                            error = %err.message,
+                            "connection closed after the complete body; not an error"
+                        );
+                        self._permit = None;
+                        return Ok(None);
+                    }
+                    Err(err)
+                }
             }
         }
     }
@@ -206,5 +256,42 @@ impl HttpResponse {
             buf.extend_from_slice(&c);
         }
         Ok(buf.freeze())
+    }
+}
+
+/// Whether `err` is only the connection closing after a body whose `Content-Length` was fully
+/// received.
+fn body_complete_before(err: &SvnError, content_length: Option<u64>, received: u64) -> bool {
+    content_length == Some(received)
+        && matches!(
+            err.connection,
+            Some(
+                ConnectionFailure::TlsClosedUncleanly
+                    | ConnectionFailure::ConnectionClosedByServer
+                    | ConnectionFailure::ConnectionReset
+            )
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_close_after_the_whole_content_length_ends_the_body() {
+        let unclean = SvnError::new(ErrorCode::Network, "x")
+            .with_connection(ConnectionFailure::TlsClosedUncleanly);
+        assert!(body_complete_before(&unclean, Some(10), 10));
+        assert!(!body_complete_before(&unclean, Some(10), 9));
+        // No framing (chunked or close-delimited): truncation cannot be ruled out.
+        assert!(!body_complete_before(&unclean, None, 10));
+        let timeout =
+            SvnError::new(ErrorCode::Timeout, "x").with_connection(ConnectionFailure::Timeout);
+        assert!(!body_complete_before(&timeout, Some(10), 10));
+        assert!(!body_complete_before(
+            &SvnError::new(ErrorCode::Network, "x"),
+            Some(10),
+            10
+        ));
     }
 }
