@@ -206,3 +206,14 @@ fn peg_revision_type() {
         .unwrap();
     assert_eq!(l.peg_rev, Some(Revnum(0)));
 }
+
+#[test]
+fn ipv6_hosts_and_ports_are_kept() {
+    assert_eq!(
+        convert("https://[2001:db8::1]:8443/!/#Repo/view/r3/trunk"),
+        (
+            "https://[2001:db8::1]:8443/svn/Repo/trunk".to_owned(),
+            Some(3)
+        )
+    );
+}
