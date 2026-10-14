@@ -29,9 +29,9 @@ use svn_client::commit::journal::{JournalLoadError, JournalStore};
 use svn_ra_api::RaSession;
 use svn_types::{ErrorCode, LockOwnershipStore, RepoUrl};
 use svn_wc::WcDb;
-use svn_wc::db::{LockOwner, sql_err};
+use svn_wc::db::{LockOwner, find_wcroot, sql_err};
 
-use super::wc_read::{blocking, describe, open_db};
+use super::wc_read::{blocking, describe, open_db_canonical};
 use super::{ConnectOptions, RealEngine};
 use crate::engine::context::OpContext;
 use crate::engine::facade::{EngineResult, RecoveryReport, WcOpened};
@@ -264,8 +264,12 @@ impl RealEngine {
         ctx.check()?;
         let root = root.to_path_buf();
         let (db, info) = blocking(move || {
-            let db = open_db(&root)?;
-            let info = describe(&db)?;
+            // Journals are keyed by the canonical root (as commits open the working copy); the
+            // description keeps the root spelled as the caller knows it.
+            let shown = find_wcroot(&root)?;
+            let db = open_db_canonical(&root)?;
+            let mut info = describe(&db)?;
+            info.root_path = shown.to_string_lossy().into_owned();
             Ok((Arc::new(db), info))
         })
         .await?;
@@ -432,7 +436,7 @@ impl RealEngine {
     }
 
     /// Session at the repository root that fails with `auth-required` instead of prompting.
-    async fn unattended_session(
+    pub(super) async fn unattended_session(
         &self,
         repo_root_url: &str,
         ctx: &OpContext,

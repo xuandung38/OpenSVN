@@ -873,8 +873,10 @@ pub(crate) fn commit_node(
         let parent = path
             .parent()
             .ok_or_else(|| SvnError::new(ErrorCode::Internal, "root cannot be added"))?;
+        // An incomplete parent (an interrupted checkout or update) exists in the repository
+        // all the same; libsvn_wc commits into it too.
         let pbase = read_base(conn, wc_id, &parent)?
-            .filter(|p| p.presence == Presence::Normal)
+            .filter(|p| matches!(p.presence, Presence::Normal | Presence::Incomplete))
             .ok_or_else(|| {
                 SvnError::new(
                     ErrorCode::Internal,

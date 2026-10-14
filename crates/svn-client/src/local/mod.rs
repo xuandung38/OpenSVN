@@ -22,7 +22,7 @@ pub mod resolve;
 pub mod revert;
 pub mod state;
 
-pub use add::{AddOptions, add};
+pub use add::{AddOptions, AddOutcome, add, add_reporting};
 pub use autoprops::AddConfig;
 pub use changelist::set_changelist;
 pub use cleanup::{CleanupReport, cleanup};
