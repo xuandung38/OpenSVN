@@ -107,7 +107,7 @@ async fn cancel_reaches_the_work_in_well_under_a_second() {
 }
 
 #[tokio::test]
-async fn progress_is_throttled_to_ten_per_second() {
+async fn progress_is_throttled_to_twenty_per_second() {
     let (m, events) = manager();
     let h = m.spawn(OperationKind::Update, None, "Update", |ctx| async move {
         let start = Instant::now();
@@ -125,8 +125,8 @@ async fn progress_is_throttled_to_ten_per_second() {
     wait_for(&events, "finished", &h.op_id).await;
     let n = events.progress().len();
     assert!(
-        (1..=6).contains(&n),
-        "expected about 4 progress events in 350 ms, got {n}"
+        (1..=10).contains(&n),
+        "expected about 7 progress events in 350 ms, got {n}"
     );
     assert!(events.progress().iter().all(|p| p.op_id == h.op_id));
 }
@@ -237,4 +237,125 @@ async fn notices_are_never_dropped_by_the_throttle() {
         .filter(|p| p.phase == crate::engine::context::PHASE_NESTED_WC_SKIPPED)
         .collect();
     assert_eq!(notices.len(), 20, "every notice reaches the UI");
+}
+
+#[tokio::test]
+async fn a_flood_of_paths_is_coalesced_and_every_path_is_counted() {
+    use opensvn_ipc::{PathAction, ProgressEntry};
+    let (m, events) = manager();
+    let h = m.spawn(
+        OperationKind::Checkout,
+        None,
+        "Checkout",
+        |ctx| async move {
+            for i in 1..=100_000u64 {
+                ctx.progress.report(ProgressUpdate {
+                    phase: "checkout".into(),
+                    current: Some(i),
+                    current_path: Some(format!("f{i}")),
+                    entry: Some(ProgressEntry {
+                        action: if i % 2 == 0 {
+                            PathAction::Added
+                        } else {
+                            PathAction::Updated
+                        },
+                        path: format!("f{i}"),
+                    }),
+                    ..ProgressUpdate::default()
+                });
+            }
+            Ok(OpResult::Done)
+        },
+    );
+    wait_for(&events, "finished", &h.op_id).await;
+    let progress = events.progress();
+    // 100 000 paths reported in a burst: a handful of events, not one per path.
+    assert!(progress.len() <= 40, "{} events", progress.len());
+    let last = progress.last().unwrap();
+    assert_eq!(last.current.map(|s| s.0), Some(100_000));
+    let counts = last.counts.unwrap();
+    assert_eq!((counts.added, counts.updated), (50_000, 50_000));
+    let carried: usize = progress.iter().map(|p| p.entries.len()).sum();
+    let dropped: u32 = progress.iter().map(|p| p.entries_dropped).sum();
+    assert_eq!(carried + dropped as usize, 100_000);
+    assert_eq!(last.entries.last().unwrap().path, "f100000");
+}
+
+#[tokio::test]
+async fn a_quiet_engine_still_gets_its_last_sample_out_before_the_end() {
+    let (m, events) = manager();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let h = m.spawn(OperationKind::Update, None, "Update", |ctx| async move {
+        for i in 1..=3u64 {
+            ctx.progress.report(ProgressUpdate {
+                phase: "update".into(),
+                current: Some(i),
+                ..ProgressUpdate::default()
+            });
+        }
+        let _ = release_rx.await;
+        Ok(OpResult::Done)
+    });
+    // The ticker sends the held sample although no new one arrives.
+    for _ in 0..200 {
+        if events
+            .progress()
+            .last()
+            .and_then(|p| p.current)
+            .map(|s| s.0)
+            == Some(3)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        events
+            .progress()
+            .last()
+            .and_then(|p| p.current)
+            .map(|s| s.0),
+        Some(3)
+    );
+    let _ = release_tx.send(());
+    wait_for(&events, "finished", &h.op_id).await;
+}
+
+#[tokio::test]
+async fn running_on_finds_our_writer_of_a_working_copy() {
+    let (m, events) = manager();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("wc");
+    std::fs::create_dir(&root).unwrap();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let h = m.spawn_with(
+        OpSpec::new(OperationKind::Checkout, None, "Checkout wc").at(&root),
+        |_| async move {
+            let _ = release_rx.await;
+            Ok(OpResult::Done)
+        },
+    );
+    assert!(h.root_path.is_some() && !h.background);
+    assert_eq!(m.running_on(&root).map(|o| o.op_id), Some(h.op_id.clone()));
+    assert!(m.running_on(&root.join("sub")).is_some(), "a folder inside");
+    assert!(m.running_on(&dir.path().join("other")).is_none());
+    // A background read of the same folder does not hold it.
+    let bg = m.spawn_with(
+        OpSpec::new(OperationKind::StatusRemote, None, "Check")
+            .at(&dir.path().join("other"))
+            .in_background(),
+        |ctx| async move {
+            assert!(!ctx.interactive, "background work never prompts");
+            Ok(OpResult::Done)
+        },
+    );
+    assert!(bg.background);
+    wait_for(&events, "finished", &bg.op_id).await;
+    assert!(m.running_on(&dir.path().join("other")).is_none());
+    let _ = release_tx.send(());
+    wait_for(&events, "finished", &h.op_id).await;
+    assert!(m.running_on(&root).is_none());
+    // Background operations stay out of the history.
+    assert!(m.list().iter().all(|o| o.op_id != bg.op_id));
+    assert!(m.list().iter().any(|o| o.op_id == h.op_id));
 }

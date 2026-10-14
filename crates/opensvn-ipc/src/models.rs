@@ -429,8 +429,96 @@ pub struct OperationHandle {
     pub kind: OperationKind,
     pub wc_id: Option<WcId>,
     pub title: String,
+    /// Working copy folder the operation writes to or reads (a checkout's target folder, which
+    /// has no `wc_id` until it finishes). The UI matches it against a working copy's `root_path`
+    /// to tell its own lock from a stale one.
+    pub root_path: Option<String>,
+    /// Started by the app itself (periodic update check), not by the user: the UI reports its
+    /// failure quietly instead of as an error row.
+    pub background: bool,
 }
 
+/// Coarse stage of a long operation, for the progress details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpStage {
+    /// Opening the session (TLS, authentication).
+    Connecting,
+    /// Receiving the tree and file contents and writing them to the working copy.
+    Fetching,
+    /// The server drive is over; recording the result (externals, working copy info).
+    Finishing,
+}
+
+/// What happened to one path, as `svn` prints it in the first column (`A`, `U`, `D`, ...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "kebab-case")]
+pub enum PathAction {
+    /// `A`
+    Added,
+    /// `D`
+    Deleted,
+    /// `U`
+    Updated,
+    /// `G`
+    Merged,
+    /// `C`
+    Conflicted,
+    /// `C` (tree conflict)
+    TreeConflicted,
+    /// `E`
+    Existed,
+    /// `R` (restored)
+    Restored,
+    /// Skipped
+    Skipped,
+}
+
+/// One line of an operation's path log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressEntry {
+    pub action: PathAction,
+    /// Working copy relative path (`""` for the root).
+    pub path: String,
+}
+
+/// Paths handled so far per action (cumulative over the whole operation).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionCounts {
+    pub added: u32,
+    pub deleted: u32,
+    pub updated: u32,
+    pub merged: u32,
+    pub conflicted: u32,
+    pub tree_conflicted: u32,
+    pub existed: u32,
+    pub restored: u32,
+    pub skipped: u32,
+}
+
+impl ActionCounts {
+    /// Counts one more path under `action`.
+    pub fn add(&mut self, action: PathAction) {
+        let slot = match action {
+            PathAction::Added => &mut self.added,
+            PathAction::Deleted => &mut self.deleted,
+            PathAction::Updated => &mut self.updated,
+            PathAction::Merged => &mut self.merged,
+            PathAction::Conflicted => &mut self.conflicted,
+            PathAction::TreeConflicted => &mut self.tree_conflicted,
+            PathAction::Existed => &mut self.existed,
+            PathAction::Restored => &mut self.restored,
+            PathAction::Skipped => &mut self.skipped,
+        };
+        *slot = slot.saturating_add(1);
+    }
+}
+
+/// Progress sample of a running operation. Samples are coalesced by the backend (at most 20 per
+/// second); `entries` carries the paths handled since the previous sample, newest last, of which
+/// only the most recent are kept when there were many (`entriesDropped` counts the others).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Progress {
@@ -438,9 +526,14 @@ pub struct Progress {
     pub phase: String,
     pub current: Option<Size>,
     pub total: Option<Size>,
+    /// Bytes received from the server so far (or written, for a download).
     pub bytes_done: Option<Size>,
     pub bytes_total: Option<Size>,
     pub current_path: Option<String>,
+    pub stage: Option<OpStage>,
+    pub entries: Vec<ProgressEntry>,
+    pub entries_dropped: u32,
+    pub counts: Option<ActionCounts>,
 }
 
 /// SVN has no real branches/tags: layout is a naming convention that may not exist.

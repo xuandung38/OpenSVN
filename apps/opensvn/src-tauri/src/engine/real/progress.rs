@@ -2,12 +2,16 @@
 //!
 //! `svn-client` reports one [`svn_client::UpdateEvent`] per path it touches while it applies an
 //! update drive. The engine turns each one into a [`ProgressUpdate`] whose `current` counts the
-//! paths handled so far. The total is unknown up front (the server streams the tree), so `total`
+//! paths handled so far and whose `entry` carries the path with its action (svn's `A`/`U`/`D`/...
+//! column) for the path log. The total is unknown up front (the server streams the tree), so `total`
 //! stays empty. One callback is built per operation and shared by every drive of that operation,
 //! so the count keeps rising when an update runs several paths one after another.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use opensvn_ipc::{PathAction, ProgressEntry};
+use svn_client::UpdateAction;
 
 use crate::engine::context::{PHASE_NESTED_WC_SKIPPED, ProgressReporter, ProgressUpdate};
 
@@ -31,6 +35,21 @@ pub(super) fn report_skipped_nested_wcs(
     }
 }
 
+/// IPC action of an `svn-client` notification.
+pub(super) fn path_action(action: UpdateAction) -> PathAction {
+    match action {
+        UpdateAction::Add => PathAction::Added,
+        UpdateAction::Delete => PathAction::Deleted,
+        UpdateAction::Update => PathAction::Updated,
+        UpdateAction::Merged => PathAction::Merged,
+        UpdateAction::Conflicted => PathAction::Conflicted,
+        UpdateAction::TreeConflicted => PathAction::TreeConflicted,
+        UpdateAction::Existed => PathAction::Existed,
+        UpdateAction::Restored => PathAction::Restored,
+        UpdateAction::Skipped => PathAction::Skipped,
+    }
+}
+
 /// Progress callback for `svn-client` that forwards every notification to `reporter`.
 ///
 /// `current` is the number of notifications so far (1-based, strictly increasing) and
@@ -44,10 +63,15 @@ pub(super) fn client_progress(
     Arc::new(move |event: &svn_client::UpdateEvent| {
         // fetch_add hands out each number once, so samples stay ordered per caller thread.
         let current = count.fetch_add(1, Ordering::Relaxed) + 1;
+        let path = event.path.as_str().to_owned();
         reporter.report(ProgressUpdate {
             phase: phase.to_owned(),
             current: Some(current),
-            current_path: Some(event.path.as_str().to_owned()),
+            current_path: Some(path.clone()),
+            entry: Some(ProgressEntry {
+                action: path_action(event.action),
+                path,
+            }),
             ..ProgressUpdate::default()
         });
     })
@@ -59,7 +83,7 @@ mod tests {
 
     use std::sync::Mutex;
 
-    use svn_client::{UpdateAction, UpdateEvent};
+    use svn_client::UpdateEvent;
     use svn_types::{NodeKind, RelPath};
 
     use super::*;
@@ -85,6 +109,27 @@ mod tests {
                 .all(|u| u.phase == "update" && u.total.is_none())
         );
         assert_eq!(seen[2].current_path.as_deref(), Some("src/lib.rs"));
+        let entry = seen[2].entry.clone().unwrap();
+        assert_eq!(entry.action, PathAction::Added);
+        assert_eq!(entry.path, "src/lib.rs");
+    }
+
+    #[test]
+    fn every_action_has_its_ipc_twin() {
+        let pairs = [
+            (UpdateAction::Add, PathAction::Added),
+            (UpdateAction::Delete, PathAction::Deleted),
+            (UpdateAction::Update, PathAction::Updated),
+            (UpdateAction::Merged, PathAction::Merged),
+            (UpdateAction::Conflicted, PathAction::Conflicted),
+            (UpdateAction::TreeConflicted, PathAction::TreeConflicted),
+            (UpdateAction::Existed, PathAction::Existed),
+            (UpdateAction::Restored, PathAction::Restored),
+            (UpdateAction::Skipped, PathAction::Skipped),
+        ];
+        for (from, to) in pairs {
+            assert_eq!(path_action(from), to);
+        }
     }
 
     #[test]

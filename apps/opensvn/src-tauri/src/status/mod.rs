@@ -7,7 +7,7 @@ mod remote_check;
 mod service;
 mod watcher;
 
-pub use poller::{IncomingPoller, PollerDeps};
+pub use poller::{IncomingPoller, PollerDeps, SkipReason, skip_reason};
 pub use publisher::StatusPublisher;
 pub use remote_check::run_remote_check;
 pub use service::{StatusService, StatusTiming};
