@@ -260,7 +260,7 @@ impl UpdateEditor {
             for tmp in p.keep {
                 let _ = tmp.keep();
             }
-            if p.deleted {
+            if !p.removed.is_empty() {
                 failpoint!("update.after_delete_txn");
             }
             failpoint!("update.after_txn_before_queue");
@@ -271,9 +271,14 @@ impl UpdateEditor {
         Ok(())
     }
 
-    /// Commits the pending nodes first when one of them removed `wc` (see [`Batch::touches`]).
+    /// Commits everything first when a node that is not committed yet (pending or staged)
+    /// removed `wc` (see [`Batch::touches`]).
     fn settle(&mut self, wc: &RelPath) -> Result<()> {
-        if self.batch.touches(wc) {
+        let staged = self
+            .staged
+            .as_ref()
+            .is_some_and(|s| s.pending.removed.contains(wc));
+        if staged || self.batch.touches(wc) {
             self.drain()?;
         }
         Ok(())

@@ -105,7 +105,7 @@ impl Batch {
     pub(super) fn take(&mut self) -> Pending {
         let taken = std::mem::take(self);
         Pending {
-            deleted: !taken.removed.is_empty(),
+            removed: taken.removed,
             ops: taken.ops,
             keep: taken.keep,
             unsynced: taken.unsynced,
@@ -119,8 +119,9 @@ pub(super) struct Pending {
     pub(super) keep: Vec<TempPath>,
     /// Pristine texts of the nodes were placed without their own sync.
     pub(super) unsynced: bool,
-    /// A node removes something (crash suite failpoint `update.after_delete_txn`).
-    pub(super) deleted: bool,
+    /// Paths the nodes remove; until they are committed (and their removal ran), the drive
+    /// must not look at these paths again (see [`Batch::touches`]).
+    pub(super) removed: HashSet<RelPath>,
 }
 
 /// A batch waiting for its durability barrier, which runs on another thread while the editor
