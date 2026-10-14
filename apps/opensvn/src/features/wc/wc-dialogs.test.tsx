@@ -187,14 +187,27 @@ test("checkout: progress is shown with Cancel; cancelling returns to the form", 
   expect(within(dlg).getByRole("combobox", { name: "Repository URL" })).toBeTruthy();
 });
 
-test("checkout: no externals option; an engine that fetches them shows no note", async () => {
+test("checkout: an engine that fetches externals offers to ignore them", async () => {
   renderApp(<AppShell />);
   await option(/renderer\.ts/);
   await user().keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
   const dlg = await dialog("Checkout repository");
-  await waitFor(() => expect(lastCall("engineCapabilities")).toBeTruthy());
-  expect(within(dlg).queryByRole("checkbox")).toBeNull();
+  const box = (await within(dlg).findByRole("checkbox", {
+    name: "Ignore externals",
+  })) as HTMLInputElement;
+  expect(box.checked).toBe(false);
   expect(within(dlg).queryByText(/Externals are not fetched yet/)).toBeNull();
+  await user().click(box);
+  await user().type(
+    within(dlg).getByRole("combobox", { name: "Repository URL" }),
+    "https://svn.example.com/repos/game/trunk",
+  );
+  const submit = within(dlg).getByRole("button", { name: "Checkout" }) as HTMLButtonElement;
+  await waitFor(() => expect(submit.disabled).toBe(false));
+  await user().click(submit);
+  await waitFor(() => expect(lastCall("checkout")).toBeTruthy());
+  const req = lastCall("checkout")?.args[0] as Record<string, unknown>;
+  expect(req.ignoreExternals).toBe(true);
 });
 
 test("checkout: an engine without externals says they are not fetched and links the issue", async () => {

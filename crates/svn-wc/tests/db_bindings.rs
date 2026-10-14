@@ -402,3 +402,45 @@ fn txn_lock_cache_and_commit_node_join_one_transaction() {
         Some(2)
     );
 }
+
+#[test]
+fn relocation_to_a_path_below_the_old_one_is_applied_once() {
+    let (_tmp, db) = new_wc();
+    for (p, repos) in [
+        ("d", "lib"),
+        ("d/s.txt", "lib/sub/s.txt"),
+        ("d/old.txt", "lib/old.txt"),
+        ("d/sw.txt", "elsewhere/sw.txt"),
+    ] {
+        let mut n = base_file(repos, 1, None);
+        if p == "d" {
+            n.kind = NodeKind::Dir;
+            n.depth = Some(Depth::Infinity);
+        }
+        db.base_add(&rp(p), &n, &[]).expect("base_add");
+    }
+    // The drive already moved `d` to `lib/sub` and wrote `d/s.txt` at its new path.
+    db.with_txn(|t| t.mark_incomplete(&rp("d"), 2, Some("lib/sub")))
+        .expect("mark");
+    db.with_txn(|t| t.relocate_subtree(&rp("d"), "lib", "lib/sub"))
+        .expect("relocate");
+    let path = |p: &str| {
+        db.read_base(&rp(p))
+            .expect("read")
+            .expect("node")
+            .repos_relpath
+            .expect("path")
+    };
+    assert_eq!(path("d"), "lib/sub");
+    assert_eq!(path("d/s.txt"), "lib/sub/s.txt");
+    assert_eq!(
+        path("d/old.txt"),
+        "lib/sub/old.txt",
+        "untouched node follows"
+    );
+    assert_eq!(
+        path("d/sw.txt"),
+        "elsewhere/sw.txt",
+        "switched node keeps its path"
+    );
+}

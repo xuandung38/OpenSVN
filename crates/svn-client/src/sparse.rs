@@ -325,6 +325,7 @@ pub async fn set_depth(
         return Ok(UpdateSummary {
             revision: None,
             events,
+            externals: Vec::new(),
         });
     }
     let mut summary = drive_update(
