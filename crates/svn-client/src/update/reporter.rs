@@ -18,6 +18,9 @@ struct Ctx<'a> {
     db: &'a WcDb,
     anchor: &'a RelPath,
     root_url: RepoUrl,
+    /// `--set-depth`: excluded nodes are reported as missing so the server sends them again
+    /// when the new depth covers them (svn's `honor_depth_exclude = FALSE`).
+    sticky: bool,
 }
 
 impl Ctx<'_> {
@@ -50,14 +53,7 @@ impl Ctx<'_> {
         let name = wc.file_name().unwrap_or("");
         let switched = parent_repos.is_some_and(|p| repos_child(p, name) != repos);
         let rev_differs = parent_rev != Some(rev.0);
-        let non_default_depth = node.kind == NodeKind::Dir && depth != Depth::Infinity;
-        if !(force
-            || switched
-            || rev_differs
-            || start_empty
-            || token.is_some()
-            || non_default_depth)
-        {
+        if !(force || switched || rev_differs || start_empty || token.is_some()) {
             return Ok(false);
         }
         if switched {
@@ -75,13 +71,19 @@ impl Ctx<'_> {
         Ok(true)
     }
 
+    /// Reports the BASE children of `wc` like svn's `report_revisions_and_depths`: `dir_depth`
+    /// is the depth the directory was reported with, `depth` the depth of the crawl (the
+    /// requested depth, `Unknown`: everything the working copy has).
     fn report_dir(
         &self,
         r: &mut dyn Reporter,
         wc: &RelPath,
         report_path: &RelPath,
         dir: &Node,
+        dir_depth: Depth,
+        depth: Depth,
     ) -> Result<()> {
+        let recursive = matches!(depth, Depth::Infinity | Depth::Unknown);
         let dir_repos = dir.repos_relpath.clone().unwrap_or_default();
         for child in self.db.children(wc)? {
             let Some(node) = self.db.read_base(&child)? else {
@@ -91,6 +93,10 @@ impl Ctx<'_> {
             let child_report = join_rel(report_path, &RelPath::new(name)?)?;
             match node.presence {
                 Presence::NotPresent | Presence::ServerExcluded => {
+                    r.delete_path(&child_report)?;
+                    continue;
+                }
+                Presence::Excluded if self.sticky => {
                     r.delete_path(&child_report)?;
                     continue;
                 }
@@ -107,25 +113,43 @@ impl Ctx<'_> {
                 Presence::BaseDeleted => continue,
                 Presence::Normal | Presence::Incomplete => {}
             }
-            let depth = match node.kind {
-                NodeKind::Dir => node
-                    .depth
-                    .filter(|d| *d != Depth::Unknown)
-                    .unwrap_or(Depth::Infinity),
-                _ => Depth::Infinity,
-            };
+            if node.kind != NodeKind::Dir {
+                // The mere presence of a file in a depth-empty directory is news to the server.
+                self.report_entry(
+                    r,
+                    &child_report,
+                    &child,
+                    &node,
+                    Some(&dir_repos),
+                    Depth::Infinity,
+                    dir_depth == Depth::Empty,
+                    dir.revision,
+                )?;
+                continue;
+            }
+            if !(recursive || depth == Depth::Immediates) {
+                continue;
+            }
+            let child_depth = node
+                .depth
+                .filter(|d| *d != Depth::Unknown)
+                .unwrap_or(Depth::Infinity);
+            let report_depth = if recursive { child_depth } else { Depth::Empty };
+            let force = matches!(dir_depth, Depth::Empty | Depth::Files)
+                || (dir_depth == Depth::Immediates && child_depth != Depth::Empty)
+                || (child_depth != Depth::Infinity && recursive);
             self.report_entry(
                 r,
                 &child_report,
                 &child,
                 &node,
                 Some(&dir_repos),
-                depth,
-                false,
+                report_depth,
+                force,
                 dir.revision,
             )?;
-            if node.kind == NodeKind::Dir {
-                self.report_dir(r, &child, &child_report, &node)?;
+            if recursive {
+                self.report_dir(r, &child, &child_report, &node, child_depth, depth)?;
             }
         }
         Ok(())
@@ -134,12 +158,15 @@ impl Ctx<'_> {
 
 /// Describes the working copy state below `target` (anchor relative) to the server.
 ///
-/// `depth` overrides the recorded depth of the target when it is not `Unknown`.
+/// `depth` overrides the recorded depth of the target when it is not `Unknown`. With `sticky`
+/// (`--set-depth`) the target is reported at its recorded depth whatever `depth` says, so the
+/// server sends what a deeper requested depth adds, and excluded nodes are reported missing.
 pub fn build_report(
     db: Arc<WcDb>,
     anchor: RelPath,
     target: RelPath,
     depth: Depth,
+    sticky: bool,
     repos_root: String,
 ) -> ReportFn {
     Box::new(move |r: &mut dyn Reporter| {
@@ -154,6 +181,7 @@ pub fn build_report(
             db: &db,
             anchor: &anchor,
             root_url: RepoUrl::parse(&repos_root)?,
+            sticky,
         };
         let _ = ctx.anchor;
         let recorded = if node.kind == NodeKind::Dir {
@@ -163,10 +191,21 @@ pub fn build_report(
         } else {
             Depth::Infinity
         };
-        let report_depth = if depth == Depth::Unknown {
-            recorded
-        } else {
+        // Like svn's crawler: a narrower requested depth is reported as the target's depth
+        // (`honor_depth_exclude`), anything else reports what the working copy has.
+        let narrower = |d: Depth| match d {
+            Depth::Empty => 0,
+            Depth::Files => 1,
+            Depth::Immediates => 2,
+            _ => 3,
+        };
+        let report_depth = if !sticky
+            && !matches!(depth, Depth::Unknown | Depth::Exclude)
+            && narrower(depth) < narrower(recorded)
+        {
             depth
+        } else {
+            recorded
         };
         let parent_repos = match target_wc.parent() {
             Some(p) => db.read_base(&p)?.and_then(|n| n.repos_relpath),
@@ -182,8 +221,8 @@ pub fn build_report(
             true,
             None,
         )?;
-        if node.kind == NodeKind::Dir {
-            ctx.report_dir(r, &target_wc, &target, &node)?;
+        if node.kind == NodeKind::Dir && depth != Depth::Empty {
+            ctx.report_dir(r, &target_wc, &target, &node, report_depth, depth)?;
         }
         r.finish()
     })

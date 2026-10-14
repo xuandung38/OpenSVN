@@ -44,6 +44,7 @@ pub async fn update(
             kind: UpdateKind::Update,
             allow_unversioned_obstructions: false,
             ignore_ancestry: false,
+            sticky_depth: false,
         },
         cancel,
     )
@@ -72,6 +73,7 @@ pub async fn switch(
             kind: UpdateKind::Switch(url.clone()),
             allow_unversioned_obstructions: false,
             ignore_ancestry: false,
+            sticky_depth: false,
         },
         cancel,
     )

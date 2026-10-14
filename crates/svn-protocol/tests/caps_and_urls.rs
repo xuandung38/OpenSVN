@@ -239,6 +239,20 @@ fn rejects_hostile_hrefs() {
         "/svn/repo/trunk/a%0ab",
         "/svn/repo/trunk/a%7Fb",
         "/svn/repo/trunk/a%5cb",
+        // The URL parser strips surrounding whitespace; `.. ` would become `..` (#102).
+        "/svn/repo/trunk/.. ",
+        "/svn/repo/trunk/%2e%2e ",
+        "/svn/repo/!svn/rvr/4/trunk/.. ",
+        " /svn/repo/trunk/..",
+        " /svn/repo/trunk",
+        "/svn/repo/trunk ",
+        "/svn/repo/trunk\u{a0}",
+        "/svn/repo/trunk\u{3000}",
+        // `://` inside a path is not a scheme separator: the `..` before it still counts.
+        "/svn/repo/trunk/../branches/x://y",
+        "/svn/repo/!svn/rvr/4/trunk/%2e%2e/x://y",
+        "http://svn.test.local/svn/repo/trunk/../x://y",
+        "trunk/../x://y",
     ];
     for href in hostile {
         let err = u.accept_href(href).expect_err(href);
@@ -433,12 +447,29 @@ fn check_server_url_text_accepts_ordinary_escapes() {
         "/svn/repo/%E2%82%AC",
         "http://svn.test.local/svn/repo/%2Fx",
         "/svn/repo/100%",
+        "/svn/repo/a b",
+        "/svn/repo/a%20",
     ] {
         svn_protocol::check_server_url_text("t", ok).unwrap();
     }
     for bad in [
-        "a\tb", "a\rb", "a\nb", "a\\b", "a%09b", "a%0db", "a%0Ab", "a%1fb", "a%7fb", "a%5cb",
-        "a%5Cb", "a\u{85}b",
+        "a\tb",
+        "a\rb",
+        "a\nb",
+        "a\\b",
+        "a%09b",
+        "a%0db",
+        "a%0Ab",
+        "a%1fb",
+        "a%7fb",
+        "a%5cb",
+        "a%5Cb",
+        "a\u{85}b",
+        " a",
+        "a ",
+        "/svn/repo/trunk/.. ",
+        "\u{a0}/svn",
+        "/svn\u{2003}",
     ] {
         assert_eq!(
             svn_protocol::check_server_url_text("t", bad)
@@ -474,4 +505,29 @@ fn repository_root_case_fold_is_ascii_only() {
         let err = UrlBuilder::new(&at(s), &caps_with_root(root)).unwrap_err();
         assert_eq!(err.code, ErrorCode::UnsafePath, "{s} vs {root}");
     }
+}
+
+#[test]
+fn segments_below_root_follow_the_session_rule() {
+    use svn_protocol::segments_below_root;
+    let root = "/svn/D%E1%BB%B1-%C3%81n";
+    let below = |p: &str| segments_below_root(root, p).unwrap();
+    // Percent escapes compare decoded: lowercase hex and unnecessary escapes are the same path.
+    assert_eq!(below("/svn/D%e1%bb%b1-%c3%81n"), Some(vec![]));
+    assert_eq!(
+        below("/svn/D%E1%BB%B1-%C3%81n/%74runk/a%20b"),
+        Some(vec!["trunk".to_owned(), "a b".to_owned()])
+    );
+    // ASCII case of the root is folded (VisualSVN), non-ASCII case never is.
+    assert_eq!(
+        below("/SVN/d%E1%BB%B1-%C3%81n/trunk"),
+        Some(vec!["trunk".to_owned()])
+    );
+    assert_eq!(below("/svn/D%E1%BB%B1-%C3%A1n/trunk"), None);
+    // Not below the root, or a segment that only starts like it.
+    assert_eq!(below("/svn/other"), None);
+    assert_eq!(below("/svn/D%E1%BB%B1-%C3%81nX"), None);
+    // Escapes that cannot be decoded, or an encoded slash, are errors.
+    assert!(segments_below_root(root, "/svn/%zz").is_err());
+    assert!(segments_below_root(root, "/svn/D%E1%BB%B1-%C3%81n/a%2Fb").is_err());
 }

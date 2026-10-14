@@ -147,7 +147,11 @@ fn not_a_wc(root: &Path) -> SvnError {
 impl EngineFacade for FakeEngine {
     fn capabilities(&self) -> EngineCapabilities {
         // The fake accepts `ignore_externals` (it has no externals to fetch either way).
-        EngineCapabilities { externals: true }
+        // `demo` is masked in debug builds by the `engine_capabilities` command.
+        EngineCapabilities {
+            externals: true,
+            demo: true,
+        }
     }
 
     async fn wc_info(&self, root: &Path, _ctx: &OpContext) -> EngineResult<WcInfo> {
