@@ -233,18 +233,30 @@ impl RealEngine {
         Ok(Rev(rev.0))
     }
 
+    /// `svn update --set-depth DEPTH PATH`: crops (never removing locally modified items) or
+    /// widens the folder, then updates it to HEAD at the new depth.
     pub(super) async fn do_set_depth(
         &self,
-        _wc: &WcRef,
-        _path: &str,
-        _depth: Depth,
+        wc: &WcRef,
+        path: &str,
+        depth: Depth,
         ctx: &OpContext,
     ) -> EngineResult<()> {
         ctx.check()?;
-        Err(unsupported(
-            "changing the depth of a working copy folder is not supported yet; check the folder \
-             out again with the depth you need",
-        ))
+        let rel = RelPath::new(path)?;
+        let target = svn_types::safe_join(&wc.root, &rel)?;
+        let info = wc_read::wc_info(&wc.root, ctx).await?;
+        let session = self.session_at(&info.url, ctx).await?;
+        svn_client::set_depth(
+            &self.sync_ctx(ctx, PHASE_UPDATE),
+            session.as_ref(),
+            &target,
+            None,
+            client_depth(depth),
+            &ctx.cancel,
+        )
+        .await?;
+        Ok(())
     }
 }
 

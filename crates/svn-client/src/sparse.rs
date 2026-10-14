@@ -253,6 +253,17 @@ pub async fn set_depth(
     if depth == Depth::Unknown {
         return Err(unsupported("a depth to set is required".to_owned()));
     }
+    // A symlink would lead to whatever it points at, possibly another working copy whose
+    // files cropping would remove.
+    if path
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return Err(unsupported(format!(
+            "'{}' is a symbolic link; change the depth of the folder it points to instead",
+            path.display()
+        )));
+    }
     session.ensure_authenticated(cancel).await?;
     let (owner, p) = (ctx.lock_owner.clone(), path.to_path_buf());
     let (db, rel) = tokio::task::spawn_blocking(move || wc::open_containing(&owner, &p))
