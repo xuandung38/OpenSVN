@@ -50,6 +50,8 @@ pub struct FakeRaSession {
     authenticated: Arc<AtomicBool>,
     lock_counter: Arc<AtomicU64>,
     copies: bool,
+    /// Listings carry the locks of their entries (`false`: like a DAV server).
+    listed_locks: bool,
 }
 
 impl FakeRaSession {
@@ -69,6 +71,7 @@ impl FakeRaSession {
             authenticated: Arc::new(AtomicBool::new(false)),
             lock_counter: Arc::new(AtomicU64::new(1)),
             copies: true,
+            listed_locks: true,
         })
     }
 
@@ -101,6 +104,13 @@ impl FakeRaSession {
     #[must_use]
     pub fn without_copies(mut self) -> Self {
         self.copies = false;
+        self
+    }
+
+    /// Makes listings carry no locks, like mod_dav_svn (locks come from `get_locks` only).
+    #[must_use]
+    pub fn without_listed_locks(mut self) -> Self {
+        self.listed_locks = false;
         self
     }
 
@@ -327,6 +337,11 @@ impl RaSession for FakeRaSession {
                         out.push(e);
                     }
                 }
+            }
+        }
+        if !self.listed_locks {
+            for e in &mut out {
+                e.lock = None;
             }
         }
         Ok(out)
