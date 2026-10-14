@@ -69,9 +69,18 @@ mod arm {
     }
 }
 
-async fn run(engine: &Engine, op: &str, url: &str, wc: &std::path::Path, msg: &str) -> crate::Result<String> {
+async fn run(
+    engine: &Engine,
+    op: &str,
+    url: &str,
+    wc: &std::path::Path,
+    msg: &str,
+) -> crate::Result<String> {
     Ok(match op {
-        "checkout" => format!("rev={:?}", engine.checkout(url, wc).await?.map(|r| r.0)),
+        "checkout" => format!(
+            "rev={:?}",
+            engine.checkout(url, wc, None).await?.map(|r| r.0)
+        ),
         "update" => format!("rev={:?}", engine.update(url, wc, None).await?.map(|r| r.0)),
         "commit" => format!("rev={:?}", engine.commit(url, wc, msg).await?.map(|r| r.0)),
         "revert" => format!("reverted={}", engine.revert(wc)?),
@@ -113,7 +122,10 @@ pub fn main() -> i32 {
     };
     let state = PathBuf::from(&args[0]);
     let (op, url, wc) = (&args[1], &args[2], PathBuf::from(&args[3]));
-    let msg = args.get(4).cloned().unwrap_or_else(|| "crash test".to_owned());
+    let msg = args
+        .get(4)
+        .cloned()
+        .unwrap_or_else(|| "crash test".to_owned());
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

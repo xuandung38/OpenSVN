@@ -1,0 +1,118 @@
+name: nightly
+
+# Crash suite (random SIGKILL + named failpoints) and benchmarks against the svn CLI, both on a
+# local Apache + mod_dav_svn. Ubuntu 24.04 packages Subversion 1.14.3, so the server and the CLI
+# baseline are 1.14.3 here.
+on:
+  schedule:
+    - cron: "17 19 * * *" # 02:17 Asia/Ho_Chi_Minh
+  workflow_dispatch:
+    inputs:
+      random_iters:
+        description: Random SIGKILL cases per operation
+        default: "120"
+      fp_iters:
+        description: Kills per reachable (operation, failpoint)
+        default: "8"
+      bench_files:
+        description: Text files in the benchmark repository
+        default: "100000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  OPENSVN_REQUIRE_SVN: "1"
+
+jobs:
+  crash:
+    name: crash suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      # 5 operations x 120 random kills + about 40 reachable (operation, failpoint) pairs x 8
+      # kills: over 1000 crash cases a night.
+      CRASH_RANDOM_ITERS: ${{ inputs.random_iters || '120' }}
+      CRASH_FP_ITERS: ${{ inputs.fp_iters || '8' }}
+      CRASH_FILES: "200"
+      CRASH_REPORT_DIR: ${{ github.workspace }}/crash-report
+      CRASH_KEEP_FAILED: "5"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Subversion and Apache mod_dav_svn
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends subversion apache2 libapache2-mod-svn
+          svn --version --quiet
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build
+        run: cargo test -p opensvn-crash --features failpoints --locked --no-run
+      - name: Random SIGKILL
+        id: sigkill
+        run: cargo test -p opensvn-crash --features failpoints --locked --test sigkill -- --ignored --nocapture
+      - name: Named failpoints
+        id: failpoints
+        if: success() || failure()
+        run: cargo test -p opensvn-crash --features failpoints --locked --test failpoints -- --ignored --nocapture
+      - name: Summary
+        if: always()
+        run: cat crash-report/*.md >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Collect failed working copies
+        if: failure()
+        run: |
+          mkdir -p crash-report/kept
+          for d in /tmp/opensvn-crash-failed-*; do [ -e "$d" ] && sudo cp -a "$d" crash-report/kept/ || true; done
+          sudo chown -R "$(id -u):$(id -g)" crash-report
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: crash-report
+          path: crash-report
+          retention-days: 14
+
+  bench:
+    name: benchmarks vs svn CLI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Free disk space (two 100k-file working copies + repository)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Install Subversion and Apache mod_dav_svn
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends subversion apache2 libapache2-mod-svn jq
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build (release)
+        run: cargo build --release --locked -p opensvn-bench
+      - name: Run
+        run: |
+          target/release/compare-svn --files "${{ inputs.bench_files || '100000' }}" \
+            --binaries 4 --binary-mb 64 --update-files 10000 --reps 3 \
+            --out bench-report/bench.md
+      - name: Summary and regression warnings
+        if: always()
+        run: |
+          cat bench-report/bench.md >> "$GITHUB_STEP_SUMMARY" || exit 0
+          # Warn when the engine is more than 10% slower than the svn CLI.
+          jq -r '.[] | select(.ratio > 1.10) | "::warning title=slower than svn CLI::\(.op): engine \(.engine_s)s vs svn \(.svn_s)s (x\(.ratio))"' \
+            bench-report/bench.json || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: bench-report
+          path: bench-report
+          retention-days: 90

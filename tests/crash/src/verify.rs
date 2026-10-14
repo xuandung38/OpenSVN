@@ -53,7 +53,9 @@ pub fn db_integrity(wc: &Path) -> Result<()> {
         )
         .map_err(|e| err(format!("orphan query: {e}")))?;
     if orphans != 0 {
-        return Err(err(format!("wc.db: {orphans} NODES rows without a parent row")));
+        return Err(err(format!(
+            "wc.db: {orphans} NODES rows without a parent row"
+        )));
     }
     let mut stmt = c
         .prepare(

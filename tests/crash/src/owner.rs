@@ -80,7 +80,9 @@ impl FileLockOwnership {
         for (root, dir, pid, boot, start) in rows {
             text.push_str(&format!("{root}\t{dir}\t{pid}\t{boot}\t{start}\n"));
         }
-        let tmp = self.path.with_extension(format!("tmp{}", std::process::id()));
+        let tmp = self
+            .path
+            .with_extension(format!("tmp{}", std::process::id()));
         std::fs::write(&tmp, text).map_err(io)?;
         std::fs::rename(&tmp, &self.path).map_err(io)
     }
@@ -108,7 +110,13 @@ impl LockOwnershipStore for FileLockOwnership {
             ));
         }
         rows.retain(|r| !(r.0 == root && r.1 == dir.as_str()));
-        rows.push((root, dir.as_str().to_owned(), pid, boot_id.to_owned(), start));
+        rows.push((
+            root,
+            dir.as_str().to_owned(),
+            pid,
+            boot_id.to_owned(),
+            start,
+        ));
         self.save(&rows)
     }
 
