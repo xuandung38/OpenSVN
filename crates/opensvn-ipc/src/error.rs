@@ -72,11 +72,6 @@ pub struct AppError {
     pub lock_conflicts: Option<Box<[LockConflict]>>,
 }
 
-/// The locks that refused a lock request (a list on the wire).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(transparent)]
-pub struct LockConflicts(pub Vec<LockConflict>);
-
 /// A lock held by someone else that refused a lock request (doc 01 §10.4: the lock dialog shows
 /// the owner and offers Steal). Never carries the lock token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]

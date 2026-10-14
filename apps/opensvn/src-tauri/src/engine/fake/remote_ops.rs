@@ -485,11 +485,12 @@ impl FakeEngine {
         for (session, repo_path, wc_target) in self.lock_targets(scope)? {
             self.network_tick(ctx).await?;
             session.ensure_authenticated(&ctx.cancel).await?;
+            // A break presents no token, like the real engine (`svn unlock --force`).
             let token = match &wc_target {
-                Some((root, wc_rel, _)) => self.with_wc(root, |w| {
+                Some((root, wc_rel, _)) if !break_lock => self.with_wc(root, |w| {
                     Ok(w.node(wc_rel)?.lock.as_ref().and_then(|l| l.token.clone()))
                 })?,
-                None => None,
+                _ => None,
             };
             session
                 .unlock(&repo_path, token.as_deref(), break_lock, &ctx.cancel)
