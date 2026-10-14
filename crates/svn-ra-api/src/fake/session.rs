@@ -191,6 +191,10 @@ impl RaSession for FakeRaSession {
         &self.session
     }
 
+    fn authenticated_user(&self) -> Option<String> {
+        Some(self.user.clone())
+    }
+
     async fn ensure_authenticated(&self, cancel: &CancelToken) -> Result<()> {
         cancel.check()?;
         if let Some((cert, prompter)) = &self.cert_check {

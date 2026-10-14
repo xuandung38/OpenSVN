@@ -13,8 +13,8 @@ use svn_ra_api::{
     ReplayableSource, TxnAbort,
 };
 use svn_types::{
-    CancelToken, Checksum, Depth, ErrorCode, NodeKind, PropChange, RelPath, Result, Revnum,
-    TxDeltaWindow, WindowSink,
+    CancelToken, ChangeAction, Checksum, Depth, ErrorCode, NodeKind, PropChange, RelPath, Result,
+    Revnum, TxDeltaWindow, WindowSink,
 };
 
 fn p(s: &str) -> RelPath {
@@ -211,12 +211,112 @@ async fn commit_creates_a_new_revision() {
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].rev, Revnum(3));
     assert_eq!(seen[0].message.as_deref(), Some("update files"));
-    assert!(
-        seen[0]
-            .changed_paths
-            .iter()
-            .any(|c| c.path.as_str() == "/trunk/b.txt")
+    // One entry per path, as svn reports them: the added file whose text followed is a single
+    // `A`, the file with text and property changes a single `M`.
+    let mut changed: Vec<_> = seen[0]
+        .changed_paths
+        .iter()
+        .map(|c| {
+            (
+                c.path.as_str().to_owned(),
+                c.action,
+                c.text_mods,
+                c.prop_mods,
+            )
+        })
+        .collect();
+    changed.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        changed,
+        vec![
+            (
+                "/trunk/a.txt".to_owned(),
+                ChangeAction::Modified,
+                true,
+                true
+            ),
+            (
+                "/trunk/b.txt".to_owned(),
+                ChangeAction::Deleted,
+                true,
+                false
+            ),
+            ("/trunk/c.txt".to_owned(), ChangeAction::Added, true, false),
+        ]
     );
+}
+
+#[tokio::test]
+async fn delete_and_add_of_the_same_path_is_one_replace() {
+    let s = session();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let c = CancelToken::new();
+    let mut ed = s
+        .commit_editor(
+            "replace",
+            &[],
+            &[],
+            false,
+            Arc::new(Recorder::default()),
+            &c,
+        )
+        .await
+        .expect("editor");
+    let root = ed.open_root(Some(Revnum(2))).await.expect("root");
+    let trunk = ed
+        .open_directory(&p("trunk"), root, Some(Revnum(2)))
+        .await
+        .expect("trunk");
+    ed.delete_entry(&p("trunk/b.txt"), Some(Revnum(2)), trunk)
+        .await
+        .expect("delete b");
+    let b = ed
+        .add_file(&p("trunk/b.txt"), trunk, None)
+        .await
+        .expect("add b");
+    ed.apply_text(
+        b,
+        None,
+        source(&tmp, "b", "bee 2"),
+        None,
+        Checksum::Md5([3; 16]),
+    )
+    .await
+    .expect("text b");
+    ed.close_file(b).await.expect("close b");
+    ed.close_directory(trunk).await.expect("close trunk");
+    ed.close_directory(root).await.expect("close root");
+    ed.close_edit().await.expect("merge");
+
+    let mut seen = Vec::new();
+    let req = LogRequest {
+        paths: vec![],
+        start: None,
+        end: None,
+        limit: Some(1),
+        discover_changed_paths: true,
+        strict_node_history: false,
+    };
+    s.log(
+        &req,
+        &mut |e| {
+            seen.push(e);
+            Ok(())
+        },
+        &c,
+    )
+    .await
+    .expect("log");
+    let changed: Vec<_> = seen[0]
+        .changed_paths
+        .iter()
+        .map(|c| (c.path.as_str().to_owned(), c.action))
+        .collect();
+    assert_eq!(
+        changed,
+        vec![("/trunk/b.txt".to_owned(), ChangeAction::Replaced)]
+    );
+    assert_eq!(cat(&s, "trunk/b.txt", None).await, b"bee 2");
 }
 
 #[tokio::test]
