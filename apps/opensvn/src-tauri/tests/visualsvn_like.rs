@@ -520,6 +520,42 @@ async fn repository_names_with_spaces_and_vietnamese() {
     }
 }
 
+/// A VisualSVN web-interface link (`https://host/!/#Repo/view/...`) converts to the `/svn/<Repo>`
+/// URL the server really serves, for names with dots, spaces and Vietnamese.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the VisualSVN-like server (scripts/test-env/visualsvn-like.sh)"]
+async fn web_interface_links_convert_to_repository_urls() {
+    let e = sso();
+    let dotted = Repo::new("web.link.repo");
+    for name in ["My Project", "Dự án Tiếng Việt", dotted.name.as_str()] {
+        for (link, rev) in [
+            (format!("{}#{name}", base("!/")), None),
+            (format!("{}#{}/view/head/", base("!/"), encode(name)), None),
+            (format!("{}#{name}/view/r0/", base("!/")), Some(0)),
+        ] {
+            let parsed = svn_types::parse_visualsvn_web_link(&link)
+                .unwrap_or_else(|| panic!("{link} is a web link"))
+                .unwrap_or_else(|err| panic!("{link}: {err}"));
+            let url = parsed.repo_url.to_string();
+            assert_eq!(url, format!("{}/{}", base("svn"), encode(name)), "{link}");
+            assert_eq!(parsed.peg_rev.map(|r| r.0), rev, "{link}");
+            let info = e
+                .engine
+                .repo_info(&url, &ctx())
+                .await
+                .unwrap_or_else(|err| panic!("repo_info {url}: {err:?}"));
+            assert!(info.repo_root_url.ends_with(&encode(name)), "{link}");
+        }
+    }
+    // The web UI itself is not a repository: the raw link is still refused with the hint.
+    let err = e
+        .engine
+        .repo_info(&format!("{}#{}", base("!/"), dotted.name), &ctx())
+        .await
+        .expect_err("raw web link");
+    assert!(err.message.contains("Copy URL to clipboard"), "{err:?}");
+}
+
 fn encode_path(path: &str) -> String {
     path.split('/').map(encode).collect::<Vec<_>>().join("/")
 }

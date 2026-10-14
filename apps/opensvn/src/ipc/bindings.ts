@@ -75,6 +75,17 @@ export const commands = {
 	resolve: (request: ResolveRequest) => typedError<null, AppError>(__TAURI_INVOKE("resolve", { request })),
 	propsSet: (wcId: WcId, path: string, name: string, value: string | null) => typedError<null, AppError>(__TAURI_INVOKE("props_set", { wcId, path, name, value })),
 	repoInfo: (url: string) => typedError<RepoInfo, AppError>(__TAURI_INVOKE("repo_info", { url })),
+	/**
+	 *  Turns a VisualSVN web-interface link (`https://host/!/#Repo/view/head/trunk`) into the
+	 *  repository URL it shows (`https://host/svn/Repo/trunk`), confirmed by asking the server.
+	 *  Any other input comes back unchanged so the usual URL checks report it.
+	 * 
+	 *  The probe goes to the scheme, host and port the user typed (the parser never changes them)
+	 *  through the normal connect path: the user's sign-in prompts and certificate trust apply.
+	 *  A failure is `invalid-argument` with detail [`VISUALSVN_WEB_LINK`], whatever the cause, so
+	 *  the UI can tell the user to copy the repository URL from VisualSVN instead.
+	 */
+	repoResolveUrl: (url: string) => typedError<ResolvedRepoUrl, AppError>(__TAURI_INVOKE("repo_resolve_url", { url })),
 	repoList: (url: string, rev: number | null) => typedError<RepoEntry[], AppError>(__TAURI_INVOKE("repo_list", { url, rev })),
 	repoCat: (url: string, rev: number | null) => typedError<TextSide, AppError>(__TAURI_INVOKE("repo_cat", { url, rev })),
 	repoSave: (url: string, rev: number | null, grant: PathGrantId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("repo_save", { url, rev, grant })),
@@ -767,6 +778,19 @@ export type ResolveRequest = {
 	wcId: WcId,
 	path: string,
 	choice: ResolveChoice,
+};
+
+/**
+ *  Result of `repo_resolve_url`: the URL to use, converted when the input was a VisualSVN
+ *  web-interface link.
+ */
+export type ResolvedRepoUrl = {
+	/**  Repository URL to use (the input unchanged when it was not a web link). */
+	url: string,
+	/**  Whether `url` was derived from a VisualSVN web-interface link and confirmed by the server. */
+	converted: boolean,
+	/**  Revision the web link pointed at (`/view/r1234/...`), as a suggestion. */
+	pegRev: Rev | null,
 };
 
 /**

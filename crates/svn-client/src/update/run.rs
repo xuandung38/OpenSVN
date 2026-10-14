@@ -319,6 +319,12 @@ pub async fn drive_update(
         let Err(e) = result else {
             break outcome;
         };
+        if e.code == ErrorCode::Cancelled {
+            // The user is waiting: what is still queued (the drive stopped committing when its
+            // grace period ran out) is finished by the next update or cleanup, which run the
+            // queue first.
+            return Err(e);
+        }
         // Nodes committed before the failure have queued work; finish it so the tree matches.
         let db2 = Arc::clone(&db);
         let _ = blocking(move || crate::wc::run_work_queue(&db2, &CancelToken::new()).map(|_| ()))

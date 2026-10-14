@@ -31,7 +31,8 @@ fn base_blob(
     path: &RelPath,
     column: &str,
 ) -> Result<Option<Vec<u8>>> {
-    conn.query_row(
+    super::connection::cached_row(
+        conn,
         &format!(
             "SELECT {column} FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = 0"
         ),
@@ -109,24 +110,7 @@ impl WcDb {
     /// Cached repository lock of the BASE node at `path`, matched by repository location like
     /// svn does (`LOCK.repos_id/repos_relpath` against the node's).
     pub fn repos_lock(&self, path: &RelPath) -> Result<Option<LockInfo>> {
-        self.with_read(|c| {
-            c.query_row(
-                "SELECT l.lock_token, l.lock_owner, l.lock_comment, l.lock_date \
-                 FROM nodes n JOIN lock l ON l.repos_id = n.repos_id AND l.repos_relpath = n.repos_path \
-                 WHERE n.wc_id = ?1 AND n.local_relpath = ?2 AND n.op_depth = 0",
-                params![self.wc_id, path.as_str()],
-                |r| {
-                    Ok(LockInfo {
-                        token: r.get(0)?,
-                        owner: r.get(1)?,
-                        comment: r.get(2)?,
-                        date: r.get(3)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(sql_err)
-        })
+        self.with_read(|c| repos_lock_on(c, self.wc_id, path))
     }
 
     /// `dav_cache` of the BASE node: the RA layer's property cache (wcprops), decoded as a
@@ -155,4 +139,28 @@ impl WcDb {
                 .map_err(|e| corrupt(format!("inherited_props of '{path}': {e}")))
         })
     }
+}
+
+/// [`WcDb::repos_lock`] on an open connection.
+pub(crate) fn repos_lock_on(
+    c: &Connection,
+    wc_id: i64,
+    path: &RelPath,
+) -> Result<Option<LockInfo>> {
+    super::connection::cached_row(c,
+                "SELECT l.lock_token, l.lock_owner, l.lock_comment, l.lock_date \
+                 FROM nodes n JOIN lock l ON l.repos_id = n.repos_id AND l.repos_relpath = n.repos_path \
+                 WHERE n.wc_id = ?1 AND n.local_relpath = ?2 AND n.op_depth = 0",
+                params![wc_id, path.as_str()],
+                |r| {
+                    Ok(LockInfo {
+                        token: r.get(0)?,
+                        owner: r.get(1)?,
+                        comment: r.get(2)?,
+                        date: r.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(sql_err)
 }

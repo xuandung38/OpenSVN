@@ -1,0 +1,225 @@
+//! Durability barriers of the batched update editor, driven by the `fail` crate.
+//! Run with `cargo test -p svn-client --features failpoints`.
+#![cfg(feature = "failpoints")]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
+mod common;
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use common::*;
+use svn_client::{checkout, update};
+use svn_types::{CancelToken, Depth, ErrorCode, Revnum};
+
+/// Files with the same text, more than one batch of them (a batch flushes at 2048 nodes).
+const SAME_TEXT_FILES: usize = 2300;
+
+// One test function: failpoint configuration is process global.
+#[tokio::test(flavor = "multi_thread")]
+async fn barriers_of_the_batched_editor() {
+    let scenario = fail::FailScenario::setup();
+    same_text_is_placed_once_across_batches().await;
+    cancel_does_not_wait_for_a_slow_barrier().await;
+    // The end-of-drive wait (a few files) and a mid-drive wait (the first flush of more files
+    // than a batch holds).
+    cancel_during_a_barrier_wait_returns_promptly(3).await;
+    cancel_during_a_barrier_wait_returns_promptly(SAME_TEXT_FILES).await;
+    scenario.teardown();
+}
+
+/// A text placed by one batch is not renamed over by a later batch of the same drive: the
+/// earlier batch's barrier covers the stored file and its commit relies on it, while a new
+/// inode would only be covered by a later barrier (power loss in between would leave a
+/// committed row naming a partial text).
+async fn same_text_is_placed_once_across_batches() {
+    let s = session();
+    let changes: Vec<_> = (0..SAME_TEXT_FILES)
+        .map(|i| put(&format!("d{}/f{i}.txt", i % 23), "same text\n"))
+        .collect();
+    s.seed("a", "r1", &changes).expect("seed");
+    let renames = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&renames);
+    fail::cfg_callback("pristine.install.before_rename", move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+    })
+    .unwrap();
+    let sb = Sandbox::new();
+    let wc = sb.path("wc");
+    checkout(
+        &ctx(),
+        &s,
+        &wc,
+        None,
+        Depth::Infinity,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("checkout");
+    fail::remove("pristine.install.before_rename");
+    assert_eq!(renames.load(Ordering::SeqCst), 1, "one text, placed once");
+    assert_eq!(read(&wc.join("d0/f0.txt")), "same text\n");
+    let db = open_db(&wc);
+    let rows = base_rows(&db);
+    assert_eq!(rows.len(), SAME_TEXT_FILES + 23 + 1);
+    assert!(rows.iter().all(|r| r.1 == "normal"), "{rows:?}");
+}
+
+/// Cancelling returns within the grace period although the barrier of the last batch takes
+/// longer; the next update finishes the work.
+async fn cancel_does_not_wait_for_a_slow_barrier() {
+    let s = session();
+    s.seed(
+        "a",
+        "r1",
+        &[
+            put("a.txt", "a\n"),
+            put("b.txt", "b\n"),
+            put("d/c.txt", "c\n"),
+        ],
+    )
+    .expect("seed");
+    let sb = Sandbox::new();
+    let wc = sb.path("wc");
+    checkout(
+        &ctx(),
+        &s,
+        &wc,
+        None,
+        Depth::Infinity,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("checkout");
+    if !svn_wc::durable::batched_sync(&wc) {
+        eprintln!("skipped: the test directory's filesystem syncs every file on its own");
+        return;
+    }
+    s.seed(
+        "a",
+        "r2",
+        &[
+            put("a.txt", "a2\n"),
+            put("b.txt", "b2\n"),
+            put("d/c.txt", "c2\n"),
+        ],
+    )
+    .expect("seed");
+
+    fail::cfg("update.sync_barrier", "sleep(3000)").unwrap();
+    let cancel = CancelToken::new();
+    let mut c = ctx();
+    let trip = cancel.clone();
+    c.progress = Some(Arc::new(move |_ev: &svn_client::UpdateEvent| trip.cancel()));
+    let started = Instant::now();
+    let err = update(&c, &s, &wc, None, Depth::Unknown, &cancel)
+        .await
+        .expect_err("cancelled");
+    let took = started.elapsed();
+    fail::remove("update.sync_barrier");
+    assert_eq!(err.code, ErrorCode::Cancelled, "{err}");
+    assert!(
+        took < Duration::from_millis(1500),
+        "cancel waited {took:?} for the barrier"
+    );
+
+    let sum = update(&ctx(), &s, &wc, None, Depth::Unknown, &CancelToken::new())
+        .await
+        .expect("resume");
+    assert_eq!(sum.revision, Some(Revnum(2)));
+    for (f, text) in [("a.txt", "a2\n"), ("b.txt", "b2\n"), ("d/c.txt", "c2\n")] {
+        assert_eq!(read(&wc.join(f)), text, "{f}");
+    }
+    let db = open_db(&wc);
+    assert!(db.work_items().expect("queue").is_empty());
+    let rows = base_rows(&db);
+    assert!(rows.iter().all(|r| r.1 == "normal" && r.3 == 2), "{rows:?}");
+}
+
+/// A cancellation that arrives while the editor already waits for a slow barrier (here the one
+/// of the last batch, at the end of the drive) ends the wait within the grace period; nothing
+/// that relies on the barrier is committed, and the next update finishes the work.
+async fn cancel_during_a_barrier_wait_returns_promptly(files: usize) {
+    let s = session();
+    let r1: Vec<_> = (0..files)
+        .map(|i| put(&format!("d{}/f{i}.txt", i % 23), &format!("{i}\n")))
+        .collect();
+    s.seed("a", "r1", &r1).expect("seed");
+    let sb = Sandbox::new();
+    let wc = sb.path("wc");
+    checkout(
+        &ctx(),
+        &s,
+        &wc,
+        None,
+        Depth::Infinity,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("checkout");
+    if !svn_wc::durable::batched_sync(&wc) {
+        eprintln!("skipped: the test directory's filesystem syncs every file on its own");
+        return;
+    }
+    let r2: Vec<_> = (0..files)
+        .map(|i| put(&format!("d{}/f{i}.txt", i % 23), &format!("{i} v2\n")))
+        .collect();
+    s.seed("a", "r2", &r2).expect("seed");
+
+    // The barrier takes 4 s; 300 ms into the first wait for it, the user cancels.
+    let cancel = CancelToken::new();
+    let cancelled_at: Arc<Mutex<Option<Instant>>> = Arc::default();
+    let (trip, at) = (cancel.clone(), Arc::clone(&cancelled_at));
+    fail::cfg("update.sync_barrier", "sleep(4000)").unwrap();
+    fail::cfg_callback("update.barrier_wait", move || {
+        let mut slot = at.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(Instant::now() + Duration::from_millis(300));
+            let (trip, at) = (trip.clone(), Arc::clone(&at));
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                *at.lock().unwrap() = Some(Instant::now());
+                trip.cancel();
+            });
+        }
+    })
+    .unwrap();
+    let result = update(&ctx(), &s, &wc, None, Depth::Unknown, &cancel).await;
+    let returned = Instant::now();
+    fail::remove("update.barrier_wait");
+    fail::remove("update.sync_barrier");
+    let err = result.expect_err("cancelled");
+    assert_eq!(err.code, ErrorCode::Cancelled, "{err}");
+    let at = cancelled_at
+        .lock()
+        .unwrap()
+        .expect("the editor waited for a barrier");
+    let took = returned.saturating_duration_since(at);
+    assert!(
+        took < Duration::from_secs(1),
+        "update returned {took:?} after the cancellation"
+    );
+    {
+        // Nothing that relies on the unfinished barrier was committed.
+        let db = open_db(&wc);
+        let rows = base_rows(&db);
+        assert!(rows.iter().all(|r| r.3 == 1), "{rows:?}");
+    }
+
+    let sum = update(&ctx(), &s, &wc, None, Depth::Unknown, &CancelToken::new())
+        .await
+        .expect("resume");
+    assert_eq!(sum.revision, Some(Revnum(2)));
+    for i in [0, files / 2, files - 1] {
+        let f = format!("d{}/f{i}.txt", i % 23);
+        assert_eq!(read(&wc.join(&f)), format!("{i} v2\n"), "{f}");
+    }
+    let db = open_db(&wc);
+    assert!(db.work_items().expect("queue").is_empty());
+    let rows = base_rows(&db);
+    assert!(rows.iter().all(|r| r.1 == "normal" && r.3 == 2), "{rows:?}");
+}

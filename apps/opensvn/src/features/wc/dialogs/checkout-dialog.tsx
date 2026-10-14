@@ -18,6 +18,7 @@ import { useT } from "../../../lib/i18n/i18n";
 import { parseRevision } from "../../remote/branch/branch-model";
 import { RepoTree } from "../../remote/browse/repo-tree";
 import { useRepoInfo } from "../../remote/browse/use-repo";
+import { hasQueryOrFragment, useWebLinkConversion } from "../../remote/web-link";
 import {
   type FolderNameError,
   joinDisplay,
@@ -27,6 +28,7 @@ import {
 import { isCheckoutUrl } from "../wc-model";
 import { pickFolder } from "../welcome/use-path-grant";
 import { dialogStrings } from "./dialog-strings";
+import { UrlFieldNote } from "./web-link-note";
 
 /** Tracking issue for svn:externals support, linked from the checkout dialog. */
 export const EXTERNALS_ISSUE_URL = "https://github.com/xuandung38/OpenSVN/issues/97";
@@ -102,7 +104,17 @@ export function CheckoutDialog({
 
   const trimmedUrl = url.trim();
   const rev = parseRevision(revText);
-  const urlOk = isCheckoutUrl(trimmedUrl);
+  // A pasted VisualSVN web link is replaced by the repository URL once the server confirms it;
+  // the revision it names fills an empty revision field.
+  const webLink = useWebLinkConversion(url, (converted, pegRev) => {
+    setUrl(converted);
+    if (pegRev !== null) setRevText((cur) => (cur.trim() === "" ? String(pegRev) : cur));
+  });
+  const urlOk = isCheckoutUrl(trimmedUrl) && !hasQueryOrFragment(trimmedUrl);
+  const revFilled =
+    webLink.kind === "converted" && webLink.pegRev !== null && revText === String(webLink.pegRev)
+      ? webLink.pegRev
+      : null;
   // The folder name follows the URL until the user edits it.
   const folderName = name ?? suggestFolderName(trimmedUrl);
   const nameError = validateFolderName(folderName);
@@ -265,11 +277,12 @@ export function CheckoutDialog({
               <option key={u} value={u} />
             ))}
           </datalist>
-          {url.length > 0 && !urlOk && (
-            <span className="text-bad-text" role="alert">
-              {d("urlInvalid")}
-            </span>
-          )}
+          <UrlFieldNote
+            url={url}
+            state={webLink}
+            revFilled={revFilled}
+            fallback={urlOk ? null : d("urlInvalid")}
+          />
           {browseFor !== null &&
             (browseInfo.data ? (
               <RepoTree
