@@ -177,15 +177,17 @@ fn repos_parent(p: &str) -> String {
         .map_or_else(String::new, |(d, _)| d.to_owned())
 }
 
-/// The session anchor a commit of `items` needs, like svn's `svn_client__condense_commit_items`:
-/// the longest common ancestor of `within` (where the caller would like the session, e.g. the
-/// working copy URL) and every item's repository path, moved to its parent while an item sits
-/// exactly there and is not a directory with only property changes (the session root can only
-/// be opened, never added, deleted or be a file).
-fn condensed_anchor(items: &[Committable], within: &str) -> String {
-    let mut base = items.iter().fold(within.to_owned(), |b, it| {
-        common_ancestor(&b, &it.repos_relpath)
-    });
+/// Like svn's `svn_client__condense_commit_items`: the longest common ancestor of the items'
+/// repository paths, moved to its parent while an item sits exactly there and is not a
+/// directory with only property changes (the session root can only be opened, never added,
+/// deleted or be a file). `items` must not be empty.
+fn condensed_anchor(items: &[Committable]) -> String {
+    let mut base = items
+        .iter()
+        .map(|it| it.repos_relpath.as_str())
+        .reduce(common_ancestor_ref)
+        .map(str::to_owned)
+        .unwrap_or_default();
     while !base.is_empty()
         && items.iter().any(|it| {
             it.repos_relpath == base
@@ -195,6 +197,34 @@ fn condensed_anchor(items: &[Committable], within: &str) -> String {
         base = repos_parent(&base);
     }
     base
+}
+
+/// [`common_ancestor`] as a prefix of `a`.
+fn common_ancestor_ref<'a>(a: &'a str, b: &str) -> &'a str {
+    let len = common_ancestor(a, b).len();
+    &a[..len]
+}
+
+/// Whether repository path `path` is `anchor` or lies below it.
+fn at_or_below(path: &str, anchor: &str) -> bool {
+    anchor.is_empty()
+        || path == anchor
+        || path
+            .strip_prefix(anchor)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The session anchor for committing `items` when the session is at `within`: `within` itself
+/// while it can express every change (no reconnect for an ordinary commit), else svn's anchor,
+/// condensed over the items only (a commit of changes below a switched subtree alone is
+/// anchored at that subtree, not at its common ancestor with `within`).
+fn anchor_for(items: &[Committable], within: &str) -> String {
+    let anchor = condensed_anchor(items);
+    if at_or_below(&anchor, within) {
+        within.to_owned()
+    } else {
+        anchor
+    }
 }
 
 /// Repository path (below the root) the commit session must be anchored at to commit the local
@@ -224,7 +254,7 @@ pub fn commit_anchor(
     if harvest.items.is_empty() {
         return Ok(None);
     }
-    Ok(Some(condensed_anchor(&harvest.items, within)))
+    Ok(Some(anchor_for(&harvest.items, within)))
 }
 
 /// Commits the local changes below `targets` (absolute paths inside the working copy).
@@ -287,7 +317,7 @@ async fn commit_locked(
     }
     // Every change must be expressible below the session root (see `commit_anchor`); checked
     // before a server transaction exists.
-    if condensed_anchor(&harvest.items, &opts.session_prefix) != opts.session_prefix {
+    if !at_or_below(&condensed_anchor(&harvest.items), &opts.session_prefix) {
         let outside = harvest
             .items
             .iter()
@@ -699,7 +729,7 @@ fn prepare_item(
 #[cfg(test)]
 mod anchor_tests {
     use super::collect::{Committable, ItemAction, ItemKind};
-    use super::{common_ancestor, condensed_anchor};
+    use super::{anchor_for, common_ancestor, condensed_anchor};
     use svn_types::RelPath;
 
     fn item(repos: &str, kind: ItemKind, action: ItemAction) -> Committable {
@@ -731,10 +761,10 @@ mod anchor_tests {
             item("trunk/f", ItemKind::File, ItemAction::Modify),
             item("trunk/d/g", ItemKind::File, ItemAction::Add),
         ];
-        assert_eq!(condensed_anchor(&items, "trunk"), "trunk");
+        assert_eq!(anchor_for(&items, "trunk"), "trunk");
         // Property changes of the working copy root itself are made on the session root.
         let root_props = [item("trunk", ItemKind::Dir, ItemAction::Modify)];
-        assert_eq!(condensed_anchor(&root_props, "trunk"), "trunk");
+        assert_eq!(anchor_for(&root_props, "trunk"), "trunk");
     }
 
     #[test]
@@ -743,19 +773,42 @@ mod anchor_tests {
             item("trunk/f", ItemKind::File, ItemAction::Modify),
             item("branches/b/x", ItemKind::File, ItemAction::Modify),
         ];
-        assert_eq!(condensed_anchor(&items, "trunk"), "");
+        assert_eq!(anchor_for(&items, "trunk"), "");
         let items = [
             item("proj/trunk/f", ItemKind::File, ItemAction::Modify),
             item("proj/branches/b/x", ItemKind::File, ItemAction::Delete),
         ];
-        assert_eq!(condensed_anchor(&items, "proj/trunk"), "proj");
+        assert_eq!(anchor_for(&items, "proj/trunk"), "proj");
     }
 
     #[test]
     fn a_file_or_an_add_at_the_anchor_moves_it_to_the_parent() {
         let items = [item("trunk/sub/x", ItemKind::File, ItemAction::Modify)];
-        assert_eq!(condensed_anchor(&items, "trunk/sub/x"), "trunk/sub");
+        assert_eq!(anchor_for(&items, "trunk/sub/x"), "trunk/sub");
         let items = [item("trunk/new", ItemKind::Dir, ItemAction::Add)];
-        assert_eq!(condensed_anchor(&items, "trunk/new"), "trunk");
+        assert_eq!(anchor_for(&items, "trunk/new"), "trunk");
+    }
+
+    #[test]
+    fn changes_outside_the_working_copy_alone_are_condensed_over_the_items_like_svn() {
+        let items = [
+            item("branches/b/x", ItemKind::File, ItemAction::Modify),
+            item("branches/b/d/y", ItemKind::File, ItemAction::Delete),
+        ];
+        assert_eq!(condensed_anchor(&items), "branches/b");
+        assert_eq!(anchor_for(&items, "trunk"), "branches/b");
+        let items = [item("branches/b/x", ItemKind::File, ItemAction::Modify)];
+        assert_eq!(anchor_for(&items, "trunk"), "branches/b");
+        // Property changes of the switched folder itself are made on the session root.
+        let items = [item("branches/b", ItemKind::Dir, ItemAction::Modify)];
+        assert_eq!(anchor_for(&items, "trunk"), "branches/b");
+        // A sibling of the working copy whose name extends it is outside it.
+        let items = [item("trunk2/x", ItemKind::File, ItemAction::Modify)];
+        assert_eq!(anchor_for(&items, "trunk"), "trunk2");
+        // Changes deeper than the working copy keep the session where it is.
+        let items = [item("trunk/a/b/c", ItemKind::File, ItemAction::Modify)];
+        assert_eq!(condensed_anchor(&items), "trunk/a/b");
+        assert_eq!(anchor_for(&items, "trunk"), "trunk");
+        assert_eq!(anchor_for(&items, ""), "");
     }
 }

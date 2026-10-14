@@ -388,11 +388,53 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+    /// Writes an executable script that prints `version`, and returns once it can be run.
+    ///
+    /// Another test thread may fork while the write fd is open. The child holds a copy of
+    /// that fd until it execs, and exec of the script fails with ETXTBSY until then. No
+    /// new copy can appear once the fd is closed, so one successful run means every later
+    /// exec is safe.
     fn stub(dir: &Path, name: &str, version: &str) -> std::io::Result<PathBuf> {
         let path = dir.join(name);
         std::fs::write(&path, format!("#!/bin/sh\necho {version}\n"))?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
-        Ok(path)
+        let mut tries = 0;
+        loop {
+            match std::process::Command::new(&path).output() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 500 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => return Err(e),
+                Ok(_) => return Ok(path),
+            }
+        }
+    }
+
+    #[test]
+    fn stubs_run_while_other_threads_spawn() -> TestResult {
+        // Each thread writes stubs and runs them at once, so forks from one thread
+        // overlap with writes in another. Before the ETXTBSY wait this failed quickly.
+        let tmp = tempfile::tempdir()?;
+        std::thread::scope(|s| -> TestResult {
+            let workers: Vec<_> = (0..8)
+                .map(|t| {
+                    let dir = tmp.path();
+                    s.spawn(move || -> std::io::Result<()> {
+                        for i in 0..25 {
+                            let path = stub(dir, &format!("s{t}-{i}"), "1.15.0")?;
+                            let out = std::process::Command::new(&path).output()?;
+                            assert_eq!(out.stdout, b"1.15.0\n");
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            for w in workers {
+                w.join().map_err(|_| "worker panicked")??;
+            }
+            Ok(())
+        })
     }
 
     fn env(pairs: Vec<(&'static str, String)>) -> impl Fn(&str) -> Option<String> {
