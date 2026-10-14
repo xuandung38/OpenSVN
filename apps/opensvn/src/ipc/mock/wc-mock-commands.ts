@@ -11,6 +11,8 @@ import type {
   DiffTarget,
   FileStatus,
   IgnoreAddRequest,
+  LockConflict,
+  LockInfo,
   LockRequest,
   OperationHandle,
   OperationKind,
@@ -38,6 +40,7 @@ export interface MockDeps {
     wcId: string | null,
     result?: OpResult,
     onDone?: () => void,
+    failure?: AppError,
   ) => OperationHandle;
   emit: (name: string, payload?: unknown) => void;
 }
@@ -52,6 +55,11 @@ interface State {
   grants: Map<string, string>;
   youngest: number;
   seq: number;
+  /**
+   * Locks other users hold on files of the main working copy that its status does not show (as
+   * after a plain local status): only a lock attempt reveals them.
+   */
+  serverLocks: Map<string, LockInfo>;
 }
 
 /** A registered working copy whose folder was moved, for the repository manager demo. */
@@ -79,6 +87,18 @@ function initialState(): State {
     grants: new Map(),
     youngest: MOCK_YOUNGEST,
     seq: 0,
+    serverLocks: new Map([
+      [
+        "assets/audio/theme.ogg",
+        {
+          owner: "binh",
+          comment: "mixing the final cut",
+          createdAt: "2026-10-13T09:00:00Z",
+          token: null,
+          mine: false,
+        },
+      ],
+    ]),
   };
 }
 
@@ -405,11 +425,32 @@ export function wcMockCommands(deps: MockDeps) {
     },
     lock: (req: LockRequest) => {
       const { wcId, paths } = req.targets as { wcId: string; paths: string[] };
-      const taken = statusOf(wcId).find((f) => paths.includes(f.path) && f.lock && !f.lock.mine);
-      if (taken && !req.steal) {
-        return fail("locked-by-other", `Locked by ${taken.lock?.owner ?? "another user"}`);
+      // Like the real engine, a lock held elsewhere is only known once the server refuses the
+      // lock: the operation fails with the refusing locks (status may not show them).
+      const conflicts: LockConflict[] = paths.flatMap((path) => {
+        const known = statusOf(wcId).find((f) => f.path === path && f.lock && !f.lock.mine)?.lock;
+        const held = known ?? state.serverLocks.get(path);
+        return held
+          ? [{ path, owner: held.owner, comment: held.comment, createdAt: held.createdAt }]
+          : [];
+      });
+      const title = `Lock ${paths.length} file(s)`;
+      if (conflicts.length > 0 && !req.steal) {
+        const owner = conflicts[0]?.owner ?? "another user";
+        return ok(
+          deps.simulateOp("lock", title, wcId, undefined, undefined, {
+            code: "locked-by-other",
+            message: `HTTP 423: locked by ${owner}`,
+            detail: null,
+            path: null,
+            retryable: false,
+            actions: ["open-lock-dialog"],
+            lockConflicts: conflicts,
+          }),
+        );
       }
-      return op("lock", `Lock ${paths.length} file(s)`, wcId, () =>
+      return op("lock", title, wcId, () => {
+        for (const p of paths) state.serverLocks.delete(p);
         setStatus(
           deps,
           wcId,
@@ -423,8 +464,8 @@ export function wcMockCommands(deps: MockDeps) {
               mine: true,
             },
           })),
-        ),
-      );
+        );
+      });
     },
     unlock: (req: UnlockRequest) => {
       const { wcId, paths } = req.targets as { wcId: string; paths: string[] };
@@ -457,10 +498,12 @@ export function wcMockCommands(deps: MockDeps) {
           setStatus(
             deps,
             req.wcId,
-            // Committed files are no longer changes; a kept lock stays on the (now normal) file.
-            mapPaths(req.wcId, req.paths, (f) =>
-              f.lock && req.keepLocks ? { ...f, text: "normal", props: "none" } : null,
-            ),
+            // Committed files are no longer changes; a kept lock stays on the (now normal) file,
+            // and a needs-lock file stays listed (read-only again once its lock is released).
+            mapPaths(req.wcId, req.paths, (f) => {
+              const lock = req.keepLocks ? f.lock : null;
+              return lock || f.needsLock ? { ...f, text: "normal", props: "none", lock } : null;
+            }),
           );
           patchWc(req.wcId, { baseRev: rev });
           deps.emit("wc://revision-changed", { wcId: req.wcId, baseRev: rev, revRange: null });

@@ -79,7 +79,8 @@ const cancelled = new Set<string>();
 /**
  * Simulates a long-running operation: op://started, a few op://progress ticks, then `onDone` (the
  * state change the real engine would have made) and op://finished. `op_cancel` turns it into an
- * op://failed with the `cancelled` code instead.
+ * op://failed with the `cancelled` code instead; `failure` ends it with op://failed (no `onDone`),
+ * the way the real engine reports a server refusal.
  */
 function simulateOp(
   kind: OperationKind,
@@ -87,6 +88,7 @@ function simulateOp(
   wcId: string | null,
   result: OpResult = { kind: "done" },
   onDone?: () => void,
+  failure?: AppError,
 ): OperationHandle {
   const handle: OperationHandle = { opId: `mock-op-${++opSeq}`, kind, wcId, title };
   setTimeout(() => mockEmit("op://started", handle), 0);
@@ -109,6 +111,10 @@ function simulateOp(
   }
   setTimeout(() => {
     if (cancelled.has(handle.opId)) return;
+    if (failure) {
+      mockEmit("op://failed", { opId: handle.opId, error: failure });
+      return;
+    }
     onDone?.();
     mockEmit("op://finished", { opId: handle.opId, result });
     if (wcId) mockEmit("wc://status-changed", { wcId, changed: [], removed: [] });

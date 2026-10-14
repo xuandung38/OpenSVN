@@ -85,6 +85,12 @@ impl Ctx<'_> {
     ) -> Result<()> {
         let recursive = matches!(depth, Depth::Infinity | Depth::Unknown);
         let dir_repos = dir.repos_relpath.clone().unwrap_or_default();
+        // An `incomplete` directory is reported `start_empty`, so the server assumes it has no
+        // children: every child must be reported, even one at the directory's revision
+        // (libsvn_wc's `report_everything`). Otherwise the server never learns about a child
+        // directory at that revision while its own deeper entries are reported below it, and
+        // mod_dav_svn rejects the report (#119).
+        let report_everything = dir.presence == Presence::Incomplete;
         // One query per directory, like svn's crawler (`svn_wc__db_base_get_children_info`).
         for node in self.db.base_children(wc)? {
             let child = node.relpath.clone();
@@ -125,7 +131,7 @@ impl Ctx<'_> {
                     &node,
                     Some(&dir_repos),
                     Depth::Infinity,
-                    dir_depth == Depth::Empty,
+                    report_everything || dir_depth == Depth::Empty,
                     dir.revision,
                 )?;
                 continue;
@@ -138,7 +144,8 @@ impl Ctx<'_> {
                 .filter(|d| *d != Depth::Unknown)
                 .unwrap_or(Depth::Infinity);
             let report_depth = if recursive { child_depth } else { Depth::Empty };
-            let force = matches!(dir_depth, Depth::Empty | Depth::Files)
+            let force = report_everything
+                || matches!(dir_depth, Depth::Empty | Depth::Files)
                 || (dir_depth == Depth::Immediates && child_depth != Depth::Empty)
                 || (child_depth != Depth::Infinity && recursive);
             self.report_entry(

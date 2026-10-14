@@ -2,15 +2,15 @@
 //! `repo_cat` returns text (size-limited); `repo_save` streams to disk as an operation.
 
 use opensvn_ipc::{
-    AppError, BranchNode, CopyLocationRequest, EntryKind, Layout, LayoutDetection, LockRequest,
-    LockTargets, LogGetRequest, LogPage, LogTarget, OpResult, OperationHandle, OperationKind,
-    PathGrantId, RemoteEditRequest, RemoteOp, RepoEntry, RepoInfo, Rev, TextSide, UnlockRequest,
+    AppError, BranchNode, CopyLocationRequest, Layout, LayoutDetection, LockRequest, LockTargets,
+    LogGetRequest, LogPage, LogTarget, OpResult, OperationHandle, OperationKind, PathGrantId,
+    RemoteEditRequest, RemoteOp, RepoEntry, RepoInfo, Rev, TextSide, UnlockRequest,
 };
 use tauri::State;
 
 use crate::app_state::{AppState, leaf};
 use crate::boundary::guard;
-use crate::engine::{EditOp, LockScope, LogScope, OpContext, RemoteEditPlan};
+use crate::engine::{EditOp, EngineFacade, LockScope, LogScope, OpContext, RemoteEditPlan};
 
 fn engine_err(e: svn_types::SvnError) -> AppError {
     AppError::from(&e)
@@ -147,29 +147,55 @@ pub async fn lock(
     guard(async {
         let (comment, steal) = (request.comment.clone(), request.steal.unwrap_or(false));
         match request.targets {
-            LockTargets::Wc { wc_id, paths } => state.start_wc_op(
+            LockTargets::Wc { wc_id, paths } => state.start_wc_op_app(
                 OperationKind::Lock,
                 &wc_id,
                 "Lock files",
                 move |engine, wc, ctx| async move {
                     let scope = LockScope::Wc { wc, paths };
-                    engine.lock(&scope, comment.as_deref(), steal, &ctx).await?;
-                    Ok(OpResult::Done)
+                    lock_with_conflicts(engine.as_ref(), &scope, comment.as_deref(), steal, &ctx)
+                        .await
                 },
             ),
-            LockTargets::Url { urls } => Ok(state.start_op(
+            LockTargets::Url { urls } => Ok(state.start_op_app(
                 OperationKind::Lock,
                 "Lock files",
                 move |engine, ctx| async move {
-                    engine
-                        .lock(&LockScope::Urls(urls), comment.as_deref(), steal, &ctx)
-                        .await?;
-                    Ok(OpResult::Done)
+                    let scope = LockScope::Urls(urls);
+                    lock_with_conflicts(engine.as_ref(), &scope, comment.as_deref(), steal, &ctx)
+                        .await
                 },
             )),
         }
     })
     .await
+}
+
+/// Locks `scope`. A `locked-by-other` refusal carries the locks that refused it, asked from the
+/// server right away (best effort: when that read fails too, the plain refusal is reported), so
+/// the lock dialog can name the owner and offer an explicitly confirmed steal (doc 01 §10.4).
+/// Nothing is ever stolen here: a steal only happens when the request asked for it.
+async fn lock_with_conflicts(
+    engine: &dyn EngineFacade,
+    scope: &LockScope,
+    comment: Option<&str>,
+    steal: bool,
+    ctx: &OpContext,
+) -> Result<OpResult, AppError> {
+    match engine.lock(scope, comment, steal, ctx).await {
+        Ok(()) => Ok(OpResult::Done),
+        Err(e) if e.code == svn_types::ErrorCode::LockedByOther => {
+            let conflicts = match engine.lock_conflicts(scope, ctx).await {
+                Ok(c) => c,
+                Err(read) => {
+                    tracing::warn!(code = ?read.code, "could not read the lock that refused a lock request");
+                    Vec::new()
+                }
+            };
+            Err(AppError::from(&e).with_lock_conflicts(conflicts))
+        }
+        Err(e) => Err(AppError::from(&e)),
+    }
 }
 
 #[tauri::command]
@@ -281,18 +307,24 @@ fn layout_valid(layout: &Layout) -> Result<(), AppError> {
 pub async fn branches_list(
     state: State<'_, AppState>,
     repo_root_url: String,
+    at_url: Option<String>,
 ) -> Result<Vec<BranchNode>, AppError> {
     guard(async {
-        let ctx = OpContext::detached();
+        // Read from popovers and dialogs in the background: never raise a credential or
+        // certificate prompt for it.
+        let ctx = OpContext::background();
         let info = state
             .engine
             .repo_info(&repo_root_url, &ctx)
             .await
             .map_err(engine_err)?;
-        let layout = state
-            .db
-            .layout_get(&info.repo_uuid)?
-            .unwrap_or(Layout::Auto);
+        // A stored layout wins. Otherwise list around `at_url`: the root-level convention, or only
+        // the project folder it is in (never every top-level folder of the repository).
+        let layout = match (state.db.layout_get(&info.repo_uuid)?, at_url) {
+            (Some(stored), _) => stored,
+            (None, Some(url)) => crate::layout::layout_near(&repo_root_url, &url),
+            (None, None) => Layout::Auto,
+        };
         state
             .engine
             .branches_list(&repo_root_url, &layout, &ctx)
@@ -322,25 +354,6 @@ pub async fn layout_set(
     .await
 }
 
-/// Lists directories through the engine for layout detection.
-struct EngineDirs(std::sync::Arc<dyn crate::engine::EngineFacade>);
-
-#[async_trait::async_trait]
-impl crate::layout::DirLister for EngineDirs {
-    async fn dirs(&self, url: &str) -> Result<Vec<String>, AppError> {
-        match self.0.repo_list(url, None, &OpContext::detached()).await {
-            Ok(entries) => Ok(entries
-                .into_iter()
-                .filter(|e| e.kind == EntryKind::Dir)
-                .map(|e| e.name)
-                .collect()),
-            // A folder that does not exist simply has no layout below it.
-            Err(e) if e.code == svn_types::ErrorCode::PathNotFound => Ok(Vec::new()),
-            Err(e) => Err(AppError::from(&e)),
-        }
-    }
-}
-
 #[tauri::command]
 #[specta::specta]
 pub async fn layout_detect(
@@ -349,7 +362,7 @@ pub async fn layout_detect(
     url: String,
 ) -> Result<LayoutDetection, AppError> {
     guard(async {
-        let lister = EngineDirs(std::sync::Arc::clone(&state.engine));
+        let lister = crate::layout::EngineDirs(state.engine.as_ref());
         crate::layout::detect(&lister, &repo_root_url, &url).await
     })
     .await

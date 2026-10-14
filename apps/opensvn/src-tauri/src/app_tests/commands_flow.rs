@@ -3,9 +3,9 @@
 use std::time::{Duration, Instant};
 
 use opensvn_ipc::{
-    CheckoutRequest, CommitRequest, Depth, DiffGetRequest, DiffTarget, ErrorCode, LogGetRequest,
-    LogTarget, NodeStatus, OpResult, PathGrantId, Rev, StatusGetRequest, UpdateRequest, WcFormat,
-    WcId,
+    BranchKind, CheckoutRequest, CommitRequest, Depth, DiffGetRequest, DiffTarget, ErrorCode,
+    Layout, LogGetRequest, LogTarget, NodeStatus, OpResult, PathGrantId, Rev, StatusGetRequest,
+    UpdateRequest, WcFormat, WcId,
 };
 
 use super::fixture::Fixture;
@@ -546,4 +546,74 @@ async fn poller_announces_incoming_for_open_working_copies_only() {
         .count();
     assert_eq!(seen, later);
     f.state().poller.lock().unwrap().as_ref().unwrap().stop();
+}
+
+#[tokio::test]
+async fn a_switch_at_the_same_revision_announces_the_new_location() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    commands::wc_open(f.state(), wc.id.clone()).await.unwrap();
+    let revisions = || {
+        f.events
+            .all()
+            .iter()
+            .filter(|r| matches!(r, Recorded::Revision(_)))
+            .count()
+    };
+    for _ in 0..200 {
+        if revisions() > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let before = revisions();
+    assert!(before > 0, "the first scan announces the revision");
+
+    let trunk = wc.branch.as_ref().expect("a trunk checkout has a branch");
+    assert_eq!(
+        (trunk.kind, trunk.name.as_str()),
+        (BranchKind::Trunk, "trunk")
+    );
+
+    let url = wc.url.replace("/trunk", "/branches/feature-x");
+    let handle = commands::switch(f.state(), wc.id.clone(), url.clone(), Some(wc.base_rev))
+        .await
+        .unwrap();
+    let OpResult::NewRev { new_rev } = f.wait_op(&handle).await.unwrap() else {
+        panic!("switch result is a revision");
+    };
+    assert_eq!(new_rev, wc.base_rev, "same revision, other location");
+    for _ in 0..200 {
+        if revisions() > before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        revisions() > before,
+        "the toolbar is told to refetch the working copy"
+    );
+    let listed = commands::wc_list(f.state()).await.unwrap();
+    assert_eq!(listed[0].url, url);
+    let branch = listed[0]
+        .branch
+        .as_ref()
+        .expect("the branch follows the switch");
+    assert_eq!(
+        (branch.kind, branch.name.as_str(), branch.url.as_str()),
+        (BranchKind::Branch, "feature-x", url.as_str())
+    );
+}
+
+#[tokio::test]
+async fn a_repository_without_a_layout_shows_no_branch() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    assert!(wc.branch.is_some());
+    commands::layout_set(f.state(), wc.repo_uuid.clone(), Layout::None)
+        .await
+        .unwrap();
+    let listed = commands::wc_list(f.state()).await.unwrap();
+    assert!(listed[0].branch.is_none(), "{:?}", listed[0].branch);
+    assert_eq!(listed[0].url, wc.url, "the location is still shown");
 }

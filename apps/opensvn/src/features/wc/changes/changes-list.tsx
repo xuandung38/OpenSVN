@@ -18,6 +18,7 @@ import {
   changedFiles,
   fileGlyph,
   filterFiles,
+  lockFiles,
   suggestMoves,
   tickedByDefault,
   tristate,
@@ -25,9 +26,11 @@ import {
 import { useWcSession } from "../wc-session";
 import { wcStrings } from "../wc-strings";
 import { fileMenuEntries } from "./file-menu";
+import { LocksList } from "./locks-list";
 import { WcFileRow } from "./wc-file-row";
 
 const ROW_H = 28;
+const NO_CHIPS: ReadonlySet<ChipId> = new Set();
 
 const CHIP_LABEL = {
   modified: "chipModified",
@@ -53,6 +56,7 @@ export function ChangesList() {
   const visible = useMemo(() => filterFiles(changed, filter, chips), [changed, filter, chips]);
   const rows = useMemo(() => buildRows(visible), [visible]);
   const moves = useMemo(() => suggestMoves(changed), [changed]);
+  const locks = useMemo(() => filterFiles(lockFiles(files), filter, NO_CHIPS), [files, filter]);
 
   // Tick tracked changes the first time they appear; forget ticks of files that left the list.
   const seen = useRef(new Set<string>());
@@ -235,6 +239,7 @@ export function ChangesList() {
           />
         )}
       </div>
+      <LocksList files={locks} />
     </>
   );
 }

@@ -84,7 +84,7 @@ export const commands = {
 	lock: (request: LockRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("lock", { request })),
 	unlock: (request: UnlockRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("unlock", { request })),
 	remoteEdit: (request: RemoteEditRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("remote_edit", { request })),
-	branchesList: (repoRootUrl: string) => typedError<BranchNode[], AppError>(__TAURI_INVOKE("branches_list", { repoRootUrl })),
+	branchesList: (repoRootUrl: string, atUrl: string | null) => typedError<BranchNode[], AppError>(__TAURI_INVOKE("branches_list", { repoRootUrl, atUrl })),
 	layoutGet: (repoUuid: string) => typedError<Layout, AppError>(__TAURI_INVOKE("layout_get", { repoUuid })),
 	layoutSet: (repoUuid: string, layout: Layout) => typedError<null, AppError>(__TAURI_INVOKE("layout_set", { repoUuid, layout })),
 	layoutDetect: (repoRootUrl: string, url: string) => typedError<LayoutDetection, AppError>(__TAURI_INVOKE("layout_detect", { repoRootUrl, url })),
@@ -196,6 +196,11 @@ export type AppError = {
 	path: string | null,
 	retryable: boolean,
 	actions: ErrorAction[] | null,
+	/**
+	 *  For `locked-by-other`: the locks held by someone else on the requested paths, as the
+	 *  server reports them now. `None` when the engine could not ask (or for other codes).
+	 */
+	lockConflicts?: LockConflict[] | null,
 };
 
 /**  Authentication scheme the server offers. */
@@ -558,6 +563,19 @@ export type LayoutDetection = {
 	found: boolean,
 	layout: Layout | null,
 	current: BranchRef | null,
+};
+
+/**
+ *  A lock held by someone else that refused a lock request (doc 01 §10.4: the lock dialog shows
+ *  the owner and offers Steal). Never carries the lock token.
+ */
+export type LockConflict = {
+	/**  Requested path as the request named it (working copy relative path or URL). */
+	path: string,
+	owner: string,
+	comment: string | null,
+	/**  ISO 8601 creation time; `None` when the server sent none. */
+	createdAt: string | null,
 };
 
 export type LockInfo = {
