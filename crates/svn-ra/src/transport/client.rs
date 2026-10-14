@@ -133,6 +133,12 @@ impl HttpTransport {
         self
     }
 
+    /// Basic user name currently cached for the origin of `url` (the last credentials the
+    /// server accepted or that are being offered), when known. Negotiate never reveals one.
+    pub fn authenticated_user(&self, url: &Url) -> Option<String> {
+        self.auth.basic_user(url)
+    }
+
     /// Sends a request and returns the response once its headers arrive.
     ///
     /// Handles 401 challenges (prompting through the `AuthPrompter`), transient failures of
