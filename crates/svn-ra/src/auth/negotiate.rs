@@ -203,7 +203,8 @@ fn initial_token_mech(token: &[u8]) -> InitialMech<'_> {
 }
 
 /// `[0] NegTokenInit ::= SEQUENCE { mechTypes [0], reqFlags [1] OPTIONAL,
-/// mechToken [2] OCTET STRING OPTIONAL, mechListMIC [3] OPTIONAL }` (RFC 4178 4.2.1).
+/// mechToken [2] OCTET STRING OPTIONAL, mechListMIC [3] OPTIONAL }` (RFC 4178 4.2.1; MS-SPNG
+/// NegTokenInit2 adds negHints at `[3]` and moves mechListMIC to `[4]`).
 fn spnego_init_mech(inner: &[u8]) -> Option<InitialMech<'_>> {
     let (0xa0, init) = der_exact(inner)? else {
         return None;
@@ -228,8 +229,9 @@ fn spnego_init_mech(inner: &[u8]) -> Option<InitialMech<'_>> {
     let mut last_tag = 0xa0;
     while !fields.is_empty() {
         let (tag, body, rest) = der(fields)?;
-        // Optional fields, each at most once and in order.
-        if !(0xa1..=0xa3).contains(&tag) || tag <= last_tag {
+        // Optional fields, each at most once and in order. `[4]` is the mechListMIC of
+        // Microsoft's NegTokenInit2 layout, where `[3]` holds negHints.
+        if !(0xa1..=0xa4).contains(&tag) || tag <= last_tag {
             return None;
         }
         if tag == 0xa2 {
@@ -485,6 +487,11 @@ mod tests {
         extra.extend(tlv(0xa2, &tlv(0x04, &ap_req)));
         extra.extend(tlv(0xa3, &tlv(0x04, b"mic")));
         check_kerberos_token(&spnego_fields(&[OID_KRB5], &extra)).expect("all fields");
+        // MS-SPNG NegTokenInit2 layout: negHints [3], mechListMIC [4].
+        let mut extra = tlv(0xa2, &tlv(0x04, &ap_req));
+        extra.extend(tlv(0xa3, &tlv(0x30, &[])));
+        extra.extend(tlv(0xa4, &tlv(0x04, b"mic")));
+        check_kerberos_token(&spnego_fields(&[OID_KRB5_MS], &extra)).expect("init2");
 
         let e = check_kerberos_token(&spnego(&[OID_NTLM], b"NTLMSSP\0")).expect_err("ntlm");
         assert_eq!(e.code, ErrorCode::NegotiateFailed);
@@ -546,7 +553,7 @@ mod tests {
         order.extend(tlv(0xa1, &[0x03, 0x01, 0x00]));
         check_kerberos_token(&spnego_fields(&[OID_KRB5], &order)).expect_err("order");
         let mut unknown = tok;
-        unknown.extend(tlv(0xa4, &[]));
+        unknown.extend(tlv(0xa5, &[]));
         check_kerberos_token(&spnego_fields(&[OID_KRB5], &unknown)).expect_err("unknown");
         // Truncated anywhere: never accepted.
         for n in 0..good.len() {
