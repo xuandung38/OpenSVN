@@ -163,3 +163,63 @@ New tests: runner batching (`self_contained_items_complete_together_and_others_a
 - Two review findings were fixed in this branch before it left draft. One: a batch that cannot
   be committed now stops every later commit. Two: a re-added path is settled when its deletion
   sits in the staged batch, not only the pending one.
+
+## Review round 1 (PR #142 comment 6165202168)
+
+Head `51f5f0c` (fixes in `3f63025`, then origin/main `aaa9269` merged, with #139 and #140).
+
+- **Uncommitted pristine replaced (power-loss hole).** `PristineStore::place` takes the drive's
+  set of texts placed but not committed yet and never renames over one of them; the new copy is
+  dropped. Orphans of earlier runs are still replaced; texts with a committed row are never
+  touched. Tests: `place_never_replaces_a_text_placed_but_not_committed`,
+  `place_replaces_an_orphan_of_an_earlier_run`, and the failpoint test
+  `update_barrier_failpoints` (2300 identical files across a batch boundary: 1 rename into the
+  store; 2300 with the check removed).
+- **`syncfs` on FUSE / network filesystems.** `durable::batched_sync(path)` allows the batched
+  barrier only on ext2/3/4, xfs, btrfs, f2fs and tmpfs (`statfs` f_type). Everything else,
+  including unknown types and an unreadable path, keeps per-file `sync_all`. Tests for the
+  gate logic in `durable.rs`.
+- **Cancel latency.** A cancelled drive waits at most 500 ms for barriers, then commits nothing
+  more (the barrier finishes on its own thread). Remaining queued work is run by the next
+  update or cleanup, as with svn; the update no longer runs the queue again after a
+  cancellation. Failpoint test: with a 3 s barrier, cancel returns in < 1.5 s (3.0 s with the
+  grace period removed). `cancelled_update_is_resumed_by_the_next_update` now checks the
+  queue after the resumed update instead of right after the cancellation.
+- `#140`'s `PristineBatch` (commit) syncs each file before its rename, so it does not have the
+  same hole.
+
+### Gates on 51f5f0c
+
+| gate | result |
+|---|---|
+| fmt; clippy workspace / app real-engine / failpoints | clean, 0 warnings |
+| `cargo test --workspace --locked`, svn 1.15.0 oracle, `OPENSVN_REQUIRE_SVN=1` | 1431 passed, 0 failed, 22 ignored |
+| `cargo test -p svn-wc --features failpoints` | 254 passed, 0 failed |
+| `cargo test -p svn-client --features failpoints` | 219 passed, 0 failed |
+| `cargo test -p opensvn --features opensvn/real-engine` | 487 passed, 0 failed |
+| `cargo test -p opensvn --features failpoints` | 493 passed, 0 failed |
+| DAV suite (HTTPS, Basic, `mod_authz_svn`) | 20 passed, 0 failed |
+| crash suite, seed 20261014 | SIGKILL 35 cases, 0 failed; failpoints 0 failed |
+| crash suite, seed 777123 | failpoints 0 failed; SIGKILL: 1 failed in the first run, 0 in the re-run (35 cases) |
+
+The seed 777123 failure was a **commit** case (code this PR does not change): the kill landed
+while Apache was still finishing r3's post-commit cleanup, recovery's `DELETE` of the
+transaction got a 500 ("Transaction '2-2' cleanup failed", the txn directory being removed at
+that moment), and the journal stayed unsettled for a later retry. This is the race documented
+on `commit::recovery::reconcile`. The kill time is wall-clock, so the same seed does not give the
+same case twice; the re-run passed.
+
+### Benchmark on 51f5f0c
+
+The VM was under heavy I/O pressure from outside (`/proc/pressure/io` full avg300 ≈ 19 %), so
+single checkouts ranged from 5.6 s to 14.2 s for every client. Alternating runs of the previous
+head (ad6b57f), this head and svn, medians:
+
+| | svn CLI | ad6b57f | 51f5f0c |
+|---|---:|---:|---:|
+| checkout (5 / 11 / 11 runs) | 8.14 s | 12.86 s | 11.77 s |
+| update (5 / 11 / 11 runs) | 1.69 s | 1.80 s | 1.90 s |
+
+Harness run (`--reps 5`): checkout 8.51 s (svn) vs 8.33 s (0.98), update 1.81 s vs 1.56 s (0.86).
+No regression from the fixes is visible above the noise. Under this load the margin over svn
+is not established, unlike the quieter measurements above.
