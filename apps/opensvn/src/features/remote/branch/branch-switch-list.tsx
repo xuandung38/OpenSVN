@@ -34,11 +34,14 @@ export function BranchSwitchList({
   const toast = useToast();
   const [pending, setPending] = useState<BranchNode | null>(null);
   const [busy, setBusy] = useState(false);
-  const nodesQ = useQuery({
-    queryKey: queryKeys.branches(wc.repoRootUrl),
-    queryFn: () => unwrap(ipc().commands.branchesList(wc.repoRootUrl)),
-  });
   const current = wc.branch;
+  const atUrl = current?.url ?? null;
+  const nodesQ = useQuery({
+    queryKey: queryKeys.branches(wc.repoRootUrl, atUrl),
+    queryFn: () => unwrap(ipc().commands.branchesList(wc.repoRootUrl, atUrl)),
+    // Folder-style working copies (no branch) never list branches.
+    enabled: current != null,
+  });
   if (!current) return null;
 
   const project = projectRootOf(norm(current.url));

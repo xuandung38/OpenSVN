@@ -1,11 +1,9 @@
 //! Registry of working copies: persisted list plus one [`WcActor`] per working copy.
 
+use opensvn_ipc::{AppError, BranchRef, ErrorCode, WcEntry, WcId, WorkingCopy};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
-
-use opensvn_ipc::{AppError, BranchRef, ErrorCode, Layout, WcEntry, WcId, WorkingCopy};
 
 use super::actor::{RetryPolicy, WcActor};
 use crate::db::{AppDb, WcRow, now_iso};
@@ -17,22 +15,7 @@ use crate::ops::new_op_id;
 struct Live {
     incoming: u32,
     last_checked_at: Option<String>,
-    branch: Option<CachedBranch>,
 }
-
-/// Branch detected for one URL of a working copy. A switch changes the URL, which invalidates it.
-#[derive(Clone)]
-struct CachedBranch {
-    url: String,
-    branch: Option<BranchRef>,
-    /// Set when detection failed (offline, no credentials): retried after [`BRANCH_RETRY`].
-    failed_at: Option<Instant>,
-}
-
-/// How long a failed branch detection is remembered before the server is asked again.
-const BRANCH_RETRY: Duration = Duration::from_secs(60);
-/// Upper bound on the server round trips of one branch detection.
-const BRANCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A working copy resolved for use: engine reference, actor and registry row.
 #[derive(Clone)]
@@ -132,73 +115,24 @@ impl WcRegistry {
         })
     }
 
-    /// Branch of the working copy at `url`: the trunk/branches/tags layout around it, detected on
-    /// the server once per URL. `None` for folder-style repositories, a layout turned off in the
-    /// settings, or while the server cannot be reached.
-    async fn branch_of(
-        &self,
-        id: &str,
-        repo_uuid: &str,
-        repo_root_url: &str,
-        url: &str,
-    ) -> Option<BranchRef> {
-        if !crate::layout::may_be_in_layout(repo_root_url, url) {
-            return None;
-        }
-        match self.db.layout_get(repo_uuid) {
-            Ok(Some(Layout::None)) => return None,
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "could not read the repository layout"),
-        }
-        let cached = self.live(id).branch;
-        if let Some(c) = cached.filter(|c| c.url == url)
-            && c.failed_at.is_none_or(|t| t.elapsed() < BRANCH_RETRY)
-        {
-            return c.branch;
-        }
-        let lister = crate::layout::EngineDirs(self.engine.as_ref());
-        let detected = tokio::time::timeout(
-            BRANCH_TIMEOUT,
-            crate::layout::detect(&lister, repo_root_url, url),
-        )
-        .await;
-        let entry = match detected {
-            Ok(Ok(d)) => CachedBranch {
-                url: url.to_owned(),
-                branch: d.current,
-                failed_at: None,
-            },
-            failure => {
-                let code = match failure {
-                    Ok(Err(e)) => Some(e.code),
-                    _ => None,
-                };
-                tracing::debug!(wc = %id, ?code, "branch detection failed");
-                CachedBranch {
-                    url: url.to_owned(),
-                    branch: None,
-                    failed_at: Some(Instant::now()),
-                }
-            }
-        };
-        let branch = entry.branch.clone();
-        self.live
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(id.to_owned())
-            .or_default()
-            .branch = Some(entry);
-        branch
+    /// Branch of the working copy at `url`, from the URL and the stored layout of the repository.
+    /// Local data only: listing working copies never waits on a server.
+    fn branch_of(&self, repo_uuid: &str, repo_root_url: &str, url: &str) -> Option<BranchRef> {
+        let layout = self.db.layout_get(repo_uuid).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "could not read the repository layout");
+            None
+        });
+        crate::layout::branch_from_url(repo_root_url, url, layout.as_ref())
     }
 
-    async fn describe(&self, row: &WcRow) -> Result<WorkingCopy, AppError> {
+    /// What the engine reads from the working copy itself.
+    async fn info_of(&self, row: &WcRow) -> Result<WcInfo, AppError> {
         let wc = WcRef {
             id: WcId(row.id.clone()),
             root: PathBuf::from(&row.root_path),
         };
         let engine = Arc::clone(&self.engine);
-        let info: WcInfo = self
-            .actor_for(&row.root_path)
+        self.actor_for(&row.root_path)
             .read(|| {
                 let (engine, root) = (Arc::clone(&engine), wc.root.clone());
                 async move {
@@ -208,10 +142,12 @@ impl WcRegistry {
                         .map_err(|e| AppError::from(&e))
                 }
             })
-            .await?;
-        let branch = self
-            .branch_of(&row.id, &info.repo_uuid, &info.repo_root_url, &info.url)
-            .await;
+            .await
+    }
+
+    async fn describe(&self, row: &WcRow) -> Result<WorkingCopy, AppError> {
+        let info = self.info_of(row).await?;
+        let branch = self.branch_of(&info.repo_uuid, &info.repo_root_url, &info.url);
         let live = self.live(&row.id);
         Ok(WorkingCopy {
             id: WcId(row.id.clone()),
@@ -250,8 +186,8 @@ impl WcRegistry {
     pub async fn entries(&self) -> Result<Vec<WcEntry>, AppError> {
         let mut out = Vec::new();
         for row in self.db.wc_list()? {
-            let (url, incomplete, problem) = match self.describe(&row).await {
-                Ok(wc) => (Some(wc.url), wc.incomplete, None),
+            let (url, incomplete, problem) = match self.info_of(&row).await {
+                Ok(info) => (Some(info.url), info.incomplete, None),
                 Err(e) => (None, false, Some(e.message)),
             };
             out.push(WcEntry {

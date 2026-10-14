@@ -23,7 +23,8 @@ vi.setConfig({ testTimeout: 120_000 });
 test("projectRootOf finds the part before trunk/branches/tags", () => {
   expect(projectRootOf("https://h/r/trunk")).toBe("https://h/r");
   expect(projectRootOf("https://h/r/ProjectA/branches/x/sub")).toBe("https://h/r/ProjectA");
-  expect(projectRootOf("https://h/r/TAGS/v1")).toBe("https://h/r");
+  // Case-sensitive like Subversion and the backend: `/TAGS` is an ordinary folder.
+  expect(projectRootOf("https://h/r/TAGS/v1")).toBeNull();
   expect(projectRootOf("https://h/r/docs/plan")).toBeNull();
 });
 
@@ -232,6 +233,10 @@ test("branch picker lists the other branches and tags and switches on click", as
     .map((b) => b.textContent);
   expect(names.some((n) => n?.startsWith("trunk"))).toBe(false);
   expect(names.some((n) => n?.startsWith("v1.0.0"))).toBe(true);
+  expect(mockCalls.find((c) => c.name === "branchesList")?.args).toEqual([
+    wc.repoRootUrl,
+    wc.branch?.url,
+  ]);
   await user().click(within(list).getByRole("button", { name: "feature-x" }));
   await waitFor(() => expect(switched).toHaveBeenCalled());
   expect(mockCalls.find((c) => c.name === "switch")?.args).toEqual([
@@ -262,10 +267,14 @@ test("branch picker asks before carrying local changes, and Cancel switches noth
   );
 });
 
-test("no branch picker without a trunk/branches/tags layout", () => {
+test("no branch picker and no branch listing without a trunk/branches/tags layout", async () => {
+  mockCalls.length = 0;
   const wc = mockWorkingCopies[1] as WorkingCopy;
   const { container } = renderApp(
     <BranchSwitchList wc={wc} changed={0} onSwitched={() => undefined} />,
   );
   expect(container.textContent).toBe("");
+  // Give a query that should not exist the chance to run.
+  await vi.advanceTimersByTimeAsync(50);
+  expect(mockCalls.some((c) => c.name === "branchesList")).toBe(false);
 });
