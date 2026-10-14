@@ -229,7 +229,7 @@ async fn switch_sends_destination_and_target() {
 async fn nested_target_is_anchored_at_its_parent_like_svn() {
     let srv = server(Bulk::Prefer).await;
     Mock::given(method("REPORT"))
-        .and(body_string_contains(&format!(
+        .and(body_string_contains(format!(
             "<S:src-path>{ROOT}/trunk/a/b</S:src-path>"
         )))
         .and(body_string_contains("<S:update-target>c</S:update-target>"))
