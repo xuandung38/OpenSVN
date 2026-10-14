@@ -87,6 +87,10 @@ rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }
 # feature yet: the rollout turns it on after the conformance run against Apache and a manual
 # VisualSVN smoke test on all three OSes.
 real-engine = ["dep:svn-wc", "dep:svn-client", "dep:svn-delta", "dep:md-5", "dep:sha1"]
+# Feature set of the installers built by scripts/release/build-* and .github/workflows/release.yml
+# (`pnpm tauri build --features release`): the real engine, without making it a cargo default.
+# macOS and Linux installers add `negotiate-gssapi` on top.
+release = ["real-engine"]
 # Kerberos single sign-on on macOS/Linux through the system GSSAPI library (needs the krb5
 # development headers and libclang to build). Off by default so CI builds without them; release
 # builds for macOS and Linux turn it on. Windows always has SSPI. Users can switch Negotiate off in

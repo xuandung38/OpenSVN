@@ -1,7 +1,10 @@
 # Deployment guide: building, packaging and updating OpenSVN
 
-Everything here runs **locally**; there is no release CI yet. Signing is optional: without any
-signing variable set, every script produces a working **unsigned** installer.
+Everything here runs **locally**; `.github/workflows/release.yml` runs the same steps on GitHub
+Actions and attaches unsigned installers to a draft release (see `docs/INSTALL-TEST.md`). Signing is
+optional: without any signing variable set, every script produces a working **unsigned** installer.
+Installers are built with the cargo feature `release` (the real engine); `OPENSVN_FEATURES`
+overrides the feature list, an empty value builds the fake engine only.
 
 ## Layout
 
@@ -94,9 +97,9 @@ cargo install cargo-about --locked --version 0.9.2 --features cli
 scripts/release/build-linux.sh
 ```
 
-The deb depends on `libwebkit2gtk-4.1-0`, `libgtk-3-0` and recommends `libgssapi-krb5-2` (Kerberos
-for Negotiate auth). Build on the oldest distro you support: the AppImage inherits its glibc.
-Not exercised on this branch (macOS-only machine).
+The deb depends on `libwebkit2gtk-4.1-0`, `libgtk-3-0` and `libgssapi-krb5-2` (the default
+`negotiate-gssapi` feature links the Kerberos library). Build on the oldest distro you support: the
+AppImage inherits its glibc. Built and smoke-tested on Ubuntu 24.04 (xvfb) for `v0.0.1-test1`.
 
 ## Windows (MSI), run on Windows
 

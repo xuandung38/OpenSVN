@@ -55,6 +55,16 @@ stamp_version() {
   node "$REPO_ROOT/scripts/release/stamp-version.mjs"
 }
 
+# Builds the cargo feature arguments of an installer build. OPENSVN_FEATURES overrides the
+# platform default given as $1 (comma-separated; `release` = the real engine); set it to an empty
+# string for a build with the fake engine only.
+tauri_feature_args() {
+  local features="${OPENSVN_FEATURES-$1}"
+  FEATURE_ARGS=()
+  if [[ -n "$features" ]]; then FEATURE_ARGS=(--features "$features"); fi
+  log "cargo features: ${features:-<none, fake engine only>}"
+}
+
 # Builds the --config arguments shared by every platform build. Signing is entirely optional:
 # nothing is added unless the matching environment variables are present.
 tauri_config_args() {
