@@ -240,7 +240,7 @@ type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'negotiate-failed' | 
 | `auth://prompt` | `{ requestId, kind: 'credentials' \| 'certificate', realm, url, cert?, reason?, attempt, offered }` | Dialog Sign in / Trust |
 | `fs://dropped` | `DroppedPaths` (§3.6) | Thả thư mục/file vào cửa sổ |
 
-Payload `auth://prompt`: với `kind: 'credentials'` có `reason: 'initial' | 'rejected' | 'negotiate-failed' | 'expired'` (chọn câu chữ dialog), `attempt` (số lần thất bại, từ 0) và `offered: ('basic' | 'negotiate')[]`; với `kind: 'certificate'` thì `reason` vắng, `attempt` là 0 và `offered` rỗng. `cert.failure` là `unknown-issuer | self-signed | expired | not-yet-valid | hostname-mismatch | revoked | { changed: { oldSha256, newSha256 } } | { other: string }`. Khi nhiều lỗi cùng áp dụng, báo lỗi nặng nhất: hostname-mismatch, expired, revoked, not-yet-valid đứng trên `changed`, `changed` đứng trên `self-signed`/`unknown-issuer`; cert vừa đổi vừa sai hostname phải báo `hostname-mismatch`. `changed` không bao giờ "luôn tin cậy" mà không có thao tác thay pin rõ ràng.
+Payload `auth://prompt`: với `kind: 'credentials'` có `reason: 'initial' | 'rejected' | 'negotiate-failed' | 'expired'` (chọn câu chữ dialog; `expired`: mật khẩu đã lưu bị server từ chối, không còn tự gửi; `rejected` với `attempt` 0: mật khẩu gõ lần trước bị từ chối nên không được lưu), `attempt` (số lần thất bại, từ 0) và `offered: ('basic' | 'negotiate')[]`; với `kind: 'certificate'` thì `reason` vắng, `attempt` là 0 và `offered` rỗng. `cert.failure` là `unknown-issuer | self-signed | expired | not-yet-valid | hostname-mismatch | revoked | { changed: { oldSha256, newSha256 } } | { other: string }`. Khi nhiều lỗi cùng áp dụng, báo lỗi nặng nhất: hostname-mismatch, expired, revoked, not-yet-valid đứng trên `changed`, `changed` đứng trên `self-signed`/`unknown-issuer`; cert vừa đổi vừa sai hostname phải báo `hostname-mismatch`. `changed` không bao giờ "luôn tin cậy" mà không có thao tác thay pin rõ ràng.
 
 Payload `auth://prompt`: với `kind: 'credentials'` có `reason: 'initial' | 'rejected' | 'negotiate-failed'` (chọn câu chữ dialog), `attempt` (số lần thất bại, từ 0) và `offered: ('basic' | 'negotiate')[]`. Với `kind: 'certificate'`, `cert.failure` là `unknown-issuer | self-signed | expired | not-yet-valid | hostname-mismatch | revoked | { changed: { oldSha256, newSha256 } } | { other: string }`. Khi nhiều lỗi cùng áp dụng, báo lỗi nặng nhất: hostname-mismatch, expired, revoked, not-yet-valid đứng trên `changed`, `changed` đứng trên `self-signed`/`unknown-issuer`; cert vừa đổi vừa sai hostname phải báo `hostname-mismatch`. Quyết định cho `auth_respond` (`kind: 'certificate'`): `reject | acceptOnce | acceptAlways | replacePin`. Với `changed` chỉ hợp lệ `reject` và `replacePin` (thay pin sau khi người dùng xác nhận); `acceptOnce`/`acceptAlways` không hợp lệ cho `changed`, `replacePin` chỉ hợp lệ cho `changed`, `acceptOnce`/`acceptAlways` chỉ cho `unknown-issuer`/`self-signed`; mọi lỗi khác (hostname-mismatch, expired, not-yet-valid, revoked, other) là lỗi cứng, chỉ hợp lệ `reject` (cố ý chặt hơn svn CLI, không có "accept temporarily"). UI không phải ranh giới tin cậy: transport kiểm quyết định với lỗi thực tế và coi tổ hợp sai là `reject`.
 
@@ -267,10 +267,15 @@ CREATE TABLE trusted_cert (               -- khóa theo host + port + sha256: ti
 CREATE TABLE account (                    -- metadata, KHÔNG có mật khẩu; khóa theo origin (không chỉ realm)
   scheme TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, realm TEXT NOT NULL,
   username TEXT, method TEXT NOT NULL CHECK (method IN ('basic','negotiate')),
-  last_used_at TEXT
-,
+  last_used_at TEXT,
+  stale INTEGER NOT NULL DEFAULT 0,       -- (migration 2) server đã trả 401 cho mật khẩu đã lưu của username này:
+                                          -- giữ trong keychain nhưng không tự gửi nữa (kể cả sau khi khởi động lại,
+                                          -- việc nền báo auth-required mà không gửi nó); lưu mật khẩu mới thì xóa cờ
   PRIMARY KEY (scheme, host, port, realm)
 );
+-- Mật khẩu gõ ở prompt với "lưu" chỉ được ghi (keychain + dòng account) sau response đầu tiên server chấp nhận
+-- (AuthPrompter::credentials_accepted); mật khẩu bị từ chối không bao giờ được lưu. Đăng xuất: xóa secret trước,
+-- chỉ xóa dòng account của secret đã xóa được, báo lỗi phần còn lại.
 CREATE TABLE wc_lock_owner (               -- sổ sở hữu WC_LOCK (wc.db không lưu PID)
   wc_root TEXT NOT NULL, dir TEXT NOT NULL, pid INTEGER NOT NULL, boot_id TEXT NOT NULL,
   start_time INTEGER,                      -- thời điểm khởi động process (giây): phân biệt pid bị tái sử dụng
@@ -311,6 +316,7 @@ Log theo path dùng `log_path_by_path`; khi khoảng revision chưa nằm trong 
 | `network.maxConnections` | number 1–8 | 4 |
 | `network.timeoutSec` | number | 60 |
 | `network.proxy` | `'system' \| { url }` | system |
+| `network.negotiate` | boolean — SSO Kerberos (Negotiate) khi server đề nghị; tắt thì không bao giờ thử Kerberos, server có Basic sẽ hỏi tên/mật khẩu. Đổi giá trị dựng lại transport (bỏ session cache) | true |
 | `wc.defaultFormat` | 31 (MVP chỉ ghi 31; 32 sau MVP) | 31 |
 | `wc.readSubversionConfig` | boolean | true |
 | `cache.maxSizeGb` | number | 2 |

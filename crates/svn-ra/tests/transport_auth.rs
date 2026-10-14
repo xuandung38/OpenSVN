@@ -661,3 +661,111 @@ async fn stored_attempt_counts_towards_the_three_attempt_cap() {
     assert_eq!(credentialed, 3);
     assert_eq!(prompter.stored_calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn typed_credentials_are_reported_accepted_only_after_the_server_took_them() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    prompter.save_answers.store(true, Ordering::SeqCst);
+    prompter.push_credentials(Some(("alice", "wrong")));
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    t.send(get(srv.url("/a")), &CancelToken::new())
+        .await
+        .expect("second answer works");
+    assert_eq!(prompter.credential_prompts(), 2);
+    let accepted = prompter.accepted();
+    assert_eq!(accepted.len(), 1, "the rejected answer is never reported");
+    let (origin, user, pass, save) = &accepted[0];
+    assert_eq!(
+        (origin.realm.as_str(), user.as_str(), pass.as_str(), *save),
+        ("r", "alice", "pw", true)
+    );
+    // Later successes with the same answer do not report it again.
+    t.send(get(srv.url("/b")), &CancelToken::new())
+        .await
+        .unwrap();
+    assert_eq!(prompter.accepted().len(), 1);
+}
+
+#[tokio::test]
+async fn rejected_then_cancelled_credentials_are_never_reported() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
+    let prompter = ScriptedPrompter::default();
+    prompter.save_answers.store(true, Ordering::SeqCst);
+    prompter.push_credentials(Some(("alice", "wrong")));
+    prompter.push_credentials(None);
+    let prompter = Arc::new(prompter);
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let err = t
+        .send(get(srv.url("/a")), &CancelToken::new())
+        .await
+        .expect_err("cancelled");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert!(prompter.accepted().is_empty());
+}
+
+#[tokio::test]
+async fn a_server_error_does_not_confirm_typed_credentials() {
+    let handler: Arc<Handler> = Arc::new(|seen: &common::Seen| {
+        if seen.header("authorization").as_deref() != Some(basic("alice", "pw").as_str()) {
+            Reply::unauthorized("r")
+        } else if seen.path == "/broken" {
+            Reply::status(500)
+        } else {
+            Reply::ok("fine")
+        }
+    });
+    let (ca, srv) = server(handler).await;
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    let t = transport_trusting(&ca, prompter.clone(), |c| {
+        c.retry = svn_ra::transport::RetryPolicy::none();
+    });
+    let _ = t.send(get(srv.url("/broken")), &CancelToken::new()).await;
+    assert!(prompter.accepted().is_empty(), "a 500 proves nothing");
+    t.send(get(srv.url("/ok")), &CancelToken::new())
+        .await
+        .unwrap();
+    assert_eq!(prompter.accepted().len(), 1);
+    assert_eq!(prompter.credential_prompts(), 1);
+}
+
+#[tokio::test]
+async fn stored_credentials_are_never_reported_as_accepted() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
+    let prompter = ScriptedPrompter::with_stored("alice", "pw");
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    t.send(get(srv.url("/a")), &CancelToken::new())
+        .await
+        .unwrap();
+    assert!(prompter.accepted().is_empty());
+}
+
+#[tokio::test]
+async fn unattended_request_does_not_wait_behind_a_prompt() {
+    let (ca, srv) = server(basic_auth_handler("r", "alice", "pw")).await;
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    *prompter.delay.lock().unwrap() = Duration::from_secs(3600);
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let owner_cancel = CancelToken::new();
+    let owner = {
+        let (t, url, c) = (Arc::clone(&t), srv.url("/a"), owner_cancel.clone());
+        tokio::spawn(async move { t.send(get(url), &c).await.map(|_| ()) })
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while prompter.credential_prompts() == 0 {
+        assert!(std::time::Instant::now() < deadline, "never prompted");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let err = tokio::time::timeout(
+        Duration::from_secs(2),
+        t.send_unattended(get(srv.url("/b")), &CancelToken::new()),
+    )
+    .await
+    .expect("does not wait for the prompt")
+    .expect_err("needs the user");
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert_eq!(prompter.credential_prompts(), 1);
+    owner_cancel.cancel();
+    let err = owner.await.unwrap().expect_err("cancelled");
+    assert_eq!(err.code, ErrorCode::Cancelled);
+}

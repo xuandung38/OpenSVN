@@ -7,6 +7,10 @@ export const authStrings = defineStrings({
     realm: "Realm",
     reasonInitial: "This server requires you to sign in.",
     reasonRejected: "The server rejected that username or password. Attempt {attempt} of {max}.",
+    reasonRejectedEarlier:
+      "The server rejected the username or password entered last time, so it was not saved.",
+    reasonExpired:
+      "The server rejected the saved password, so it is no longer used automatically. Enter it again.",
     reasonNegotiateFailed: "Windows sign-in did not work for this server. Use another account.",
     lastAttempt:
       "This was the last attempt. Close this dialog and check the account with your administrator.",
@@ -47,6 +51,10 @@ export const authStrings = defineStrings({
     realm: "Realm",
     reasonInitial: "Máy chủ này yêu cầu đăng nhập.",
     reasonRejected: "Máy chủ từ chối tên đăng nhập hoặc mật khẩu. Lần thử {attempt}/{max}.",
+    reasonRejectedEarlier:
+      "Máy chủ đã từ chối tên đăng nhập hoặc mật khẩu nhập lần trước, nên thông tin đó không được lưu.",
+    reasonExpired:
+      "Máy chủ đã từ chối mật khẩu đã lưu, nên mật khẩu đó không còn được dùng tự động. Hãy nhập lại.",
     reasonNegotiateFailed:
       "Đăng nhập bằng tài khoản Windows không thành công với máy chủ này. Hãy dùng tài khoản khác.",
     lastAttempt: "Đây là lần thử cuối. Đóng hộp thoại và kiểm tra tài khoản với quản trị viên.",
