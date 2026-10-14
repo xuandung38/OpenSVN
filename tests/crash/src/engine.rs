@@ -99,14 +99,19 @@ impl Engine {
         Ok(db)
     }
 
-    /// `svn checkout url wc`.
-    pub async fn checkout(&self, url: &str, wc: &Path) -> Result<Option<Revnum>> {
+    /// `svn checkout [-r rev] url wc` (HEAD when `rev` is `None`).
+    pub async fn checkout(
+        &self,
+        url: &str,
+        wc: &Path,
+        rev: Option<Revnum>,
+    ) -> Result<Option<Revnum>> {
         let s = self.session(url).await?;
         let sum = svn_client::checkout(
             &self.ctx,
             &s,
             wc,
-            None,
+            rev,
             Depth::Infinity,
             false,
             &CancelToken::new(),
@@ -116,7 +121,12 @@ impl Engine {
     }
 
     /// `svn update wc` to HEAD (or `rev`); `url` is the working copy's URL.
-    pub async fn update(&self, url: &str, wc: &Path, rev: Option<Revnum>) -> Result<Option<Revnum>> {
+    pub async fn update(
+        &self,
+        url: &str,
+        wc: &Path,
+        rev: Option<Revnum>,
+    ) -> Result<Option<Revnum>> {
         let s = self.session(url).await?;
         let sum =
             svn_client::update(&self.ctx, &s, wc, rev, Depth::Unknown, &CancelToken::new()).await?;
@@ -133,8 +143,9 @@ impl Engine {
             state_dir: &self.journal_dir(),
             cancel: &cancel,
         };
-        let r = svn_client::commit::commit(&db, &cctx, &[wc.to_path_buf()], &CommitOptions::new(msg))
-            .await?;
+        let r =
+            svn_client::commit::commit(&db, &cctx, &[wc.to_path_buf()], &CommitOptions::new(msg))
+                .await?;
         Ok(r.map(|r| r.revision))
     }
 

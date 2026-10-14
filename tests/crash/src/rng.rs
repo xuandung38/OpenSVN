@@ -7,7 +7,11 @@ pub struct Rng(u64);
 impl Rng {
     /// Generator seeded with `seed` (0 is replaced by a fixed non-zero value).
     pub fn new(seed: u64) -> Self {
-        Self(if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed })
+        Self(if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
+        })
     }
 
     /// Seed from `CRASH_SEED`, else from the clock. Returns the generator and its seed.

@@ -72,7 +72,11 @@ fn service_user() -> &'static str {
             .status()
             .is_ok_and(|s| s.success())
     };
-    if has("www-data") { "www-data" } else { "apache" }
+    if has("www-data") {
+        "www-data"
+    } else {
+        "apache"
+    }
 }
 
 fn free_port() -> Result<u16> {
@@ -106,7 +110,12 @@ impl Apache {
             chmod(dir.path(), "755")?;
         }
         let port = free_port()?;
-        let m = |name: &str| format!("LoadModule {name}_module {}/mod_{name}.so", modules.display());
+        let m = |name: &str| {
+            format!(
+                "LoadModule {name}_module {}/mod_{name}.so",
+                modules.display()
+            )
+        };
         let mut conf = String::new();
         // Debian builds the MPM and unixd as modules; other distributions compile some in.
         for (name, file) in [("mpm_event", "mod_mpm_event.so"), ("unixd", "mod_unixd.so")] {
@@ -155,8 +164,8 @@ impl Apache {
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
             if let Ok(Some(status)) = self.child.try_wait() {
-                let mut log = std::fs::read_to_string(self.dir.path().join("error.log"))
-                    .unwrap_or_default();
+                let mut log =
+                    std::fs::read_to_string(self.dir.path().join("error.log")).unwrap_or_default();
                 if let Some(mut e) = self.child.stderr.take() {
                     let _ = std::io::Read::read_to_string(&mut e, &mut log);
                 }

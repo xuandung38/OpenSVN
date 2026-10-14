@@ -67,7 +67,13 @@ pub enum Op {
 
 impl Op {
     /// All operations.
-    pub const ALL: [Op; 5] = [Op::Checkout, Op::Update, Op::Commit, Op::Revert, Op::Cleanup];
+    pub const ALL: [Op; 5] = [
+        Op::Checkout,
+        Op::Update,
+        Op::Commit,
+        Op::Revert,
+        Op::Cleanup,
+    ];
 
     /// Worker op name.
     pub fn name(self) -> &'static str {
@@ -443,14 +449,8 @@ impl Fixture {
         for (b, bytes) in &m.binary_r1 {
             write(&import.join(b), bytes)?;
         }
-        self.svn.run(&[
-            "import",
-            "-q",
-            "-m",
-            "r1",
-            &import.to_string_lossy(),
-            &url,
-        ])?;
+        self.svn
+            .run(&["import", "-q", "-m", "r1", &import.to_string_lossy(), &url])?;
         // r2: another user's commit.
         let other = self.path("other");
         self.svn
@@ -473,7 +473,8 @@ impl Fixture {
         let mut args = vec!["add", "-q"];
         args.extend(m.server_added.iter().map(String::as_str));
         self.svn.run_in(&other, &args)?;
-        self.svn.run_in(&other, &["commit", "-q", "-m", "r2 by another user"])?;
+        self.svn
+            .run_in(&other, &["commit", "-q", "-m", "r2 by another user"])?;
 
         // tpl-r1: local edits at r1 (update / cleanup cases).
         let t1 = self.path("tpl-r1");
@@ -507,7 +508,14 @@ impl Fixture {
     }
 
     /// Runs `crash-worker <state> <op> <url> <wc>` and stops it as `kill` says.
-    pub fn worker(&self, state: &Path, op: &str, url: &str, wc: &Path, kill: &Kill) -> Result<WorkerRun> {
+    pub fn worker(
+        &self,
+        state: &Path,
+        op: &str,
+        url: &str,
+        wc: &Path,
+        kill: &Kill,
+    ) -> Result<WorkerRun> {
         let mut cmd = Command::new(&self.worker);
         cmd.arg(state)
             .arg(op)
@@ -543,10 +551,7 @@ impl Fixture {
         });
         let limit = Duration::from_secs(600);
         let status = loop {
-            if let Some(st) = child
-                .try_wait()
-                .map_err(|e| err(format!("wait: {e}")))?
-            {
+            if let Some(st) = child.try_wait().map_err(|e| err(format!("wait: {e}")))? {
                 break st;
             }
             let el = start.elapsed();
@@ -619,7 +624,12 @@ impl Fixture {
         );
         match &rec.ended {
             Ended::Ok(_) => {}
-            other => return Err(err(format!("count {op:?}/{fp}: {other:?} {:?}", rec.failure))),
+            other => {
+                return Err(err(format!(
+                    "count {op:?}/{fp}: {other:?} {:?}",
+                    rec.failure
+                )));
+            }
         }
         rec.fp_hits.ok_or_else(|| err("no hit count"))
     }
@@ -653,11 +663,23 @@ impl Fixture {
         let log_before = self.apache.error_log().len();
         if let Err(e) = self.run_case(op, kill, pre, &dir, &repo, &mut rec) {
             let log = self.apache.error_log();
-            let tail: Vec<&str> = log.get(log_before..).unwrap_or_default().lines().rev().take(10).collect();
+            let tail: Vec<&str> = log
+                .get(log_before..)
+                .unwrap_or_default()
+                .lines()
+                .rev()
+                .take(10)
+                .collect();
             let mut msg = e.0;
             if !tail.is_empty() {
                 msg.push_str("\n  server log: ");
-                msg.push_str(&tail.into_iter().rev().collect::<Vec<_>>().join("\n  server log: "));
+                msg.push_str(
+                    &tail
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n  server log: "),
+                );
             }
             rec.failure = Some(msg);
         }
@@ -665,7 +687,8 @@ impl Fixture {
         let keep = rec.failure.is_some() && *self.kept.borrow() < self.keep_failed;
         if keep {
             *self.kept.borrow_mut() += 1;
-            let to = std::env::temp_dir().join(format!("opensvn-crash-failed-{}-{id}", std::process::id()));
+            let to = std::env::temp_dir()
+                .join(format!("opensvn-crash-failed-{}-{id}", std::process::id()));
             let _ = copy_dir(&dir, &to);
             let _ = copy_dir(&self.apache.repos_dir().join(&repo), &to.join("repo"));
             if let Some(f) = rec.failure.as_mut() {
@@ -800,7 +823,12 @@ impl Fixture {
     }
 
     /// `svn status` must succeed and agree with the engine's status; returns svn's.
-    fn status_agrees(&self, state: &Path, wc: &Path, when: &str) -> Result<BTreeMap<String, String>> {
+    fn status_agrees(
+        &self,
+        state: &Path,
+        wc: &Path,
+        when: &str,
+    ) -> Result<BTreeMap<String, String>> {
         let svn = self
             .svn
             .status(wc)
@@ -833,7 +861,9 @@ impl Fixture {
                     let got = read(&wc.join(f));
                     let rev = base_rev(wc, f)?;
                     if m.conflicts.contains(f) {
-                        let ok = got.as_deref().is_some_and(|g| contains(g, &conflict_line(f)));
+                        let ok = got
+                            .as_deref()
+                            .is_some_and(|g| contains(g, &conflict_line(f)));
                         if !ok {
                             return Err(err(format!("lost local modification: {f}")));
                         }
@@ -1003,10 +1033,7 @@ impl Fixture {
                 want_status.insert("unversioned.txt".into(), "?  ".into());
                 // No silent revert: svn diff never removes another user's line.
                 let diff = self.svn.diff(wc)?;
-                if let Some(l) = diff
-                    .lines()
-                    .find(|l| l.starts_with("-server edit of"))
-                {
+                if let Some(l) = diff.lines().find(|l| l.starts_with("-server edit of")) {
                     return Err(err(format!("silent revert of a server change: {l}")));
                 }
             }
@@ -1080,7 +1107,10 @@ fn describe(got: Option<&[u8]>, want: &[u8], local: bool) -> String {
             format!(
                 "different (first line {first:?}, last line {last:?}, local edit expected: {local}, \
                  expected {:?})",
-                String::from_utf8_lossy(want).lines().last().unwrap_or_default()
+                String::from_utf8_lossy(want)
+                    .lines()
+                    .last()
+                    .unwrap_or_default()
             )
         }
     }
@@ -1105,15 +1135,23 @@ impl Report {
 
     /// Markdown summary.
     pub fn markdown(&self, title: &str) -> String {
-        let mut s = format!("# {title}\n\nSeed: `{}` (replay with `CRASH_SEED={}`)\n\n", self.seed, self.seed);
-        s.push_str("| op | cases | killed | completed before kill | failed |\n|---|---:|---:|---:|---:|\n");
+        let mut s = format!(
+            "# {title}\n\nSeed: `{}` (replay with `CRASH_SEED={}`)\n\n",
+            self.seed, self.seed
+        );
+        s.push_str(
+            "| op | cases | killed | completed before kill | failed |\n|---|---:|---:|---:|---:|\n",
+        );
         for op in Op::ALL {
             let cs: Vec<_> = self.cases.iter().filter(|c| c.op == op).collect();
             if cs.is_empty() {
                 continue;
             }
             let killed = cs.iter().filter(|c| c.ended == Ended::Killed).count();
-            let done = cs.iter().filter(|c| matches!(c.ended, Ended::Ok(_))).count();
+            let done = cs
+                .iter()
+                .filter(|c| matches!(c.ended, Ended::Ok(_)))
+                .count();
             let failed = cs.iter().filter(|c| c.failure.is_some()).count();
             s.push_str(&format!(
                 "| {} | {} | {killed} | {done} | {failed} |\n",
@@ -1122,8 +1160,8 @@ impl Report {
             ));
         }
         if !self.coverage.is_empty() {
-            s.push_str("\n## Failpoint coverage\n\n| failpoint | op | hits per run | kills | failed |\n|---|---|---:|---:|---:|\n");
-            for ((op, fp), hits) in &self.coverage {
+            s.push_str("\n## Failpoint coverage\n\nOperations that never reach a failpoint are left out.\n\n| failpoint | op | hits per run | kills | failed |\n|---|---|---:|---:|---:|\n");
+            for ((op, fp), hits) in self.coverage.iter().filter(|(_, h)| **h > 0) {
                 let mine: Vec<_> = self
                     .cases
                     .iter()
@@ -1134,7 +1172,10 @@ impl Report {
                     .collect();
                 let kills = mine.iter().filter(|c| c.ended == Ended::Killed).count();
                 let failed = mine.iter().filter(|c| c.failure.is_some()).count();
-                s.push_str(&format!("| `{fp}` | {} | {hits} | {kills} | {failed} |\n", op.name()));
+                s.push_str(&format!(
+                    "| `{fp}` | {} | {hits} | {kills} | {failed} |\n",
+                    op.name()
+                ));
             }
             let never: Vec<&str> = FAILPOINTS
                 .iter()
@@ -1142,7 +1183,14 @@ impl Report {
                 .filter(|fp| !self.coverage.iter().any(|((_, f), h)| f == fp && *h > 0))
                 .collect();
             if !never.is_empty() {
-                s.push_str(&format!("\nNever reached by any operation: {}\n", never.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ")));
+                s.push_str(&format!(
+                    "\nNever reached by any operation: {}\n",
+                    never
+                        .iter()
+                        .map(|f| format!("`{f}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
         }
         let warn: BTreeSet<&str> = self
@@ -1166,7 +1214,10 @@ impl Report {
                 c.kill,
                 c.ended,
                 c.recovery,
-                c.failure.as_deref().unwrap_or_default().replace('\n', "\n  ")
+                c.failure
+                    .as_deref()
+                    .unwrap_or_default()
+                    .replace('\n', "\n  ")
             ));
         }
         s
@@ -1181,7 +1232,8 @@ impl Report {
             });
         std::fs::create_dir_all(&dir).map_err(|e| err(format!("mkdir report: {e}")))?;
         let path = dir.join(format!("{name}.md"));
-        std::fs::write(&path, self.markdown(title)).map_err(|e| err(format!("write report: {e}")))?;
+        std::fs::write(&path, self.markdown(title))
+            .map_err(|e| err(format!("write report: {e}")))?;
         Ok(path)
     }
 }

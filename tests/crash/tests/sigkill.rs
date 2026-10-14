@@ -51,7 +51,11 @@ fn random_sigkill_suite() {
     let path = report
         .write("sigkill", "Crash suite: random SIGKILL")
         .expect("report");
-    eprintln!("{}\nreport: {}", report.markdown("Crash suite: random SIGKILL"), path.display());
+    eprintln!(
+        "{}\nreport: {}",
+        report.markdown("Crash suite: random SIGKILL"),
+        path.display()
+    );
     assert!(
         report.failures().is_empty(),
         "{} of {} crash cases failed (seed {seed}); see {}",

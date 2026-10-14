@@ -41,8 +41,7 @@ fn walk(dir: &Path, prefix: &str, out: &mut BTreeMap<String, Entry>) -> Result<(
             out.insert(rel.clone(), Entry::Dir);
             walk(&entry.path(), &rel, out)?;
         } else {
-            let bytes =
-                std::fs::read(entry.path()).map_err(|e| err(format!("read {rel}: {e}")))?;
+            let bytes = std::fs::read(entry.path()).map_err(|e| err(format!("read {rel}: {e}")))?;
             out.insert(rel, Entry::File(bytes));
         }
     }
