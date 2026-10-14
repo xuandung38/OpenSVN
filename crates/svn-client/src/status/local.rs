@@ -750,7 +750,22 @@ pub fn local_status(
         .map(<[String]>::to_vec)
         .unwrap_or_else(|| split_global(DEFAULT_GLOBAL_IGNORES));
     let rows = db.read_subtree(rel)?;
-    let snap = Snapshot::new(db, rel, &rows);
+    let result = status_of_rows(db, rel, &rows, opts, &global, cancel);
+    // Freeing tens of thousands of rows takes milliseconds the caller need not wait for.
+    std::thread::spawn(move || drop(rows));
+    result
+}
+
+/// [`local_status`] once the rows of the target's subtree are read.
+fn status_of_rows(
+    db: &WcDb,
+    rel: &RelPath,
+    rows: &SubtreeRows,
+    opts: &StatusOptions,
+    global: &[String],
+    cancel: &CancelToken,
+) -> Result<Vec<WcStatus>> {
+    let snap = Snapshot::new(db, rel, rows);
     let mut externals = ExternalPaths::for_path(db, rel)?;
     let depth = if opts.depth == Depth::Unknown {
         Depth::Infinity
@@ -791,7 +806,7 @@ pub fn local_status(
         snap: &snap,
         opts,
         cancel,
-        global: &global,
+        global,
         index: jobs
             .iter()
             .enumerate()
