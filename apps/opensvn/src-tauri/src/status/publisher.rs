@@ -17,7 +17,9 @@ pub const SNAPSHOT_QUERY: StatusQuery = StatusQuery {
     include_unversioned: true,
 };
 
-type RevState = (Rev, Option<(Rev, Rev)>);
+/// What a `wc://revision-changed` announces: the revisions and the URL (a switch at the same
+/// revision moves the working copy too, and the toolbar shows its location).
+type RevState = (Rev, Option<(Rev, Rev)>, String);
 
 /// Publishes status deltas. Shared by explicit refreshes, finished write operations and (later)
 /// the file system watcher.
@@ -138,10 +140,13 @@ impl StatusPublisher {
     }
 
     fn publish_revision(&self, wc_id: &WcId, info: &WcInfo) {
-        let state: RevState = (info.base_rev, info.rev_range);
+        let state: RevState = (info.base_rev, info.rev_range, info.url.clone());
         let moved = {
             let mut map = self.last_rev.lock().unwrap_or_else(PoisonError::into_inner);
-            map.insert(wc_id.0.clone(), state) != Some(state)
+            map.get(&wc_id.0) != Some(&state) && {
+                map.insert(wc_id.0.clone(), state);
+                true
+            }
         };
         if moved {
             self.events.revision_changed(&RevisionChanged {
