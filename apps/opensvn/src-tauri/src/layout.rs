@@ -2,13 +2,59 @@
 //! looks for the common folder names, at the repository root or one project level below it.
 
 use async_trait::async_trait;
-use opensvn_ipc::{AppError, BranchKind, BranchRef, Layout, LayoutDetection};
+use opensvn_ipc::{AppError, BranchKind, BranchRef, EntryKind, Layout, LayoutDetection};
+
+use crate::engine::{EngineFacade, OpContext};
 
 /// Lists the sub-directories of a repository URL.
 #[async_trait]
 pub trait DirLister: Send + Sync {
     /// Names of the directories directly below `url` (empty when `url` does not exist).
     async fn dirs(&self, url: &str) -> Result<Vec<String>, AppError>;
+}
+
+/// Lists directories through an engine. Uses an unattended context: detection never prompts.
+pub struct EngineDirs<'a>(pub &'a dyn EngineFacade);
+
+#[async_trait]
+impl DirLister for EngineDirs<'_> {
+    async fn dirs(&self, url: &str) -> Result<Vec<String>, AppError> {
+        match self.0.repo_list(url, None, &OpContext::background()).await {
+            Ok(entries) => Ok(entries
+                .into_iter()
+                .filter(|e| e.kind == EntryKind::Dir)
+                .map(|e| e.name)
+                .collect()),
+            // A folder that does not exist simply has no layout below it.
+            Err(e) if e.code == svn_types::ErrorCode::PathNotFound => Ok(Vec::new()),
+            Err(e) => Err(AppError::from(&e)),
+        }
+    }
+}
+
+/// Patterns of a layout one project level below the repository root.
+pub fn project_layout() -> Layout {
+    Layout::Custom {
+        trunk: "/{project}/trunk".to_owned(),
+        branches: vec!["/{project}/branches".to_owned()],
+        tags: vec!["/{project}/tags".to_owned()],
+    }
+}
+
+/// True when `url` could sit in a trunk/branches/tags layout at the repository root or one project
+/// level below it. Lets callers skip the server round trips for folder-style working copies.
+pub fn may_be_in_layout(repo_root_url: &str, url: &str) -> bool {
+    let rel = url
+        .trim_end_matches('/')
+        .strip_prefix(repo_root_url.trim_end_matches('/'))
+        .unwrap_or("");
+    let segments: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    let at = |i: usize| match segments.get(i) {
+        Some(&"trunk") => true,
+        Some(&("branches" | "tags")) => segments.len() > i + 1,
+        _ => false,
+    };
+    at(0) || at(1)
 }
 
 fn join(base: &str, name: &str) -> String {
@@ -70,11 +116,7 @@ pub async fn detect(
         if looks_like_layout(&lister.dirs(&project_url).await?) {
             return Ok(LayoutDetection {
                 found: true,
-                layout: Some(Layout::Custom {
-                    trunk: "/{project}/trunk".to_owned(),
-                    branches: vec!["/{project}/branches".to_owned()],
-                    tags: vec!["/{project}/tags".to_owned()],
-                }),
+                layout: Some(project_layout()),
                 current: current_branch(&project_url, below),
             });
         }
@@ -128,6 +170,22 @@ mod tests {
         assert_eq!(d.current.unwrap().kind, BranchKind::Trunk);
         let d = detect(&t, ROOT, ROOT).await.unwrap();
         assert!(d.found && d.current.is_none());
+    }
+
+    #[test]
+    fn only_urls_shaped_like_a_layout_are_worth_detecting() {
+        for (url, expected) in [
+            (format!("{ROOT}/trunk"), true),
+            (format!("{ROOT}/trunk/src"), true),
+            (format!("{ROOT}/branches/x"), true),
+            (format!("{ROOT}/app/tags/v1/"), true),
+            (format!("{ROOT}/branches"), false),
+            (format!("{ROOT}/app/lib/trunk"), false),
+            (format!("{ROOT}/docs"), false),
+            (ROOT.to_owned(), false),
+        ] {
+            assert_eq!(may_be_in_layout(ROOT, &url), expected, "{url}");
+        }
     }
 
     #[tokio::test]

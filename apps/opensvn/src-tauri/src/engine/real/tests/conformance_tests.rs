@@ -83,6 +83,7 @@ scenario!(remote_edit_and_copy);
 scenario!(cancellation_and_errors);
 scenario!(working_copy_metadata_operations);
 scenario!(switch_to_a_branch);
+scenario!(branch_detection_follows_a_switch);
 scenario!(repository_content_tools);
 scenario!(open_recovers_dead_locks_and_reports_foreign_ones);
 scenario!(locked_unmodified_file_in_status);
