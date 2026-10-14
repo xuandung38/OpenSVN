@@ -12,7 +12,7 @@ use md5::{Digest, Md5};
 use ra_write_support::{
     Bulk, FixedPrompter, ROOT, fixture, requests, server, session_url, transport, wire,
 };
-use svn_delta::SvndiffDecoder;
+use svn_delta::{SvndiffDecoder, WindowApplier};
 use svn_ra::ops::commit::{abort_txn, start_commit};
 use svn_ra::ops::update::RaWire;
 use svn_ra_api::{CommitEditor, CommitInfo, CommitObserver, ReplayableSource};
@@ -295,6 +295,127 @@ async fn modify_delete_and_copy_requests() {
             .ends_with("/svn/repo/!svn/txr/7-a/trunk/copied")
     );
     assert_eq!(hdr(copy, "Depth").as_deref(), Some("infinity"));
+}
+
+/// Rebuilds the text an svndiff stream describes on top of `base`.
+fn apply_svndiff(base: &[u8], svndiff: &[u8]) -> Vec<u8> {
+    let mut dec = SvndiffDecoder::new();
+    let mut out = Vec::new();
+    {
+        let mut ap = WindowApplier::new(std::io::Cursor::new(base.to_vec()), &mut out);
+        for w in dec.feed(svndiff).unwrap() {
+            ap.apply_window(&w).unwrap();
+        }
+        dec.finish().unwrap();
+        ap.finish().unwrap();
+    }
+    out
+}
+
+/// A large binary-like text and the same text with one byte changed in the middle.
+fn big_pair() -> (Vec<u8>, Vec<u8>) {
+    let mut x = 0x2545_f491_4f6c_dd1d_u64;
+    let base: Vec<u8> = (0..1_500_000)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect();
+    let mut target = base.clone();
+    target[750_000] ^= 0x5a;
+    (base, target)
+}
+
+fn file_source(data: &[u8]) -> (NamedTempFile, ReplayableSource, Checksum) {
+    let mut f = NamedTempFile::new().unwrap();
+    f.write_all(data).unwrap();
+    let md5: [u8; 16] = Md5::digest(data).into();
+    let src = ReplayableSource {
+        path: f.path().to_path_buf(),
+        translated: true,
+        size: Some(data.len() as u64),
+    };
+    (f, src, Checksum::Md5(md5))
+}
+
+/// Commits a one-byte change of a 1.5 MB file with `local_base` on disk as the pristine
+/// (whose recorded MD5 is that of `base`); returns the PUT.
+async fn commit_one_byte_change(local_base: &[u8]) -> (wiremock::Request, Vec<u8>, Vec<u8>) {
+    let (base, target) = big_pair();
+    let srv = server(Bulk::Prefer).await;
+    mount_txn(&srv).await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&srv)
+        .await;
+    mount_merge(&srv, fixture("commit/full-merge.resp")).await;
+    let rec = Arc::new(Recorder::default());
+    let mut ed = begin(&srv, &rec, &[], &CancelToken::new()).await.unwrap();
+    let (_keep, src, md5) = file_source(&target);
+    let (_keep_base, base_src, _) = file_source(local_base);
+    let base_md5 = Checksum::Md5(Md5::digest(&base).into());
+    let root = ed.open_root(Some(Revnum(5))).await.unwrap();
+    let f = ed
+        .open_file(&p("big.bin"), root, Some(Revnum(5)))
+        .await
+        .unwrap();
+    ed.apply_text(f, Some(base_src), src, Some(base_md5), md5)
+        .await
+        .unwrap();
+    ed.close_file(f).await.unwrap();
+    ed.close_directory(root).await.unwrap();
+    ed.close_edit().await.unwrap();
+    let all = srv.received_requests().await.unwrap();
+    let put = all
+        .into_iter()
+        .find(|r| r.method.as_str() == "PUT")
+        .unwrap();
+    (put, base, target)
+}
+
+#[tokio::test]
+async fn changed_file_is_sent_as_a_delta_against_its_base() {
+    let (base, _) = big_pair();
+    let (put, base, target) = commit_one_byte_change(&base).await;
+    // svndiff 2 on a low-latency connection, 1 otherwise (as svn picks; both are announced),
+    // a few hundred bytes for 1.5 MB.
+    assert_eq!(&put.body[..3], b"SVN");
+    assert!(matches!(put.body[3], 1 | 2));
+    assert!(
+        put.body.len() < 2_000,
+        "PUT body is {} bytes",
+        put.body.len()
+    );
+    let mut dec = SvndiffDecoder::new();
+    let windows = dec.feed(&put.body).unwrap();
+    assert!(windows.iter().all(|w| w.sview_len > 0));
+    assert!(
+        windows
+            .iter()
+            .flat_map(|w| &w.ops)
+            .any(|op| matches!(op, TxDeltaOp::CopyFromSource { .. }))
+    );
+    assert_eq!(apply_svndiff(&base, &put.body), target);
+    let hdr = |n: &str| put.headers.get(n).map(|v| v.to_str().unwrap().to_owned());
+    assert_eq!(hdr("X-SVN-Base-Fulltext-MD5"), Some(md5_hex(&base)));
+    assert_eq!(hdr("X-SVN-Result-Fulltext-MD5"), Some(md5_hex(&target)));
+}
+
+#[tokio::test]
+async fn damaged_local_base_falls_back_to_the_full_text() {
+    // The pristine on disk is not the text its recorded MD5 names: a delta against it would
+    // be applied by the server to the real base and give a wrong file.
+    let (mut damaged, _) = big_pair();
+    damaged[10] ^= 1;
+    let (put, base, target) = commit_one_byte_change(&damaged).await;
+    assert_eq!(decode_fulltext(&put.body), target);
+    assert_eq!(apply_svndiff(&base, &put.body), target);
+    // Truncated or longer pristines are caught the same way.
+    let (base, _) = big_pair();
+    let (put, _, target) = commit_one_byte_change(&base[..base.len() - 1]).await;
+    assert_eq!(decode_fulltext(&put.body), target);
 }
 
 fn path_prefix_txr() -> wiremock::matchers::PathRegexMatcher {
@@ -857,10 +978,39 @@ async fn checksum_mismatch_is_caught_before_upload() {
     let root = ed.open_root(None).await.unwrap();
     let f = ed.add_file(&p("a"), root, None).await.unwrap();
     ed.apply_text(f, None, src, None, wrong).await.unwrap();
+    // The text is read before close_file returns, so the mismatch is reported there.
     let err = ed.close_file(f).await.unwrap_err();
     assert_eq!(err.code, ErrorCode::Corrupt);
     assert!(requests(&srv).await.iter().all(|(m, _)| m != "PUT"));
     ed.abort_edit().await.unwrap();
+    assert!(rec.events().iter().all(|e| !e.starts_with("merged")));
+}
+
+#[tokio::test]
+async fn a_refused_upload_stops_the_commit_before_the_merge() {
+    let srv = server(Bulk::Prefer).await;
+    mount_txn(&srv).await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(423))
+        .mount(&srv)
+        .await;
+    mount_merge(&srv, fixture("commit/full-merge.resp")).await;
+    let rec = Arc::new(Recorder::default());
+    let mut ed = begin(&srv, &rec, &[], &CancelToken::new()).await.unwrap();
+    let root = ed.open_root(None).await.unwrap();
+    let f = ed.add_file(&p("a"), root, None).await.unwrap();
+    let (keep, src, md5) = source("text");
+    ed.apply_text(f, None, src, None, md5).await.unwrap();
+    // The PUT goes on in the background; the source may go once close_file returned.
+    ed.close_file(f).await.unwrap();
+    drop(keep);
+    ed.close_directory(root).await.unwrap();
+    let err = ed.close_edit().await.unwrap_err();
+    assert_ne!(err.code, ErrorCode::CommitOutcomeUnknown);
+    let reqs = requests(&srv).await;
+    assert!(reqs.iter().any(|(m, _)| m == "PUT"));
+    assert!(reqs.iter().all(|(m, _)| m != "MERGE"));
+    assert_eq!(reqs.last().unwrap().0, "DELETE");
 }
 
 #[tokio::test]
@@ -938,15 +1088,43 @@ async fn cancel_stops_uploads_and_abort_cleans_up() {
         trigger.cancel();
     });
     let started = Instant::now();
-    let err = ed.close_file(f).await.unwrap_err();
+    // Closing returns at once; the upload goes on in the background until the cancel stops
+    // it, and the commit then ends without a MERGE and without its transaction.
+    ed.close_file(f).await.unwrap();
+    ed.close_directory(root).await.unwrap();
+    let err = ed.close_edit().await.unwrap_err();
     assert_eq!(err.code, ErrorCode::Cancelled);
     assert!(started.elapsed() < Duration::from_secs(2));
-    // Every other call is cancelled too, but abort still works.
+    let reqs = requests(&srv).await;
+    assert!(reqs.iter().all(|(m, _)| m != "MERGE"));
+    assert_eq!(reqs.last().unwrap().0, "DELETE");
+}
+
+#[tokio::test]
+async fn cancel_while_a_closed_file_uploads_then_abort_cleans_up() {
+    let srv = server(Bulk::Prefer).await;
+    mount_txn(&srv).await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(201).set_delay(Duration::from_secs(10)))
+        .mount(&srv)
+        .await;
+    let rec = Arc::new(Recorder::default());
+    let cancel = CancelToken::new();
+    let mut ed = begin(&srv, &rec, &[], &cancel).await.unwrap();
+    let (_keep, src, md5) = source("slow");
+    let root = ed.open_root(None).await.unwrap();
+    let f = ed.add_file(&p("a"), root, None).await.unwrap();
+    ed.apply_text(f, None, src, None, md5).await.unwrap();
+    ed.close_file(f).await.unwrap();
+    cancel.cancel();
+    // Every other call is cancelled, but abort still works and stops the upload.
     assert_eq!(
         ed.open_root(None).await.unwrap_err().code,
         ErrorCode::Cancelled
     );
+    let started = Instant::now();
     ed.abort_edit().await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(requests(&srv).await.last().unwrap().0, "DELETE");
 }
 

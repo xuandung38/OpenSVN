@@ -281,6 +281,35 @@ impl WcDb {
         f(&self.conn_guard())
     }
 
+    /// Runs `f`, which makes many reads through this handle, inside ONE read transaction
+    /// (`BEGIN DEFERRED` ... `COMMIT`): SQLite then takes its shared lock and validates its
+    /// page cache once instead of for every statement. `f` must not write: a write transaction
+    /// cannot start inside it. Other processes can still read meanwhile; their writes wait
+    /// (busy timeout) until it ends, so keep it free of network I/O.
+    pub fn read_txn<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        /// Ends the read transaction even when `f` panics.
+        struct End<'a>(&'a WcDb);
+        impl Drop for End<'_> {
+            fn drop(&mut self) {
+                let conn = self.0.conn_guard();
+                if !conn.is_autocommit() {
+                    let _ = conn.execute_batch("ROLLBACK");
+                }
+            }
+        }
+        self.conn_guard()
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(sql_err)?;
+        let end = End(self);
+        let out = f();
+        // Nothing was written: COMMIT and ROLLBACK both just release the shared lock.
+        let done = self.conn_guard().execute_batch("COMMIT").map_err(sql_err);
+        drop(end);
+        let value = out?;
+        done?;
+        Ok(value)
+    }
+
     /// Runs `f` inside a `BEGIN IMMEDIATE` transaction; commits on `Ok`, rolls back on `Err`.
     /// Fails with [`ErrorCode::WcFormatUnsupported`] on format 32 working copies.
     pub fn with_write<T>(&self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
