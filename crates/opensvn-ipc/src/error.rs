@@ -66,10 +66,16 @@ pub struct AppError {
     pub actions: Option<Vec<ErrorAction>>,
     /// For `locked-by-other`: the locks held by someone else on the requested paths, as the
     /// server reports them now. `None` when the engine could not ask (or for other codes).
+    // A boxed slice keeps `AppError` (returned by every command) small.
     #[serde(default)]
     #[specta(optional)]
-    pub lock_conflicts: Option<Vec<LockConflict>>,
+    pub lock_conflicts: Option<Box<[LockConflict]>>,
 }
+
+/// The locks that refused a lock request (a list on the wire).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(transparent)]
+pub struct LockConflicts(pub Vec<LockConflict>);
 
 /// A lock held by someone else that refused a lock request (doc 01 §10.4: the lock dialog shows
 /// the owner and offers Steal). Never carries the lock token.
@@ -126,7 +132,7 @@ impl AppError {
 
     /// Attaches the locks that refused a lock request; an empty list attaches nothing.
     pub fn with_lock_conflicts(mut self, conflicts: Vec<LockConflict>) -> Self {
-        self.lock_conflicts = (!conflicts.is_empty()).then_some(conflicts);
+        self.lock_conflicts = (!conflicts.is_empty()).then(|| conflicts.into_boxed_slice());
         self
     }
 }
