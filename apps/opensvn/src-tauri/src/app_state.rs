@@ -25,8 +25,8 @@ use crate::wc::{ResolvedWc, WcRegistry};
 /// Services an engine may need, created before it (decision C of the real engine wiring plan):
 /// the broker must exist so the engine's transport can prompt and read saved credentials.
 #[derive(Clone)]
-// Built from `lib.rs` once the real engine becomes the default (WP7); tests construct it already.
-#[allow(dead_code)]
+// Only the real engine's builder reads every field.
+#[cfg_attr(not(feature = "real-engine"), allow(dead_code))]
 pub struct EngineServices {
     /// Credential and certificate prompts, saved credentials and trusted certificates.
     pub auth: Arc<AuthBroker>,
@@ -47,8 +47,77 @@ pub enum EngineSource {
     /// An engine that needs nothing from the app (the fake engine, tests).
     Ready(Arc<dyn EngineFacade>),
     /// An engine built once the broker, database and settings exist (the real engine).
-    #[allow(dead_code)] // used by `lib.rs` from WP7 on
+    // Constructed only by `real_engine_source` (feature `real-engine`) and tests.
+    #[cfg_attr(not(any(test, feature = "real-engine")), allow(dead_code))]
     Build(EngineBuilder),
+}
+
+/// Folder below the data directory for the real engine's per-user state (commit journals).
+#[cfg(feature = "real-engine")]
+pub const ENGINE_STATE_SUBDIR: &str = "state";
+
+/// The real engine over the HTTP transport, built once the broker, database and settings exist.
+#[cfg(feature = "real-engine")]
+pub fn real_engine_source() -> EngineSource {
+    EngineSource::Build(Box::new(|services| {
+        let engine: Arc<dyn EngineFacade> = build_real_engine(&services)?;
+        Ok(engine)
+    }))
+}
+
+/// Builds [`RealEngine`](crate::engine::real::RealEngine): sessions through one
+/// [`HttpConnector`](crate::engine::real::HttpConnector) over the broker, working copy lock
+/// owners in `app.sqlite`, state below `<data_dir>/state`, and svn's runtime configuration read
+/// while `wc.readSubversionConfig` is on.
+#[cfg(feature = "real-engine")]
+pub(crate) fn build_real_engine(
+    services: &EngineServices,
+) -> Result<Arc<crate::engine::real::RealEngine>, AppError> {
+    use crate::engine::real::{ClientRecovery, HttpConnector, RealEngine, RealEngineConfig};
+    use crate::lock_ownership::{SqliteLockOwnership, current_boot_id};
+
+    // Private to the user: commit journals hold log messages and paths.
+    let state_dir = crate::preview::prepare_private_dir(&services.data_dir, ENGINE_STATE_SUBDIR)?;
+    let engine = Arc::new(RealEngine::new(RealEngineConfig {
+        connector: Arc::new(HttpConnector::from_services(services)),
+        lock_ownership: Arc::new(SqliteLockOwnership::with_os_probe(services.db.clone())),
+        boot_id: current_boot_id().to_owned(),
+        state_dir,
+        recovery: Arc::new(ClientRecovery),
+    }));
+    follow_subversion_config_setting(&engine, &services.settings);
+    Ok(engine)
+}
+
+/// Points the engine at svn's per-user configuration directory while `wc.readSubversionConfig`
+/// is on (built-in defaults while it is off), now and after every change of the setting. The
+/// follower stops when the engine or the settings service is dropped.
+#[cfg(feature = "real-engine")]
+fn follow_subversion_config_setting(
+    engine: &Arc<crate::engine::real::RealEngine>,
+    settings: &SettingsService,
+) {
+    fn apply(engine: &crate::engine::real::RealEngine, read: bool) {
+        engine.set_subversion_config_dir(if read {
+            crate::engine::real::default_subversion_config_dir()
+        } else {
+            None
+        });
+    }
+    let mut rx = settings.subscribe();
+    let mut current = rx.borrow_and_update().wc_read_subversion_config;
+    apply(engine, current);
+    let weak = Arc::downgrade(engine);
+    tauri::async_runtime::spawn(async move {
+        while rx.changed().await.is_ok() {
+            let read = rx.borrow_and_update().wc_read_subversion_config;
+            let Some(engine) = weak.upgrade() else { break };
+            if read != current {
+                current = read;
+                apply(&engine, read);
+            }
+        }
+    });
 }
 
 /// Everything needed to build the state; tests substitute the engine, events and dialogs.
