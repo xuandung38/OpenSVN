@@ -348,3 +348,145 @@ async fn commit_of_copy_and_move_matches_svn() {
     assert_eq!(repo.svn(&ours.wc, &["status"]), "");
     assert_same_repository(&oracle, &repo, &ours).await;
 }
+
+/// Issue #111: changes below a switched subtree and outside it, committed together. svn anchors
+/// the commit at the common ancestor of the changes; through a session at the working copy URL
+/// the commit is refused before any server transaction, and `commit_anchor` names the anchor.
+#[tokio::test(flavor = "multi_thread")]
+async fn commit_with_a_switched_subtree_matches_svn() {
+    let Some(oracle) = oracle() else { return };
+    let repo = Repo::new(&oracle);
+    let seed = repo.checkout("seed");
+    write(&seed.join("trunk/top.txt"), "top\n");
+    write(&seed.join("trunk/sub/x.txt"), "trunk x\n");
+    write(&seed.join("branches/b/x.txt"), "branch x\n");
+    repo.svn(&seed, &["add", "-q", "trunk", "branches"]);
+    repo.svn(&seed, &["commit", "-q", "-m", "r1"]);
+    let trunk_url = format!("{}/trunk", repo.url);
+    let branch_url = format!("{}/branches/b", repo.url);
+
+    // svn: trunk checkout, sub switched to the branch.
+    let theirs = repo.base().join("svnwc");
+    repo.svn(
+        &repo.base(),
+        &["checkout", "-q", &trunk_url, theirs.to_str().unwrap()],
+    );
+    repo.svn(
+        &theirs,
+        &["switch", "-q", "--ignore-ancestry", &branch_url, "sub"],
+    );
+
+    // Ours: the same through the fake session.
+    let fake = repo.fake(None);
+    let root = fake.repos_root().clone();
+    let at_trunk = fake.at(&root.join(&rp("trunk")).unwrap()).unwrap();
+    let sb = Sandbox::new();
+    let wc = sb.path("wc");
+    let cancel = CancelToken::new();
+    checkout(
+        &ctx(),
+        &at_trunk,
+        &wc,
+        None,
+        Depth::Infinity,
+        false,
+        &cancel,
+    )
+    .await
+    .expect("checkout");
+    svn_client::switch(
+        &ctx(),
+        &at_trunk,
+        &wc.join("sub"),
+        &root.join(&rp("branches/b")).unwrap(),
+        None,
+        Depth::Unknown,
+        &cancel,
+    )
+    .await
+    .expect("switch");
+    assert_same(&oracle, &theirs, &wc, "after switch");
+
+    for w in [&theirs, &wc] {
+        write(&w.join("top.txt"), "top\nedited\n");
+        write(&w.join("sub/x.txt"), "branch x\nedited\n");
+        write(&w.join("sub/new.txt"), "new on the branch\n");
+    }
+    repo.svn(&theirs, &["add", "-q", "sub/new.txt"]);
+    let db = WcDb::open(&wc).expect("open");
+    db.set_lock_owner(LockOwner {
+        store: Arc::new(MemoryLockOwnership::for_current_process("test-boot")),
+        pid: std::process::id(),
+        boot_id: "test-boot".to_owned(),
+    });
+    local::add(
+        &db,
+        &cancel,
+        &[wc.join("sub/new.txt")],
+        &AddOptions::default(),
+        &AddConfig::default(),
+    )
+    .expect("add");
+    let theirs_rev = svn_commit(&repo, &theirs, "both sides");
+
+    let state = sb.path("state");
+    let targets = [wc.clone()];
+    let at_trunk_opts = CommitOptions {
+        session_prefix: "trunk".into(),
+        ..CommitOptions::new("both sides")
+    };
+    // Through the working copy URL: refused, nothing sent, nothing changed.
+    let before = nodes_snapshot(&wc);
+    let err = commit(
+        &db,
+        &CommitContext {
+            ra: &at_trunk,
+            state_dir: &state,
+            cancel: &cancel,
+        },
+        &targets,
+        &at_trunk_opts,
+    )
+    .await
+    .expect_err("outside the session");
+    assert_eq!(err.code, svn_types::ErrorCode::WcInvalidOperation, "{err}");
+    assert_eq!(nodes_snapshot(&wc), before);
+    assert_eq!(
+        fake.youngest_rev(&cancel).await.unwrap().0,
+        1,
+        "no revision was made"
+    );
+
+    // svn's anchor: the common ancestor of trunk/top.txt and branches/b/...: the root.
+    let anchor = svn_client::commit::commit_anchor(&db, &targets, &at_trunk_opts, "trunk")
+        .expect("anchor")
+        .expect("changes");
+    assert_eq!(anchor, "");
+    let ours_rev = commit(
+        &db,
+        &CommitContext {
+            ra: &fake,
+            state_dir: &state,
+            cancel: &cancel,
+        },
+        &targets,
+        &CommitOptions::new("both sides"),
+    )
+    .await
+    .expect("commit")
+    .expect("something to commit")
+    .revision
+    .0;
+    assert_eq!(ours_rev, theirs_rev);
+    drop(db);
+    assert_same(&oracle, &theirs, &wc, "after commit");
+    let ours = Ours {
+        wc: wc.clone(),
+        db: WcDb::open(&wc).expect("open"),
+        fake,
+        state,
+        cancel,
+        _sb: sb,
+    };
+    assert_same_repository(&oracle, &repo, &ours).await;
+}
