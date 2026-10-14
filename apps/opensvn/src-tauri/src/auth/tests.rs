@@ -626,6 +626,13 @@ async fn a_sign_out_during_the_keychain_write_removes_the_saved_password() {
         !sign_out.is_finished(),
         "sign-out waits for the account gate"
     );
+    // Answering a prompt reads the sign-out count; it must not wait for the stalled write.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        typed(&broker, &events, &initial, 1, "other", false),
+    )
+    .await
+    .expect("a prompt answer does not wait for the keychain write");
     release.send(()).unwrap();
     accepted.await.unwrap();
     sign_out.join().unwrap().unwrap();
