@@ -42,6 +42,19 @@ use crate::skel::Skel;
 
 const MARKER_PREFIX: &str = "opensvn-lock-";
 
+/// Name prefixes of the temp files the engine creates in `.svn/tmp` (each followed by a random
+/// suffix): work queue installs, update and merge texts, pristine installs, conflict marker
+/// staging and file externals. Kept in sync with the `tempfile` builders of `svn-wc` and
+/// `svn-client`; [`WcDb::remove_stale_tmp_files`] removes nothing else.
+pub const ENGINE_TMP_PREFIXES: &[&str] = &[
+    "wq-",
+    "update-",
+    "merge-",
+    "pristine-",
+    "marker-",
+    "external-",
+];
+
 /// Who owns the locks this process takes.
 #[derive(Clone)]
 pub struct LockOwner {
@@ -343,6 +356,71 @@ impl WcDb {
                 None => LockState::Free,
             },
         )
+    }
+
+    /// Removes leftovers of crashed engine operations from `.svn/tmp` (#120) and returns how
+    /// many files went.
+    ///
+    /// Only regular files whose name starts with one of [`ENGINE_TMP_PREFIXES`] are removed:
+    /// every one of them is a temp file this engine creates with a random suffix and then
+    /// renames away, queues for removal, or removes itself. Lock markers
+    /// (`opensvn-lock-*`), svn's own temp files, directories, symlinks and anything else are
+    /// left alone. Runs only while this handle holds the write lock on the whole working copy
+    /// and the work queue is empty, so no live operation (of this or another engine process)
+    /// can still need one of the files and no queued work item can name one.
+    pub fn remove_stale_tmp_files(&self) -> Result<usize> {
+        let root = RelPath::root();
+        let whole_tree = self.owned().get(&root).is_some_and(|lv| *lv == -1);
+        if !whole_tree {
+            return Err(SvnError::new(
+                ErrorCode::Internal,
+                "removing stale temp files needs the write lock on the whole working copy",
+            ));
+        }
+        let pending: Option<i64> = self.with_read(|c| {
+            c.query_row("SELECT 1 FROM work_queue LIMIT 1", [], |r| r.get(0))
+                .optional()
+                .map_err(sql_err)
+        })?;
+        if pending.is_some() {
+            return Ok(0);
+        }
+        let adm = self.wcroot.join(ADM_DIR);
+        let dir = self.tmp_dir();
+        for d in [&adm, &dir] {
+            match std::fs::symlink_metadata(d) {
+                Ok(m) if m.file_type().is_dir() => {}
+                Ok(_) => return Ok(0), // a symlink or a file: not ours to walk into
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+                Err(e) => return Err(io("cannot stat", d, &e)),
+            }
+        }
+        let entries = std::fs::read_dir(&dir).map_err(|e| io("cannot read", &dir, &e))?;
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !ENGINE_TMP_PREFIXES
+                .iter()
+                .any(|p| name.len() > p.len() && name.starts_with(p))
+            {
+                continue;
+            }
+            let path = entry.path();
+            // `symlink_metadata`: a symlink is never followed, and only a regular file goes.
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !meta.file_type().is_file() {
+                continue;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(io("cannot remove", &path, &e)),
+            }
+        }
+        Ok(removed)
     }
 
     /// Removes the lock row on exactly `dir` (and its ownership record and markers) on the user's
