@@ -170,7 +170,11 @@ impl CreationLock {
         match file.try_lock() {
             Ok(()) => {}
             Err(fs::TryLockError::WouldBlock) => return Err(busy(wcroot)),
-            Err(fs::TryLockError::Error(e)) => return Err(io_err("cannot lock", &path, &e)),
+            // A filesystem without file locks (some network shares): a checkout must still work
+            // there; only concurrent creators in one directory lose their protection.
+            Err(fs::TryLockError::Error(e)) => {
+                tracing::debug!(error = %e, path = %path.display(), "creation lock unavailable");
+            }
         }
         let lock = CreationLock { file, path };
         // The previous holder may have deleted the file (with `.svn`, or after finishing) between
