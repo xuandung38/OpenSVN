@@ -8,7 +8,9 @@
 //! locking a directory account. A prompt that ends without credentials (cancelled or timed out)
 //! fails only the requests that were already under way when it ended; it is not a rejected
 //! attempt, and the next interactive request prompts again. Typed credentials count as accepted
-//! only on a response to a request that resent them in answer to a 401.
+//! only on a response to a request whose method and URL challenged with a 401 for them: the
+//! resent request itself, or (if that one got a server error, a network error or was cancelled)
+//! a later request with the same method and URL that sent them up front.
 //!
 //! Negotiate (SPNEGO/Kerberos, see [`negotiate`]) is tried first when the server offers it, the
 //! build has a provider and the URL is `https`. On plain `http` no Negotiate token is ever sent
@@ -44,6 +46,9 @@ use negotiate::PendingNegotiate;
 
 /// Maximum number of rejected credentials per origin before giving up.
 pub const MAX_ATTEMPTS: u8 = 3;
+
+/// How many challenged `(method, URL)` pairs a flight remembers to confirm typed credentials on.
+const MAX_PROTECTED: usize = 256;
 
 /// How long a Negotiate failure is remembered for a host. Afterwards SSO is tried again, so a
 /// ticket obtained later (`kinit`, renewed logon session) is picked up without a restart.
@@ -141,6 +146,17 @@ struct FlightState {
     from_stored: bool,
     /// The cached `credentials` were typed at the prompt and no response has accepted them yet.
     unconfirmed: Option<Unconfirmed>,
+    /// `(method, URL)` pairs that answered 401 for this origin. A success there proves the
+    /// credentials, also when they were sent up front, so a typed password whose resent request
+    /// failed without a response (or with a 5xx) is confirmed by the next such request.
+    protected: HashSet<(String, String)>,
+}
+
+/// Key for `FlightState::protected`: the method and the URL without fragment.
+fn protected_key(method: &reqwest::Method, url: &Url) -> (String, String) {
+    let mut url = url.clone();
+    url.set_fragment(None);
+    (method.as_str().to_owned(), url.into())
 }
 
 #[derive(Default)]
@@ -190,6 +206,21 @@ pub(crate) struct AuthManager {
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Drop for AuthManager {
+    fn drop(&mut self) {
+        for (origin, flight) in lock(&self.flights).iter() {
+            if lock(&flight.state).unconfirmed.is_some() {
+                // Visible in the log rather than silently lost (#113).
+                tracing::info!(
+                    host = %origin.host,
+                    port = origin.port,
+                    "a typed password was never confirmed by the server; it was not saved"
+                );
+            }
+        }
+    }
 }
 
 /// Sets `FlightState::from_stored` again unless disarmed, so a stored-credential rejection
@@ -325,6 +356,7 @@ impl AuthManager {
     /// ever attached to `https` requests).
     pub(crate) async fn prepare(
         &self,
+        method: &reqwest::Method,
         url: &Url,
         channel_binding: Option<Arc<[u8]>>,
         cancel: &CancelToken,
@@ -361,19 +393,22 @@ impl AuthManager {
             (Some(c), "https") => Some(basic_header(&c.username, &c.password)?),
             _ => None,
         };
+        // Up front on a method and URL known to challenge: a success proves the credentials.
+        let challenged = header.is_some() && state.protected.contains(&protected_key(method, url));
         Ok(Attached {
             header,
             origin: Some(origin),
             generation: state.generation,
             seq,
+            challenged,
             ..Attached::default()
         })
     }
 
     /// Records that the server accepted the credentials carried by `sent` (any response but a
-    /// 401). Only a request that resent them in answer to a 401 counts: a preemptive header on a
-    /// URL that never challenged may have reached a path that does not check it (anonymous
-    /// read), which proves nothing. The first such response with credentials typed at the
+    /// 401). Only a request whose method and URL challenged counts (the resent request, or a
+    /// later one that sent them up front): a preemptive header on a URL that never challenged
+    /// may have reached a path that does not check it (anonymous read), which proves nothing. The first such response with credentials typed at the
     /// prompt is reported through `AuthPrompter::credentials_accepted`, unless it is a server
     /// error, which proves nothing either.
     ///
@@ -417,6 +452,12 @@ impl AuthManager {
                 } else {
                     state.failures = 0;
                     if status.is_server_error() {
+                        if state.unconfirmed.is_some() {
+                            tracing::debug!(
+                                status = status.as_u16(),
+                                "server error; the typed password is confirmed by a later success"
+                            );
+                        }
                         None
                     } else {
                         match (state.unconfirmed.take(), &state.credentials) {
@@ -505,6 +546,7 @@ impl AuthManager {
     /// prompts again.
     pub(crate) async fn on_unauthorized(
         &self,
+        method: &reqwest::Method,
         url: &Url,
         challenges: &Challenges,
         sent: &Attached,
@@ -516,9 +558,16 @@ impl AuthManager {
             .answer_unauthorized(url, challenges, sent, channel_binding, interactive, cancel)
             .await?;
         if next.negotiate.is_none() {
-            // Basic credentials resent in answer to this URL's challenge.
+            // Basic credentials resent in answer to this URL's challenge. (`seq` was read under
+            // the flight gate in `answer_unauthorized`.)
             next.challenged = next.header.is_some();
-            next.seq = self.seq();
+            if let (true, Some(origin)) = (next.challenged, &next.origin) {
+                let flight = self.flight(origin);
+                let mut state = lock(&flight.state);
+                if state.protected.len() < MAX_PROTECTED {
+                    state.protected.insert(protected_key(method, url));
+                }
+            }
         }
         Ok(next)
     }
@@ -609,6 +658,7 @@ impl AuthManager {
                         header: Some(header),
                         origin: Some(origin),
                         generation: state.generation,
+                        seq: self.seq(),
                         ..Attached::default()
                     });
                 }
@@ -670,7 +720,12 @@ impl AuthManager {
             let mut state = lock(&flight.state);
             state.stored_used = true;
             state.from_stored = true;
-            state.unconfirmed = None;
+            if state.unconfirmed.take().is_some() {
+                tracing::info!(
+                    host = %origin.host,
+                    "a typed password was replaced by the saved one before the server confirmed it"
+                );
+            }
             state.generation += 1;
             state.credentials = Some(Credential {
                 username: creds.username,
@@ -681,6 +736,7 @@ impl AuthManager {
                 header: Some(header),
                 origin: Some(origin),
                 generation: state.generation,
+                seq: self.seq(),
                 ..Attached::default()
             });
         }
@@ -717,6 +773,9 @@ impl AuthManager {
             header: Some(header),
             origin: Some(origin),
             generation: state.generation,
+            // Read while the flight gate is held: a round ending concurrently cannot make it
+            // stale (#113).
+            seq: self.seq(),
             ..Attached::default()
         })
     }

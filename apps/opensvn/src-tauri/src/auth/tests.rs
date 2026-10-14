@@ -570,6 +570,75 @@ async fn a_password_typed_before_a_sign_out_is_not_saved_by_a_late_response() {
     );
 }
 
+/// A credential store whose `set` signals that it started and then waits to be released.
+struct GatedStore {
+    inner: secure_store::MemoryStore,
+    entered: std::sync::atomic::AtomicBool,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl secure_store::CredentialStore for GatedStore {
+    fn get(&self, o: &OriginKey, u: &str) -> secure_store::Result<Option<secrecy::SecretString>> {
+        self.inner.get(o, u)
+    }
+    fn set(&self, o: &OriginKey, u: &str, p: &secrecy::SecretString) -> secure_store::Result<()> {
+        self.entered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.release.lock().unwrap().recv();
+        self.inner.set(o, u, p)
+    }
+    fn delete(&self, o: &OriginKey, u: &str) -> secure_store::Result<bool> {
+        self.inner.delete(o, u)
+    }
+}
+
+#[tokio::test]
+async fn a_sign_out_during_the_keychain_write_removes_the_saved_password() {
+    use secure_store::CredentialStore;
+    let (release, rx) = std::sync::mpsc::channel();
+    let store = Arc::new(GatedStore {
+        inner: secure_store::MemoryStore::new(),
+        entered: Default::default(),
+        release: std::sync::Mutex::new(rx),
+    });
+    let db = AppDb::open_in_memory().unwrap();
+    let events = Arc::new(RecordingEvents::default());
+    let broker = Arc::new(AuthBroker::new(events.clone(), db.clone(), store.clone()));
+    let initial =
+        CredentialRequest::new(origin(), 0, vec![AuthMethod::Basic], PromptReason::Initial);
+    let (_, creds) = typed(&broker, &events, &initial, 0, "pw", true).await;
+
+    // The server accepts the password; the keychain write starts and stalls.
+    let b = broker.clone();
+    let accepted = tokio::spawn(async move { b.credentials_accepted(&origin(), &creds).await });
+    for _ in 0..500 {
+        if store.entered.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(store.entered.load(std::sync::atomic::Ordering::SeqCst));
+    // The user signs out meanwhile: it waits for the save to finish instead of interleaving.
+    let b = broker.clone();
+    let sign_out = std::thread::spawn(move || b.sign_out(&origin().realm));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !sign_out.is_finished(),
+        "sign-out waits for the account gate"
+    );
+    release.send(()).unwrap();
+    accepted.await.unwrap();
+    sign_out.join().unwrap().unwrap();
+
+    // The sign-out stands: neither the secret nor the row survived.
+    assert!(db.accounts_list().unwrap().is_empty(), "no account row");
+    assert!(
+        store.get(&origin(), "alice").unwrap().is_none(),
+        "no secret"
+    );
+    assert!(broker.stored_credentials(&initial).await.is_none());
+}
+
 #[tokio::test]
 async fn a_rejected_saved_password_is_not_worded_as_the_one_typed_last_time() {
     let store = Arc::new(secure_store::MemoryStore::new());

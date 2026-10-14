@@ -278,7 +278,7 @@ impl HttpTransport {
     ) -> Result<HttpResponse> {
         let mut sent = self
             .auth
-            .prepare(&req.url, origin.channel_binding(), cancel)
+            .prepare(&req.method, &req.url, origin.channel_binding(), cancel)
             .await?;
         let mut tls_rounds = 0u8;
         let mut round_trips = 0u8;
@@ -315,6 +315,7 @@ impl HttpTransport {
                     sent = self
                         .auth
                         .on_unauthorized(
+                            &req.method,
                             &req.url,
                             &challenges,
                             &sent,
