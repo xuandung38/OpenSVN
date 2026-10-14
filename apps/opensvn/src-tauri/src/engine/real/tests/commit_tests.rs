@@ -207,6 +207,9 @@ impl Harness for CommitHarness {
         write(root, rel, content);
         Ok(())
     }
+    fn remove_file(&self, root: &Path, rel: &str) -> Result<(), SvnError> {
+        std::fs::remove_file(root.join(rel)).map_err(|e| SvnError::from_io("remove", &e))
+    }
     fn scratch_dir(&self) -> PathBuf {
         self.env.tmp.path().to_path_buf()
     }
