@@ -9,6 +9,7 @@ import { useT } from "../../lib/i18n/i18n";
 import { activityStrings } from "./activity-strings";
 import { errorText } from "./error-text";
 import { OpDetails } from "./op-details";
+import { stageKey } from "./op-log";
 
 /** Working copy whose folder "Open folder" shows: the operation's own, or the one a checkout made. */
 function folderWc(op: OpState): string | null {
@@ -39,12 +40,29 @@ export function ActivityPanel({
   const backgroundFailed = ops.filter((o) => o.handle.background && o.state === "failed");
   const open = ops.find((o) => o.handle.opId === openId) ?? null;
   const openWc = open ? folderWc(open) : null;
+  // Screen readers hear the newest operation's stage and outcome, not every progress tick.
+  const latest = visible.at(-1);
+  const announce = (() => {
+    if (!latest) return "";
+    const title = latest.handle.title;
+    if (latest.state === "running")
+      return t("statusRunning", { title, stage: t(stageKey(latest)) });
+    if (latest.state === "done") return t("statusDone", { title });
+    const err = latest.appError ? errorText(latest.appError) : null;
+    return t("statusFailed", {
+      title,
+      message: err?.key ? t(err.key) : (err?.message ?? latest.error ?? ""),
+    });
+  })();
 
   return (
     <section
       aria-label={t("region")}
       className="max-h-[180px] overflow-auto border-t border-line bg-surface"
     >
+      <p role="status" aria-live="polite" className="sr-only">
+        {announce}
+      </p>
       {visible.length === 0 && backgroundFailed.length === 0 && (
         <p className="m-0 px-3.5 py-2 text-muted-text">{t("empty")}</p>
       )}
