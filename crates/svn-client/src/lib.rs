@@ -13,6 +13,7 @@ pub mod diff;
 pub mod externals;
 pub mod local;
 pub mod ops;
+pub mod sparse;
 pub mod status;
 pub mod update;
 pub mod wc;
@@ -24,4 +25,5 @@ pub use ctx::{
 };
 pub use diff::{DiffOptions, diff};
 pub use ops::{switch, update};
+pub use sparse::set_depth;
 pub use status::{StatusOptions, status, status_remote};

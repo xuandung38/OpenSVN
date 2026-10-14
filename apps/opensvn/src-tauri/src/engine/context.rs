@@ -22,6 +22,20 @@ pub struct ProgressUpdate {
     pub current_path: Option<String>,
 }
 
+/// Notice phase: the operation went through, but the working copy needs `cleanup`
+/// (`current_path` carries the reason). The UI shows the working copy's "needs cleanup" banner.
+pub const PHASE_NEEDS_CLEANUP: &str = "needs-cleanup";
+/// Notice phase: an add skipped a nested working copy (svn's W150002); `current_path` carries the
+/// warning text. The UI shows it to the user.
+pub const PHASE_NESTED_WC_SKIPPED: &str = "nested-wc-skipped";
+
+impl ProgressUpdate {
+    /// A notice for the user rather than a progress count: never dropped by the throttle.
+    pub fn is_notice(&self) -> bool {
+        self.phase == PHASE_NEEDS_CLEANUP || self.phase == PHASE_NESTED_WC_SKIPPED
+    }
+}
+
 /// Sink for progress samples; cheap to clone.
 #[derive(Clone)]
 pub struct ProgressReporter(Option<Arc<dyn Fn(ProgressUpdate) + Send + Sync>>);

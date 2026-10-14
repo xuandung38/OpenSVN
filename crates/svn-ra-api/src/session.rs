@@ -40,6 +40,11 @@ pub struct UpdateRequest {
 }
 
 /// Builds the working-copy report. Runs synchronously on the driver task.
+///
+/// Report paths are relative to the session URL, like [`UpdateRequest::target`]: the first
+/// `set_path` describes the target itself and every other path lies below it. A session
+/// translates them to the wire form (svn's target-relative paths, anchored at the target's
+/// parent).
 pub type ReportFn = Box<dyn FnOnce(&mut dyn Reporter) -> Result<()> + Send>;
 
 /// Result of `get_file`.

@@ -268,7 +268,10 @@ impl EngineFacade for RealEngine {
     fn capabilities(&self) -> EngineCapabilities {
         // Checkout, update and switch fetch `svn:externals`; a checkout honours
         // `ignore_externals` (see `sync`).
-        EngineCapabilities { externals: true }
+        EngineCapabilities {
+            externals: true,
+            demo: false,
+        }
     }
 
     async fn wc_info(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcInfo> {
