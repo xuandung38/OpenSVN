@@ -49,6 +49,10 @@ pub struct ScriptedPrompter {
     /// When set, `stored_credentials_rejected` cancels this token and yields before recording,
     /// as if the user cancelled while the hook ran.
     pub cancel_in_rejected_hook: Mutex<Option<svn_types::CancelToken>>,
+    /// `save` flag of the prompt answers.
+    pub save_answers: std::sync::atomic::AtomicBool,
+    /// Every `credentials_accepted` call: origin, user name, password and `save`.
+    pub accepted: Mutex<Vec<(OriginKey, String, String, bool)>>,
 }
 
 impl ScriptedPrompter {
@@ -86,6 +90,10 @@ impl ScriptedPrompter {
         self.credential_calls.lock().unwrap().len()
     }
 
+    pub fn accepted(&self) -> Vec<(OriginKey, String, String, bool)> {
+        self.accepted.lock().unwrap().clone()
+    }
+
     pub fn cert_prompts(&self) -> usize {
         self.cert_calls.lock().unwrap().len()
     }
@@ -112,10 +120,11 @@ impl AuthPrompter for ScriptedPrompter {
             }
         };
         self.concurrent.fetch_sub(1, Ordering::SeqCst);
+        let save = self.save_answers.load(Ordering::SeqCst);
         answer.map(|(username, password)| Credentials {
             username,
             password: SecretString::from(password),
-            save: false,
+            save,
             method: AuthMethod::Basic,
         })
     }
@@ -144,6 +153,16 @@ impl AuthPrompter for ScriptedPrompter {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         self.stored_rejected.lock().unwrap().push(req.clone());
+    }
+
+    async fn credentials_accepted(&self, origin: &OriginKey, credentials: &Credentials) {
+        use secrecy::ExposeSecret as _;
+        self.accepted.lock().unwrap().push((
+            origin.clone(),
+            credentials.username.clone(),
+            credentials.password.expose_secret().to_owned(),
+            credentials.save,
+        ));
     }
 
     async fn confirm_certificate(&self, info: &CertInfo) -> CertDecision {

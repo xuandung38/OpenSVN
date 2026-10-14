@@ -326,7 +326,7 @@ impl HttpTransport {
                 }
                 Ok(resp) => {
                     self.auth
-                        .on_success(&req.url, &sent, &resp.headers, cancel)
+                        .on_success(&req.url, &sent, resp.status, &resp.headers, cancel)
                         .await?;
                     origin.tls.connected();
                     return Ok(resp);

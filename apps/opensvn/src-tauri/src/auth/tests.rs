@@ -101,6 +101,10 @@ async fn credentials_prompt_carries_origin_reason_and_returns_the_answer() {
     let creds = task.await.unwrap().unwrap();
     assert_eq!(creds.username, "alice");
     assert_eq!(creds.method, AuthMethod::Basic);
+    assert!(creds.save);
+    // Nothing is saved before the server accepted the password.
+    assert!(db.accounts_list().unwrap().is_empty());
+    broker.credentials_accepted(&origin(), &creds).await;
     // metadata only, keyed by origin
     let accounts = db.accounts_list().unwrap();
     assert_eq!(accounts.len(), 1);
@@ -377,7 +381,9 @@ async fn saved_credentials_are_offered_silently_by_a_new_broker() {
     let (b, r) = (first.clone(), req.clone());
     let task = tokio::spawn(async move { b.credentials(&r).await });
     answer(&first, &events, 0, "alice", "s3cret", true).await;
-    assert!(task.await.unwrap().unwrap().save);
+    let typed = task.await.unwrap().unwrap();
+    assert!(typed.save);
+    first.credentials_accepted(&origin(), &typed).await;
 
     // "Restart": a new broker over the same database and credential store.
     let quiet = Arc::new(RecordingEvents::default());
@@ -404,19 +410,34 @@ async fn unsaved_answers_store_nothing() {
     assert!(db.accounts_list().unwrap().is_empty());
 }
 
+/// Asks `broker` for credentials with `req`, answers the prompt number `nth` and returns what
+/// the transport would get.
+async fn typed(
+    broker: &Arc<AuthBroker>,
+    events: &RecordingEvents,
+    req: &CredentialRequest,
+    nth: usize,
+    pass: &str,
+    save: bool,
+) -> (opensvn_ipc::AuthPrompt, svn_ra_api::Credentials) {
+    let (b, r) = (broker.clone(), req.clone());
+    let task = tokio::spawn(async move { b.credentials(&r).await });
+    let prompt = next_prompt_after(events, nth).await;
+    answer(broker, events, nth, "alice", pass, save).await;
+    (prompt, task.await.unwrap().unwrap())
+}
+
 #[tokio::test]
 async fn a_rejected_saved_password_is_not_offered_again_until_new_credentials_are_saved() {
     use secrecy::ExposeSecret;
     let store = Arc::new(secure_store::MemoryStore::new());
     let db = AppDb::open_in_memory().unwrap();
     let events = Arc::new(RecordingEvents::default());
-    let broker = Arc::new(AuthBroker::new(events.clone(), db.clone(), store));
+    let broker = Arc::new(AuthBroker::new(events.clone(), db.clone(), store.clone()));
     let initial =
         CredentialRequest::new(origin(), 0, vec![AuthMethod::Basic], PromptReason::Initial);
-    let (b, r) = (broker.clone(), initial.clone());
-    let task = tokio::spawn(async move { b.credentials(&r).await });
-    answer(&broker, &events, 0, "alice", "old", true).await;
-    task.await.unwrap().unwrap();
+    let (_, creds) = typed(&broker, &events, &initial, 0, "old", true).await;
+    broker.credentials_accepted(&origin(), &creds).await;
 
     // The transport offers the saved password, the server rejects it (reported through the
     // hook), the user is prompted and cancels.
@@ -435,22 +456,181 @@ async fn a_rejected_saved_password_is_not_offered_again_until_new_credentials_ar
         broker.stored_credentials(&initial).await.is_none(),
         "stale password withheld"
     );
+    // Persisted: a new broker (restart) withholds it too and says why it asks.
+    let restarted = Arc::new(AuthBroker::new(events.clone(), db.clone(), store.clone()));
+    assert!(restarted.stored_credentials(&initial).await.is_none());
+    let (prompt, _) = typed(&restarted, &events, &initial, 2, "x", false).await;
+    assert_eq!(prompt.reason, Some(AuthPromptReason::Expired));
+    let account = db
+        .account_get("https", "svn.test.local", 8443, &origin().realm)
+        .unwrap()
+        .unwrap();
+    assert!(account.stale);
+    use secure_store::CredentialStore;
+    assert_eq!(
+        store
+            .get(&origin(), "alice")
+            .unwrap()
+            .unwrap()
+            .expose_secret(),
+        "old",
+        "kept in the store"
+    );
 
-    // An unsaved answer leaves the stale one withheld; a saved one replaces it.
-    let (b, r) = (broker.clone(), initial.clone());
-    let task = tokio::spawn(async move { b.credentials(&r).await });
-    answer(&broker, &events, 2, "alice", "typed", false).await;
-    task.await.unwrap().unwrap();
+    // An unsaved accepted answer leaves the stale one withheld; a saved accepted one replaces it.
+    let (_, creds) = typed(&broker, &events, &initial, 3, "typed", false).await;
+    broker.credentials_accepted(&origin(), &creds).await;
     assert!(broker.stored_credentials(&initial).await.is_none());
-    let (b, r) = (broker.clone(), initial.clone());
-    let task = tokio::spawn(async move { b.credentials(&r).await });
-    answer(&broker, &events, 3, "alice", "new", true).await;
-    task.await.unwrap().unwrap();
+    let (_, creds) = typed(&broker, &events, &initial, 4, "new", true).await;
+    assert!(
+        broker.stored_credentials(&initial).await.is_none(),
+        "not before the server accepted it"
+    );
+    broker.credentials_accepted(&origin(), &creds).await;
     let creds = broker
         .stored_credentials(&initial)
         .await
         .expect("offered again");
     assert_eq!(creds.password.expose_secret(), "new");
+    assert!(
+        restarted.stored_credentials(&initial).await.is_some(),
+        "the persisted flag is cleared too"
+    );
+}
+
+#[tokio::test]
+async fn a_typed_password_the_server_rejects_is_never_saved_and_the_next_prompt_says_so() {
+    let (broker, events, db) = setup(PROMPT_TIMEOUT);
+    let initial =
+        CredentialRequest::new(origin(), 0, vec![AuthMethod::Basic], PromptReason::Initial);
+    let (prompt, creds) = typed(&broker, &events, &initial, 0, "typo", true).await;
+    assert_eq!(prompt.reason, Some(AuthPromptReason::Initial));
+    assert!(creds.save);
+    // The server rejects it: the transport prompts again (attempt 1); the user cancels.
+    let again =
+        CredentialRequest::new(origin(), 1, vec![AuthMethod::Basic], PromptReason::Rejected);
+    let (b, r) = (broker.clone(), again.clone());
+    let task = tokio::spawn(async move { b.credentials(&r).await });
+    let prompt = next_prompt_after(&events, 1).await;
+    assert_eq!(prompt.reason, Some(AuthPromptReason::Rejected));
+    broker
+        .respond(&prompt.request_id, AuthResponse::Cancel)
+        .unwrap();
+    assert!(task.await.unwrap().is_none());
+    assert!(db.accounts_list().unwrap().is_empty(), "never saved");
+    assert!(broker.stored_credentials(&initial).await.is_none());
+    // A later first prompt (new transport, attempt 0) still says the last password was rejected.
+    let (prompt, creds) = typed(&broker, &events, &initial, 2, "s3cret", true).await;
+    assert_eq!(prompt.reason, Some(AuthPromptReason::Rejected));
+    assert_eq!(prompt.attempt, 0);
+    broker.credentials_accepted(&origin(), &creds).await;
+    let (prompt, _) = typed(&broker, &events, &initial, 3, "s3cret", false).await;
+    assert_eq!(
+        prompt.reason,
+        Some(AuthPromptReason::Initial),
+        "accepted since"
+    );
+}
+
+/// Credential store whose `delete` fails for one host.
+struct FailingDelete {
+    inner: secure_store::MemoryStore,
+    host: &'static str,
+}
+
+impl secure_store::CredentialStore for FailingDelete {
+    fn get(&self, o: &OriginKey, u: &str) -> secure_store::Result<Option<secrecy::SecretString>> {
+        self.inner.get(o, u)
+    }
+    fn set(&self, o: &OriginKey, u: &str, p: &secrecy::SecretString) -> secure_store::Result<()> {
+        self.inner.set(o, u, p)
+    }
+    fn delete(&self, o: &OriginKey, u: &str) -> secure_store::Result<bool> {
+        if o.host == self.host {
+            Err(secure_store::StoreError::Unavailable("locked".into()))
+        } else {
+            self.inner.delete(o, u)
+        }
+    }
+}
+
+#[tokio::test]
+async fn sign_out_deletes_secrets_first_continues_past_errors_and_keeps_rows_of_kept_secrets() {
+    use secure_store::CredentialStore;
+    let store = Arc::new(FailingDelete {
+        inner: secure_store::MemoryStore::new(),
+        host: "bad",
+    });
+    let db = AppDb::open_in_memory().unwrap();
+    let broker = AuthBroker::new(
+        Arc::new(RecordingEvents::default()),
+        db.clone(),
+        store.clone(),
+    );
+    let at = |host: &str| OriginKey {
+        scheme: "https".into(),
+        host: host.into(),
+        port: 443,
+        realm: "r".into(),
+    };
+    for host in ["a", "bad", "c"] {
+        db.account_upsert(&crate::db::AccountRecord {
+            scheme: "https",
+            host,
+            port: 443,
+            realm: "r",
+            username: "u",
+            negotiate: false,
+        })
+        .unwrap();
+        store
+            .set(
+                &at(host),
+                "u",
+                &secrecy::SecretString::from("pw".to_owned()),
+            )
+            .unwrap();
+    }
+    let invalidations = broker.invalidations();
+    let err = broker.sign_out("r").unwrap_err();
+    assert!(
+        err.detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("bad:443"),
+        "{err:?}"
+    );
+    assert!(invalidations.has_changed().unwrap());
+    // The others are gone, secret and row; the failed one keeps its row (no orphaned secret)
+    // and is no longer offered.
+    for host in ["a", "c"] {
+        assert!(store.get(&at(host), "u").unwrap().is_none());
+        assert!(db.account_get("https", host, 443, "r").unwrap().is_none());
+    }
+    assert!(store.get(&at("bad"), "u").unwrap().is_some());
+    let kept = db.account_get("https", "bad", 443, "r").unwrap().unwrap();
+    assert!(kept.stale);
+    let req = CredentialRequest::new(at("bad"), 0, vec![AuthMethod::Basic], PromptReason::Initial);
+    assert!(broker.stored_credentials(&req).await.is_none());
+}
+
+#[tokio::test]
+async fn forgetting_a_pin_held_only_in_memory_rebuilds_the_transport() {
+    use svn_ra::transport::TrustStore;
+    let (broker, _, db) = setup(PROMPT_TIMEOUT);
+    let trust = broker.trust_store();
+    trust.pin("svn.test.local", 8443, [0xcd; 32]);
+    // As if the database write in `pin` had failed: the pin lives in memory only.
+    let key = opensvn_ipc::TrustedCertKey {
+        host: "svn.test.local".into(),
+        port: 8443,
+        sha256: "cd".repeat(32),
+    };
+    assert!(db.certs_remove(&key).unwrap());
+    let inv = broker.invalidations();
+    assert!(broker.forget_certificate(&key).unwrap());
+    assert!(trust.pinned("svn.test.local", 8443).is_empty());
+    assert!(inv.has_changed().unwrap(), "the transport is rebuilt");
 }
 
 #[tokio::test]
