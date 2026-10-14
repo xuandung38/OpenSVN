@@ -106,9 +106,9 @@ function NumberField({
   const t = useT(settingsStrings);
   const range = rangeOf(name);
   const value = settingValue(settings, draft, name);
-  const error = errors[name];
+  const error = fieldError(errors, name, t("outOfRange", range), t("rejected"));
   return (
-    <Field label={t(label, range)} error={error && t("outOfRange", range)}>
+    <Field label={t(label, range)} error={error}>
       <Input
         type="number"
         min={range.min}

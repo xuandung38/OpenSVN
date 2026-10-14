@@ -268,3 +268,19 @@ test("a value the backend still refuses is shown on its field, never as the raw 
     setMockRefusedSetting(null);
   }
 });
+
+test("a number in range that the backend refuses says so, not 'enter a whole number'", async () => {
+  setMockRefusedSetting("network.timeoutSec");
+  try {
+    const { dialog, save } = await openOn("Network");
+    const timeout = await within(dialog).findByLabelText("Timeout (seconds, 5–3600)");
+    await user().clear(timeout);
+    await user().type(timeout, "30");
+    await user().click(save);
+    expect(await within(dialog).findByText("The app did not accept this value")).toBeTruthy();
+    expect(within(dialog).queryByText("Enter a whole number from 5 to 3600")).toBeNull();
+    expect(timeout.getAttribute("aria-invalid")).toBe("true");
+  } finally {
+    setMockRefusedSetting(null);
+  }
+});
