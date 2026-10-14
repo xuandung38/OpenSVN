@@ -8,22 +8,26 @@
 //! for the server. A cancelled or failed checkout leaves the root recorded as incomplete, so a
 //! later update finishes it.
 //!
-//! Externals are never fetched: checkout, update and switch behave like
-//! `svn --ignore-externals` whatever [`CheckoutPlan::ignore_externals`] says, and
-//! [`RealEngine`]'s capabilities report `externals: false` so the UI can say so. The
-//! `svn:externals` property itself is checked out like any other property. Support is tracked in
-//! <https://github.com/xuandung38/OpenSVN/issues/97>.
+//! Externals (`svn:externals`) are fetched, updated and removed after every checkout, update and
+//! switch, like svn does; a checkout with [`CheckoutPlan::ignore_externals`] skips them
+//! (`svn --ignore-externals`). Every external session, also one on another host, is opened
+//! through the same [`SessionConnector`](super::SessionConnector) and [`ConnectOptions`] as the
+//! main session, so the TLS default-deny and sign-in rules apply unchanged
+//! ([`ConnectorOpener`]). A failed external, or one removed from its definition but kept for its
+//! local changes, does not fail the operation (svn warns too): it is logged and reported as a
+//! progress sample with phase [`PHASE_EXTERNAL_WARNING`] and the external's path.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use opensvn_ipc::{Depth, Rev, UpdateRequest, WcFormat};
 use svn_ra_api::RaSession;
-use svn_types::{ErrorCode, RelPath, RepoUrl, Revnum, SvnError};
+use svn_types::{CancelToken, ErrorCode, RelPath, RepoUrl, Revnum, SvnError};
 
 use super::progress::{PHASE_CHECKOUT, PHASE_UPDATE, client_progress};
-use super::{ConnectOptions, RealEngine, wc_read};
-use crate::engine::context::OpContext;
+use super::{ConnectOptions, RealEngine, SessionConnector, wc_read};
+use crate::engine::context::{OpContext, ProgressUpdate};
 use crate::engine::facade::{CheckoutPlan, EngineResult, WcInfo, WcRef};
 
 /// Error of a feature the real engine does not offer yet; the message is shown to the user.
@@ -79,38 +83,103 @@ fn is_inside(root: &RepoUrl, url: &RepoUrl) -> bool {
     url == root || url.starts_with(&format!("{root}/"))
 }
 
+/// Phase of the progress sample sent for an external that failed or kept local changes; its
+/// `current_path` is the external's path in the working copy.
+pub(super) const PHASE_EXTERNAL_WARNING: &str = "external-warning";
+
+/// Opens an authenticated session anchored exactly at `url` through `connector`.
+async fn open_at(
+    connector: &dyn SessionConnector,
+    url: &RepoUrl,
+    options: &ConnectOptions,
+    cancel: &CancelToken,
+) -> Result<Arc<dyn RaSession>, SvnError> {
+    cancel.check()?;
+    let session = connector.connect_with(url, options, cancel).await?;
+    // A root-anchored session would silently check out or update the wrong tree.
+    if !same_location(session.repos_root(), url, session.session_url()) {
+        return Err(SvnError::new(
+            ErrorCode::Internal,
+            format!(
+                "the connector opened a session at {} instead of {url}",
+                session.session_url()
+            ),
+        ));
+    }
+    session.ensure_authenticated(cancel).await?;
+    Ok(session)
+}
+
+/// Sessions for externals, opened exactly like the operation's own session: same connector
+/// (transport, trust store, credentials), same interactivity.
+struct ConnectorOpener {
+    connector: Arc<dyn SessionConnector>,
+    options: ConnectOptions,
+}
+
+#[async_trait]
+impl svn_client::externals::SessionOpener for ConnectorOpener {
+    async fn open(
+        &self,
+        url: &RepoUrl,
+        cancel: &CancelToken,
+    ) -> Result<Arc<dyn RaSession>, SvnError> {
+        open_at(self.connector.as_ref(), url, &self.options, cancel).await
+    }
+}
+
+/// Logs the externals that need attention and reports each one as a progress sample.
+fn report_external_warnings(summary: &svn_client::UpdateSummary, ctx: &OpContext) {
+    for w in summary.external_warnings() {
+        tracing::warn!(
+            path = %w.path,
+            action = ?w.action,
+            "external: {}",
+            w.message.as_deref().unwrap_or("no details")
+        );
+        ctx.progress.report(ProgressUpdate {
+            phase: PHASE_EXTERNAL_WARNING.to_owned(),
+            current_path: Some(w.path.as_str().to_owned()),
+            ..ProgressUpdate::default()
+        });
+    }
+}
+
 impl RealEngine {
     /// Opens an authenticated session anchored at `url`.
     async fn session_at(&self, url: &str, ctx: &OpContext) -> EngineResult<Arc<dyn RaSession>> {
         ctx.check()?;
         let parsed = RepoUrl::parse(url)?;
-        let session = self
-            .connector
-            .connect_with(&parsed, &ConnectOptions::at_url(ctx), &ctx.cancel)
-            .await?;
-        // A root-anchored session would silently check out or update the wrong tree.
-        if !same_location(session.repos_root(), &parsed, session.session_url()) {
-            return Err(SvnError::new(
-                ErrorCode::Internal,
-                format!(
-                    "the connector opened a session at {} instead of {parsed}",
-                    session.session_url()
-                ),
-            ));
-        }
-        session.ensure_authenticated(&ctx.cancel).await?;
-        Ok(session)
+        Ok(open_at(
+            self.connector.as_ref(),
+            &parsed,
+            &ConnectOptions::at_url(ctx),
+            &ctx.cancel,
+        )
+        .await?)
     }
 
-    /// `svn-client` context of an operation that reports progress under `phase`.
-    fn sync_ctx(&self, ctx: &OpContext, phase: &'static str) -> svn_client::ClientCtx {
+    /// `svn-client` context of an operation that reports progress under `phase`; externals are
+    /// fetched unless `ignore_externals`.
+    fn sync_ctx(
+        &self,
+        ctx: &OpContext,
+        phase: &'static str,
+        ignore_externals: bool,
+    ) -> svn_client::ClientCtx {
         let mut client = self.client_ctx(ctx);
         client.progress = Some(client_progress(&ctx.progress, phase));
+        if !ignore_externals {
+            client.externals = Some(Arc::new(ConnectorOpener {
+                connector: Arc::clone(&self.connector),
+                options: ConnectOptions::at_url(ctx),
+            }));
+        }
         client
     }
 
-    /// Checks out `plan.url` into `plan.path`. Externals are never fetched, whatever
-    /// `plan.ignore_externals` says (see the module documentation).
+    /// Checks out `plan.url` into `plan.path`, with its externals unless
+    /// `plan.ignore_externals`.
     pub(super) async fn do_checkout(
         &self,
         plan: &CheckoutPlan,
@@ -144,8 +213,8 @@ impl RealEngine {
             ));
         }
         let session = self.session_at(&plan.url, ctx).await?;
-        svn_client::checkout(
-            &self.sync_ctx(ctx, PHASE_CHECKOUT),
+        let summary = svn_client::checkout(
+            &self.sync_ctx(ctx, PHASE_CHECKOUT, plan.ignore_externals),
             session.as_ref(),
             &plan.path,
             plan.rev.map(|r| Revnum(r.0)),
@@ -154,10 +223,11 @@ impl RealEngine {
             &ctx.cancel,
         )
         .await?;
+        report_external_warnings(&summary, ctx);
         wc_read::wc_info(&plan.path, ctx).await
     }
 
-    /// Updates the given paths, all to the same revision. Externals are never fetched.
+    /// Updates the given paths, all to the same revision, with their externals.
     pub(super) async fn do_update(
         &self,
         wc: &WcRef,
@@ -180,9 +250,9 @@ impl RealEngine {
             None => session.youngest_rev(&ctx.cancel).await?,
         };
         let depth = req.depth.map_or(svn_types::Depth::Unknown, client_depth);
-        let client = self.sync_ctx(ctx, PHASE_UPDATE);
+        let client = self.sync_ctx(ctx, PHASE_UPDATE, false);
         for target in &targets {
-            svn_client::update(
+            let summary = svn_client::update(
                 &client,
                 session.as_ref(),
                 target,
@@ -191,6 +261,7 @@ impl RealEngine {
                 &ctx.cancel,
             )
             .await?;
+            report_external_warnings(&summary, ctx);
         }
         Ok(Rev(rev.0))
     }
@@ -220,8 +291,8 @@ impl RealEngine {
             Some(r) => Revnum(r.0),
             None => session.youngest_rev(&ctx.cancel).await?,
         };
-        svn_client::switch(
-            &self.sync_ctx(ctx, PHASE_UPDATE),
+        let summary = svn_client::switch(
+            &self.sync_ctx(ctx, PHASE_UPDATE, false),
             session.as_ref(),
             &wc.root,
             &target,
@@ -230,6 +301,7 @@ impl RealEngine {
             &ctx.cancel,
         )
         .await?;
+        report_external_warnings(&summary, ctx);
         Ok(Rev(rev.0))
     }
 
