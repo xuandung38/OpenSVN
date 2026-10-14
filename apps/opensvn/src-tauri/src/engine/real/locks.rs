@@ -4,9 +4,8 @@
 //! Like `svn lock`, the working copy write lock (`WC_LOCK`) of the node's parent directory is held
 //! for the whole operation, so another client cannot change the same directory meanwhile and a
 //! directory locked by someone else fails with [`ErrorCode::WcBusy`] before the server is asked.
-//!
-//! Not handled yet (needs the property layer): making `svn:needs-lock` files writable on lock
-//! and read-only again on unlock.
+//! Like libsvn_wc, a `svn:needs-lock` file becomes writable once its token is recorded and
+//! read-only again once it is forgotten (a `sync-file-flags` work item, run on the spot).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -15,6 +14,7 @@ use svn_ra_api::RaSession;
 use svn_types::{ErrorCode, RelPath, Revnum, SvnError};
 use svn_wc::WcDb;
 use svn_wc::db::ObtainMode;
+use svn_wc::workqueue::WorkItem;
 
 use super::RealEngine;
 use super::wc_read::{NodeLocation, blocking, node_location, open_db};
@@ -59,7 +59,7 @@ impl RealEngine {
                                 &ctx.cancel,
                             )
                             .await?;
-                        if let Err(e) = record_lock(&held.db, &loc, &lock).await {
+                        if let Err(e) = record_lock(&held.db, &loc, &lock, rel).await {
                             // The server lock exists but the working copy cannot remember its
                             // token: give it back instead of leaving one nobody can release.
                             release_quietly(session.as_ref(), &path, &lock.token).await;
@@ -103,7 +103,7 @@ impl RealEngine {
                         session
                             .unlock(&path, token.as_deref(), break_lock, &ctx.cancel)
                             .await?;
-                        forget_lock(&held.db, &loc).await
+                        forget_lock(&held.db, &loc, rel).await
                     }
                     .await;
                     finish(done, held.release().await)?;
@@ -195,8 +195,9 @@ async fn record_lock(
     db: &Arc<WcDb>,
     loc: &NodeLocation,
     lock: &svn_types::LockInfo,
+    rel: &str,
 ) -> EngineResult<()> {
-    let (db, loc, lock) = (db.clone(), loc.clone(), lock.clone());
+    let (db, loc, lock, rel) = (db.clone(), loc.clone(), lock.clone(), RelPath::new(rel)?);
     blocking(move || {
         db.with_write(|tx| {
             tx.execute(
@@ -214,7 +215,9 @@ async fn record_lock(
             )
             .map(|_| ())
             .map_err(svn_wc::db::sql_err)
-        })
+        })?;
+        sync_flags(&db, &rel);
+        Ok(())
     })
     .await
 }
@@ -236,8 +239,8 @@ async fn recorded_token(db: &Arc<WcDb>, loc: &NodeLocation) -> EngineResult<Opti
     .await
 }
 
-async fn forget_lock(db: &Arc<WcDb>, loc: &NodeLocation) -> EngineResult<()> {
-    let (db, loc) = (db.clone(), loc.clone());
+async fn forget_lock(db: &Arc<WcDb>, loc: &NodeLocation, rel: &str) -> EngineResult<()> {
+    let (db, loc, rel) = (db.clone(), loc.clone(), RelPath::new(rel)?);
     blocking(move || {
         db.with_write(|tx| {
             tx.execute(
@@ -246,9 +249,27 @@ async fn forget_lock(db: &Arc<WcDb>, loc: &NodeLocation) -> EngineResult<()> {
             )
             .map(|_| ())
             .map_err(svn_wc::db::sql_err)
-        })
+        })?;
+        sync_flags(&db, &rel);
+        Ok(())
     })
     .await
+}
+
+/// Makes the permissions of `rel` follow its lock and `svn:needs-lock` (the queued item does
+/// nothing for a directory). The lock change is already durable and stays the outcome: a failure
+/// here is only logged, and a queued item left behind is finished by the next operation that runs
+/// the work queue.
+fn sync_flags(db: &WcDb, rel: &RelPath) {
+    let item = WorkItem::SyncFileFlags {
+        relpath: rel.as_str().to_owned(),
+    };
+    let done = db.queue_work(&[item.to_skel()]).and_then(|()| {
+        svn_client::wc::run_work_queue(db, &svn_types::CancelToken::new()).map(|_| ())
+    });
+    if let Err(e) = done {
+        tracing::warn!(%rel, error = %e, "could not update the permissions of a locked file");
+    }
 }
 
 /// Best-effort release of a lock taken a moment ago; failure is logged, the caller already has
