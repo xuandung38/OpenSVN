@@ -19,7 +19,9 @@ export const queryKeys = {
   wcLog: (wcId: string, path: string, filter: string, stopOnCopy: boolean) =>
     ["log", "wc", wcId, path, filter, stopOnCopy] as const,
   layout: (repoUuid: string) => ["layout", repoUuid] as const,
-  branches: (repoRootUrl: string) => ["branches", repoRootUrl] as const,
+  /** Branches listed around `atUrl` (its project) when the repository has no stored layout. */
+  branches: (repoRootUrl: string, atUrl: string | null) =>
+    ["branches", repoRootUrl, atUrl] as const,
   accounts: ["accounts"] as const,
   ops: ["ops"] as const,
   opOutcomes: ["op-outcomes"] as const,

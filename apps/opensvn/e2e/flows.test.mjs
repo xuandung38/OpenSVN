@@ -2,15 +2,7 @@
 // engine and Apache + mod_dav_svn. See e2e/README.md for how to run them.
 
 import assert from "node:assert/strict";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { App, PASSWORD, ScratchRepo, USER } from "./harness.mjs";
@@ -55,17 +47,6 @@ function wcRoot() {
   return join(parent, name);
 }
 
-/**
- * Edits a read-only file the way a user forcing it would, and leaves it read-only again, so a
- * later "writable" check proves that the app changed the permissions.
- */
-function forceWrite(path, text) {
-  const mode = statSync(path).mode & 0o777;
-  chmodSync(path, mode | 0o200);
-  writeFileSync(path, text);
-  chmodSync(path, mode);
-}
-
 /** Flow 10.1: Welcome -> Checkout -> URL -> trust certificate -> sign in -> Changes (empty). */
 async function checkout(path = "trunk") {
   await app.click("button", "Checkout repository…");
@@ -92,7 +73,8 @@ test("10.1 first use: checkout with certificate trust and sign-in opens an empty
   assert.ok(existsSync(join(wc, ".svn", "wc.db")));
   const text = await app.bodyText();
   assert.match(text, new RegExp(`Current repository\\s+${repo.name}`));
-  assert.match(text, /\/trunk/);
+  // trunk/branches/tags layout: the toolbar shows the branch, not the in-repo path (#129).
+  assert.match(text, /Branch\s+trunk/);
   assert.match(text, /0 changed/);
 });
 
@@ -160,32 +142,29 @@ test("10.4 needs-lock file: lock to edit, unlock, lock again, commit releases th
   const readme = join(wc, "README.md");
   const writable = () => (statSync(readme).mode & 0o222) !== 0;
   assert.ok(!writable(), "read-only until locked");
-  // An unmodified needs-lock file is not listed in Changes (#128), so the file is
-  // edited first.
-  forceWrite(readme, "hello\nlocked edit\n");
+  // The unmodified needs-lock file is listed under Locks (#128): lock it before editing.
+  await app.waitText("Locks (1)", 30_000);
   await app.waitText("Needs lock", 30_000);
 
-  const lockVia = async (item) => {
-    await app.click("option", /README\.md/);
-    await app.contextMenu("option", /README\.md/);
-    await app.click("menuitem", item);
-  };
-  await lockVia(/^Lock…/);
+  await app.click("button", "Lock to edit…");
   await app.role("dialog", "Lock to edit");
   await app.fill("Comment (optional)", "e2e edit");
   await app.click("button", /^Lock$/);
   await app.waitFor(async () => writable(), 30_000, "README.md writable after lock");
   assert.match(repo.svn(["info", `${repo.url}/trunk/README.md`]), /e2e edit/);
 
-  await lockVia(/^Unlock…/);
+  // Still unmodified: Unlock… is reachable from the Locks section.
+  await app.click("button", "Unlock…");
   await app.role("dialog", "Unlock");
   await app.click("button", /^Unlock$/);
   await app.waitFor(async () => !writable(), 30_000, "README.md read-only after unlock");
   assert.doesNotMatch(repo.svn(["info", `${repo.url}/trunk/README.md`]), /Lock Token/);
 
-  await lockVia(/^Lock…/);
+  await app.click("button", "Lock to edit…");
   await app.click("button", /^Lock$/);
   await app.waitFor(async () => writable(), 30_000, "README.md writable after second lock");
+  writeFileSync(readme, "hello\nlocked edit\n");
+  await app.waitText("1 changed", 30_000);
   await app.fill("Summary (required)", "Edit the locked README");
   await app.keys(Keys.Control, Keys.Enter);
   await app.waitText("Committed r3", 60_000);
@@ -194,21 +173,21 @@ test("10.4 needs-lock file: lock to edit, unlock, lock again, commit releases th
   assert.equal(repo.svn(["cat", `${repo.url}/trunk/README.md`]), "hello\nlocked edit\n");
 });
 
-test("10.4 lock held elsewhere: the lock is refused, steal needs two confirmations", {
-  todo: "#127: the dialog closes before the server refuses; no owner, no Steal",
-}, async () => {
+test("10.4 lock held elsewhere: the lock is refused with the owner, steal needs two confirmations", async () => {
   repo.svn(["propset", "-q", "svn:needs-lock", "*", "README.md"], repo.seed);
   repo.svn(["commit", "-q", "-m", "README needs a lock"], repo.seed);
   repo.svn(["lock", "-q", "-m", "held by the other checkout", "README.md"], repo.seed);
   const wc = await checkout();
-  forceWrite(join(wc, "README.md"), "hello\nmine\n");
-  await app.waitText("Needs lock", 30_000);
-  await app.click("option", /README\.md/);
-  await app.contextMenu("option", /README\.md/);
-  await app.click("menuitem", /^Lock…/);
+  const writable = () => (statSync(join(wc, "README.md")).mode & 0o222) !== 0;
+  await app.waitText("Locks (1)", 30_000);
+  await app.click("button", "Lock to edit…");
+  await app.role("dialog", "Lock to edit");
   await app.click("button", /^Lock$/);
-  // The server refuses; the dialog stays open and offers to steal.
-  const steal = await app.role("checkbox", /^Steal the lock held by/, 30_000);
+  // The server refuses; the dialog stays open, names the owner and offers to steal.
+  await app.waitText(`README.md: locked by ${USER}`, 30_000);
+  await app.waitText("Their comment: held by the other checkout", 30_000);
+  const steal = await app.role("checkbox", `Steal the lock held by ${USER}`, 30_000);
+  assert.ok(!writable(), "nothing was stolen yet");
   await app.s.click(steal["element-6066-11e4-a52e-4f735466cecf"]);
   assert.equal(
     await app.exec("return arguments[0].disabled", await app.role("button", "Steal lock")),
@@ -217,18 +196,14 @@ test("10.4 lock held elsewhere: the lock is refused, steal needs two confirmatio
   );
   await app.click("checkbox", "I understand and want to steal this lock");
   await app.click("button", "Steal lock");
-  await app.waitFor(
-    async () => (statSync(join(wc, "README.md")).mode & 0o222) !== 0,
-    30_000,
-    "README.md writable after the steal",
-  );
+  await app.waitFor(async () => writable(), 30_000, "README.md writable after the steal");
   assert.doesNotMatch(
     repo.svn(["info", `${repo.url}/trunk/README.md`]),
     /held by the other checkout/,
   );
 });
 
-test("10.5 switch to a branch through Location, carrying a local change", async () => {
+test("10.5 switch to a branch through the Branch picker, carrying a local change", async () => {
   repo.svn([
     "copy",
     "-q",
@@ -243,12 +218,12 @@ test("10.5 switch to a branch through Location, carrying a local change", async 
   writeFileSync(join(wc, "notes.txt"), "one\ntwo\nthree\nlocal\n");
   await app.waitText("1 changed", 30_000);
 
-  // The repository follows trunk/branches/tags, but the toolbar offers "Location" and a URL
-  // field rather than the doc's "Branch" picker (#129).
-  await app.click("button", /Location/);
-  await app.click("button", "Switch…");
-  await app.fill("URL in the same repository", `${repo.url}/branches/feature-x`);
-  await app.click("button", /^Switch$/);
+  // The repository follows trunk/branches/tags: the toolbar shows "Branch trunk" and the popover
+  // lists the branches; with a local change it asks before carrying it over.
+  await app.click("button", /Branch\s*trunk/, 30_000);
+  await app.click("button", /^feature-x/, 30_000);
+  await app.waitText("1 local change(s) will be carried over to feature-x");
+  await app.click("button", "Carry changes and switch");
   await app.waitFor(
     async () => readFileSync(join(wc, "src/main.c"), "utf8").includes("return 1"),
     60_000,
@@ -256,8 +231,17 @@ test("10.5 switch to a branch through Location, carrying a local change", async 
   );
   assert.equal(readFileSync(join(wc, "notes.txt"), "utf8"), "one\ntwo\nthree\nlocal\n");
   assert.match(repo.svn(["info", "--show-item", "url", wc]), /\/branches\/feature-x$/m);
-  await app.waitText("/branches/feature-x", 30_000);
+  await app.role("button", /Branch\s*feature-x/, 30_000);
   await app.waitText("1 changed");
+
+  // The URL field stays available for any location of the repository.
+  await app.click("button", /Branch\s*feature-x/);
+  await app.click("button", "Switch…");
+  await app.fill("URL in the same repository", `${repo.url}/trunk`);
+  await app.click("button", /^Switch$/);
+  await app.role("button", /Branch\s*trunk/, 60_000);
+  assert.match(repo.svn(["info", "--show-item", "url", wc]), /\/trunk$/m);
+  assert.equal(readFileSync(join(wc, "notes.txt"), "utf8"), "one\ntwo\nthree\nlocal\n");
 });
 
 test("history and blame of a file", async () => {

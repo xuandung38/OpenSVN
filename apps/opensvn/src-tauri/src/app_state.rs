@@ -303,6 +303,24 @@ impl AppState {
         F: FnOnce(Arc<dyn EngineFacade>, WcRef, OpContext) -> Fut + Send + 'static,
         Fut: Future<Output = Result<OpResult, SvnError>> + Send + 'static,
     {
+        self.start_wc_op_app(kind, id, title, move |engine, wc, ctx| async move {
+            f(engine, wc, ctx).await.map_err(|e| AppError::from(&e))
+        })
+    }
+
+    /// [`start_wc_op`](Self::start_wc_op) for work that builds its own `AppError` (to attach
+    /// more than the engine error carries, such as the locks that refused a lock request).
+    pub fn start_wc_op_app<F, Fut>(
+        &self,
+        kind: OperationKind,
+        id: &WcId,
+        title: impl Into<String>,
+        f: F,
+    ) -> Result<OperationHandle, AppError>
+    where
+        F: FnOnce(Arc<dyn EngineFacade>, WcRef, OpContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<OpResult, AppError>> + Send + 'static,
+    {
         let r = self.wcs.resolve(id)?;
         let (engine, publisher) = (Arc::clone(&self.engine), Arc::clone(&self.status));
         let wc = r.wc.clone();
@@ -315,18 +333,32 @@ impl AppState {
                     .await
                     .map_err(|e| AppError::from(&e))?;
                 let cancel = ctx.cancel.clone();
-                let result = r
-                    .actor
-                    .write_cancellable(
-                        async move { f(engine, wc, ctx).await.map_err(|e| AppError::from(&e)) },
-                        &cancel,
-                    )
-                    .await;
+                let result = r.actor.write_cancellable(f(engine, wc, ctx), &cancel).await;
                 if let Err(e) = publisher.publish(&r).await {
                     tracing::warn!(code = ?e.code, "status refresh after operation failed");
                 }
                 result
             }))
+    }
+
+    /// Like [`start_op`](Self::start_op), for work that builds its own `AppError`.
+    pub fn start_op_app<F, Fut>(
+        &self,
+        kind: OperationKind,
+        title: impl Into<String>,
+        f: F,
+    ) -> OperationHandle
+    where
+        F: FnOnce(Arc<dyn EngineFacade>, OpContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<OpResult, AppError>> + Send + 'static,
+    {
+        let engine = Arc::clone(&self.engine);
+        self.ops.spawn(
+            kind,
+            None,
+            title,
+            move |ctx| async move { f(engine, ctx).await },
+        )
     }
 
     /// Starts an operation that needs no working copy (remote edits, downloads, ...).

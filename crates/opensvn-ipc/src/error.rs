@@ -64,6 +64,25 @@ pub struct AppError {
     pub path: Option<String>,
     pub retryable: bool,
     pub actions: Option<Vec<ErrorAction>>,
+    /// For `locked-by-other`: the locks held by someone else on the requested paths, as the
+    /// server reports them now. `None` when the engine could not ask (or for other codes).
+    // A boxed slice keeps `AppError` (returned by every command) small.
+    #[serde(default)]
+    #[specta(optional)]
+    pub lock_conflicts: Option<Box<[LockConflict]>>,
+}
+
+/// A lock held by someone else that refused a lock request (doc 01 §10.4: the lock dialog shows
+/// the owner and offers Steal). Never carries the lock token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LockConflict {
+    /// Requested path as the request named it (working copy relative path or URL).
+    pub path: String,
+    pub owner: String,
+    pub comment: Option<String>,
+    /// ISO 8601 creation time; `None` when the server sent none.
+    pub created_at: Option<String>,
 }
 
 impl AppError {
@@ -80,6 +99,7 @@ impl AppError {
             path: None,
             retryable,
             actions: (!actions.is_empty()).then(|| actions.to_vec()),
+            lock_conflicts: None,
         }
     }
 
@@ -102,6 +122,12 @@ impl AppError {
 
     pub fn with_path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
+        self
+    }
+
+    /// Attaches the locks that refused a lock request; an empty list attaches nothing.
+    pub fn with_lock_conflicts(mut self, conflicts: Vec<LockConflict>) -> Self {
+        self.lock_conflicts = (!conflicts.is_empty()).then(|| conflicts.into_boxed_slice());
         self
     }
 }

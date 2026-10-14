@@ -14,6 +14,54 @@ pub const MAX_CONNECTIONS: usize = 8;
 /// Default connections per host.
 pub const DEFAULT_CONNECTIONS: usize = 4;
 
+/// Subversion version this client speaks as (the `User-Agent` prefix and the transaction's
+/// client compatibility property).
+pub const SVN_COMPAT_VERSION: &str = "1.15.0";
+
+/// `User-Agent` of every request and the transaction's `svn:txn-user-agent`, shaped like
+/// TortoiseSVN's (`SVN/<version> (<os>) <client>`). mod_dav_svn treats a client as an svn client
+/// only when the agent starts with `SVN/` (1.8 to 1.15); only then does a `LOCK` honour
+/// `lock-steal` and an `UNLOCK` honour `lock-break` instead of failing with 423.
+pub const USER_AGENT: &str = user_agent!();
+
+macro_rules! user_agent {
+    () => {
+        concat!(
+            "SVN/1.15.0 (",
+            os_name!(),
+            ") OpenSVN/",
+            env!("CARGO_PKG_VERSION")
+        )
+    };
+}
+use user_agent;
+
+#[cfg(target_os = "windows")]
+macro_rules! os_name {
+    () => {
+        "Windows"
+    };
+}
+#[cfg(target_os = "macos")]
+macro_rules! os_name {
+    () => {
+        "macOS"
+    };
+}
+#[cfg(target_os = "linux")]
+macro_rules! os_name {
+    () => {
+        "Linux"
+    };
+}
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+macro_rules! os_name {
+    () => {
+        "Unix"
+    };
+}
+use os_name;
+
 /// Proxy selection.
 #[derive(Clone, Default)]
 pub enum ProxyConfig {
@@ -76,7 +124,7 @@ impl Default for TransportConfig {
             max_redirects: 5,
             proxy: ProxyConfig::System,
             extra_root_certs: Vec::new(),
-            user_agent: concat!("OpenSVN/", env!("CARGO_PKG_VERSION")).to_owned(),
+            user_agent: USER_AGENT.to_owned(),
         }
     }
 }
@@ -86,5 +134,21 @@ impl TransportConfig {
     pub fn effective_connections(&self) -> usize {
         self.max_connections_per_host
             .clamp(MIN_CONNECTIONS, MAX_CONNECTIONS)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_user_agent_is_an_svn_client_agent_of_the_compat_version() {
+        // mod_dav_svn only honours lock-steal / lock-break for agents starting with "SVN/".
+        assert!(
+            USER_AGENT.starts_with(&format!("SVN/{SVN_COMPAT_VERSION} (")),
+            "{USER_AGENT}"
+        );
+        assert!(USER_AGENT.ends_with(concat!(") OpenSVN/", env!("CARGO_PKG_VERSION"))));
+        assert_eq!(TransportConfig::default().user_agent, USER_AGENT);
     }
 }

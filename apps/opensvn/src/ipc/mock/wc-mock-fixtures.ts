@@ -55,6 +55,21 @@ export function freshMainStatus(): FileStatus[] {
     status("docs/readme-renamed.md", { text: "missing" }),
     status("tools/readme-renamed.md", { text: "unversioned" }),
     status("art", { kind: "dir", text: "normal", treeConflict: true }),
+    // Unmodified files that matter for locking (Locks section): read-only until locked (another
+    // user holds this one; only a lock attempt reveals it), and one locked by you.
+    status("assets/audio/theme.ogg", { text: "normal", needsLock: true, binary: true }),
+    status("docs/spec.docx", {
+      text: "normal",
+      needsLock: true,
+      binary: true,
+      lock: {
+        owner: "you",
+        comment: "rewriting chapter 2",
+        createdAt: "2026-10-13T07:00:00Z",
+        token: null,
+        mine: true,
+      },
+    }),
   ];
 }
 
