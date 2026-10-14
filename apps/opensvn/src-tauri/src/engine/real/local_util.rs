@@ -6,6 +6,7 @@
 //!
 //! Everything here is blocking; callers run it inside [`blocking`](super::wc_read::blocking).
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,8 @@ use svn_types::{
     CancelToken, Depth, ErrorCode, NodeStatus, RelPath, SvnError, WcStatus, safe_join,
 };
 use svn_wc::WcDb;
+use svn_wc::conflicts::ConflictSkel;
+use svn_wc::db::{Presence, sql_err};
 
 use crate::engine::facade::EngineResult;
 
@@ -400,4 +403,73 @@ fn remove_item(db: &WcDb, cancel: &CancelToken, rel: &RelPath) -> EngineResult<(
     } else {
         remove_entry(&abs, false)
     }
+}
+
+/// Conflict marker files recorded for any conflicted node of the working copy (`.mine`,
+/// `.rOLD`, `.rNEW`, `.working`, `.merge-*`, `.prej`), relative to the root. They are
+/// unversioned files svn wrote; auto add must never schedule them.
+pub(super) fn conflict_markers(db: &WcDb) -> EngineResult<HashSet<RelPath>> {
+    let conflicted: Vec<String> = db.with_read(|c| {
+        let mut stmt = c
+            .prepare(
+                "SELECT local_relpath FROM actual_node \
+                 WHERE wc_id = ?1 AND conflict_data IS NOT NULL",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([db.wc_id()], |r| r.get::<_, String>(0))
+            .map_err(sql_err)?;
+        rows.collect::<Result<_, _>>().map_err(sql_err)
+    })?;
+    let mut out = HashSet::new();
+    for rel in conflicted {
+        let Some(rec) = db.conflict(&RelPath::new(&rel)?)? else {
+            continue;
+        };
+        let skel = ConflictSkel::from_skel(&rec.skel)?;
+        let text = skel.text().into_iter().flat_map(|t| {
+            [t.original.as_ref(), t.mine.as_ref(), t.their.as_ref()]
+                .into_iter()
+                .flatten()
+        });
+        let props = skel.prop().into_iter().flat_map(|p| p.markers.iter());
+        for marker in text.chain(props) {
+            // A marker that is not a valid working copy path cannot be a status item either.
+            if let Ok(m) = RelPath::new(marker) {
+                out.insert(m);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether the missing versioned node `rel` may be scheduled for deletion by auto add/remove:
+/// only a node that exists in BASE (not one only scheduled for addition or copied, which svn
+/// refuses to commit as missing) and that is not part of an interrupted checkout or update.
+///
+/// A folder recorded as incomplete (`presence = 'incomplete'`) and everything below it may
+/// simply not have been fetched yet: its "missing" content is not a user deletion, so it is
+/// never deleted (issue #99).
+///
+/// A file external is never deleted: its BASE row is the external's source, so deleting it would
+/// delete that source from the repository. svn refuses to delete externals (E155030); a missing
+/// one is restored by the next update.
+pub(super) fn missing_is_deletable(db: &WcDb, rel: &RelPath) -> EngineResult<bool> {
+    let Some(node) = db.read_node(rel)? else {
+        return Ok(false);
+    };
+    if node.op_depth != 0 || node.presence != Presence::Normal || node.file_external {
+        return Ok(false);
+    }
+    let mut cur = Some(rel.clone());
+    while let Some(p) = cur {
+        if db
+            .read_base(&p)?
+            .is_some_and(|b| b.presence == Presence::Incomplete)
+        {
+            return Ok(false);
+        }
+        cur = p.parent();
+    }
+    Ok(true)
 }

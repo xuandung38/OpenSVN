@@ -11,10 +11,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use fail::FailScenario;
+use opensvn_ipc::{CommitRequest, WcId};
 use opensvn_lib::engine::real::{
     ClientRecovery, ConnectOptions, RealEngine, RealEngineConfig, SessionConnector,
 };
-use opensvn_lib::engine::{EngineFacade, OpContext};
+use opensvn_lib::engine::{EngineFacade, OpContext, WcRef};
 use svn_client::commit::journal::JournalStore;
 use svn_client::commit::{CommitContext, CommitOptions, CommitResult};
 use svn_ra_api::RaSession;
@@ -390,4 +391,82 @@ async fn killed_mid_update_is_completed_on_the_next_open() {
     let summary = e.update().await.unwrap();
     assert_eq!(summary.revision.map(|r| r.0), Some(2));
     assert_eq!(e.base_rev(""), 2);
+}
+
+impl Env {
+    /// Commits `paths` through the engine (auto add/remove on).
+    async fn engine_commit(&self, paths: &[&str]) -> Result<opensvn_ipc::Rev, SvnError> {
+        let wc = WcRef {
+            id: WcId("wc".into()),
+            root: self.wc.clone(),
+        };
+        let req = CommitRequest {
+            wc_id: wc.id.clone(),
+            paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+            message: "engine commit".into(),
+            keep_locks: false,
+            auto_add_remove: true,
+        };
+        self.engine.commit(&wc, &req, &OpContext::detached()).await
+    }
+}
+
+/// The engine's commit dies after the revision reached the journal, before the working copy
+/// was updated: the next engine commit first folds the merged commit in, then commits on top.
+#[tokio::test]
+async fn engine_commit_killed_after_the_merge_was_recorded_is_finalized_by_the_next_commit() {
+    let _scenario = FailScenario::setup();
+    let e = env(true).await;
+    std::fs::write(e.wc.join("a.txt"), "changed\n").unwrap();
+    std::fs::write(e.wc.join("new.txt"), "new\n").unwrap();
+    fail::cfg("commit.after_merge_before_finalize", "return").unwrap();
+    e.engine_commit(&["a.txt", "new.txt"])
+        .await
+        .expect_err("killed");
+    fail::remove("commit.after_merge_before_finalize");
+    assert_eq!(e.youngest().await, 2, "the revision exists");
+    assert_eq!(e.journals().len(), 1);
+    assert_eq!(e.base_rev("a.txt"), 1);
+
+    std::fs::write(e.wc.join("b.txt"), "b changed\n").unwrap();
+    let rev = e.engine_commit(&["b.txt"]).await.expect("next commit");
+    assert_eq!(rev.0, 3);
+    assert!(e.journals().is_empty());
+    assert_eq!(e.base_rev("a.txt"), 2);
+    assert_eq!(e.base_rev("new.txt"), 2);
+    assert_eq!(e.base_rev("b.txt"), 3);
+    assert_eq!(read(&e.wc.join("a.txt")), "changed\n");
+}
+
+/// The engine's commit dies after the MERGE was sent, before its answer was recorded: the next
+/// engine commit is refused (the commit may exist), the next open finds it in the log and
+/// finalizes it, and the commit after that builds on it.
+#[tokio::test]
+async fn engine_commit_killed_after_the_merge_was_sent_blocks_until_recovery_settles_it() {
+    let _scenario = FailScenario::setup();
+    let e = env(true).await;
+    std::fs::write(e.wc.join("a.txt"), "changed\n").unwrap();
+    fail::cfg("commit.journal_merged_write", "return").unwrap();
+    fail::cfg("commit.after_merge_before_finalize", "return").unwrap();
+    e.engine_commit(&["a.txt"]).await.expect_err("killed");
+    fail::remove("commit.after_merge_before_finalize");
+    fail::remove("commit.journal_merged_write");
+    let data = JournalStore::read(&e.journals()[0]).unwrap();
+    assert!(data.outcome_unknown(), "{data:?}");
+    assert_eq!(data.author.as_deref(), Some("tester"), "author journaled");
+
+    std::fs::write(e.wc.join("b.txt"), "b changed\n").unwrap();
+    let refused = e.engine_commit(&["b.txt"]).await.expect_err("refused");
+    assert_eq!(refused.code, ErrorCode::WcNeedsCleanup, "{refused}");
+    assert_eq!(e.youngest().await, 2, "nothing committed twice");
+
+    let opened = e
+        .engine
+        .open_wc(&e.wc, &OpContext::detached())
+        .await
+        .unwrap();
+    assert_eq!(opened.recovery.recovered, vec![String::new()], "{opened:?}");
+    assert_eq!(e.base_rev("a.txt"), 2);
+    let rev = e.engine_commit(&["b.txt"]).await.expect("next commit");
+    assert_eq!(rev.0, 3);
 }
