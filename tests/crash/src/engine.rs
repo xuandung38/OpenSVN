@@ -197,7 +197,10 @@ impl Engine {
             return Ok(out); // nothing may write while a lock of unknown owner is in place
         }
         let ran = svn_client::local::lock::with_wc_lock(&db, &cancel, || {
-            svn_client::wc::run_work_queue(&db, &cancel)
+            let n = svn_client::wc::run_work_queue(&db, &cancel)?;
+            // What the app's recovery does next (#120).
+            db.remove_stale_tmp_files()?;
+            Ok(n)
         });
         out.work_items = match ran {
             Ok(n) => n,

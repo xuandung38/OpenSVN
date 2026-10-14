@@ -25,7 +25,14 @@ export function WcDialogHost() {
     case "delete":
       return <DeleteDialog paths={dialog.paths} onClose={closeDialog} />;
     case "lock":
-      return <WcLockDialog mode={dialog.mode} paths={dialog.paths} onClose={closeDialog} />;
+      return (
+        <WcLockDialog
+          mode={dialog.mode}
+          paths={dialog.paths}
+          conflicts={dialog.conflicts}
+          onClose={closeDialog}
+        />
+      );
     case "changelist":
       return <ChangelistDialog paths={dialog.paths} onClose={closeDialog} />;
     case "update-rev":

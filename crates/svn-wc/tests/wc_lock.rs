@@ -565,3 +565,74 @@ fn svn_cleanup_after_a_crash_then_a_new_svn_lock_is_never_taken_over() {
     );
     assert!(child.wait().expect("wait").success());
 }
+
+#[test]
+fn stale_tmp_files_of_the_engine_go_and_nothing_else() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = wc(tmp.path());
+    let store = Arc::new(MemoryLockOwnership::for_current_process("boot"));
+    db.set_lock_owner(owner(&store, 1));
+    let t = tmp.path().join(".svn/tmp");
+    let ours = [
+        "wq-gzeqsJ",
+        "update-a1",
+        "merge-b2",
+        "pristine-c3",
+        "marker-d4",
+        "external-e5",
+        "wc.db.creating",
+        "wc.db.creating-journal",
+        "wc.db.creating.lock",
+    ];
+    let kept = ["svn-AbCd", "notes.txt", "wq-", "update", "random", "wc.db"];
+    for n in ours.iter().chain(kept.iter()) {
+        std::fs::write(t.join(n), b"x").expect("write");
+    }
+    std::fs::create_dir(t.join("wq-dir")).expect("dir");
+    #[cfg(unix)]
+    {
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("victim"), b"v").expect("victim");
+        std::os::unix::fs::symlink(outside.path().join("victim"), t.join("wq-link")).expect("link");
+        std::mem::forget(outside);
+    }
+
+    // Without the whole-tree write lock: refused, nothing removed.
+    assert!(db.remove_stale_tmp_files().is_err());
+    db.wc_lock_obtain(&rp("a"), -1, ObtainMode::Normal)
+        .expect("subtree lock");
+    assert!(db.remove_stale_tmp_files().is_err());
+    db.wc_lock_release(&rp("a")).expect("release");
+    for n in ours {
+        assert!(t.join(n).exists(), "{n}");
+    }
+
+    db.wc_lock_obtain(&RelPath::root(), -1, ObtainMode::Normal)
+        .expect("root lock");
+    // A pending work item may still name a temp file: nothing goes.
+    db.queue_work(&[Skel::parse(b"(file-remove 18 .svn/tmp/wq-gzeqsJ)").expect("skel")])
+        .expect("queue");
+    assert_eq!(db.remove_stale_tmp_files().expect("pending"), 0);
+    assert!(t.join("wq-gzeqsJ").exists());
+    let (id, _) = db.work_items().expect("items")[0].clone();
+    db.complete_work_item(id).expect("complete");
+
+    assert_eq!(db.remove_stale_tmp_files().expect("remove"), ours.len());
+    for n in ours {
+        assert!(!t.join(n).exists(), "{n} left");
+    }
+    for n in kept {
+        assert!(t.join(n).exists(), "{n} removed");
+    }
+    assert!(t.join("wq-dir").is_dir());
+    #[cfg(unix)]
+    assert!(t.join("wq-link").symlink_metadata().is_ok());
+    // The lock's own marker survives.
+    assert!(std::fs::read_dir(&t).expect("read").any(|e| {
+        e.expect("entry")
+            .file_name()
+            .to_string_lossy()
+            .starts_with("opensvn-lock-")
+    }));
+    db.wc_lock_release(&RelPath::root()).expect("release");
+}

@@ -244,6 +244,8 @@ impl FakeWc {
             || props_modified
             || n.tree_conflict
             || n.lock.is_some()
+            // Read-only until locked: listed so the UI can offer "lock to edit".
+            || (!n.is_dir() && n.props.contains_key("svn:needs-lock"))
             || n.changelist.is_some()
             || n.moved_from.is_some()
             || n.moved_to.is_some();

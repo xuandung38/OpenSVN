@@ -33,6 +33,8 @@ use crate::{Result, err, verify};
 
 /// Every failpoint of `svn-wc` and `svn-client` (feature `failpoints`).
 pub const FAILPOINTS: &[&str] = &[
+    "wc.create.before_schema",
+    "wc.create.before_rename",
     "pristine.install.before_rename",
     "wc.txn.before_commit",
     "wc.txn.after_commit",

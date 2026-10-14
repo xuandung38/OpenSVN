@@ -275,6 +275,7 @@ pub fn diff_local(
             show_unmodified: false,
             include_unversioned: false,
             include_ignored: false,
+            include_needs_lock: false,
         },
         None,
         cancel,
