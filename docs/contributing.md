@@ -30,7 +30,7 @@ cargo xtask compat up|fixtures|run   # harness so với svn thật, cần Docker
 - `fix/<ten-loi>`: sửa lỗi của hành vi đã có.
 - Viết thường, kebab-case (chỉ `a-z`, `0-9`, `-`), không dấu, ngắn và nói rõ việc. Được thêm mã phase như repo đang dùng: `feat/p08-app-backend-m1`.
 
-| Tên | | Lý do |
+| Tên | Kết quả | Lý do |
 |---|---|---|
 | `feat/commit-dialog` | Đúng | |
 | `fix/commit-recovery-delete-5xx` | Đúng | |
@@ -46,6 +46,10 @@ cargo xtask compat up|fixtures|run   # harness so với svn thật, cần Docker
 - `feat` khi thêm hoặc mở rộng hành vi; `fix` khi sửa lỗi của hành vi đã có.
 - Có cả hai thì chọn theo mục đích chính.
 - Việc khác (docs, ci, refactor) cũng dùng `feat/`, trừ khi sếp quy định thêm.
+
+**Nhánh cũ**
+- Nhánh đã có trên remote với tiền tố khác (`perf/`, `test/`, `docs/`, `contract/`...) giữ nguyên tên, không đổi.
+- Rule chỉ áp cho nhánh tạo mới. Riêng `proteam/*` phải đổi tên khi đưa lên remote (xem dưới).
 
 **Nhánh `proteam/*`**
 - App ProTeam tạo `proteam/<topic>` cho worktree của mỗi topic. Nhánh này chỉ được ở local; remote không bao giờ có `proteam/*`.
