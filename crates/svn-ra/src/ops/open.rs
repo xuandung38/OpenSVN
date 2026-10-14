@@ -127,6 +127,12 @@ impl RaSession for HttpRaSession {
         self.wire.session_url()
     }
 
+    fn authenticated_user(&self) -> Option<String> {
+        self.wire
+            .transport()
+            .authenticated_user(self.wire.session_url().as_url())
+    }
+
     async fn ensure_authenticated(&self, cancel: &CancelToken) -> Result<()> {
         // An OPTIONS goes through the same authentication as every other request, so any
         // prompt happens now, before the caller takes the working-copy lock.

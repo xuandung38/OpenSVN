@@ -201,9 +201,10 @@ impl HttpConnector {
         )
     }
 
-    /// Like [`HttpConnector::new`], with `tweak` applied to every transport configuration.
-    #[cfg(test)]
-    pub(crate) fn with_config_tweak(
+    /// Like [`HttpConnector::new`], with `tweak` applied to every transport configuration
+    /// (tests: no proxy, a test CA in `extra_root_certs`).
+    #[cfg(any(test, feature = "engine-conformance"))]
+    pub fn with_config_tweak(
         prompter: Arc<dyn AuthPrompter>,
         trust: Arc<dyn TrustStore>,
         settings: watch::Receiver<Settings>,
