@@ -368,18 +368,32 @@ fn editor_and_terminal_refuse_symlinks_inside_the_working_copy() {
     let d = wc();
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("secret.txt"), b"s").unwrap();
-    symlink(outside.path().join("secret.txt"), d.path().join("notes.txt")).unwrap();
+    symlink(
+        outside.path().join("secret.txt"),
+        d.path().join("notes.txt"),
+    )
+    .unwrap();
     symlink(outside.path(), d.path().join("docs")).unwrap();
     symlink("src", d.path().join("alias")).unwrap();
     let r = Recorder::default();
     let editor = tool("/usr/bin/code", &[]);
     let terminal = tool("/usr/bin/term", &[]);
-    for rel in ["notes.txt", "docs", "docs/secret.txt", "alias", "alias/main.rs"] {
+    for rel in [
+        "notes.txt",
+        "docs",
+        "docs/secret.txt",
+        "alias",
+        "alias/main.rs",
+    ] {
         for with in [OpenWith::Editor, OpenWith::Terminal] {
-            let err = open_external(&r, d.path(), rel, with, Some(&editor), Some(&terminal))
-                .unwrap_err();
+            let err =
+                open_external(&r, d.path(), rel, with, Some(&editor), Some(&terminal)).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidArgument, "{rel} {with:?}");
-            assert!(err.message.contains("symbolic link"), "{rel}: {}", err.message);
+            assert!(
+                err.message.contains("symbolic link"),
+                "{rel}: {}",
+                err.message
+            );
             assert_eq!(err.path.as_deref(), Some(rel));
         }
     }

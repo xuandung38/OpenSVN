@@ -142,3 +142,10 @@ test("read-only operations do not refetch repository views, writing ones do", as
   expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.logRoot });
   bus.stop();
 });
+
+test("mock data never carries lock tokens, like the IPC contract", async () => {
+  const { mockStatus } = await import("./mock/data");
+  const locks = mockStatus.flatMap((f) => (f.lock ? [f.lock] : []));
+  expect(locks.length).toBeGreaterThan(0);
+  for (const lock of locks) expect(lock.token).toBeNull();
+});
