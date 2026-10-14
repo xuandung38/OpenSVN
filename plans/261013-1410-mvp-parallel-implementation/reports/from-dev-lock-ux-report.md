@@ -1,7 +1,7 @@
 # Lock UX: lock held by another user (#127), unmodified needs-lock / locked files (#128)
 
 Date: 2026-10-14. Branch `fix/lock-ux-127-128`, from origin/main 9425158, merged with
-`test/e2e-flows` (#130, still open: it has the lock-permission fix). PR #135.
+`test/e2e-flows` (#130, still open: it has the lock-permission fix) and origin/main 74b337e. PR #135.
 
 ## #127: a refused lock names its owner and offers a confirmed Steal
 
@@ -47,8 +47,19 @@ Date: 2026-10-14. Branch `fix/lock-ux-127-128`, from origin/main 9425158, merged
 - FE: owner + comment + double confirmation Steal from the Locks section; reopen after Cancel
   (no steal sent); Locks section Lock/Unlock and no commit tick; `lockFiles` unit test.
 
-## Gates
-See the PR body for the counts of the final head.
+## Gates (merged with origin/main 74b337e)
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo clippy -p opensvn --features real-engine --all-targets -- -D warnings` | pass |
+| `cargo test --workspace --locked` | 1385 passed, 0 failed, 22 ignored |
+| `cargo test -p opensvn --features opensvn/real-engine` (`OPENSVN_REQUIRE_SVN=1`, svn 1.14.3) | 483 passed, 0 failed |
+| FE `install / lint / typecheck / lint:safety / test / build` | pass, 220 tests |
+| `pnpm gen:ipc` | no diff |
+
+Clippy's `result_large_err` (128 bytes) is why `lockConflicts` is a boxed slice in Rust; the wire
+shape is a plain array.
 
 ## Self-review
 - **Data loss:** `lock_conflicts` is read only; the only write paths are the existing
