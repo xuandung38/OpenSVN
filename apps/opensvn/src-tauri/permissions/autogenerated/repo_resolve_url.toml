@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-repo-resolve-url"
+description = "Enables the repo_resolve_url command without any pre-configured scope."
+commands.allow = ["repo_resolve_url"]
+
+[[permission]]
+identifier = "deny-repo-resolve-url"
+description = "Denies the repo_resolve_url command without any pre-configured scope."
+commands.deny = ["repo_resolve_url"]
