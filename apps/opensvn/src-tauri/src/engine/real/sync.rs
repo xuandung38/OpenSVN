@@ -46,20 +46,13 @@ fn trimmed(url: &RepoUrl) -> String {
     url.to_string().trim_end_matches('/').to_owned()
 }
 
-/// Splits a URL path into the repository root part (compared case-insensitively against
-/// `root_path`) and the rest, which is `""` or starts with `/`.
-fn split_root<'a>(path: &'a str, root_path: &str) -> Option<&'a str> {
-    let head = path.get(..root_path.len())?;
-    let rest = &path[root_path.len()..];
-    (head.eq_ignore_ascii_case(root_path) && (rest.is_empty() || rest.starts_with('/')))
-        .then_some(rest)
-}
-
 /// Whether the session opened at `got` is the requested `wanted` URL of the repository rooted at
 /// `root`. Scheme, host and port compare as the URL parser normalized them (case-insensitively).
-/// The repository root part of the path compares case-insensitively, because a server on a
-/// case-insensitive file system (VisualSVN) may spell it differently. The path below the root
-/// compares exactly: repository paths are case-sensitive.
+/// The paths compare with the rule the protocol layer applies to the server's root
+/// ([`svn_protocol::segments_below_root`]): segments are percent-decoded, the repository root
+/// part may differ in ASCII case (a server on a case-insensitive file system, VisualSVN, may
+/// spell it differently), and the decoded segments below the root compare exactly (repository
+/// paths are case-sensitive).
 fn same_location(root: &RepoUrl, wanted: &RepoUrl, got: &RepoUrl) -> bool {
     let (w, g) = (wanted.as_url(), got.as_url());
     if w.scheme() != g.scheme()
@@ -68,9 +61,13 @@ fn same_location(root: &RepoUrl, wanted: &RepoUrl, got: &RepoUrl) -> bool {
     {
         return false;
     }
-    let root_path = root.as_url().path().trim_end_matches('/');
-    let rest = |p: &str| split_root(p.trim_end_matches('/'), root_path).map(str::to_owned);
-    matches!((rest(w.path()), rest(g.path())), (Some(a), Some(b)) if a == b)
+    let root_path = root.as_url().path();
+    let below = |p: &str| {
+        svn_protocol::segments_below_root(root_path, p)
+            .ok()
+            .flatten()
+    };
+    matches!((below(w.path()), below(g.path())), (Some(a), Some(b)) if a == b)
 }
 
 /// Whether `url` is the repository root `root` or below it (segment by segment).
@@ -334,6 +331,35 @@ mod tests {
         assert!(!same(
             "https://svn.example.com/svn/Repox/trunk",
             "https://svn.example.com/svn/Repo/trunk"
+        ));
+    }
+
+    #[test]
+    fn a_non_ascii_root_compares_decoded_like_the_protocol_layer() {
+        let root = url("https://svn.example.com/svn/D%E1%BB%B1-%C3%81n");
+        let same = |wanted: &str, got: &str| same_location(&root, &url(wanted), &url(got));
+        // Lowercase or unnecessary escapes, and ASCII case of the root, are the same location.
+        assert!(same(
+            "https://svn.example.com/svn/d%e1%bb%b1-%c3%81n/trunk",
+            "https://svn.example.com/svn/D%E1%BB%B1-%C3%81n/trunk"
+        ));
+        assert!(same(
+            "https://svn.example.com/svn/D%E1%BB%B1-%C3%81n/%74runk/a%20b",
+            "https://svn.example.com/svn/D%E1%BB%B1-%C3%81n/trunk/a%20b"
+        ));
+        assert!(same(
+            "https://svn.example.com/svn/Dự-Án/trunk",
+            "https://svn.example.com/svn/D%E1%BB%B1-%C3%81n/trunk"
+        ));
+        // Non-ASCII case is never folded (the protocol layer's fallback is ASCII-only), and the
+        // path below the root stays case-sensitive after decoding.
+        assert!(!same(
+            "https://svn.example.com/svn/D%E1%BB%B1-%C3%A1n/trunk",
+            "https://svn.example.com/svn/D%E1%BB%B1-%C3%81n/trunk"
+        ));
+        assert!(!same(
+            "https://svn.example.com/svn/D%E1%BB%B1-%C3%81n/%C3%81",
+            "https://svn.example.com/svn/D%E1%BB%B1-%C3%81n/%C3%A1"
         ));
     }
 
