@@ -65,8 +65,8 @@ pub struct AppError {
     pub retryable: bool,
     pub actions: Option<Vec<ErrorAction>>,
     /// For `locked-by-other`: the locks held by someone else on the requested paths, as the
-    /// server reports them now. Absent when the engine could not ask (or for other codes).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// server reports them now. `None` when the engine could not ask (or for other codes).
+    #[serde(default)]
     #[specta(optional)]
     pub lock_conflicts: Option<Vec<LockConflict>>,
 }

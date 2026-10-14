@@ -104,6 +104,7 @@ fn app_error_wire_shape() {
             "path": "src/a.txt",
             "retryable": false,
             "actions": ["update"],
+            "lockConflicts": null,
         })
     );
     assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), e);
@@ -133,12 +134,12 @@ fn lock_conflicts_ride_on_the_error_only_when_known() {
     assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), e);
     let none =
         AppError::from_code(SvnErrorCode::LockedByOther, "locked").with_lock_conflicts(vec![]);
-    assert!(
-        serde_json::to_value(&none)
-            .unwrap()
-            .get("lockConflicts")
-            .is_none()
-    );
+    assert!(none.lock_conflicts.is_none());
+    // Payloads without the field still read.
+    let mut v = serde_json::to_value(&none).unwrap();
+    assert_eq!(v["lockConflicts"], serde_json::Value::Null);
+    v.as_object_mut().unwrap().remove("lockConflicts");
+    assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), none);
 }
 
 #[test]
