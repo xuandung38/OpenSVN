@@ -228,7 +228,7 @@ test("10.4 lock held elsewhere: the lock is refused, steal needs two confirmatio
   );
 });
 
-test("10.5 switch to a branch through Location, carrying a local change", async () => {
+test("10.5 switch to a branch through the Branch picker, carrying a local change", async () => {
   repo.svn([
     "copy",
     "-q",
@@ -243,12 +243,12 @@ test("10.5 switch to a branch through Location, carrying a local change", async 
   writeFileSync(join(wc, "notes.txt"), "one\ntwo\nthree\nlocal\n");
   await app.waitText("1 changed", 30_000);
 
-  // The repository follows trunk/branches/tags, but the toolbar offers "Location" and a URL
-  // field rather than the doc's "Branch" picker (#129).
-  await app.click("button", /Location/);
-  await app.click("button", "Switch…");
-  await app.fill("URL in the same repository", `${repo.url}/branches/feature-x`);
-  await app.click("button", /^Switch$/);
+  // The repository follows trunk/branches/tags: the toolbar shows "Branch trunk" and the popover
+  // lists the branches; with a local change it asks before carrying it over.
+  await app.click("button", /Branch\s*trunk/, 30_000);
+  await app.click("button", /^feature-x/, 30_000);
+  await app.waitText("1 local change(s) will be carried over to feature-x");
+  await app.click("button", "Carry changes and switch");
   await app.waitFor(
     async () => readFileSync(join(wc, "src/main.c"), "utf8").includes("return 1"),
     60_000,
@@ -256,8 +256,17 @@ test("10.5 switch to a branch through Location, carrying a local change", async 
   );
   assert.equal(readFileSync(join(wc, "notes.txt"), "utf8"), "one\ntwo\nthree\nlocal\n");
   assert.match(repo.svn(["info", "--show-item", "url", wc]), /\/branches\/feature-x$/m);
-  await app.waitText("/branches/feature-x", 30_000);
+  await app.role("button", /Branch\s*feature-x/, 30_000);
   await app.waitText("1 changed");
+
+  // The URL field stays available for any location of the repository.
+  await app.click("button", /Branch\s*feature-x/);
+  await app.click("button", "Switch…");
+  await app.fill("URL in the same repository", `${repo.url}/trunk`);
+  await app.click("button", /^Switch$/);
+  await app.role("button", /Branch\s*trunk/, 60_000);
+  assert.match(repo.svn(["info", "--show-item", "url", wc]), /\/trunk$/m);
+  assert.equal(readFileSync(join(wc, "notes.txt"), "utf8"), "one\ntwo\nthree\nlocal\n");
 });
 
 test("history and blame of a file", async () => {

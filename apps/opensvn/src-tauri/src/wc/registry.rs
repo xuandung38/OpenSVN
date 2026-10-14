@@ -151,10 +151,10 @@ impl WcRegistry {
             Err(e) => tracing::warn!(error = %e, "could not read the repository layout"),
         }
         let cached = self.live(id).branch;
-        if let Some(c) = cached.filter(|c| c.url == url) {
-            if c.failed_at.is_none_or(|t| t.elapsed() < BRANCH_RETRY) {
-                return c.branch;
-            }
+        if let Some(c) = cached.filter(|c| c.url == url)
+            && c.failed_at.is_none_or(|t| t.elapsed() < BRANCH_RETRY)
+        {
+            return c.branch;
         }
         let lister = crate::layout::EngineDirs(self.engine.as_ref());
         let detected = tokio::time::timeout(

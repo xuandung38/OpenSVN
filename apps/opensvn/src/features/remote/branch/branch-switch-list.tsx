@@ -62,7 +62,7 @@ export function BranchSwitchList({
 
   if (pending) {
     return (
-      <div className="flex flex-col gap-1.5 border-t border-line pt-2" role="group">
+      <div className="flex flex-col gap-1.5 border-t border-line pt-2">
         <SafeText className="px-1.5 text-[12px]">
           {t("carryChanges", { count: changed, name: pending.name })}
         </SafeText>
