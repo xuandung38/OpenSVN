@@ -959,6 +959,26 @@ impl Fixture {
                         )));
                     }
                 }
+                for f in &m.commit_deletes {
+                    let got = read(&wc.join(f));
+                    let st = status.get(f).map(String::as_str);
+                    let ok = match st {
+                        Some("D  ") => got.is_none(),
+                        None => got.as_deref() == Some(&m.base_text(f, 2)[..]),
+                        _ => false,
+                    };
+                    if !ok {
+                        return Err(err(format!(
+                            "{f}: deletion half reverted (status {st:?}, on disk {})",
+                            got.is_some()
+                        )));
+                    }
+                }
+                for f in &m.commit_adds {
+                    if read(&wc.join(f)).is_none() {
+                        return Err(err(format!("revert deleted the added file {f}")));
+                    }
+                }
                 Ok(())
             }
         }

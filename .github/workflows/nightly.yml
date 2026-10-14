@@ -82,7 +82,8 @@ jobs:
   bench:
     name: benchmarks vs svn CLI
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    # Today's engine needs about 16 min per 100k-file checkout (#121), so two repetitions.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Free disk space (two 100k-file working copies + repository)
@@ -101,7 +102,7 @@ jobs:
       - name: Run
         run: |
           target/release/compare-svn --files "${{ inputs.bench_files || '100000' }}" \
-            --binaries 4 --binary-mb 64 --update-files 10000 --reps 3 \
+            --binaries 4 --binary-mb 64 --update-files 10000 --reps 2 \
             --out bench-report/bench.md
       - name: Summary and regression warnings
         if: always()
