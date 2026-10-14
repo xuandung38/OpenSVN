@@ -83,7 +83,8 @@ pub struct CheckoutPlan {
     pub store_pristine: bool,
     /// Skip externals (`svn --ignore-externals`). Only meaningful when
     /// [`EngineFacade::capabilities`] reports `externals`; otherwise externals are never fetched,
-    /// whatever this says.
+    /// whatever this says. It applies to this checkout only: like svn, a later update or switch
+    /// fetches the externals.
     pub ignore_externals: bool,
 }
 
