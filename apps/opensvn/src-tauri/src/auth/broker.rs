@@ -180,14 +180,14 @@ impl AuthBroker {
     }
 
     /// Trusted certificates for the transport (loaded at start-up, kept in memory).
-    #[allow(dead_code)] // the real engine's connector (built from `lib.rs` from WP7 on)
+    #[cfg(any(test, feature = "real-engine"))]
     pub fn trust_store(&self) -> Arc<AppDbTrustStore> {
         Arc::clone(&self.trust)
     }
 
     /// Observes events after which cached repository sessions must be dropped: a sign-out or a
     /// removed certificate. The value only ever increases.
-    #[allow(dead_code)] // the real engine's connector (built from `lib.rs` from WP7 on)
+    #[cfg(any(test, feature = "real-engine"))]
     pub fn invalidations(&self) -> watch::Receiver<u64> {
         self.invalidations.subscribe()
     }
