@@ -32,3 +32,27 @@ Release builds only: a debug build is marked "not representative" in the report.
 
 The nightly workflow runs the 100k configuration. It emits a warning when an operation of the
 engine is more than 10% slower than svn's.
+
+## Commit
+
+`compare-svn-commit` measures commits the same way, each client on its own repository and working
+copy, with the bytes each client uploads counted by a pass-through proxy in front of Apache.
+
+```sh
+cargo build --release -p opensvn-bench --bin compare-svn-commit
+target/release/compare-svn-commit --files 10000 --modify-files 1000 --big-mb 40 --reps 3
+# report: target/bench-report/commit.md
+```
+
+- **add**: `--files` new text files of about 1 to 3 KiB in 100 folders, scheduled with `svn add`
+  (untimed), then one timed commit.
+- **modify**: `--modify-files` of those files get one more line, then one timed commit.
+- **1 byte in a big file**: a `--big-mb` MiB random file is committed (untimed), one byte in the
+  middle changes, then one timed commit.
+
+After every engine commit an untimed `svn status` must be clean and `svn cat` of a changed file
+must return the new content. `OPENSVN_BENCH_STDERR=1` passes the engine's stderr through.
+
+Most of a commit of many files is server time (the `MERGE` of 10,000 added files alone takes 5 to
+15 s on the same machine from one run to the next), so compare several repetitions, or subtract
+the server time from Apache's access log (`%D`) to compare the clients' own work.
