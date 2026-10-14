@@ -667,5 +667,37 @@ async fn commit_with_changes_below_a_switched_subtree() {
                 .unwrap_or_else(|err| panic!("cat {path}: {err}"));
             assert_eq!(text.content, expected, "{path} at r{}", rev.0);
         }
+
+        // Changes below the switched subtree alone: the session is anchored at the branch,
+        // condensed over the items like svn.
+        h.write_file(&wc.root, "src/main.rs", "fn main() { again(); }\n")
+            .unwrap();
+        h.write_file(&wc.root, "src/new.rs", "fn new() {}\n")
+            .unwrap();
+        let rev = e
+            .commit(
+                &wc,
+                &CommitRequest {
+                    wc_id: wc.id.clone(),
+                    paths: vec!["src".into()],
+                    message: "Branch only".into(),
+                    keep_locks: false,
+                    auto_add_remove: true,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("switched-only commit");
+        for (path, expected) in [
+            ("branches/b/main.rs", "fn main() { again(); }\n"),
+            ("branches/b/new.rs", "fn new() {}\n"),
+            ("trunk/src/main.rs", "fn main() {}\n"),
+        ] {
+            let text = e
+                .repo_cat(&format!("{url}/{path}"), Some(rev), &ctx())
+                .await
+                .unwrap_or_else(|err| panic!("cat {path}: {err}"));
+            assert_eq!(text.content, expected, "{path} at r{}", rev.0);
+        }
     }
 }

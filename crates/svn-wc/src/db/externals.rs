@@ -1,7 +1,8 @@
 //! Read side of the `EXTERNALS` table: file/directory externals recorded for a working copy.
 //!
 //! The definitions themselves live in `svn:externals` properties; this table records the external
-//! working-copy nodes that exist because of them. Writing externals is outside the MVP.
+//! working-copy nodes that exist because of them. Writing externals is outside the MVP, except
+//! for forgetting them ([`WcDb::forget_externals`]) when their definition leaves the working copy.
 
 use rusqlite::{Row, params};
 use svn_types::{NodeKind, RelPath, Result};
@@ -98,6 +99,67 @@ impl WcDb {
             ),
             path,
         )
+    }
+
+    /// Externals whose defining directory is `path` or lies below it, sorted by path.
+    pub fn externals_defined_at_or_below(&self, path: &RelPath) -> Result<Vec<External>> {
+        self.externals_where(
+            &format!(
+                "(e.def_local_relpath = ?2 OR {})",
+                super::nodes::strict_descendant("e.def_local_relpath", "?2")
+            ),
+            path,
+        )
+    }
+
+    /// Forgets the externals at `paths`: their `EXTERNALS` rows and, for a file external, its
+    /// BASE row and actual properties. Nothing on disk is touched, so what an external left
+    /// there becomes unversioned, as after svn removes an external whose definition is gone.
+    /// A file external with local operations on it (rows above BASE) is left as it is.
+    pub fn forget_externals(&self, paths: &[RelPath]) -> Result<()> {
+        self.with_write(|c| {
+            for p in paths {
+                let worked: bool = c
+                    .query_row(
+                        "SELECT EXISTS (SELECT 1 FROM nodes WHERE wc_id = ?1 \
+                         AND local_relpath = ?2 AND op_depth > 0)",
+                        params![self.wc_id, p.as_str()],
+                        |r| r.get(0),
+                    )
+                    .map_err(sql_err)?;
+                let file_external = c
+                    .execute(
+                        "DELETE FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+                         AND op_depth = 0 AND file_external IS NOT NULL AND NOT ?3",
+                        params![self.wc_id, p.as_str(), worked],
+                    )
+                    .map_err(sql_err)?
+                    > 0;
+                if file_external {
+                    c.execute(
+                        "DELETE FROM actual_node WHERE wc_id = ?1 AND local_relpath = ?2",
+                        params![self.wc_id, p.as_str()],
+                    )
+                    .map_err(sql_err)?;
+                }
+                let is_file_node: bool = c
+                    .query_row(
+                        "SELECT EXISTS (SELECT 1 FROM nodes WHERE wc_id = ?1 \
+                         AND local_relpath = ?2 AND file_external IS NOT NULL)",
+                        params![self.wc_id, p.as_str()],
+                        |r| r.get(0),
+                    )
+                    .map_err(sql_err)?;
+                if !is_file_node {
+                    c.execute(
+                        "DELETE FROM externals WHERE wc_id = ?1 AND local_relpath = ?2",
+                        params![self.wc_id, p.as_str()],
+                    )
+                    .map_err(sql_err)?;
+                }
+            }
+            Ok(())
+        })
     }
 
     fn externals_where(&self, cond: &str, arg: &RelPath) -> Result<Vec<External>> {

@@ -622,4 +622,22 @@ mod tests {
         let e = check_server_path_text("stub", "/svn/repo/!svn/.. ").expect_err("space");
         assert_eq!(e.code, ErrorCode::UnsafePath);
     }
+
+    /// The whitespace evil fixtures (`update/href-trailing-space-dotdot`,
+    /// `update/href-encoded-dotdot-space`, `propfind/child-dotdot-space`) never reach this
+    /// check with their whitespace: the XML parsers trim text first, and so does httparse for
+    /// headers. They document intent; this test guards the check itself, with the same hrefs
+    /// as an untrimmed caller (a future parser, the fuzz target) would pass them.
+    #[test]
+    fn the_whitespace_fixture_hrefs_are_refused_untrimmed() {
+        for href in [
+            "/svn/repo/!svn/rvr/5/trunk/.. ",
+            "/svn/repo/!svn/rvr/5/trunk/%2e%2e ",
+            " /svn/repo/!svn/rvr/5/trunk/..",
+            "/svn/repo/!svn/rvr/5/trunk/..\t",
+        ] {
+            let e = check_server_url_text("href", href).expect_err(href);
+            assert_eq!(e.code, ErrorCode::UnsafePath, "{href:?}");
+        }
+    }
 }
