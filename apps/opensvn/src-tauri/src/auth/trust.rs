@@ -68,19 +68,24 @@ impl AppDbTrustStore {
         self.pins.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Stops trusting one certificate (in memory; the caller removed the row).
-    pub fn forget(&self, host: &str, port: u16, sha256_hex: &str) {
+    /// Stops trusting one certificate (in memory; the caller removed the row). Returns whether
+    /// it was pinned in memory.
+    pub fn forget(&self, host: &str, port: u16, sha256_hex: &str) -> bool {
         let Some(fp) = unhex(&sha256_hex.to_ascii_lowercase()) else {
-            return;
+            return false;
         };
         let mut pins = self.map();
         let k = key(host, port);
-        if let Some(list) = pins.get_mut(&k) {
-            list.retain(|p| *p != fp);
-            if list.is_empty() {
-                pins.remove(&k);
-            }
+        let Some(list) = pins.get_mut(&k) else {
+            return false;
+        };
+        let before = list.len();
+        list.retain(|p| *p != fp);
+        let forgotten = list.len() != before;
+        if list.is_empty() {
+            pins.remove(&k);
         }
+        forgotten
     }
 }
 

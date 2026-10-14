@@ -13,10 +13,16 @@ pub struct Migration {
 }
 
 /// Migrations of `app.sqlite`.
-pub const APP_MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: include_str!("migrations/app_0001_initial.sql"),
-}];
+pub const APP_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: include_str!("migrations/app_0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        sql: include_str!("migrations/app_0002_account_stale.sql"),
+    },
+];
 
 /// Migrations of `cache.sqlite`.
 pub const CACHE_MIGRATIONS: &[Migration] = &[Migration {
@@ -67,7 +73,7 @@ mod tests {
     fn applies_all_and_is_idempotent() {
         let mut c = Connection::open_in_memory().unwrap();
         migrate(&mut c, APP_MIGRATIONS).unwrap();
-        assert_eq!(version(&c), 1);
+        assert_eq!(version(&c), 2);
         migrate(&mut c, APP_MIGRATIONS).unwrap();
         c.execute("INSERT INTO setting (key, value) VALUES ('a', '1')", [])
             .unwrap();
@@ -114,7 +120,7 @@ mod tests {
             migrate(&mut c, APP_MIGRATIONS),
             Err(DbError::NewerSchema {
                 found: 99,
-                supported: 1
+                supported: 2
             })
         ));
     }
@@ -137,6 +143,31 @@ mod tests {
         c.execute(cert, [443]).unwrap();
         c.execute(cert, [8443]).unwrap();
         assert!(c.execute(cert, [443]).is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod upgrade_tests {
+    use super::*;
+
+    #[test]
+    fn version_1_accounts_survive_and_start_not_stale() {
+        let mut c = Connection::open_in_memory().unwrap();
+        migrate(&mut c, &APP_MIGRATIONS[..1]).unwrap();
+        c.execute(
+            "INSERT INTO account (scheme, host, port, realm, username, method)
+             VALUES ('https', 'h', 443, 'r', 'u', 'basic')",
+            [],
+        )
+        .unwrap();
+        migrate(&mut c, APP_MIGRATIONS).unwrap();
+        let stale: i64 = c
+            .query_row("SELECT stale FROM account WHERE host = 'h'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stale, 0);
     }
 }
 
@@ -166,6 +197,6 @@ mod race_tests {
         let v: u32 = c
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, 2);
     }
 }
