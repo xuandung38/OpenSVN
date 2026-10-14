@@ -26,6 +26,12 @@
 //! - Revision dates (`-r {2020-01-01}`) are refused (svn resolves them).
 //! - With different peg and operative revisions (`-r 5 URL@10`) the URL is used at the operative
 //!   revision as written; svn first traces the node's history from the peg revision.
+//! - A local change in a file external is merged against the file's old text, like any other
+//!   file. svn 1.15 merges file externals against an empty base, so every local change
+//!   conflicts there.
+//! - The inherited-properties cache of a file external is recorded empty; svn fills it with the
+//!   properties of the file's repository ancestors.
+//! - Updating a file external on its own is refused; update the directory that defines it.
 
 mod dir;
 mod file;
