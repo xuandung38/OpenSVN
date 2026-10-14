@@ -5105,6 +5105,7 @@ dependencies = [
  "fail",
  "md-5",
  "opensvn-svn-oracle",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha1",

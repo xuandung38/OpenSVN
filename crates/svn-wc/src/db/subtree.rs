@@ -16,7 +16,7 @@ use super::misc::LockInfo;
 use super::nodes::{
     NODE_COLUMNS, Node, Props, decode_props, node_from_row, rel, strict_descendant,
 };
-use super::{ADM_DIR, DB_FILE, WcDb};
+use super::{ADM_DIR, DB_FILE, WcDb, failpoint};
 use crate::skel::Skel;
 
 /// One ACTUAL_NODE row, as far as status needs it.
@@ -109,11 +109,7 @@ impl WcDb {
                 .iter()
                 .map(|&(a, b)| {
                     let path = &path;
-                    scope.spawn(move || {
-                        open_connection(path, OpenMode::ReadOnly)
-                            .ok()
-                            .map(|c| rowid_rows(&c, wc_id, a, b))
-                    })
+                    scope.spawn(move || helper_rows(path, wc_id, a, b))
                 })
                 .collect();
             let first = rowid_rows(tx, wc_id, ranges[0].0, ranges[0].1);
@@ -124,13 +120,34 @@ impl WcDb {
         let mut out = Vec::new();
         for (part, &(a, b)) in helpers.into_iter().zip(&ranges) {
             out.extend(match part {
-                Some(rows) => rows?,
-                None => rowid_rows(tx, wc_id, a, b)?,
+                Some(Ok(rows)) => rows,
+                // `tx` already holds the shared lock, so it reads on whatever stopped the helper
+                // (a real error comes back from this read too).
+                Some(Err(_)) | None => rowid_rows(tx, wc_id, a, b)?,
             });
         }
         sort_nodes(&mut out);
         Ok(out)
     }
+}
+
+/// One part of [`WcDb::node_rows_split`] read on its own read-only connection; `None` when the
+/// connection cannot be opened.
+///
+/// The helper never waits for a lock. While `tx` holds its shared lock, a writer that wants to
+/// commit takes PENDING and waits for `tx` to finish; a new connection cannot take a shared
+/// lock past PENDING, so waiting here would deadlock both until the busy timeout (`WcBusy`).
+/// A busy helper gives its part back to `tx`, which can still read.
+fn helper_rows(path: &std::path::Path, wc_id: i64, a: i64, b: i64) -> Option<Result<Vec<Node>>> {
+    let conn = open_connection(path, OpenMode::ReadOnly).ok()?;
+    if conn.busy_timeout(std::time::Duration::ZERO).is_err() {
+        return None;
+    }
+    let read = || -> Result<Vec<Node>> {
+        failpoint!("wc.subtree.helper_before_read");
+        rowid_rows(&conn, wc_id, a, b)
+    };
+    Some(read())
 }
 
 /// From this many NODES rowids up the whole-tree read is split over several connections.
