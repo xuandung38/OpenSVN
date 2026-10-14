@@ -80,3 +80,26 @@ shape is a plain array.
   now in place (Locks → Lock to edit… → owner → Steal + confirm).
 - The status still shows another user's lock only after a remote check; the dialog learns it from
   the refusal.
+
+## Review round 1 (review on 0078d6d)
+- **Steal/break refused by Apache (423).** mod_dav_svn treats a client as an svn client only when
+  its `User-Agent` starts with `SVN/`; otherwise mod_dav core checks a `LOCK` against the
+  existing lock and answers 423 before `lock-steal` is read (lock comments were also lost). One
+  shared `svn_ra::transport::USER_AGENT` = `SVN/1.15.0 (<os>) OpenSVN/<version>` (TortoiseSVN
+  style) now serves the requests and `svn:txn-user-agent`; a unit test ties it to
+  `SVN_COMPAT_VERSION`.
+- **Break-unlock after a steal answered 400.** The recorded token is stale then; a break now
+  presents the server's current token, like `svn unlock --force` (real and fake engine).
+- **DAV regression:** `tests/real_engine_dav.rs` runs `needs_lock_unmodified_file_in_status` and
+  `lock_held_elsewhere_and_steal` (now also: a stale-token unlock is refused, an explicit break
+  removes the lock). With the old agent the scenario fails; with the fix the suite passes 20/20
+  on Apache 2.4 + mod_dav_svn 1.14.3 (`scripts/test-env/visualsvn-like.sh up`, `/svn-basic`).
+- **E2e:** "10.4 lock held elsewhere" is enabled (Locks → Lock to edit… → owner + comment →
+  Steal + confirmation → writable); "10.4 needs-lock file" starts from the Locks section without
+  forcing a write. README updated (CA:FALSE server certificate). `pnpm e2e`: 8/8 pass.
+- Nits: the unused `LockConflicts` newtype is gone; the steal box and warning name every owner.
+- Merged origin/main 35773a9 (#130).
+
+Gates on the final head: fmt ✅, clippy workspace ✅, clippy real-engine ✅, workspace tests
+1386 passed / 0 failed / 22 ignored, real-engine tests 483 passed, DAV suite 20 passed, FE 221
+tests ✅, `pnpm gen:ipc` no diff, e2e 8/8.
