@@ -1,6 +1,7 @@
 /// Names of all app commands. Shared by build.rs (permission manifest) and lib.rs (tests).
 pub const COMMAND_NAMES: &[&str] = &[
     "repo_info",
+    "repo_resolve_url",
     "repo_list",
     "repo_cat",
     "repo_save",

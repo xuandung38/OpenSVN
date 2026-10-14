@@ -25,8 +25,8 @@ use crate::skel::Skel;
 use crate::translate::flags::SyncInput;
 use crate::translate::utc_offset_local;
 use crate::workqueue::{
-    FileInfoRecord, NodeInstallInfo, RunnerConfig, WorkQueueError, WorkQueueRunner, WorkQueueStore,
-    WorkingCopyOps,
+    FileInfoRecord, NodeInstallInfo, RunnerConfig, Unsettled, WorkQueueError, WorkQueueRunner,
+    WorkQueueStore, WorkingCopyOps,
 };
 
 use super::node_api::FileInfo;
@@ -50,7 +50,8 @@ impl PristineIndex for DbPristineIndex<'_> {
     fn record(&mut self, r: &PristineRecord) -> std::result::Result<(), PristineError> {
         let size = i64::try_from(r.size).map_err(|_| PristineError::index("size out of range"))?;
         self.db.with_write(|tx| {
-            tx.execute(
+            super::connection::cached_exec(
+                tx,
                 "INSERT OR IGNORE INTO pristine (checksum, compression, size, refcount, \
                  md5_checksum) VALUES (?1, NULL, ?2, 0, ?3)",
                 params![r.sha1.to_svn_string(), size, r.md5.to_svn_string()],
@@ -71,7 +72,8 @@ impl PristineIndex for DbPristineIndex<'_> {
             "1"
         };
         let row: Option<(i64, String, i64)> = self.db.with_read(|c| {
-            c.query_row(
+            super::connection::cached_row(
+                c,
                 &format!(
                     "SELECT size, md5_checksum, {hydrated_col} FROM pristine WHERE checksum = ?1"
                 ),
@@ -114,7 +116,8 @@ impl PristineIndex for DbPristineIndex<'_> {
         sha1: &Sha1Digest,
     ) -> std::result::Result<bool, PristineError> {
         let n = self.db.with_write(|tx| {
-            tx.execute(
+            super::connection::cached_exec(
+                tx,
                 "DELETE FROM pristine WHERE checksum = ?1 AND refcount = 0 \
                  AND NOT EXISTS (SELECT 1 FROM actual_node WHERE older_checksum = ?1 \
                  OR left_checksum = ?1 OR right_checksum = ?1)",
@@ -128,8 +131,8 @@ impl PristineIndex for DbPristineIndex<'_> {
 
 // ---- work queue store ----------------------------------------------------------------------
 
-/// The `WORK_QUEUE` table as a [`WorkQueueStore`], backed by
-/// [`WcDb::wq_record_and_fetch_next`] (delete, stat cache and fetch in one transaction).
+/// The `WORK_QUEUE` table as a [`WorkQueueStore`]: completion (delete and stat cache) and the
+/// next fetch run in one transaction, like [`WcDb::wq_record_and_fetch_next`].
 pub struct DbWorkQueue<'a> {
     db: &'a WcDb,
 }
@@ -146,17 +149,22 @@ fn rel(relpath: &str) -> std::result::Result<RelPath, WorkQueueError> {
 }
 
 impl WorkQueueStore for DbWorkQueue<'_> {
-    fn next_item(
+    fn next_items(
         &mut self,
-        completed: Option<u64>,
+        completed: &[u64],
         fileinfo: &[FileInfoRecord],
-    ) -> std::result::Result<Option<(u64, Vec<u8>)>, WorkQueueError> {
+        after: Option<u64>,
+        limit: usize,
+    ) -> std::result::Result<Vec<(u64, Vec<u8>)>, WorkQueueError> {
+        let id_of = |id: u64| {
+            i64::try_from(id)
+                .map_err(|_| SvnError::new(ErrorCode::Internal, "work item id out of range"))
+        };
         let completed = completed
-            .map(|id| {
-                i64::try_from(id)
-                    .map_err(|_| SvnError::new(ErrorCode::Internal, "work item id out of range"))
-            })
-            .transpose()?;
+            .iter()
+            .map(|id| id_of(*id))
+            .collect::<Result<Vec<_>>>()?;
+        let after = after.map(id_of).transpose()?;
         let infos = fileinfo
             .iter()
             .map(|r| {
@@ -169,13 +177,16 @@ impl WorkQueueStore for DbWorkQueue<'_> {
                 ))
             })
             .collect::<std::result::Result<Vec<_>, WorkQueueError>>()?;
-        let next = self.db.wq_record_and_fetch_next_raw(completed, &infos)?;
-        next.map(|(id, blob)| {
-            u64::try_from(id)
-                .map(|id| (id, blob))
-                .map_err(|_| SvnError::new(ErrorCode::Corrupt, "negative work item id").into())
-        })
-        .transpose()
+        let next = self
+            .db
+            .wq_complete_and_fetch_raw(&completed, &infos, after, limit)?;
+        next.into_iter()
+            .map(|(id, blob)| {
+                u64::try_from(id)
+                    .map(|id| (id, blob))
+                    .map_err(|_| SvnError::new(ErrorCode::Corrupt, "negative work item id").into())
+            })
+            .collect()
     }
 }
 
@@ -230,12 +241,32 @@ fn not_versioned(relpath: &str) -> SvnError {
 impl WorkingCopyOps for DbWorkingCopyOps<'_> {
     fn install_info(&self, relpath: &str) -> std::result::Result<NodeInstallInfo, WorkQueueError> {
         let rp = rel(relpath)?;
-        let node = self
+        let wc_id = self.db.wc_id();
+        // One read transaction (one shared lock) for the few statements below; the queue runs
+        // this for every installed file.
+        let (node, repos, has_lock) = self
             .db
-            .read_node(&rp)?
+            .with_read(|c| {
+                let read = |c: &rusqlite::Connection| -> Result<_> {
+                    Ok(match super::nodes::read_current(c, wc_id, &rp)? {
+                        Some(node) => Some((
+                            node,
+                            super::repos_info::read_repos_info_on(c, wc_id, &rp)?,
+                            super::misc::repos_lock_on(c, wc_id, &rp)?.is_some(),
+                        )),
+                        None => None,
+                    })
+                };
+                if !c.is_autocommit() {
+                    // Already inside a transaction: its snapshot serves.
+                    return read(c);
+                }
+                let tx = c.unchecked_transaction().map_err(sql_err)?;
+                let found = read(&tx)?;
+                tx.commit().map_err(sql_err)?;
+                Ok(found)
+            })?
             .ok_or_else(|| not_versioned(relpath))?;
-        let repos = self.db.read_repos_info(&rp)?;
-        let has_lock = self.db.repos_lock(&rp)?.is_some();
         Ok(NodeInstallInfo {
             checksum: node
                 .checksum
@@ -423,9 +454,32 @@ impl WcDb {
             wc_root: PathBuf::from(self.wcroot()),
             tz: &utc_offset_local,
             cancelled,
+            defer_sync: true,
         };
         WorkQueueRunner::new(config, ops, &store)
             .run(&mut DbWorkQueue::new(self))
+            .map_err(SvnError::from)
+    }
+
+    /// [`run_work_queue_with`](Self::run_work_queue_with) that leaves the completion of the
+    /// self-contained items to the caller; see [`WorkQueueRunner::run_unsettled`]. The caller
+    /// completes them with [`WcTxn::complete_work`](super::WcTxn::complete_work) once their files
+    /// are durable.
+    pub fn run_work_queue_unsettled(
+        &self,
+        ops: &mut DbWorkingCopyOps<'_>,
+        cancelled: Option<&dyn Fn() -> bool>,
+        carried: Unsettled,
+    ) -> Result<(usize, Unsettled)> {
+        let store = self.pristine_store();
+        let config = RunnerConfig {
+            wc_root: PathBuf::from(self.wcroot()),
+            tz: &utc_offset_local,
+            cancelled,
+            defer_sync: true,
+        };
+        WorkQueueRunner::new(config, ops, &store)
+            .run_unsettled(&mut DbWorkQueue::new(self), carried)
             .map_err(SvnError::from)
     }
 }

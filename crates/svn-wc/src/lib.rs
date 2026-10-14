@@ -12,6 +12,7 @@
 
 pub mod conflicts;
 pub mod db;
+pub mod durable;
 pub mod pristine;
 pub mod skel;
 pub mod status;

@@ -15,6 +15,7 @@
 //! 3. Report, drive the editor, run queued work after each node.
 //! 4. Release the lock (also on error and cancellation).
 
+mod batch;
 mod conflict_record;
 mod editor;
 mod file_install;

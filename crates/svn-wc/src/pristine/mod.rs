@@ -22,6 +22,7 @@
 //! but refuses every write with [`PristineError::ReadOnlyFormat`]. Re-hydrating a dehydrated
 //! text is out of the MVP: `record` never flips `hydrated` from false to true.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -327,6 +328,77 @@ impl<I: PristineIndex> PristineStore<I> {
         Ok(record)
     }
 
+    /// Moves an already hashed text file into the store **without recording its row**, and
+    /// returns whether the store already held the text (the file is then dropped).
+    ///
+    /// For callers that computed `record` while writing `file` (the update editor hashes the
+    /// delta result as it applies it), so the text is neither copied nor hashed again. The caller
+    /// must record the row ([`crate::db::WcTxn::record_pristine`]) in the transaction that
+    /// references the text, and, when `sync` is false, run [`crate::durable::sync_filesystem`]
+    /// on the administrative directory before that transaction commits. A crash before the
+    /// commit leaves an orphan file, which the next install of the same text overwrites.
+    ///
+    /// `sync` = true syncs the file and its directory entry here (the [`install`](Self::install)
+    /// behaviour); pass false only when [`crate::durable::batched_sync`] allows a barrier and one
+    /// follows.
+    ///
+    /// `uncommitted` holds the texts this caller placed whose rows are not committed yet. Such a
+    /// text is never replaced: an earlier barrier covers the stored file and a transaction about
+    /// to commit relies on it, while a new inode renamed over it would be covered only by a later
+    /// barrier. The new file is dropped instead (the content is the same, by its checksum). An
+    /// orphan left by an earlier, interrupted run (no row, not in the set) is replaced, since it
+    /// may be partial. A text with a committed row is never touched either.
+    ///
+    /// Requires the WC write lock; see the module documentation.
+    pub fn place(
+        &mut self,
+        file: tempfile::TempPath,
+        record: &PristineRecord,
+        sync: bool,
+        uncommitted: &mut HashSet<Sha1Digest>,
+    ) -> Result<bool, PristineError> {
+        self.require_writable()?;
+        match self.index.lookup(&record.sha1)? {
+            Some(row) if row.hydrated => return Ok(true),
+            Some(_) => return Err(PristineError::RehydrateUnsupported(record.sha1)),
+            None => {}
+        }
+        if uncommitted.contains(&record.sha1) && self.path_of(&record.sha1).is_file() {
+            // `file` is removed when the guard drops.
+            return Ok(true);
+        }
+        if sync {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&file)
+                .and_then(|f| f.sync_all())
+                .map_err(PristineError::io("sync", &file))?;
+        }
+        let dest = self.path_of(&record.sha1);
+        let parent = dest.parent().unwrap_or(&self.adm_dir);
+        if !parent.is_dir() {
+            fs::create_dir_all(parent).map_err(PristineError::io("create directory", parent))?;
+        }
+        #[cfg(feature = "failpoints")]
+        fail::fail_point!("pristine.install.before_rename", |_| Err(
+            PristineError::index("failpoint pristine.install.before_rename")
+        ));
+        rename_replacing(&file, &dest)?;
+        // The rename consumed the temp file; do not let the guard remove the stored text.
+        let _ = file.keep();
+        let mut perms = fs::metadata(&dest)
+            .map_err(PristineError::io("stat", &dest))?
+            .permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&dest, perms)
+            .map_err(PristineError::io("set permissions of", &dest))?;
+        if sync {
+            sync_dir(parent)?;
+        }
+        uncommitted.insert(record.sha1);
+        Ok(false)
+    }
+
     /// A writer that puts many texts into this store without recording their rows, for a
     /// caller that records all of them in one database transaction (see [`PristineBatch`]).
     ///
@@ -343,6 +415,15 @@ impl<I: PristineIndex> PristineStore<I> {
     /// Opens the stored text for reading. Fails with [`PristineError::NotHydrated`] when the row says the
     /// text was dropped, and [`PristineError::NotInstalled`] when row or file is missing.
     pub fn open_text(&self, sha1: &Sha1Digest) -> Result<File, PristineError> {
+        self.open_text_with_row(sha1).map(|(_, file)| file)
+    }
+
+    /// [`open_text`](Self::open_text) that also returns the row it looked up (one lookup when
+    /// the caller needs both, for example to check the MD5 a delta expects).
+    pub fn open_text_with_row(
+        &self,
+        sha1: &Sha1Digest,
+    ) -> Result<(PristineRecord, File), PristineError> {
         let row = self
             .index
             .lookup(sha1)?
@@ -351,14 +432,15 @@ impl<I: PristineIndex> PristineStore<I> {
             return Err(PristineError::NotHydrated(*sha1));
         }
         let path = self.path_of(sha1);
-        File::open(&path).map_err(|e| match e.kind() {
+        let file = File::open(&path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => PristineError::NotInstalled(*sha1),
             _ => PristineError::Io {
                 op: "open",
                 path,
                 source: e,
             },
-        })
+        })?;
+        Ok((row, file))
     }
 
     /// Checks the stored text against the row's size and its SHA-1; `true` when both match.

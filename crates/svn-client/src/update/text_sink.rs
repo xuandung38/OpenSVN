@@ -76,6 +76,7 @@ impl WindowSink for TextSink {
                     path,
                     md5: outcome.md5,
                     sha1: outcome.sha1,
+                    size: outcome.bytes_written,
                 });
                 Ok(())
             }

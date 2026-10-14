@@ -60,11 +60,8 @@ pub(super) async fn drive_update(
         let st = lock_state(state);
         let (rev, rv) = st.revision(req.revision)?;
         let mut bases: HashMap<Revnum, Tree> = HashMap::new();
-        for e in reporter
-            .entries
-            .iter()
-            .filter(|e| !e.deleted && !e.start_empty)
-        {
+        // `start_empty` entries too: the reported path itself exists at its revision.
+        for e in reporter.entries.iter().filter(|e| !e.deleted) {
             let (r, brv) = st.revision(Some(e.rev))?;
             // Report paths are session-relative: so are the base trees.
             bases.insert(r, super::prefixed::subtree(&brv.tree, session_rel)?);
