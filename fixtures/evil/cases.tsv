@@ -18,6 +18,9 @@ update/href-other-host	update	update/href-other-host.xml	unsafe	checked-in href 
 update/href-traversal	update	update/href-traversal.xml	unsafe	checked-in href with .. segments
 update/href-encoded-traversal	update	update/href-encoded-traversal.xml	unsafe	checked-in href with percent-encoded .. segments
 update/href-outside-repo	update	update/href-outside-repo.xml	unsafe	checked-in href outside the repository root
+update/href-trailing-space-dotdot	update	update/href-trailing-space-dotdot.xml	unsafe	checked-in href ending in '.. ' (the URL parser strips the space, leaving ..)
+update/href-encoded-dotdot-space	update	update/href-encoded-dotdot-space.xml	unsafe	checked-in href ending in an encoded .. plus a space
+update/href-scheme-in-path	update	update/href-scheme-in-path.xml	unsafe	checked-in href with .. segments before a '://' inside the path (not a scheme)
 update/truncated	update	update/truncated.xml	corrupt	document cut off in the middle
 update/mismatched-tags	update	update/mismatched-tags.xml	corrupt	end tag does not match start tag
 update/billion-laughs	update	update/billion-laughs.xml	corrupt	DOCTYPE with nested entity expansion
@@ -35,6 +38,8 @@ propfind/child-outside-target	propfind-list	propfind/child-outside-target.xml	qu
 propfind/child-admin	propfind-list	propfind/child-admin.xml	quarantine	list entry named .svn
 propfind/child-backslash	propfind-list	propfind/child-backslash.xml	quarantine	list entry with encoded backslash traversal
 propfind/child-nul	propfind-list	propfind/child-nul.xml	quarantine	list entry with an encoded NUL
+propfind/child-dotdot-space	propfind-list	propfind/child-dotdot-space.xml	quarantine	list entry href ending in '.. ' (the URL parser strips the space)
+propfind/child-scheme-in-path	propfind-list	propfind/child-scheme-in-path.xml	quarantine	list entry href with .. before a '://' inside the path (not a scheme)
 log/changed-path-dotdot	log	log/changed-path-dotdot.xml	corrupt	changed path with .. segments
 log/changed-path-relative	log	log/changed-path-relative.xml	corrupt	changed path that is not absolute in the repository
 log/copyfrom-dotdot	log	log/copyfrom-dotdot.xml	corrupt	copyfrom path with ..
@@ -56,6 +61,8 @@ options/root-encoded-backslash	options	options/root-encoded-backslash.headers	re
 options/me-tab	options	options/me-tab.headers	reject	me resource with a tab between dots
 options/me-other-host	options	options/me-other-host.headers	reject	me resource on another host (commits would go there)
 options/stub-other-host	options	options/stub-other-host.headers	reject	protocol-relative stub URL on another host
+options/stub-scheme-in-path	options	options/stub-scheme-in-path.headers	reject	stub with .. segments before a '://' inside the path (not a scheme)
+options/root-scheme-in-path	options	options/root-scheme-in-path.headers	reject	repository root whose '..' segment is followed by '://' (hidden from a scheme split)
 options/youngest-garbage	options	options/youngest-garbage.headers	reject	youngest revision overflows
 svndiff/bad-magic	svndiff	svndiff/bad-magic.svndiff	corrupt	wrong magic bytes
 svndiff/unknown-version	svndiff	svndiff/unknown-version.svndiff	corrupt	unsupported svndiff version 7

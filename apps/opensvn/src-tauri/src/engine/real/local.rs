@@ -7,8 +7,8 @@
 //! (`WcActor`), so no app-level lock is added. Request paths are validated with
 //! [`local_util::target`] before anything is touched.
 //!
-//! Marking a move made outside the app and changing the working copy format are not supported
-//! by `svn-client` yet and fail with a user-facing error.
+//! Changing the working copy format is not supported yet (only format 31 is written) and fails
+//! with a user-facing error.
 
 use opensvn_ipc::{
     CleanupRequest, IgnoreAddRequest, IgnoreScope, ResolveChoice, ResolveRequest, RevertRequest,
@@ -25,9 +25,6 @@ use super::local_util::{self, LocalEnv};
 use super::wc_read::blocking;
 use crate::engine::context::OpContext;
 use crate::engine::facade::{EngineResult, WcRef};
-
-/// Issue tracking `svn-client` support for the operations this engine refuses.
-const UNSUPPORTED_ISSUE: &str = "https://github.com/xuandung38/OpenSVN/issues/90";
 
 /// `ResolveChoice` of the app -> `--accept` choice of `svn-client`.
 pub(super) fn accept_of(choice: ResolveChoice) -> Accept {
@@ -63,9 +60,11 @@ impl RealEngine {
         let client = self.client_ctx(ctx);
         let config = self.svn_config.clone();
         let (root, cancel) = (wc.root.clone(), ctx.cancel.clone());
+        let case_insensitive = self.case_insensitive_fs;
         blocking(move || {
             let db = local_util::open_wc_root(&client, &root)?;
-            let env = local_util::local_env(&config, &db, cancel)?;
+            let mut env = local_util::local_env(&config, &db, cancel)?;
+            env.case_insensitive = case_insensitive;
             f(&db, &env)
         })
         .await
@@ -81,7 +80,7 @@ impl RealEngine {
         check_changelist_name(name)?;
         let (paths, name) = (paths.to_vec(), name.map(str::to_owned));
         self.with_local(wc, ctx, move |db, env| {
-            let targets = local_util::targets(db, &paths)?;
+            let targets = local_util::targets_in(db, env, &paths)?;
             client_local::set_changelist(db, &env.cancel, &targets, name.as_deref(), Depth::Empty)
                 .map(|_| ())
         })
@@ -97,7 +96,7 @@ impl RealEngine {
         let pattern = local_util::checked_ignore_pattern(&req.pattern)?.to_owned();
         let (dir, scope) = (req.dir.clone(), req.scope);
         self.with_local(wc, ctx, move |db, env| {
-            let (rel, _) = local_util::target(db, &dir)?;
+            let (rel, _) = local_util::target_in(db, env, &dir)?;
             if db.read_node(&rel)?.is_none() {
                 return Err(SvnError::new(
                     ErrorCode::PathNotFound,
@@ -116,21 +115,23 @@ impl RealEngine {
         .await
     }
 
+    /// Records that `from` was moved to `to` outside OpenSVN (TortoiseSVN's "Repair move"):
+    /// the rows `svn move` writes, without touching the disk. Recording the same move again is
+    /// a no-op.
     pub(super) async fn do_mark_move(
         &self,
-        _wc: &WcRef,
-        _from: &str,
-        _to: &str,
+        wc: &WcRef,
+        from: &str,
+        to: &str,
         ctx: &OpContext,
     ) -> EngineResult<()> {
-        ctx.check()?;
-        Err(SvnError::new(
-            ErrorCode::WcInvalidOperation,
-            format!(
-                "Marking a move made outside OpenSVN is not supported yet. Revert both paths and \
-                 move the item with OpenSVN's Move command instead (tracked in {UNSUPPORTED_ISSUE})."
-            ),
-        ))
+        let (from, to) = (from.to_owned(), to.to_owned());
+        self.with_local(wc, ctx, move |db, env| {
+            let (_, src) = local_util::target(db, &from)?;
+            let (_, dst) = local_util::target(db, &to)?;
+            client_local::mark_move(db, &env.cancel, &src, &dst).map(|_| ())
+        })
+        .await
     }
 
     pub(super) async fn do_resolve(
@@ -141,7 +142,7 @@ impl RealEngine {
     ) -> EngineResult<()> {
         let (path, accept) = (req.path.clone(), accept_of(req.choice));
         self.with_local(wc, ctx, move |db, env| {
-            let (rel, _) = local_util::target(db, &path)?;
+            let (rel, _) = local_util::target_in(db, env, &path)?;
             client_local::resolve(db, &env.cancel, &rel, false, ResolveScope::ALL, accept)
                 .map(|_| ())
         })
@@ -158,7 +159,7 @@ impl RealEngine {
     ) -> EngineResult<()> {
         let (path, name, value) = (path.to_owned(), name.to_owned(), value.map(str::to_owned));
         self.with_local(wc, ctx, move |db, env| {
-            let (rel, _) = local_util::target(db, &path)?;
+            let (rel, _) = local_util::target_in(db, env, &path)?;
             client_local::propset(
                 db,
                 &env.cancel,
@@ -183,7 +184,7 @@ impl RealEngine {
             let mut rels = Vec::with_capacity(paths.len());
             let mut targets = Vec::with_capacity(paths.len());
             for p in &paths {
-                let (rel, abs) = local_util::target(db, p)?;
+                let (rel, abs) = local_util::target_in(db, env, p)?;
                 rels.push(rel);
                 targets.push(abs);
             }
@@ -214,18 +215,16 @@ impl RealEngine {
         paths: &[String],
         ctx: &OpContext,
     ) -> EngineResult<()> {
-        let paths = paths.to_vec();
+        let (paths, progress) = (paths.to_vec(), ctx.progress.clone());
         self.with_local(wc, ctx, move |db, env| {
-            let targets = local_util::targets(db, &paths)?;
+            let targets = local_util::targets_in(db, env, &paths)?;
             let opts = AddOptions {
                 depth: Depth::Infinity,
                 add_parents: true,
                 ..AddOptions::default()
             };
             let outcome = client_local::add_reporting(db, &env.cancel, &targets, &opts, &env.add)?;
-            for w in &outcome.warnings {
-                tracing::warn!(warning = %w, "add skipped a nested working copy");
-            }
+            super::progress::report_skipped_nested_wcs(&progress, &outcome.warnings);
             Ok(())
         })
         .await
@@ -240,7 +239,7 @@ impl RealEngine {
     ) -> EngineResult<()> {
         let paths = paths.to_vec();
         self.with_local(wc, ctx, move |db, env| {
-            let targets = local_util::targets(db, &paths)?;
+            let targets = local_util::targets_in(db, env, &paths)?;
             let opts = DeleteOptions {
                 keep_local,
                 force: false,
@@ -260,8 +259,8 @@ impl RealEngine {
     ) -> EngineResult<()> {
         let (from, to) = (from.to_owned(), to.to_owned());
         self.with_local(wc, ctx, move |db, env| {
-            let (_, src) = local_util::target(db, &from)?;
-            let (_, dst) = local_util::target(db, &to)?;
+            let (_, src) = local_util::target_in(db, env, &from)?;
+            let (_, dst) = local_util::new_target(db, &to)?;
             client_local::move_path(db, &env.cancel, &src, &dst).map(|_| ())
         })
         .await
@@ -325,17 +324,10 @@ impl RealEngine {
     ) -> EngineResult<()> {
         ctx.check()?;
         let root = wc.root.clone();
-        let current = blocking(move || Ok(super::wc_read::open_db(&root)?.format())).await?;
-        if u32::from(to) == current {
-            return Ok(()); // already in that format
-        }
-        Err(SvnError::new(
-            ErrorCode::WcFormatUnsupported,
-            format!(
-                "Changing the working copy format from {current} to {to} is not supported yet. \
-                 Check out a new working copy in the format you need (tracked in \
-                 {UNSUPPORTED_ISSUE})."
-            ),
-        ))
+        blocking(move || {
+            let db = super::wc_read::open_db(&root)?;
+            svn_client::wc::upgrade_format(&db, u32::from(to))
+        })
+        .await
     }
 }

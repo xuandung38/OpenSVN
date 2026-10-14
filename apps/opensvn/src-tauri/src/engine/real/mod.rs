@@ -160,6 +160,12 @@ pub struct RealEngine {
     recovery: Arc<dyn RecoveryHooks>,
     /// Where local operations read svn's runtime configuration (ignores, auto-props).
     svn_config: Arc<SvnConfigSource>,
+    /// Longest time the repository part of commit recovery may take when a working copy is
+    /// opened ([`recovery::RECOVERY_NETWORK_TIMEOUT`]).
+    recovery_network_timeout: std::time::Duration,
+    /// Request paths of local operations are matched against `wc.db` ignoring case
+    /// ([`local_util::CASE_INSENSITIVE_FS`] unless a test overrides it).
+    case_insensitive_fs: bool,
 }
 
 impl RealEngine {
@@ -172,7 +178,24 @@ impl RealEngine {
             state_dir: config.state_dir,
             recovery: config.recovery,
             svn_config: Arc::new(SvnConfigSource::default()),
+            recovery_network_timeout: recovery::RECOVERY_NETWORK_TIMEOUT,
+            case_insensitive_fs: local_util::CASE_INSENSITIVE_FS,
         }
+    }
+
+    /// Matches request paths of local operations against `wc.db` ignoring case or not, whatever
+    /// the platform (tests of the case-insensitive rules on any file system).
+    #[cfg(test)]
+    pub(crate) fn with_case_insensitive_fs(mut self, on: bool) -> Self {
+        self.case_insensitive_fs = on;
+        self
+    }
+
+    /// Replaces [`recovery::RECOVERY_NETWORK_TIMEOUT`] (tests with a server that never answers).
+    #[cfg(test)]
+    pub(crate) fn with_recovery_network_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.recovery_network_timeout = timeout;
+        self
     }
 
     /// Reads svn's runtime configuration (`global-ignores`, auto-props) from `dir/config` for
@@ -268,7 +291,10 @@ impl EngineFacade for RealEngine {
     fn capabilities(&self) -> EngineCapabilities {
         // `svn-client` does not fetch `svn:externals` yet (issue #97): checkout, update and switch
         // behave like `svn --ignore-externals`.
-        EngineCapabilities { externals: false }
+        EngineCapabilities {
+            externals: false,
+            demo: false,
+        }
     }
 
     async fn wc_info(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcInfo> {

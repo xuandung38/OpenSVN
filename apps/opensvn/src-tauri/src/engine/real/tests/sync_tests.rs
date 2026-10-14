@@ -432,10 +432,14 @@ async fn unsupported_requests_fail_with_user_facing_errors() {
     s.f.engine.checkout(&plan(&url, &wc), &ctx()).await.unwrap();
     let err =
         s.f.engine
-            .set_depth(&wc_ref(&wc), "src", Depth::Empty, &ctx())
+            .set_depth(&wc_ref(&wc), "README.md", Depth::Empty, &ctx())
             .await
             .unwrap_err();
-    assert_eq!(err.code, ErrorCode::WcInvalidOperation);
+    assert_eq!(
+        err.code,
+        ErrorCode::WcInvalidOperation,
+        "a file has no depth"
+    );
     assert!(err.message.contains("depth"), "{err}");
 
     let err =
@@ -743,4 +747,62 @@ impl RaSession for GatedSession {
     async fn abort_txn(&self, txn_name: &str) -> Result<(), SvnError> {
         self.inner.abort_txn(txn_name).await
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_depth_crops_without_losing_local_changes_and_widens_again() {
+    let s = setup();
+    let wc = s.tmp.path().join("wc");
+    let url = format!("{URL}/trunk");
+    s.f.engine.checkout(&plan(&url, &wc), &ctx()).await.unwrap();
+    std::fs::write(wc.join("src/notes.txt"), "mine\n").unwrap();
+    let wcr = wc_ref(&wc);
+
+    s.f.engine
+        .set_depth(&wcr, "src", Depth::Empty, &ctx())
+        .await
+        .unwrap();
+    assert!(!wc.join("src/main.rs").exists(), "unmodified files go");
+    assert_eq!(
+        read(&wc.join("src/notes.txt")),
+        "mine\n",
+        "unversioned files stay"
+    );
+    let db = svn_wc::WcDb::open(&wc).unwrap();
+    let src = RelPath::new("src").unwrap();
+    assert_eq!(
+        db.read_base(&src).unwrap().unwrap().depth,
+        Some(svn_types::Depth::Empty)
+    );
+    assert!(
+        db.read_base(&RelPath::new("src/main.rs").unwrap())
+            .unwrap()
+            .is_none()
+    );
+
+    // A locally modified file is never removed: it stays versioned and modified.
+    s.f.engine
+        .set_depth(&wcr, "src", Depth::Infinity, &ctx())
+        .await
+        .unwrap();
+    assert_eq!(read(&wc.join("src/main.rs")), "fn main() {}\n");
+    std::fs::write(wc.join("src/main.rs"), "fn main() { local(); }\n").unwrap();
+    s.f.engine
+        .set_depth(&wcr, "", Depth::Empty, &ctx())
+        .await
+        .unwrap();
+    assert_eq!(read(&wc.join("src/main.rs")), "fn main() { local(); }\n");
+    assert!(!wc.join("README.md").exists());
+    assert!(
+        db.read_base(&RelPath::new("src/main.rs").unwrap())
+            .unwrap()
+            .is_some(),
+        "the modified file stays versioned"
+    );
+    s.f.engine
+        .set_depth(&wcr, "", Depth::Infinity, &ctx())
+        .await
+        .unwrap();
+    assert_eq!(read(&wc.join("README.md")), "hello\n");
+    assert_eq!(read(&wc.join("src/main.rs")), "fn main() { local(); }\n");
 }

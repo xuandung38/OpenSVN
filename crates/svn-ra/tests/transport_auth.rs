@@ -972,3 +972,110 @@ async fn an_anonymous_success_does_not_confirm_a_typed_password() {
         "a rejected password is never reported"
     );
 }
+
+#[tokio::test]
+async fn a_typed_password_whose_resend_got_a_server_error_is_confirmed_later() {
+    // `/flaky` checks the password, then fails once with a 500.
+    let broken_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handler: Arc<Handler> = {
+        let broken_once = Arc::clone(&broken_once);
+        Arc::new(move |seen: &common::Seen| {
+            if seen.path == "/public" {
+                Reply::ok("open")
+            } else if seen.header("authorization").as_deref() != Some(basic("alice", "pw").as_str())
+            {
+                Reply::unauthorized("r")
+            } else if !broken_once.swap(true, Ordering::SeqCst) {
+                Reply::status(500)
+            } else {
+                Reply::ok("fine")
+            }
+        })
+    };
+    let (ca, srv) = server(handler).await;
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    prompter.save_answers.store(true, Ordering::SeqCst);
+    let t = transport_trusting(&ca, prompter.clone(), |c| {
+        c.retry = svn_ra::transport::RetryPolicy::none();
+    });
+    let resp = t
+        .send(get(srv.url("/flaky")), &CancelToken::new())
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 500);
+    assert!(prompter.accepted().is_empty(), "a 500 proves nothing");
+    // Up front elsewhere (a URL that never challenged) or with another method: still nothing.
+    t.send(get(srv.url("/public")), &CancelToken::new())
+        .await
+        .unwrap();
+    t.send(
+        HttpRequest::new(Method::OPTIONS, srv.url("/flaky")),
+        &CancelToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(prompter.accepted().is_empty());
+    // The same request again, credentials sent up front: the URL challenged, so this proves them.
+    let resp = t
+        .send(get(srv.url("/flaky")), &CancelToken::new())
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let accepted = prompter.accepted();
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(
+        (accepted[0].1.as_str(), accepted[0].2.as_str()),
+        ("alice", "pw")
+    );
+    assert!(accepted[0].3, "save is carried over");
+    assert_eq!(prompter.credential_prompts(), 1);
+    let last = srv.requests().pop().unwrap();
+    assert_eq!(last.header("authorization"), Some(basic("alice", "pw")));
+}
+
+#[tokio::test]
+async fn a_typed_password_whose_resend_was_cancelled_is_confirmed_later() {
+    let slow_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handler: Arc<Handler> = {
+        let slow_once = Arc::clone(&slow_once);
+        Arc::new(move |seen: &common::Seen| {
+            if seen.header("authorization").as_deref() != Some(basic("alice", "pw").as_str()) {
+                Reply::unauthorized("r")
+            } else if !slow_once.swap(true, Ordering::SeqCst) {
+                let mut r = Reply::ok("late");
+                r.delay = Duration::from_secs(30);
+                r
+            } else {
+                Reply::ok("fine")
+            }
+        })
+    };
+    let (ca, srv) = server(handler).await;
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    prompter.save_answers.store(true, Ordering::SeqCst);
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let cancel = CancelToken::new();
+    let pending = {
+        let (t, url, cancel) = (Arc::clone(&t), srv.url("/repo"), cancel.clone());
+        tokio::spawn(async move { t.send(get(url), &cancel).await.map(|_| ()) })
+    };
+    wait_until("the resent request reached the server", || {
+        srv.requests()
+            .iter()
+            .any(|r| r.header("authorization").is_some())
+    })
+    .await;
+    cancel.cancel();
+    let err = pending.await.unwrap().expect_err("cancelled");
+    assert_eq!(err.code, ErrorCode::Cancelled);
+    assert!(prompter.accepted().is_empty());
+    t.send(get(srv.url("/repo")), &CancelToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        prompter.accepted().len(),
+        1,
+        "confirmed by the next success"
+    );
+    assert_eq!(prompter.credential_prompts(), 1);
+}

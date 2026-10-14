@@ -369,16 +369,7 @@ scenario!(commit_with_auto_add_remove);
 scenario!(update_ends_in_conflict);
 scenario!(update_of_sub_paths);
 
-/// `mark_move` and `set_depth` are refused until https://github.com/xuandung38/OpenSVN/issues/90
-/// and https://github.com/xuandung38/OpenSVN/issues/109 land (same gap
-/// as on the in-memory repository, see `engine/real/tests/conformance_tests.rs`).
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
-#[should_panic(expected = "mark_move: SvnError { code: WcInvalidOperation")]
-async fn mark_move_and_set_depth_is_a_known_gap() {
-    let (_, host) = servers().remove(0);
-    conformance::mark_move_and_set_depth(&harness(&host, "mark-move")).await;
-}
+scenario!(mark_move_and_set_depth);
 
 // ---- path-based authorization ----
 
@@ -568,4 +559,113 @@ async fn authz_denied_at_root_allowed_on_trunk() {
         ErrorCode::Forbidden,
         "copy outside trunk: {err:?}"
     );
+}
+
+// ---- issue #111: commit below a switched subtree ----
+
+/// A commit with changes outside and below a switched folder goes through, like `svn commit`
+/// (the session moves to the common ancestor of the changes).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn commit_with_changes_below_a_switched_subtree() {
+    use opensvn_lib::engine::real::SessionConnector as _;
+    for (version, host) in servers() {
+        eprintln!("server {version}");
+        let h = harness(&host, "switched-commit");
+        let url = h.repo_url();
+        let e = h.engine();
+        e.copy_location(
+            &CopyLocationRequest {
+                from_url: format!("{url}/trunk/src"),
+                from_rev: None,
+                to_url: format!("{url}/branches/b"),
+                message: "Branch src".into(),
+                switch_wc_id: None,
+                from_wc: None,
+            },
+            None,
+            &ctx(),
+        )
+        .await
+        .expect("branch");
+        let root = h.work_dir().join("switched");
+        let info = e
+            .checkout(
+                &CheckoutPlan {
+                    url: format!("{url}/trunk"),
+                    path: root.clone(),
+                    rev: None,
+                    depth: Depth::Infinity,
+                    sparse: None,
+                    format: WcFormat::V31,
+                    store_pristine: true,
+                    ignore_externals: false,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("checkout");
+        let wc = WcRef {
+            id: WcId("switched".into()),
+            root: PathBuf::from(info.root_path),
+        };
+        // Switch `src` with the library directly (the facade switches whole working copies),
+        // over a session anchored at the folder.
+        let cancel = svn_types::CancelToken::new();
+        let src_url = svn_types::RepoUrl::parse(&format!("{url}/trunk/src")).unwrap();
+        let session = connector()
+            .connect_with(
+                &src_url,
+                &opensvn_lib::engine::real::ConnectOptions::at_url(&ctx()),
+                &cancel,
+            )
+            .await
+            .expect("session");
+        let client = svn_client::ClientCtx::new(LockOwner {
+            store: h.store.clone() as Arc<dyn LockOwnershipStore>,
+            pid: std::process::id(),
+            boot_id: THIS_BOOT.to_owned(),
+        });
+        svn_client::switch(
+            &client,
+            session.as_ref(),
+            &wc.root.join("src"),
+            &svn_types::RepoUrl::parse(&format!("{url}/branches/b")).unwrap(),
+            None,
+            svn_types::Depth::Unknown,
+            &cancel,
+        )
+        .await
+        .expect("switch src");
+
+        h.write_file(&wc.root, "README.md", "hello trunk\n")
+            .unwrap();
+        h.write_file(&wc.root, "src/main.rs", "fn main() { branch(); }\n")
+            .unwrap();
+        let rev = e
+            .commit(
+                &wc,
+                &CommitRequest {
+                    wc_id: wc.id.clone(),
+                    paths: vec![String::new()],
+                    message: "Both sides".into(),
+                    keep_locks: false,
+                    auto_add_remove: false,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("commit");
+        for (path, expected) in [
+            ("trunk/README.md", "hello trunk\n"),
+            ("branches/b/main.rs", "fn main() { branch(); }\n"),
+            ("trunk/src/main.rs", "fn main() {}\n"),
+        ] {
+            let text = e
+                .repo_cat(&format!("{url}/{path}"), Some(rev), &ctx())
+                .await
+                .unwrap_or_else(|err| panic!("cat {path}: {err}"));
+            assert_eq!(text.content, expected, "{path} at r{}", rev.0);
+        }
+    }
 }

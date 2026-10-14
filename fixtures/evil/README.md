@@ -11,12 +11,12 @@ Documents assume the session `http(s)://svn.test.local/svn/repo` (repository roo
 
 | Dir | Fed to | Attacks |
 |---|---|---|
-| `update/` | `svn_protocol::update::parse_update` / `UpdateParser` | node names `../x`, `..`, `.`, `/etc/passwd`, `sub/../../x`, `C:\…`, `C:evil`, `\\server\share`, `..\..\`, `.svn` + `wc.db`, `.SVN`, `CON.txt`, `a:b` (ADS), trailing dot/space, `delete-entry ../victim`; `checked-in` hrefs on another host, with `..` / `%2e%2e`, outside the repository; truncated, mismatched tags, billion laughs, XXE, invalid UTF-8, `&#0;`, overflowing/negative revisions, binary garbage |
-| `propfind/` | `svn_protocol::propfind::parse_list` / `ListParser` | child hrefs with `..`, `%2e%2e`, `%2f`, `%5c`, `%00`, `.svn`, another host, outside the listed directory |
+| `update/` | `svn_protocol::update::parse_update` / `UpdateParser` | node names `../x`, `..`, `.`, `/etc/passwd`, `sub/../../x`, `C:\…`, `C:evil`, `\\server\share`, `..\..\`, `.svn` + `wc.db`, `.SVN`, `CON.txt`, `a:b` (ADS), trailing dot/space, `delete-entry ../victim`; `checked-in` hrefs on another host, with `..` / `%2e%2e`, outside the repository, ending in `.. ` (the URL parser strips the space) or with `..` before a `://` inside the path; truncated, mismatched tags, billion laughs, XXE, invalid UTF-8, `&#0;`, overflowing/negative revisions, binary garbage |
+| `propfind/` | `svn_protocol::propfind::parse_list` / `ListParser` | child hrefs with `..`, `%2e%2e`, `%2f`, `%5c`, `%00`, `.svn`, another host, outside the listed directory, a trailing `.. `, `..` before a `://` inside the path |
 | `log/` | `svn_protocol::log::parse_log` | changed paths / copyfrom with `..` or not absolute, bad revision, truncation; an HTML/script commit message |
 | `merge/` | `svn_protocol::commit::parse_merge_response` | negative or non-numeric new revision |
 | `locks/` | `svn_protocol::locks::parse_get_locks` | lock paths with `..` or not absolute |
-| `options/` | `Capabilities::from_options_response` + `UrlBuilder::new` | repository root / `me` / stubs on another host or protocol-relative, root outside the session, root with `..` (also after `\`), any `\`, tab or other control character and their percent escapes (`%09`, `%5C`, ...) in a root or stub, overflowing youngest revision |
+| `options/` | `Capabilities::from_options_response` + `UrlBuilder::new` | repository root / `me` / stubs on another host or protocol-relative, root outside the session, root with `..` (also after `\`), any `\`, tab or other control character and their percent escapes (`%09`, `%5C`, ...) in a root or stub, `..` hidden before a `://` inside the path, overflowing youngest revision |
 | `svndiff/` | `svn_delta::SvndiffDecoder` (+ `WindowApplier` for `svndiff-apply`, + `Base64SvndiffDecoder`) | bad magic, unknown version, truncation, varint overflow, 1 TiB target view / new data, source view overflow, reads past new data / source view / unwritten target, short/long target, reserved opcode, zlib bomb (claims 5 B, inflates to 1 MiB), bad zlib/lz4, source beyond the base text |
 
 Transport-level attacks have no data file; `crates/svn-ra/tests/evil_transport.rs` serves them
