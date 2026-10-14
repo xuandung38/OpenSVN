@@ -22,7 +22,10 @@ async fn barriers_of_the_batched_editor() {
     let scenario = fail::FailScenario::setup();
     same_text_is_placed_once_across_batches().await;
     cancel_does_not_wait_for_a_slow_barrier().await;
-    cancel_during_a_barrier_wait_returns_promptly().await;
+    // The end-of-drive wait (a few files) and a mid-drive wait (the first flush of more files
+    // than a batch holds).
+    cancel_during_a_barrier_wait_returns_promptly(3).await;
+    cancel_during_a_barrier_wait_returns_promptly(SAME_TEXT_FILES).await;
     scenario.teardown();
 }
 
@@ -139,18 +142,12 @@ async fn cancel_does_not_wait_for_a_slow_barrier() {
 /// A cancellation that arrives while the editor already waits for a slow barrier (here the one
 /// of the last batch, at the end of the drive) ends the wait within the grace period; nothing
 /// that relies on the barrier is committed, and the next update finishes the work.
-async fn cancel_during_a_barrier_wait_returns_promptly() {
+async fn cancel_during_a_barrier_wait_returns_promptly(files: usize) {
     let s = session();
-    s.seed(
-        "a",
-        "r1",
-        &[
-            put("a.txt", "a\n"),
-            put("b.txt", "b\n"),
-            put("d/c.txt", "c\n"),
-        ],
-    )
-    .expect("seed");
+    let r1: Vec<_> = (0..files)
+        .map(|i| put(&format!("d{}/f{i}.txt", i % 23), &format!("{i}\n")))
+        .collect();
+    s.seed("a", "r1", &r1).expect("seed");
     let sb = Sandbox::new();
     let wc = sb.path("wc");
     checkout(
@@ -168,16 +165,10 @@ async fn cancel_during_a_barrier_wait_returns_promptly() {
         eprintln!("skipped: the test directory's filesystem syncs every file on its own");
         return;
     }
-    s.seed(
-        "a",
-        "r2",
-        &[
-            put("a.txt", "a2\n"),
-            put("b.txt", "b2\n"),
-            put("d/c.txt", "c2\n"),
-        ],
-    )
-    .expect("seed");
+    let r2: Vec<_> = (0..files)
+        .map(|i| put(&format!("d{}/f{i}.txt", i % 23), &format!("{i} v2\n")))
+        .collect();
+    s.seed("a", "r2", &r2).expect("seed");
 
     // The barrier takes 4 s; 300 ms into the first wait for it, the user cancels.
     let cancel = CancelToken::new();
@@ -223,8 +214,9 @@ async fn cancel_during_a_barrier_wait_returns_promptly() {
         .await
         .expect("resume");
     assert_eq!(sum.revision, Some(Revnum(2)));
-    for (f, text) in [("a.txt", "a2\n"), ("b.txt", "b2\n"), ("d/c.txt", "c2\n")] {
-        assert_eq!(read(&wc.join(f)), text, "{f}");
+    for i in [0, files / 2, files - 1] {
+        let f = format!("d{}/f{i}.txt", i % 23);
+        assert_eq!(read(&wc.join(&f)), format!("{i} v2\n"), "{f}");
     }
     let db = open_db(&wc);
     assert!(db.work_items().expect("queue").is_empty());
