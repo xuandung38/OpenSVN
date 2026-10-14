@@ -250,6 +250,17 @@ async fn incoming_delete_refuses_to_copy_a_server_excluded_node_like_svn() {
         "rows below d differ from svn"
     );
     assert_eq!(read(&ours.join("d/x.txt")), "x\nedited\n");
+    // The interrupted update leaves the root `incomplete` at the new revision, as svn does.
+    assert_eq!(
+        nodes_snapshot(&ours),
+        nodes_snapshot(&theirs),
+        "NODES rows differ"
+    );
+    assert_eq!(
+        svn_status(&oracle, &ours, &[]),
+        svn_status(&oracle, &theirs, &[]),
+        "svn status differs"
+    );
     assert_eq!(
         tree_snapshot(&ours),
         tree_snapshot(&theirs),
