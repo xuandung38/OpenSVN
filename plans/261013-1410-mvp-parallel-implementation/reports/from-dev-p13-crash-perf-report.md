@@ -67,7 +67,37 @@ none.
 
 ### Crash suite
 
-CRASH_RESULTS_PLACEHOLDER
+Run on 2026-10-14 with `CRASH_FILES=200`, `CRASH_RANDOM_ITERS=20` and `CRASH_FP_ITERS=5`. That
+gives 105 random-SIGKILL cases (5 of them control cases) and 143 failpoint kills, after 75
+hit-counting runs. Failpoint coverage:
+- 13 of the 15 failpoints are reached and killed: every `wc.txn.*`, `wc.wq.*`,
+  `pristine.install.before_rename` and `update.*`, plus the 6 `commit.*` failpoints, including
+  `commit.after_merge_before_finalize` ("after MERGE").
+- The 2 failpoints that a given operation never reaches are left out of the table, per operation.
+
+| engine | random SIGKILL failed | failpoint kills failed |
+|---|---:|---:|
+| `main` today | 32 / 105 (update 19, cleanup 13) | 44 / 143 (update 32, cleanup 12) |
+| `main` + one-line reporter fix from #119 (separate worktree, not in this PR) | 0 / 105 | 0 / 143 |
+
+- **All 76 failures have the same symptom:** after the kill, the next update fails with `HTTP
+  request failed: ... unexpected EOF`, and Apache logs "Working copy path '...' does not exist in
+  repository". This is #119.
+- **Checks that never failed:**
+  - no wc.db corruption: integrity check right after the kill, and again after recovery;
+  - no lost local change, and no half-applied file;
+  - no silent revert;
+  - commit atomic and folded in after MERGE;
+  - no half revert;
+  - checkout, commit and revert recover fully.
+- **Warnings** (dozens of cases): `.svn/tmp` leftovers after recovery (#120).
+- In the patched random run, many cases completed before the kill. The two suites ran at the same
+  time, so the uninterrupted durations measured under load were too long. The failpoint suite is
+  deterministic and does not have this problem.
+
+Acceptance "0 corrupt WC, 0 lost changes, 0 silent reverts":
+- holds on every case;
+- "next open/update recovers" does **not** hold for update/cleanup until #119 is fixed.
 
 ## Issues opened (no production fix in this PR)
 
@@ -95,4 +125,11 @@ as warnings and resolves them with real `svn cleanup` before verifying.
 
 ## Gates
 
-GATES_PLACEHOLDER
+- `cargo fmt --all --check`: clean.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: clean.
+- `cargo clippy -p opensvn-crash --features failpoints --all-targets -- -D warnings`: clean.
+- `cargo clippy -p opensvn --features real-engine --all-targets -- -D warnings`: clean.
+- `cargo test --workspace --locked`: 1293 passed, 0 failed, 22 ignored. The crash suites are
+  among the ignored tests; they need Apache and run in the nightly workflow.
+- `cargo test -p opensvn --features opensvn/real-engine`: 422 passed, 0 failed.
+- `actionlint .github/workflows/nightly.yml`: clean.
