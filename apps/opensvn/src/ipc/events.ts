@@ -48,8 +48,19 @@ export const EVENT_NAMES: EventName[] = [
 export const PHASE_NEEDS_CLEANUP = "needs-cleanup";
 export const PHASE_NESTED_WC_SKIPPED = "nested-wc-skipped";
 
-/** Native menu events (`menu://wc.update`, `menu://file.checkout`, ...) carry no payload. */
+/**
+ * Native menu events (`menu://wc/update`, `menu://file/checkout`, ...) carry no payload. The item
+ * id's dots become slashes (`menu.rs` `event_name`): Tauri refuses any other character set.
+ */
 export type MenuEventName = `menu://${string}`;
+
+/**
+ * Tauri's rule for event names: only alphanumerics, `-`, `/`, `:` and `_`. Anything else fails both
+ * `emit` in Rust and `listen` here, so the event never arrives.
+ */
+export function isValidEventName(name: string): boolean {
+  return /^[\p{L}\p{N}\-/:_]+$/u.test(name);
+}
 
 /** Live view of one operation for the Activity panel. */
 export interface OpState {
@@ -82,66 +93,66 @@ export interface EventBus {
  * itself (zoom, Exit). `MENU_ACTIONS` (`use-wc-shortcuts.ts`) has exactly these keys.
  */
 export const MENU_EVENTS: readonly MenuEventName[] = [
-  "menu://file.checkout",
-  "menu://file.add-wc",
-  "menu://file.switch-repo",
-  "menu://file.recent",
-  "menu://file.close-wc",
-  "menu://app.settings",
-  "menu://app.check-app-updates",
-  "menu://edit.find",
-  "menu://edit.copy-path",
-  "menu://edit.copy-url",
-  "menu://view.changes",
-  "menu://view.history",
-  "menu://view.browse",
-  "menu://view.activity",
-  "menu://view.sidebar",
-  "menu://view.diff-mode",
-  "menu://view.hide-whitespace",
-  "menu://view.show-unversioned",
-  "menu://view.show-ignored",
-  "menu://view.group-changelist",
-  "menu://view.tree",
-  "menu://view.theme-system",
-  "menu://view.theme-light",
-  "menu://view.theme-dark",
-  "menu://wc.check-updates",
-  "menu://wc.update",
-  "menu://wc.update-to",
-  "menu://wc.commit",
-  "menu://wc.discard-all",
-  "menu://wc.sparse",
-  "menu://wc.cleanup",
-  "menu://wc.properties",
-  "menu://wc.layout",
-  "menu://wc.upgrade",
-  "menu://wc.reveal",
-  "menu://wc.terminal",
-  "menu://wc.editor",
-  "menu://branch.switch",
-  "menu://branch.new",
-  "menu://branch.new-tag",
-  "menu://branch.merge",
-  "menu://branch.compare",
-  "menu://branch.show-on-server",
-  "menu://branch.layout",
-  "menu://sel.discard",
-  "menu://sel.lock",
-  "menu://sel.unlock",
-  "menu://sel.changelist",
-  "menu://sel.ignore",
-  "menu://sel.resolve",
-  "menu://sel.log",
-  "menu://sel.blame",
-  "menu://sel.rename",
-  "menu://sel.delete",
-  "menu://sel.properties",
-  "menu://window.conflicts",
-  "menu://help.docs",
-  "menu://help.shortcuts",
-  "menu://help.logs",
-  "menu://help.report",
+  "menu://file/checkout",
+  "menu://file/add-wc",
+  "menu://file/switch-repo",
+  "menu://file/recent",
+  "menu://file/close-wc",
+  "menu://app/settings",
+  "menu://app/check-app-updates",
+  "menu://edit/find",
+  "menu://edit/copy-path",
+  "menu://edit/copy-url",
+  "menu://view/changes",
+  "menu://view/history",
+  "menu://view/browse",
+  "menu://view/activity",
+  "menu://view/sidebar",
+  "menu://view/diff-mode",
+  "menu://view/hide-whitespace",
+  "menu://view/show-unversioned",
+  "menu://view/show-ignored",
+  "menu://view/group-changelist",
+  "menu://view/tree",
+  "menu://view/theme-system",
+  "menu://view/theme-light",
+  "menu://view/theme-dark",
+  "menu://wc/check-updates",
+  "menu://wc/update",
+  "menu://wc/update-to",
+  "menu://wc/commit",
+  "menu://wc/discard-all",
+  "menu://wc/sparse",
+  "menu://wc/cleanup",
+  "menu://wc/properties",
+  "menu://wc/layout",
+  "menu://wc/upgrade",
+  "menu://wc/reveal",
+  "menu://wc/terminal",
+  "menu://wc/editor",
+  "menu://branch/switch",
+  "menu://branch/new",
+  "menu://branch/new-tag",
+  "menu://branch/merge",
+  "menu://branch/compare",
+  "menu://branch/show-on-server",
+  "menu://branch/layout",
+  "menu://sel/discard",
+  "menu://sel/lock",
+  "menu://sel/unlock",
+  "menu://sel/changelist",
+  "menu://sel/ignore",
+  "menu://sel/resolve",
+  "menu://sel/log",
+  "menu://sel/blame",
+  "menu://sel/rename",
+  "menu://sel/delete",
+  "menu://sel/properties",
+  "menu://window/conflicts",
+  "menu://help/docs",
+  "menu://help/shortcuts",
+  "menu://help/logs",
+  "menu://help/report",
 ];
 
 export function createEventBus(adapter: IpcAdapter, qc: QueryClient): EventBus {
@@ -186,16 +197,28 @@ export function createEventBus(adapter: IpcAdapter, qc: QueryClient): EventBus {
         unlistens.push(u);
         return true;
       };
+      // One refused subscription must not leave every later event (and menu item) dead: each one
+      // is tried, and the failures are reported together once the others are active.
+      const failed: string[] = [];
+      const trySubscribe = async (name: string, cb: (payload: unknown) => void) => {
+        try {
+          return await subscribe(name, cb);
+        } catch (e) {
+          failed.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+          return true;
+        }
+      };
       starting = (async () => {
         for (const name of EVENT_NAMES) {
-          if (!(await subscribe(name, (p) => dispatch(name, p)))) return;
+          if (!(await trySubscribe(name, (p) => dispatch(name, p)))) return;
         }
         for (const name of menuEvents) {
-          const ok = await subscribe(name, () => {
+          const ok = await trySubscribe(name, () => {
             for (const h of menuHandlers) h(name);
           });
           if (!ok) return;
         }
+        if (failed.length > 0) throw new Error(`could not subscribe to ${failed.join("; ")}`);
       })();
       return starting;
     },

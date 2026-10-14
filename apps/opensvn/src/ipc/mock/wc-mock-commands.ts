@@ -134,6 +134,11 @@ export function resetWcMock(): void {
   state = initialState();
 }
 
+/** Empties the working copy list, as on a fresh install (tests: the Welcome screen). */
+export function clearMockWorkingCopies(): void {
+  state.wcs = [];
+}
+
 /** Marks a sample working copy as left behind by a checkout that stopped half-way (tests). */
 export function markMockWcIncomplete(wcId: string): void {
   const wc = state.wcs.find((w) => w.id === wcId);

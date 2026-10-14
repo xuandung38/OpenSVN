@@ -203,7 +203,7 @@ Grant dùng một lần, hết hạn sau 5 phút, gắn với cửa sổ `main`;
 
 ### 3.7 Menu native
 Menu bar do Rust dựng (`menu.rs`, `menu_spec`): một menu duy nhất, cấu trúc và phím tắt theo doc 01 §8 (OpenSVN trên macOS · File · Edit · View · Working Copy · Branch/Location · Selection · Window trên macOS · Help). Mỗi mục là một trong ba loại, có test Rust giữ đúng theo cả hai chiều:
-- **Mục của UI:** phát event không payload `menu://<id>` (id = id mục, ví dụ `menu://wc.update`, `menu://file.checkout`, `menu://edit.find`, `menu://view.diff-mode`). UI đăng ký đúng danh sách `MENU_EVENTS` (`src/ipc/events.ts`), mỗi event có hành động trong `MENU_ACTIONS` (`use-wc-shortcuts.ts`, cùng tập khóa, có test). Mục chưa làm (phase sau, ví dụ Merge, Properties, Sparse) báo "chưa có" bằng toast thay vì không làm gì.
+- **Mục của UI:** phát event không payload `menu://<id>`, trong đó dấu `.` của id mục đổi thành `/` vì Tauri chỉ nhận tên event gồm chữ, số, `-`, `/`, `:` và `_` (ví dụ `menu://wc/update`, `menu://file/checkout`, `menu://edit/find`, `menu://view/diff-mode`). UI đăng ký đúng danh sách `MENU_EVENTS` (`src/ipc/events.ts`), mỗi event có hành động trong `MENU_ACTIONS` (`use-wc-shortcuts.ts`, cùng tập khóa, có test). Mục chưa làm (phase sau, ví dụ Merge, Properties, Sparse) báo "chưa có" bằng toast thay vì không làm gì.
 - **Mục Rust tự xử lý** (`native_action`): Zoom in/out/Actual size (đổi zoom webview) và Exit; không phát event.
 - **Mục native** (undo/redo/cut/copy/paste/select all, hide, quit, minimize, full screen, about): vai trò của hệ điều hành; không phát event.
 

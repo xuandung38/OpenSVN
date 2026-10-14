@@ -14,6 +14,7 @@ import type {
   SettingsPatch_Deserialize,
   UnlockRequest,
 } from "../bindings";
+import { isValidEventName } from "../events";
 import { mockSettings } from "./data";
 import {
   MOCK_REPO_ROOT,
@@ -32,8 +33,12 @@ import { wcMockCommands } from "./wc-mock-commands";
 type Handler = (payload: unknown) => void;
 const listeners = new Map<string, Set<Handler>>();
 
-/** Emit an event to mock subscribers (also used by the dev gallery to simulate backend pushes). */
+/**
+ * Emit an event to mock subscribers (also used by the dev gallery to simulate backend pushes).
+ * Refuses names Tauri refuses, as Rust's `emit` does.
+ */
 export function mockEmit(name: string, payload: unknown = null): void {
+  if (!isValidEventName(name)) throw new Error(`mock: illegal event name ${name}`);
   for (const h of listeners.get(name) ?? []) h(payload);
 }
 
@@ -293,6 +298,8 @@ export const mockAdapter: IpcAdapter = {
   kind: "mock",
   commands: commandsProxy,
   async listen(name, handler) {
+    // Like Tauri's `listen`, which rejects such a name before subscribing.
+    if (!isValidEventName(name)) throw new Error(`mock: illegal event name ${name}`);
     const set = listeners.get(name) ?? new Set<Handler>();
     listeners.set(name, set);
     set.add(handler);

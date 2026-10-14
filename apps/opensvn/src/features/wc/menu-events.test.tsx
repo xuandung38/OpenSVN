@@ -42,20 +42,20 @@ test("Edit > Find focuses the filter; View > Diff mode / Hide whitespace toggle 
   await screen.findByTestId("editor");
   expect(mode()).toBe("split");
 
-  await emit("menu://edit.find");
+  await emit("menu://edit/find");
   await waitFor(() => expect(document.activeElement?.hasAttribute("data-wc-filter")).toBe(true));
   (document.activeElement as HTMLElement).blur();
 
-  await emit("menu://view.diff-mode");
+  await emit("menu://view/diff-mode");
   await waitFor(() => expect(mode()).toBe("unified"));
 
   // Key press plus the native accelerator's echo, in both orders: one toggle each time.
   const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
   await user().keyboard("{Control>}{Alt>}d{/Alt}{/Control}");
-  await emit("menu://view.diff-mode");
+  await emit("menu://view/diff-mode");
   await waitFor(() => expect(mode()).toBe("split"));
   now.mockReturnValue(2_000_000);
-  await emit("menu://view.diff-mode");
+  await emit("menu://view/diff-mode");
   now.mockReturnValue(2_000_050);
   await user().keyboard("{Control>}{Alt>}d{/Alt}{/Control}");
   await waitFor(() => expect(mode()).toBe("unified"));
@@ -63,13 +63,13 @@ test("Edit > Find focuses the filter; View > Diff mode / Hide whitespace toggle 
   now.mockReturnValue(3_000_000);
   await user().keyboard("{Control>}{Alt>}d{/Alt}{/Control}");
   now.mockReturnValue(3_000_401);
-  await emit("menu://view.diff-mode");
+  await emit("menu://view/diff-mode");
   await waitFor(() => expect(mode()).toBe("unified"));
   now.mockRestore();
 
   const ws = screen.getByRole("checkbox", { name: "Hide whitespace changes" }) as HTMLInputElement;
   expect(ws.checked).toBe(false);
-  await emit("menu://view.hide-whitespace");
+  await emit("menu://view/hide-whitespace");
   await waitFor(() => expect(ws.checked).toBe(true));
 });
 
@@ -77,34 +77,34 @@ test("menu-only items: shortcuts help, not-yet items, sidebar, copy URL and clos
   renderApp(<AppShell />);
   await screen.findByRole("option", { name: /src\/engine\/renderer\.ts/ });
 
-  await emit("menu://help.shortcuts");
+  await emit("menu://help/shortcuts");
   const help = await screen.findByRole("dialog", { name: "Keyboard shortcuts", hidden: true });
   expect(await within(help).findByText("Find / Filter")).toBeTruthy();
   await user().click(within(help).getByRole("button", { name: "Close", hidden: true }));
   await waitFor(() => expect(within(help).queryByText("Find / Filter")).toBeNull());
 
-  await emit("menu://branch.merge");
+  await emit("menu://branch/merge");
   expect(await screen.findByText("This menu item is not available yet.")).toBeTruthy();
 
-  await emit("menu://edit.copy-url");
+  await emit("menu://edit/copy-url");
   await waitFor(async () =>
     expect(await navigator.clipboard.readText()).toBe("https://svn.example.com/repos/game/trunk"),
   );
 
   expect(screen.getByRole("button", { name: "Working copy actions" })).toBeTruthy();
-  await emit("menu://view.sidebar");
+  await emit("menu://view/sidebar");
   await waitFor(() =>
     expect(screen.queryByRole("button", { name: "Working copy actions" })).toBeNull(),
   );
-  await emit("menu://view.sidebar");
+  await emit("menu://view/sidebar");
   expect(await screen.findByRole("button", { name: "Working copy actions" })).toBeTruthy();
 
-  await emit("menu://wc.reveal");
+  await emit("menu://wc/reveal");
   await waitFor(() =>
     expect(mockCalls.filter((c) => c.name === "revealInOs").at(-1)?.args).toEqual([MOCK_WC_ID, ""]),
   );
 
-  await emit("menu://file.close-wc");
+  await emit("menu://file/close-wc");
   await waitFor(() =>
     expect(mockCalls.filter((c) => c.name === "wcClose").at(-1)?.args).toEqual([MOCK_WC_ID]),
   );

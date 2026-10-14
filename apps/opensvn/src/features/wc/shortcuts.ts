@@ -1,7 +1,20 @@
 /** Keyboard shortcuts of doc 01 section 8. `Mod` is Cmd on macOS and Ctrl elsewhere. */
 
-export function isMac(): boolean {
-  return typeof navigator !== "undefined" && /mac|iphone|ipad/i.test(navigator.platform ?? "");
+/**
+ * True on macOS (and iOS). `navigator.platform` is deprecated and may be frozen or empty, so the
+ * newer `userAgentData.platform` and the user agent string back it up; WKWebView reports
+ * "MacIntel" in `platform` and "Macintosh" in its user agent.
+ */
+export function isMac(
+  nav: Pick<Navigator, "platform" | "userAgent"> | undefined = globalNavigator(),
+): boolean {
+  if (!nav) return false;
+  const uaData = (nav as { userAgentData?: { platform?: string } }).userAgentData;
+  return /mac|iphone|ipad/i.test(uaData?.platform || nav.platform || nav.userAgent || "");
+}
+
+function globalNavigator(): Navigator | undefined {
+  return typeof navigator === "undefined" ? undefined : navigator;
 }
 
 export type ShortcutId =
@@ -31,7 +44,8 @@ export type ShortcutId =
   | "editor"
   | "newBranch"
   | "newTag"
-  | "showShortcuts";
+  | "showShortcuts"
+  | "settings";
 
 interface Spec {
   key: string;
@@ -67,6 +81,7 @@ export const SHORTCUTS: Record<ShortcutId, Spec> = {
   newBranch: { key: "n", shift: true },
   newTag: { key: "t", shift: true },
   showShortcuts: { key: "/" },
+  settings: { key: "," },
 };
 
 /** True when the keyboard event is the given shortcut (Mod held, modifiers matching exactly). */

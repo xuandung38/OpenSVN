@@ -280,11 +280,11 @@ test("footer and File menu events open checkout and add existing; a menu/key ech
   await closeCheckout();
 
   now.mockReturnValue(500_000);
-  await act(async () => mockEmit("menu://file.switch-repo"));
+  await act(async () => mockEmit("menu://file/switch-repo"));
   expect(await screen.findByRole("combobox", { name: "Filter repositories" })).toBeTruthy();
   await user().keyboard("{Escape}");
 
-  await act(async () => mockEmit("menu://file.checkout"));
+  await act(async () => mockEmit("menu://file/checkout"));
   expect(
     await screen.findByRole("dialog", { name: "Checkout repository", hidden: true }),
   ).toBeTruthy();
@@ -294,14 +294,14 @@ test("footer and File menu events open checkout and add existing; a menu/key ech
   // Wall-clock time is frozen so a slow machine cannot stretch the key-to-echo gap.
   now.mockReturnValue(1_000_000);
   await user().keyboard("{Control>}o{/Control}");
-  await act(async () => mockEmit("menu://file.add-wc"));
+  await act(async () => mockEmit("menu://file/add-wc"));
   await waitFor(() => expect(calls("pathPick")).toBe(1));
   expect(await screen.findByText(/Added working copy/)).toBeTruthy();
   expect(calls("pathPick")).toBe(1);
 
   // The other order (Windows/Linux can deliver the menu event first): still shown once.
   now.mockReturnValue(2_000_000);
-  await act(async () => mockEmit("menu://file.add-wc"));
+  await act(async () => mockEmit("menu://file/add-wc"));
   now.mockReturnValue(2_000_050);
   await user().keyboard("{Control>}o{/Control}");
   await waitFor(() => expect(calls("pathPick")).toBe(2));
@@ -312,11 +312,11 @@ test("footer and File menu events open checkout and add existing; a menu/key ech
   await user().keyboard("{Control>}o{/Control}");
   await waitFor(() => expect(calls("pathPick")).toBe(3));
   now.mockReturnValue(3_000_401);
-  await act(async () => mockEmit("menu://file.add-wc"));
+  await act(async () => mockEmit("menu://file/add-wc"));
   await waitFor(() => expect(calls("pathPick")).toBe(4));
   // ...and so is a key press more than 400 ms after a menu event.
   now.mockReturnValue(4_000_000);
-  await act(async () => mockEmit("menu://file.add-wc"));
+  await act(async () => mockEmit("menu://file/add-wc"));
   await waitFor(() => expect(calls("pathPick")).toBe(5));
   now.mockReturnValue(4_000_401);
   await user().keyboard("{Control>}o{/Control}");
