@@ -17,6 +17,8 @@ svn-delta.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
+# Only to classify connection failures in the errors reqwest returns (same version as reqwest's).
+hyper.workspace = true
 md-5.workspace = true
 reqwest = { workspace = true, features = ["rustls-no-provider", "stream", "system-proxy"] }
 # `ring` provider: smaller C/asm surface than aws-lc-rs; FIPS and post-quantum key exchange are not

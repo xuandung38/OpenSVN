@@ -19,7 +19,7 @@ use svn_types::{
 };
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-use super::update::{RaWire, error_of};
+use super::update::{RaWire, buffered_error};
 
 pub(crate) fn corrupt(msg: impl Into<String>) -> SvnError {
     SvnError::new(ErrorCode::Corrupt, msg)
@@ -107,12 +107,12 @@ pub(crate) async fn stat(
     let rev = peg(wire, rev, cancel).await?;
     let repo = wire.repo_path(path)?;
     let req = propfind::stat_request(wire.urls(), rev, &repo)?;
-    let resp = wire.send(req, cancel).await?;
-    if !resp.status().is_success() {
-        let e = error_of(resp, cancel).await;
+    let resp = wire.fetch_small(req, cancel).await?;
+    if !resp.status.is_success() {
+        let e = buffered_error(&resp);
         return if is_absent(&e) { Ok(None) } else { Err(e) };
     }
-    let body = RaWire::read_small(resp, cancel).await?;
+    let body = resp.body;
     let entries = parse_chunked(&mut MultiStatusParser::new(), &body, 0)?;
     let first = entries
         .first()
@@ -330,8 +330,7 @@ pub(crate) async fn get_file(
     // Properties, node kind and checksum first: a GET on a directory would return an HTML
     // index page, which must never end up in a file.
     let req = propfind::allprop_request(wire.urls(), rev, &repo)?;
-    let resp = wire.send_ok(req, cancel).await?;
-    let body = RaWire::read_small(resp, cancel).await?;
+    let body = wire.fetch_small_ok(req, cancel).await?;
     let entries = parse_chunked(&mut MultiStatusParser::new(), &body, 0)?;
     let entry = entries
         .first()

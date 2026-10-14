@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use svn_ra_api::{RaSession, UpdateMode, UpdateRequest};
 use svn_types::{
-    CancelToken, Checksum, DeltaEditor, Depth, DirId, FileId, LockInfo, NodeKind, PropChange,
-    RelPath, RemoteStatus, Result, Revnum, SvnError, WcStatus, WindowSink,
+    CancelToken, Checksum, DeltaEditor, Depth, DirId, ErrorCode, FileId, LockInfo, NodeKind,
+    PropChange, RelPath, RemoteStatus, Result, Revnum, SvnError, WcStatus, WindowSink,
 };
 use svn_wc::db::WcDb;
 
@@ -161,6 +161,10 @@ pub struct RemoteInfo {
 }
 
 /// Asks the server what changed below `rel` since the working copy revisions.
+///
+/// Nothing is written to the working copy, so a check that broke off because the connection
+/// failed (see [`svn_types::ConnectionFailure`]) is run again from the start on a fresh
+/// connection, after the delays of [`crate::update::RECONNECT_DELAYS`].
 pub async fn fetch(
     session: &dyn RaSession,
     db: Arc<WcDb>,
@@ -168,6 +172,50 @@ pub async fn fetch(
     target: RelPath,
     depth: Depth,
     repos_root: String,
+    cancel: &CancelToken,
+) -> Result<RemoteInfo> {
+    let mut attempt = 0usize;
+    loop {
+        let result = fetch_once(
+            session,
+            Arc::clone(&db),
+            &anchor,
+            &target,
+            depth,
+            &repos_root,
+            cancel,
+        )
+        .await;
+        let err = match result {
+            Ok(info) => return Ok(info),
+            Err(e) => e,
+        };
+        let delay = crate::update::RECONNECT_DELAYS.get(attempt).copied();
+        let (Some(delay), Some(failure)) = (delay, err.connection_failure()) else {
+            return Err(err);
+        };
+        if err.code == ErrorCode::Cancelled {
+            return Err(err);
+        }
+        attempt += 1;
+        tracing::info!(?failure, attempt, "remote status broke off; asking again");
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                cancel.check()?;
+            }
+            () = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
+async fn fetch_once(
+    session: &dyn RaSession,
+    db: Arc<WcDb>,
+    anchor: &RelPath,
+    target: &RelPath,
+    depth: Depth,
+    repos_root: &str,
     cancel: &CancelToken,
 ) -> Result<RemoteInfo> {
     let out = Arc::new(Mutex::new(Collected::default()));
@@ -184,7 +232,7 @@ pub async fn fetch(
         target.clone(),
         depth,
         false,
-        repos_root,
+        repos_root.to_owned(),
     );
     session
         .do_update(
@@ -209,12 +257,12 @@ pub async fn fetch(
             locks: BTreeMap::new(),
         }
     };
-    let locks = session.get_locks(&target, Depth::Infinity, cancel).await?;
+    let locks = session.get_locks(target, Depth::Infinity, cancel).await?;
     for l in locks {
         // Lock paths are repository paths below the session; map them back through the anchor.
         let text = l.path.as_str().trim_start_matches('/');
         if let Ok(rel) = RelPath::new(text)
-            && let Ok(wc) = wc::join_rel(&anchor, &rel)
+            && let Ok(wc) = wc::join_rel(anchor, &rel)
         {
             info.locks.insert(wc, l);
         }

@@ -14,6 +14,11 @@ pub const MAX_CONNECTIONS: usize = 8;
 /// Default connections per host.
 pub const DEFAULT_CONNECTIONS: usize = 4;
 
+/// Default time an idle pooled connection is kept for reuse. Shorter than the keep-alive timeout
+/// of common servers (Apache 5 s, IIS 120 s, many proxies 5-60 s), so the client drops an idle
+/// connection before the server does and rarely sends a request into a closing connection.
+pub const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(4);
+
 /// Subversion version this client speaks as (the `User-Agent` prefix and the transaction's
 /// client compatibility property).
 pub const SVN_COMPAT_VERSION: &str = "1.15.0";
@@ -104,6 +109,8 @@ pub struct TransportConfig {
     pub read_timeout: Duration,
     /// Retry behavior for idempotent requests.
     pub retry: RetryPolicy,
+    /// How long an idle connection stays in the pool; see [`DEFAULT_POOL_IDLE_TIMEOUT`].
+    pub pool_idle_timeout: Duration,
     /// Maximum same-origin redirects followed per request.
     pub max_redirects: u8,
     /// Proxy selection.
@@ -121,6 +128,7 @@ impl Default for TransportConfig {
             connect_timeout: Duration::from_secs(30),
             read_timeout: Duration::from_secs(60),
             retry: RetryPolicy::default(),
+            pool_idle_timeout: DEFAULT_POOL_IDLE_TIMEOUT,
             max_redirects: 5,
             proxy: ProxyConfig::System,
             extra_root_certs: Vec::new(),
