@@ -18,6 +18,9 @@ struct Ctx<'a> {
     db: &'a WcDb,
     anchor: &'a RelPath,
     root_url: RepoUrl,
+    /// `--set-depth`: excluded nodes are reported as missing so the server sends them again
+    /// when the new depth covers them (svn's `honor_depth_exclude = FALSE`).
+    sticky: bool,
 }
 
 impl Ctx<'_> {
@@ -94,6 +97,10 @@ impl Ctx<'_> {
                     r.delete_path(&child_report)?;
                     continue;
                 }
+                Presence::Excluded if self.sticky => {
+                    r.delete_path(&child_report)?;
+                    continue;
+                }
                 Presence::Excluded => {
                     r.set_path(
                         &child_report,
@@ -134,12 +141,15 @@ impl Ctx<'_> {
 
 /// Describes the working copy state below `target` (anchor relative) to the server.
 ///
-/// `depth` overrides the recorded depth of the target when it is not `Unknown`.
+/// `depth` overrides the recorded depth of the target when it is not `Unknown`. With `sticky`
+/// (`--set-depth`) the target is reported at its recorded depth whatever `depth` says, so the
+/// server sends what a deeper requested depth adds, and excluded nodes are reported missing.
 pub fn build_report(
     db: Arc<WcDb>,
     anchor: RelPath,
     target: RelPath,
     depth: Depth,
+    sticky: bool,
     repos_root: String,
 ) -> ReportFn {
     Box::new(move |r: &mut dyn Reporter| {
@@ -154,6 +164,7 @@ pub fn build_report(
             db: &db,
             anchor: &anchor,
             root_url: RepoUrl::parse(&repos_root)?,
+            sticky,
         };
         let _ = ctx.anchor;
         let recorded = if node.kind == NodeKind::Dir {
@@ -163,7 +174,7 @@ pub fn build_report(
         } else {
             Depth::Infinity
         };
-        let report_depth = if depth == Depth::Unknown {
+        let report_depth = if depth == Depth::Unknown || sticky {
             recorded
         } else {
             depth

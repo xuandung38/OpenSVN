@@ -38,6 +38,9 @@ pub struct UpdateParams {
     pub allow_unversioned_obstructions: bool,
     /// Ignore node ancestry (switch only).
     pub ignore_ancestry: bool,
+    /// `svn update --set-depth`: record `depth` and let the drive widen the working copy to it.
+    /// The caller crops first when the depth shrinks.
+    pub sticky_depth: bool,
 }
 
 /// Releases the working copy lock when dropped, also on error and cancellation.
@@ -226,6 +229,7 @@ pub async fn drive_update(
         target: target.clone(),
         switch_relpath,
         depth: params.depth,
+        sticky_depth: params.sticky_depth,
         allow_unversioned_obstructions: params.allow_unversioned_obstructions,
         repos_root: root.clone(),
         uuid,
@@ -233,7 +237,14 @@ pub async fn drive_update(
         cancel: cancel.clone(),
     };
     let (editor, outcome) = UpdateEditor::new(setup)?;
-    let report = build_report(Arc::clone(&db), anchor, target.clone(), params.depth, root);
+    let report = build_report(
+        Arc::clone(&db),
+        anchor,
+        target.clone(),
+        params.depth,
+        params.sticky_depth,
+        root,
+    );
     let req = UpdateRequest {
         revision: params.revision,
         target,
