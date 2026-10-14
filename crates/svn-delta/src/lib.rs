@@ -4,7 +4,8 @@
 //!   [`svn_types::TxDeltaWindow`]s.
 //! * [`WindowApplier`] is a [`svn_types::WindowSink`] that applies windows onto a source stream
 //!   and writes the target while hashing it (MD5 and SHA-1).
-//! * [`SvndiffEncoder`] writes full-text svndiff 0/1/2 streams.
+//! * [`SvndiffEncoder`] writes svndiff 0/1/2 streams; [`delta_window`] computes the window that
+//!   rebuilds a target view from a source view (svn's xdelta), for commits against a base.
 //! * [`Base64Decoder`] / [`Base64SvndiffDecoder`] unwrap svndiff embedded in XML.
 //!
 //! Every malformed input is reported as an [`svn_types::SvnError`] with
@@ -18,6 +19,7 @@ mod decoder;
 mod encoder;
 mod varint;
 mod window;
+mod xdelta;
 
 pub use apply::{ApplyHandle, ApplyOutcome, WindowApplier};
 pub use base64::{Base64Decoder, Base64SvndiffDecoder};
@@ -25,3 +27,4 @@ pub use decoder::SvndiffDecoder;
 pub use encoder::{SvndiffEncoder, SvndiffVersion, WINDOW_SIZE};
 pub use varint::{decode_varint, encode_varint};
 pub use window::{parse_instructions, serialize_instructions, validate_window};
+pub use xdelta::{MATCH_BLOCKSIZE, delta_window};
