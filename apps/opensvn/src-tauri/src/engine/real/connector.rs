@@ -129,7 +129,6 @@ impl HttpConnector {
     }
 
     /// Connector over the app's broker, trust store and settings.
-    #[allow(dead_code)] // called from `lib.rs` once the real engine is the default (WP7)
     pub(crate) fn from_services(services: &crate::app_state::EngineServices) -> Self {
         Self::new(
             services.auth.clone(),
