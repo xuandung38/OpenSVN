@@ -5,7 +5,10 @@
 //! realm has to prompt on its own. The first 401 for an origin starts a *flight*: one prompt is
 //! shown while every other request that got a 401 for the same origin waits and then reuses the
 //! outcome. After three rejected credentials the flight stops with `AuthRequired` to avoid
-//! locking a directory account.
+//! locking a directory account. A prompt that ends without credentials (cancelled or timed out)
+//! fails only the requests that were already under way when it ended; it is not a rejected
+//! attempt, and the next interactive request prompts again. Typed credentials count as accepted
+//! only on a response to a request that resent them in answer to a 401.
 //!
 //! Negotiate (SPNEGO/Kerberos, see [`negotiate`]) is tried first when the server offers it, the
 //! build has a provider and the URL is `https`. On plain `http` no Negotiate token is ever sent
@@ -23,6 +26,7 @@ mod challenge;
 pub mod negotiate;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -92,6 +96,12 @@ pub(crate) struct Attached {
     negotiate: Option<Arc<PendingNegotiate>>,
     /// The Negotiate token was sent up front (not in answer to a challenge).
     proactive: bool,
+    /// Value of `AuthManager::denials` when the request was prepared: a prompt that ended
+    /// without credentials after this point was one the request waited for.
+    seq: u64,
+    /// The Basic credentials answer a 401 for this request's URL, so the URL is protected and a
+    /// success proves them (a preemptive header on a URL that never challenged proves nothing).
+    challenged: bool,
 }
 
 impl Attached {
@@ -119,8 +129,11 @@ struct FlightState {
     credentials: Option<Credential>,
     /// Credentials rejected since the last success.
     failures: u8,
-    /// The last prompt round ended without credentials.
+    /// The last prompt round ended without credentials (cancelled, timed out or given up).
     denied: bool,
+    /// `AuthManager::denials` value stamped when `denied` was set. Only requests prepared
+    /// before it fail with the denial; a later request asks again.
+    denied_seq: u64,
     /// Stored credentials were already offered for this origin (they are offered once).
     stored_used: bool,
     /// The cached `credentials` came from `AuthPrompter::stored_credentials` and their
@@ -170,6 +183,9 @@ pub(crate) struct AuthManager {
     negotiate_retry_after: Duration,
     /// Hosts where Negotiate succeeded; later requests start it up front.
     negotiate_ok: Mutex<HashSet<HostKey>>,
+    /// Bumped whenever a prompt round of any flight ends without credentials. Requests record it
+    /// in `Attached::seq`, so a denial only fails the requests that were already under way.
+    denials: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -207,7 +223,20 @@ impl AuthManager {
             negotiate_failed: Mutex::default(),
             negotiate_retry_after: NEGOTIATE_RETRY_AFTER,
             negotiate_ok: Mutex::default(),
+            denials: AtomicU64::new(0),
         }
+    }
+
+    /// Current denial sequence, recorded in every `Attached`.
+    fn seq(&self) -> u64 {
+        self.denials.load(Ordering::SeqCst)
+    }
+
+    /// Ends a prompt round without credentials: only requests prepared before now (the ones
+    /// waiting for this round) fail with it; the next interactive request prompts again.
+    fn deny(&self, state: &mut FlightState) {
+        state.denied = true;
+        state.denied_seq = self.denials.fetch_add(1, Ordering::SeqCst) + 1;
     }
 
     /// Replaces the Negotiate provider (tests inject a fake one).
@@ -253,6 +282,7 @@ impl AuthManager {
             header: Some(header),
             negotiate: Some(pending),
             proactive,
+            seq: self.seq(),
             ..Attached::default()
         })
     }
@@ -279,7 +309,10 @@ impl AuthManager {
             Err(e) if e.code == ErrorCode::Cancelled => Err(e),
             Err(e) => {
                 tracing::debug!(error = %e.message, "cannot renew the Negotiate token");
-                Ok(Attached::default())
+                Ok(Attached {
+                    seq: sent.seq,
+                    ..Attached::default()
+                })
             }
         }
     }
@@ -306,6 +339,8 @@ impl AuthManager {
         cancel: &CancelToken,
     ) -> Result<Attached> {
         let key = HostKey::from_url(url)?;
+        // Read before anything else: a denial racing with this call must count as later.
+        let seq = self.seq();
         if let Some(provider) = &self.negotiate
             && key.scheme == "https"
             && lock(&self.negotiate_ok).contains(&key)
@@ -324,7 +359,10 @@ impl AuthManager {
             }
         }
         let Some(origin) = lock(&self.hosts).get(&key).cloned() else {
-            return Ok(Attached::default());
+            return Ok(Attached {
+                seq,
+                ..Attached::default()
+            });
         };
         let flight = self.flight(&origin);
         let state = lock(&flight.state);
@@ -336,14 +374,17 @@ impl AuthManager {
             header,
             origin: Some(origin),
             generation: state.generation,
+            seq,
             ..Attached::default()
         })
     }
 
     /// Records that the server accepted the credentials carried by `sent` (any response but a
-    /// 401). The first such response with credentials typed at the prompt is reported through
-    /// `AuthPrompter::credentials_accepted`, unless it is a server error, which proves nothing
-    /// about them.
+    /// 401). Only a request that resent them in answer to a 401 counts: a preemptive header on a
+    /// URL that never challenged may have reached a path that does not check it (anonymous
+    /// read), which proves nothing. The first such response with credentials typed at the
+    /// prompt is reported through `AuthPrompter::credentials_accepted`, unless it is a server
+    /// error, which proves nothing either.
     ///
     /// For Negotiate, the server's final token (if any) must pass mutual authentication;
     /// otherwise the response is not trusted and `NegotiateFailed` is returned.
@@ -376,7 +417,7 @@ impl AuthManager {
             }
             return Ok(());
         }
-        if let (Some(origin), Some(_)) = (&sent.origin, &sent.header) {
+        if let (Some(origin), Some(_), true) = (&sent.origin, &sent.header, sent.challenged) {
             let flight = self.flight(origin);
             let accepted = {
                 let mut state = lock(&flight.state);
@@ -467,7 +508,31 @@ impl AuthManager {
     /// silently. When `interactive` is false nothing is ever prompted: without cached or
     /// stored credentials (or once they are rejected) the request fails with `AuthRequired`.
     /// Negotiate never prompts, so it is tried in both modes.
+    ///
+    /// A prompt that ends without credentials (cancelled, timed out, or the three-attempt cap)
+    /// fails the requests that waited for it, not later ones: the next interactive request
+    /// prompts again.
     pub(crate) async fn on_unauthorized(
+        &self,
+        url: &Url,
+        challenges: &Challenges,
+        sent: &Attached,
+        channel_binding: Option<Arc<[u8]>>,
+        interactive: bool,
+        cancel: &CancelToken,
+    ) -> Result<Attached> {
+        let mut next = self
+            .answer_unauthorized(url, challenges, sent, channel_binding, interactive, cancel)
+            .await?;
+        if next.negotiate.is_none() {
+            // Basic credentials resent in answer to this URL's challenge.
+            next.challenged = next.header.is_some();
+            next.seq = self.seq();
+        }
+        Ok(next)
+    }
+
+    async fn answer_unauthorized(
         &self,
         url: &Url,
         challenges: &Challenges,
@@ -513,8 +578,6 @@ impl AuthManager {
             (Some(o), Some(_)) if *o == origin => Some(sent.generation),
             _ => None,
         };
-        // Generation observed before queueing: a request that carried no credentials may have
-        // been sent at any earlier generation, so only the carried case is compared.
         let _gate = if interactive {
             or_cancel(cancel, flight.gate.lock()).await?
         } else {
@@ -540,9 +603,12 @@ impl AuthManager {
         let mut stored_rejected = false;
         let attempt = {
             let mut state = lock(&flight.state);
+            // Another request already settled this round: either it has credentials to reuse,
+            // or its prompt ended without any after this request was sent.
+            let denied_since_sent = state.denied && state.denied_seq > sent.seq;
             let resolved_elsewhere = match sent_generation {
                 Some(g) => state.generation != g,
-                None => state.credentials.is_some() || state.generation != sent.generation,
+                None => state.credentials.is_some() || denied_since_sent,
             };
             if resolved_elsewhere {
                 if let Some(c) = &state.credentials {
@@ -555,7 +621,7 @@ impl AuthManager {
                         ..Attached::default()
                     });
                 }
-                if state.denied {
+                if denied_since_sent {
                     return Err(auth_refused("authentication was refused or cancelled"));
                 }
             }
@@ -568,7 +634,7 @@ impl AuthManager {
             }
             if state.failures >= MAX_ATTEMPTS {
                 state.failures = 0;
-                state.denied = true;
+                self.deny(&mut state);
                 state.generation += 1;
                 return Err(auth_refused(&format!(
                     "authentication failed {MAX_ATTEMPTS} times; giving up to avoid locking the account"
@@ -579,7 +645,8 @@ impl AuthManager {
         };
 
         let offered = challenges.offered_methods();
-        // A cancelled prompt leaves the flight untouched so other requests can still ask.
+        // A cancelled prompt does not count as a rejected attempt (`failures` is unchanged), and
+        // it only fails the requests that waited for it (see `deny`).
         // Reaching the prompt while Negotiate is offered means it failed or is unavailable.
         let reason = if attempt == 0 && challenges.negotiate {
             PromptReason::NegotiateFailed
@@ -639,12 +706,12 @@ impl AuthManager {
         let mut state = lock(&flight.state);
         state.generation += 1;
         let Some(creds) = answer else {
-            state.denied = true;
+            self.deny(&mut state);
             return Err(auth_refused("authentication was cancelled"));
         };
         if creds.method != AuthMethod::Basic {
             // Negotiate already failed for this host; there is nothing else to retry with.
-            state.denied = true;
+            self.deny(&mut state);
             return Err(negotiate_failure(self.negotiate.is_some()));
         }
         let header = basic_header(&creds.username, &creds.password)?;
