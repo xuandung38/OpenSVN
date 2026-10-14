@@ -44,6 +44,9 @@ fn removal_items(db: &WcDb, rel: &RelPath, out: &mut Vec<Skel>) -> Result<()> {
 
 impl UpdateEditor {
     pub(super) fn delete_node(&mut self, wc: &RelPath, _parent: DirId) -> Result<()> {
+        // What decides between a delete and a kept copy (BASE, the working rows below `wc`, its
+        // conflict) is read below: commit what the batch still holds for `wc` first.
+        self.settle(wc)?;
         let db = self.s.db.clone();
         let Some(base) = db.read_base(wc)? else {
             return Ok(());
