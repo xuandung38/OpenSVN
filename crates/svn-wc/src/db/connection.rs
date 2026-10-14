@@ -116,7 +116,8 @@ fn apply_pragmas(conn: &Connection, writable: bool) -> Result<()> {
          PRAGMA foreign_keys = OFF;
          PRAGMA recursive_triggers = ON;
          PRAGMA case_sensitive_like = 1;
-         PRAGMA temp_store = MEMORY;",
+         PRAGMA temp_store = MEMORY;
+         PRAGMA cache_size = -16384;",
     )
     .map_err(sql_err)?;
     // svn enables this only in SVN_DEBUG builds (it surfaces missing ORDER BY clauses); mirror that.

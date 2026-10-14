@@ -138,6 +138,12 @@ pub trait WorkingCopyOps {
 pub trait PristineSource {
     /// Opens the text with this checksum.
     fn open_text(&self, sha1: &Sha1Digest) -> Result<Box<dyn Read>, PristineError>;
+    /// Opens the text as a plain file when it is stored as one, so an install without
+    /// translation can copy it in the kernel; `None` (the default) falls back to
+    /// [`open_text`](Self::open_text).
+    fn open_file(&self, _sha1: &Sha1Digest) -> Result<Option<File>, PristineError> {
+        Ok(None)
+    }
     /// Size in bytes of the text with this checksum, from the pristine table (no file access).
     fn text_size(&self, sha1: &Sha1Digest) -> Result<u64, PristineError>;
 }
@@ -145,6 +151,10 @@ pub trait PristineSource {
 impl<I: PristineIndex> PristineSource for PristineStore<I> {
     fn open_text(&self, sha1: &Sha1Digest) -> Result<Box<dyn Read>, PristineError> {
         PristineStore::open_text(self, sha1).map(|f| Box::new(f) as Box<dyn Read>)
+    }
+
+    fn open_file(&self, sha1: &Sha1Digest) -> Result<Option<File>, PristineError> {
+        PristineStore::open_text(self, sha1).map(Some)
     }
 
     fn text_size(&self, sha1: &Sha1Digest) -> Result<u64, PristineError> {
@@ -518,10 +528,10 @@ impl<'a> WorkQueueRunner<'a> {
         info: &NodeInstallInfo,
         source: Option<&str>,
         relpath: &str,
-    ) -> Result<Box<dyn Read>, WorkQueueError> {
+    ) -> Result<Source, WorkQueueError> {
         if let Some(src) = source {
             let path = self.operand(src)?;
-            return Ok(Box::new(
+            return Ok(Source::File(
                 File::open(&path).map_err(WorkQueueError::io("open", &path))?,
             ));
         }
@@ -532,7 +542,10 @@ impl<'a> WorkQueueRunner<'a> {
             )
             .with_svn_code(155_017)
         })?;
-        Ok(self.pristine.open_text(sha1)?)
+        Ok(match self.pristine.open_file(sha1)? {
+            Some(file) => Source::File(file),
+            None => Source::Stream(self.pristine.open_text(sha1)?),
+        })
     }
 
     fn file_install(
@@ -549,7 +562,7 @@ impl<'a> WorkQueueRunner<'a> {
 
         if tinfo.special {
             // svn bypasses eol/keywords for special files: only the first line is buffered.
-            special::install_from_reader(&abs, reader.as_mut())?;
+            special::install_from_reader(&abs, &mut reader)?;
         } else {
             let translator = ContentTranslator::to_working(
                 &tinfo,
@@ -566,7 +579,7 @@ impl<'a> WorkQueueRunner<'a> {
             let executable = info.props.contains_key("svn:executable");
             let tmp_dir = self.tmp_dir()?;
             let defer = self.deferring();
-            write_atomically(&abs, &tmp_dir, reader.as_mut(), translator, !defer, |tmp| {
+            write_atomically(&abs, &tmp_dir, &mut reader, translator, !defer, |tmp| {
                 if let Some(m) = mtime {
                     set_mtime(tmp, m)?;
                 }
@@ -612,6 +625,7 @@ impl<'a> WorkQueueRunner<'a> {
         // `wq-*` file in the user's folder (#120). `.svn/tmp` is on the same filesystem.
         let tmp_dir = self.tmp_dir()?;
         let src_perms = fs::metadata(&src_abs).ok().map(|m| m.permissions());
+        let mut reader = Source::File(reader);
         write_atomically(&dst_abs, &tmp_dir, &mut reader, translator, true, |tmp| {
             if let Some(p) = &src_perms {
                 // Best effort, like svn_io_copy_perms.
@@ -622,12 +636,29 @@ impl<'a> WorkQueueRunner<'a> {
     }
 }
 
+/// Content an install reads.
+enum Source {
+    /// A plain file (a pristine text or a temporary file).
+    File(File),
+    /// Any other stream.
+    Stream(Box<dyn Read>),
+}
+
+impl Read for Source {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::File(f) => f.read(buf),
+            Self::Stream(r) => r.read(buf),
+        }
+    }
+}
+
 /// Translates `reader` into a temp file in `tmp_dir`, lets `prepare` adjust it, and renames it
 /// over `dest`. `sync` = false leaves the sync to a later barrier (see [`crate::durable`]).
 fn write_atomically(
     dest: &Path,
     tmp_dir: &Path,
-    reader: &mut dyn Read,
+    reader: &mut Source,
     translator: ContentTranslator,
     sync: bool,
     prepare: impl FnOnce(&Path) -> Result<(), WorkQueueError>,
@@ -641,7 +672,15 @@ fn write_atomically(
         .prefix("wq-")
         .tempfile_in(tmp_dir)
         .map_err(WorkQueueError::io("create temp file in", tmp_dir))?;
-    translate_stream(reader, &mut tmp, translator)?;
+    match reader {
+        // Nothing to translate: a plain copy, which `std::io::copy` runs in the kernel between
+        // two files (`copy_file_range` on Linux).
+        Source::File(file) if translator.is_identity() => {
+            std::io::copy(file, tmp.as_file_mut())
+                .map_err(WorkQueueError::io("copy to", tmp.path()))?;
+        }
+        _ => translate_stream(reader, &mut tmp, translator)?,
+    }
     if sync {
         tmp.as_file()
             .sync_all()
