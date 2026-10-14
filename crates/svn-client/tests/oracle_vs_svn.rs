@@ -1114,3 +1114,32 @@ async fn update_of_nested_targets_matches_svn() {
         assert_same(&o, &t, &w, target);
     }
 }
+
+/// The server replaces a file, and a directory by a file, in one revision: each path is deleted
+/// and added again by the same drive, so the update must commit the deletion (and remove the old
+/// node from disk) before it looks at the added node.
+///
+/// A file replaced by a directory is left out: there the engine and svn 1.15 already differed
+/// before the update batching (same result on `main`), which is a separate issue.
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_replacements_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "incoming-replacements",
+        |_, _, _| {},
+        |repo, seed| {
+            repo.svn(seed, &["rm", "-q", "README", "docs"]);
+            write(&seed.join("README"), "replaced\n");
+            write(&seed.join("docs"), "a file now\n");
+            repo.svn(seed, &["add", "-q", "README", "docs"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "incoming replacements");
+    assert_eq!(
+        std::fs::read_to_string(w.join("docs")).unwrap(),
+        "a file now\n"
+    );
+}

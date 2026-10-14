@@ -8,7 +8,7 @@ use svn_wc::skel::Skel;
 use svn_wc::workqueue::WorkItem;
 
 use super::conflict_record::{self, NewConflict};
-use super::editor::{UpdateEditor, failpoint};
+use super::editor::UpdateEditor;
 use super::props::merge_props;
 use super::state::DirState;
 use crate::ctx::UpdateAction;
@@ -57,13 +57,15 @@ impl UpdateEditor {
             None
         };
         if !base.presence.is_present() {
-            db.with_txn(|t| {
-                t.base_remove(wc)?;
+            let path = wc.clone();
+            self.defer(Box::new(move |t| {
+                t.base_remove(&path)?;
                 if let Some(m) = &marker {
-                    t.base_add(wc, m)?;
+                    t.base_add(&path, m)?;
                 }
                 Ok(())
-            })?;
+            }))?;
+            self.batch.removed(wc.clone());
             return Ok(());
         }
         let kind = base.kind;
@@ -93,22 +95,25 @@ impl UpdateEditor {
                 old.as_ref(),
                 new.as_ref(),
             );
-            db.with_txn(|t| {
+            let path = wc.clone();
+            let recorded = reason.clone();
+            self.defer(Box::new(move |t| {
                 if keep_as_working {
-                    t.convert_base_to_copy(wc)?;
+                    t.convert_base_to_copy(&path)?;
                 } else {
-                    t.base_remove(wc)?;
+                    t.base_remove(&path)?;
                 }
                 if let Some(m) = &marker {
-                    t.base_add(wc, m)?;
+                    t.base_add(&path, m)?;
                 }
                 conflict_record::record(
                     t,
-                    wc,
+                    &path,
                     &info,
-                    vec![NewConflict::Tree(reason.clone(), TreeAction::Delete)],
+                    vec![NewConflict::Tree(recorded, TreeAction::Delete)],
                 )
-            })?;
+            }))?;
+            self.batch.removed(wc.clone());
             self.skipped.push(wc.clone());
             self.deletion_conflicts.insert(wc.clone(), (base, reason));
             self.emit(wc, NodeKind::None, UpdateAction::TreeConflicted);
@@ -116,15 +121,15 @@ impl UpdateEditor {
         }
         let mut items = Vec::new();
         removal_items(&db, wc, &mut items)?;
-        db.with_txn(|t| {
-            t.base_remove(wc)?;
+        let path = wc.clone();
+        self.defer(Box::new(move |t| {
+            t.base_remove(&path)?;
             if let Some(m) = &marker {
-                t.base_add(wc, m)?;
+                t.base_add(&path, m)?;
             }
             t.queue_work(&items)
-        })?;
-        failpoint!("update.after_delete_txn");
-        self.run_queue()?;
+        }))?;
+        self.batch.removed(wc.clone());
         self.emit(wc, kind, UpdateAction::Delete);
         Ok(())
     }
@@ -244,17 +249,18 @@ impl UpdateEditor {
             conflicts.push(NewConflict::Tree(tc.reason.clone(), tc.action.clone()));
             action = Some(UpdateAction::TreeConflicted);
         }
-        db.with_txn(|t| {
-            t.base_add(&d.wc, &node)?;
-            if !shadowed && (d.base.is_some() || overlay.is_some()) {
-                t.set_actual_props(&d.wc, overlay.as_ref())?;
+        let path = d.wc.clone();
+        let had_base = d.base.is_some();
+        self.defer(Box::new(move |t| {
+            t.base_add(&path, &node)?;
+            if !shadowed && (had_base || overlay.is_some()) {
+                t.set_actual_props(&path, overlay.as_ref())?;
             }
             if !conflicts.is_empty() {
-                conflict_record::record(t, &d.wc, &info, conflicts)?;
+                conflict_record::record(t, &path, &info, conflicts)?;
             }
             t.queue_work(&work)
-        })?;
-        self.run_queue()?;
+        }))?;
         if let Some(a) = action
             && (!shadowed || d.tree_conflict.is_some())
         {
@@ -267,7 +273,7 @@ impl UpdateEditor {
         if self.is_finished() {
             return Ok(());
         }
-        self.run_queue()?;
+        self.drain()?;
         let rev = self.rev()?;
         let db = self.s.db.clone();
         let target = self.target_wc.clone();

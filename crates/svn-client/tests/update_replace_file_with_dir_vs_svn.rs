@@ -204,3 +204,78 @@ async fn incoming_dir_to_file_replacement_matches_svn() {
         assert_same(&oracle, &theirs, &ours, &format!("{local:?}"));
     }
 }
+
+/// Like [`build`], but r2 also edits 50 files that the drive visits before `f` and adds one
+/// after it: the replacement happens while the update still holds those earlier nodes
+/// uncommitted (they are committed in batches), so they must reach wc.db before the tree
+/// conflict of the replacement is recorded, and in drive order.
+fn build_with_neighbours(repo: &Repo) {
+    let seed = repo.checkout("seed");
+    for i in 0..50 {
+        write(&seed.join(format!("a/{i:02}.txt")), &format!("{i}\n"));
+    }
+    write(&seed.join("f"), "orig\n");
+    write(&seed.join("keep/k.txt"), "k\n");
+    repo.svn(&seed, &["add", "-q", "a", "f", "keep"]);
+    repo.svn(&seed, &["commit", "-q", "-m", "r1"]);
+    for i in 0..50 {
+        write(
+            &seed.join(format!("a/{i:02}.txt")),
+            &format!("{i} edited\n"),
+        );
+    }
+    repo.svn(&seed, &["rm", "-q", "f"]);
+    write(&seed.join("f/inner.txt"), "inner\n");
+    write(&seed.join("z.txt"), "z\n");
+    repo.svn(&seed, &["add", "-q", "f", "z.txt"]);
+    repo.svn(&seed, &["commit", "-q", "-m", "r2"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_file_to_dir_replacement_amid_other_changes_matches_svn() {
+    let Some(oracle) = oracle() else { return };
+    let repo = Repo::new(&oracle);
+    build_with_neighbours(&repo);
+    let sb = Sandbox::new();
+    for local in [Local::Clean, Local::Edited, Local::Deleted] {
+        let name = format!("{local:?}").to_lowercase();
+        let theirs = repo.base().join(format!("svn-{name}"));
+        let target = theirs.to_str().expect("utf-8 path");
+        repo.svn(
+            &repo.base(),
+            &["checkout", "-q", "-r", "1", &repo.url, target],
+        );
+        let ours = sb.path(&name);
+        checkout(
+            &ctx(),
+            &repo.fake(Some(1)),
+            &ours,
+            None,
+            Depth::Infinity,
+            false,
+            &CancelToken::new(),
+        )
+        .await
+        .expect("checkout r1");
+        prepare(&repo, &theirs, local);
+        prepare(&repo, &ours, local);
+
+        repo.svn(&theirs, &["update", "-q"]);
+        update(
+            &ctx(),
+            &repo.fake(None),
+            &ours,
+            Some(Revnum(2)),
+            Depth::Unknown,
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{local:?}: update: {e}"));
+        assert_same(&oracle, &theirs, &ours, &format!("{local:?}"));
+        assert_eq!(
+            fs::read_to_string(ours.join("a/49.txt")).expect("read"),
+            "49 edited\n",
+            "{local:?}"
+        );
+    }
+}
