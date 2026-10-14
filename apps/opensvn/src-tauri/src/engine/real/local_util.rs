@@ -130,11 +130,100 @@ pub(super) fn open_wc_root(client: &ClientCtx, root: &Path) -> EngineResult<WcDb
 ///
 /// Also refuses a path that belongs to another working copy (see [`ensure_own_path`]): an
 /// external, a separate checkout nested inside this one, or anything inside either.
+///
+/// On case-insensitive file systems a path that `wc.db` does not know is first resolved to the
+/// versioned spelling ([`resolve_case`]), so `README.MD` acts on the versioned `README.md` instead
+/// of being treated as unversioned (and deleted by a revert or cleanup that removes unversioned
+/// items).
 pub(super) fn target(db: &WcDb, path: &str) -> EngineResult<(RelPath, PathBuf)> {
+    target_with(db, path, CASE_INSENSITIVE_FS)
+}
+
+/// [`target`], matching `wc.db` ignoring case when `case_insensitive`.
+pub(super) fn target_with(
+    db: &WcDb,
+    path: &str,
+    case_insensitive: bool,
+) -> EngineResult<(RelPath, PathBuf)> {
     let rel = RelPath::new(path).map_err(|e| unsafe_request_path(path, &e))?;
+    let rel = resolve_case(db, &rel, case_insensitive)?;
     let abs = safe_join(db.wcroot(), &rel).map_err(|e| unsafe_request_path(path, &e))?;
     ensure_own_path(db, &rel)?;
     Ok((rel, abs))
+}
+
+/// [`target`] for a path that is about to be created (the destination of a move): taken as
+/// spelled, so a rename that only changes case stays possible.
+pub(super) fn new_target(db: &WcDb, path: &str) -> EngineResult<(RelPath, PathBuf)> {
+    target_with(db, path, false)
+}
+
+/// Whether the platform's usual file systems ignore case in names (APFS/HFS+ by default, NTFS),
+/// so `README.MD` and `README.md` are the same file. A case-sensitive volume on these platforms
+/// is treated the same way: a request spelled differently from `wc.db` then acts on the
+/// versioned node or is refused, never on a guess that could delete versioned data.
+pub(super) const CASE_INSENSITIVE_FS: bool = cfg!(any(target_os = "macos", windows));
+
+/// A name folded for comparison the way case-insensitive file systems compare names: Unicode
+/// NFC (APFS and HFS+ also ignore normalization), then full upper-then-lower case folding.
+fn fold_name(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    name.nfc()
+        .flat_map(char::to_uppercase)
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Paths in `wc.db` (any layer, any presence) spelled like `rel` up to case and normalization,
+/// `rel` itself included when it is there. Matched component by component, so a request that
+/// differs from `wc.db` in a parent folder's case is found too.
+pub(super) fn case_variants(db: &WcDb, rel: &RelPath) -> EngineResult<Vec<RelPath>> {
+    let mut frontier = vec![RelPath::root()];
+    for component in rel.components() {
+        let want = fold_name(component);
+        let mut next = Vec::new();
+        for parent in &frontier {
+            for child in db.children(parent)? {
+                if child.file_name().is_some_and(|n| fold_name(n) == want) {
+                    next.push(child);
+                }
+            }
+        }
+        if next.is_empty() {
+            return Ok(Vec::new());
+        }
+        frontier = next;
+    }
+    frontier.sort();
+    frontier.dedup();
+    Ok(frontier)
+}
+
+/// Resolves `rel` to its spelling in `wc.db` when `case_insensitive` and `wc.db` has no row for
+/// it as spelled: one match is used, several (`README.md` and `Readme.md` both versioned, as a
+/// repository made on a case-sensitive system can have) are refused as ambiguous, none leaves
+/// `rel` as it is (an unversioned path).
+pub(super) fn resolve_case(
+    db: &WcDb,
+    rel: &RelPath,
+    case_insensitive: bool,
+) -> EngineResult<RelPath> {
+    if !case_insensitive || rel.is_root() || db.read_node(rel)?.is_some() {
+        return Ok(rel.clone());
+    }
+    let mut found = case_variants(db, rel)?;
+    match found.len() {
+        0 => Ok(rel.clone()),
+        1 => Ok(found.remove(0)),
+        _ => {
+            let names: Vec<String> = found.iter().map(|p| format!("'{p}'")).collect();
+            Err(invalid(format!(
+                "'{rel}' matches several versioned items that differ only in case ({}); this \
+                 file system cannot tell them apart, so nothing was changed",
+                names.join(", ")
+            )))
+        }
+    }
 }
 
 /// Fails when `rel`, which this working copy's database does not know, belongs to another
@@ -250,7 +339,40 @@ pub(super) fn checked_ignore_pattern(pattern: &str) -> EngineResult<&str> {
 /// out inside this one. A `rel` inside an external or a nested checkout is refused with an error
 /// ([`ensure_own_path`]). svn's own `cleanup --remove-unversioned` deletes such a nested checkout;
 /// the app deliberately keeps it, since it may hold local edits nothing else knows about.
+///
+/// On case-insensitive file systems an item whose name matches a versioned node up to case is
+/// never returned: it is that node's file under another spelling (renamed outside svn), and
+/// removing it would delete versioned data.
 pub(super) fn unversioned_items(
+    db: &WcDb,
+    env: &LocalEnv,
+    rel: &RelPath,
+    unversioned: bool,
+    ignored: bool,
+) -> EngineResult<Vec<RelPath>> {
+    let mut items = unversioned_items_as_spelled(db, env, rel, unversioned, ignored)?;
+    if CASE_INSENSITIVE_FS {
+        drop_case_aliases(db, &mut items)?;
+    }
+    Ok(items)
+}
+
+/// Removes from `items` every path that matches a versioned node up to case.
+pub(super) fn drop_case_aliases(db: &WcDb, items: &mut Vec<RelPath>) -> EngineResult<()> {
+    let mut kept = Vec::with_capacity(items.len());
+    for item in items.drain(..) {
+        if case_variants(db, &item)?.is_empty() {
+            kept.push(item);
+        } else {
+            tracing::warn!(path = %item, "kept: same name as a versioned item up to case");
+        }
+    }
+    *items = kept;
+    Ok(())
+}
+
+/// [`unversioned_items`] comparing names exactly as spelled.
+pub(super) fn unversioned_items_as_spelled(
     db: &WcDb,
     env: &LocalEnv,
     rel: &RelPath,

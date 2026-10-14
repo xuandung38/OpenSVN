@@ -257,7 +257,7 @@ impl RealEngine {
         let (from, to) = (from.to_owned(), to.to_owned());
         self.with_local(wc, ctx, move |db, env| {
             let (_, src) = local_util::target(db, &from)?;
-            let (_, dst) = local_util::target(db, &to)?;
+            let (_, dst) = local_util::new_target(db, &to)?;
             client_local::move_path(db, &env.cancel, &src, &dst).map(|_| ())
         })
         .await

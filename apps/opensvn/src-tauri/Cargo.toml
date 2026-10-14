@@ -37,6 +37,8 @@ svn-client = { workspace = true, optional = true }
 svn-delta = { workspace = true, optional = true }
 md-5 = { workspace = true, optional = true }
 sha1 = { workspace = true, optional = true }
+# Case-insensitive matching of request paths against wc.db (macOS, Windows).
+unicode-normalization = { workspace = true, optional = true }
 # `fake` ships the in-memory repository that backs FakeEngine (the engine of builds without the
 # `real-engine` feature, and of `OPENSVN_ENGINE=fake`).
 svn-ra-api = { workspace = true, features = ["fake"] }
@@ -90,7 +92,14 @@ libc = "=0.2.190"
 # makes it the app's engine (`OPENSVN_ENGINE=fake` still selects the demo engine). Not a default
 # feature yet: the rollout turns it on after the conformance run against Apache and a manual
 # VisualSVN smoke test on all three OSes.
-real-engine = ["dep:svn-wc", "dep:svn-client", "dep:svn-delta", "dep:md-5", "dep:sha1"]
+real-engine = [
+  "dep:svn-wc",
+  "dep:svn-client",
+  "dep:svn-delta",
+  "dep:md-5",
+  "dep:sha1",
+  "dep:unicode-normalization",
+]
 # Kerberos single sign-on on macOS/Linux through the system GSSAPI library (needs the krb5
 # development headers and libclang to build). Off by default so CI builds without them; release
 # builds for macOS and Linux turn it on. Windows always has SSPI. Users can switch Negotiate off in
