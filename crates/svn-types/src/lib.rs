@@ -11,6 +11,7 @@ mod lock_ownership;
 mod model;
 mod rel_path;
 mod safe_join;
+mod web_link;
 
 pub use admin_name::is_any_admin_dir_name;
 pub use cancel::{CancelToken, Cancelled};
@@ -25,3 +26,6 @@ pub use model::{
 };
 pub use rel_path::RelPath;
 pub use safe_join::{rename_replacing, safe_join, safe_join_child, write_file_replacing};
+pub use web_link::{
+    VISUALSVN_SVN_PREFIX, VisualSvnWebLink, is_visualsvn_web_link, parse_visualsvn_web_link,
+};
