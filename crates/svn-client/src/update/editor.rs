@@ -316,6 +316,7 @@ impl UpdateEditor {
         let base = base
             .filter(|n| n.kind == NodeKind::Dir && n.presence.is_present())
             .ok_or_else(|| corrupt(format!("directory '{wc}' is not in the working copy base")))?;
+        let was_incomplete = base.presence == Presence::Incomplete;
         let is_switch_root = self.s.switch_relpath.is_some() && wc == self.target_wc;
         let p = parent.unwrap_or_else(ParentInfo::anchor);
         let relocating = is_switch_root || p.relocating;
@@ -333,6 +334,7 @@ impl UpdateEditor {
         let mut skipped = p.skipped;
         let mut tree_conflict = None;
         let mut shadow = if skipped { None } else { p.shadow };
+        let mut obstructed = false;
         if !skipped && in_target {
             if self.s.db.conflict(&wc)?.is_some() {
                 skipped = true;
@@ -355,6 +357,12 @@ impl UpdateEditor {
                     action: TreeAction::Edit,
                 });
                 shadow = Some(cur.op_depth);
+            } else if shadow.is_none() && self.dir_obstructed(&wc)? {
+                tree_conflict = Some(PendingTreeConflict {
+                    reason: TreeReason::Obstructed,
+                    action: TreeAction::Edit,
+                });
+                obstructed = true;
             }
         }
         let mut depth = base
@@ -400,12 +408,27 @@ impl UpdateEditor {
                 limit,
                 not_present_on_drop,
                 shadow,
+                obstructed,
+                was_incomplete,
                 prop_changes: Vec::new(),
                 entry: EntryProps::default(),
                 tree_conflict,
             },
         );
         Ok((id, skipped))
+    }
+
+    /// Whether the versioned directory `wc` is replaced on disk by a file or a symlink (to
+    /// anything: the link is never followed). Only called where every parent of `wc` is a real
+    /// directory (the directories above it are neither obstructed nor shadowed).
+    fn dir_obstructed(&self, wc: &RelPath) -> Result<bool> {
+        if wc.is_root() {
+            return Ok(false);
+        }
+        Ok(matches!(
+            self.disk_kind(wc)?,
+            Some(NodeKind::File | NodeKind::Symlink)
+        ))
     }
 
     fn parent_info(&self, parent: DirId) -> Result<ParentInfo> {
@@ -421,7 +444,9 @@ impl UpdateEditor {
                 Depth::Infinity
             },
             not_present_on_drop: p.in_target && p.not_present_on_drop,
-            shadow: p.shadow,
+            // Below an obstructed directory: BASE only (svn's `shadowed` children of an
+            // `edit_obstructed` directory).
+            shadow: p.shadow.or(p.obstructed.then_some(0)),
         })
     }
 
@@ -443,6 +468,8 @@ impl UpdateEditor {
                 limit: Depth::Empty,
                 not_present_on_drop: false,
                 shadow: None,
+                obstructed: false,
+                was_incomplete: false,
                 prop_changes: Vec::new(),
                 entry: EntryProps::default(),
                 tree_conflict: None,
@@ -618,6 +645,7 @@ impl DeltaEditor for UpdateEditor {
         let mut skipped = p.skipped;
         let mut was_incomplete = false;
         let mut shadow = p.shadow;
+        let mut obstructed = false;
         let mut tree_conflict = None;
         let existing = self.s.db.read_node(&wc)?;
         let base = self.s.db.read_base(&wc)?;
@@ -630,8 +658,16 @@ impl DeltaEditor for UpdateEditor {
             let disk = self.disk_kind(&wc)?;
             match (&existing, &base) {
                 (_, Some(b)) if b.kind == NodeKind::Dir && b.presence.is_present() => {
-                    // A resumed update re-sends directories it already created.
+                    // A resumed update re-sends directories it already created. One replaced on
+                    // disk by a file or a symlink since is obstructed, as when it is opened.
                     was_incomplete = true;
+                    if matches!(disk, Some(NodeKind::File | NodeKind::Symlink)) {
+                        obstructed = true;
+                        tree_conflict = Some(PendingTreeConflict {
+                            reason: TreeReason::Obstructed,
+                            action: TreeAction::Edit,
+                        });
+                    }
                 }
                 (Some(e), _) if e.op_depth > 0 && e.presence == Presence::Normal => {
                     self.record_tree_conflict(
@@ -678,7 +714,7 @@ impl DeltaEditor for UpdateEditor {
                 base.as_ref(),
                 Some(depth),
             )?;
-            let work = if shadow.is_some() {
+            let work = if shadow.is_some() || obstructed {
                 Vec::new()
             } else {
                 vec![
@@ -715,6 +751,8 @@ impl DeltaEditor for UpdateEditor {
                 limit: depth,
                 not_present_on_drop: false,
                 shadow,
+                obstructed,
+                was_incomplete,
                 prop_changes: Vec::new(),
                 entry: EntryProps::default(),
                 tree_conflict,

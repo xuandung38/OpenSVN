@@ -265,7 +265,12 @@ pub fn tree_snapshot(root: &Path) -> BTreeMap<String, (bool, Vec<u8>, bool)> {
                 .to_string_lossy()
                 .replace('\\', "/");
             let md = std::fs::symlink_metadata(&path).expect("md");
-            if md.is_dir() {
+            if md.file_type().is_symlink() {
+                // The link itself, never what it points to (which may be missing or outside).
+                let target = std::fs::read_link(&path).expect("read_link");
+                let text = format!("link -> {}", target.to_string_lossy());
+                out.insert(rel, (false, text.into_bytes(), false));
+            } else if md.is_dir() {
                 out.insert(rel, (true, Vec::new(), false));
                 walk(root, &path, out);
             } else {
