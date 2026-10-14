@@ -266,3 +266,29 @@ async fn unattended_session_uses_stored_credentials_silently() {
     assert_eq!(prompter.credential_prompts(), 0);
     assert_eq!(prompter.stored_calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn the_session_reports_the_basic_user_it_authenticated_as() {
+    let (ca, srv) = auth_server().await;
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let s = HttpRaSession::open(Arc::clone(&t), tls_session_url(&srv), &CancelToken::new())
+        .await
+        .expect("interactive open");
+    assert_eq!(s.authenticated_user().as_deref(), Some("alice"));
+    // The root session of the same transport and its unattended twin know it too.
+    let root = s.reparent(s.repos_root()).unwrap();
+    assert_eq!(root.authenticated_user().as_deref(), Some("alice"));
+    assert_eq!(
+        s.unattended().authenticated_user().as_deref(),
+        Some("alice")
+    );
+    // A transport that never authenticated knows nothing.
+    let other = transport_trusting(&ca, ScriptedPrompter::with_credentials("bob", "pw"), |_| {});
+    let fresh = HttpRaSession::from_wire(
+        svn_ra::ops::update::RaWire::new(other, s.session_url().clone(), s.wire().caps().clone())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(fresh.authenticated_user(), None);
+}

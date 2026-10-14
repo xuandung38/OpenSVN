@@ -64,10 +64,37 @@ fn unversioned(abs: &Path) -> SvnError {
     .with_svn_code(200_005)
 }
 
+/// `SVN_ERR_WC_CANNOT_DELETE_FILE_EXTERNAL` (E155030): externals are removed by editing the
+/// `svn:externals` property that defines them, never by deleting them (libsvn_client's
+/// `check_external`).
+pub(crate) fn cannot_delete_external(db: &WcDb, rel: &RelPath, def: &RelPath) -> SvnError {
+    invalid(format!(
+        "Cannot remove the external at '{}'; please edit or delete the svn:externals property \
+         on '{}'",
+        abs_of(db, rel).display(),
+        abs_of(db, def).display()
+    ))
+    .with_svn_code(155_030)
+}
+
+/// The directory whose `svn:externals` defines the external at `rel`, when `rel` is one: an
+/// `EXTERNALS` row at exactly `rel`, or a file external node (`file_external = 1`) whose row
+/// is missing, which is then attributed to its parent directory.
+pub(crate) fn external_definer(db: &WcDb, rel: &RelPath) -> Result<Option<RelPath>> {
+    if let Some(ext) = db.external(rel)? {
+        return Ok(Some(ext.def_local_relpath));
+    }
+    if db.read_base(rel)?.is_some_and(|b| b.file_external) {
+        return Ok(Some(rel.parent().unwrap_or_else(RelPath::root)));
+    }
+    Ok(None)
+}
+
 /// Schedules `targets` for deletion and removes them from disk (unless `keep_local`). Without
 /// `force` or `keep_local`, a target whose subtree holds local modifications or unversioned
 /// items that are not ignored is refused (svn's E195006 / E200005) and the whole call has no
-/// effect.
+/// effect. An external (a file external, or the root of a directory external) is always refused
+/// with svn's E155030.
 pub fn delete(
     db: &WcDb,
     cancel: &CancelToken,
@@ -92,6 +119,10 @@ pub fn delete(
 fn plan(db: &WcDb, rel: &RelPath, opts: &DeleteOptions) -> Result<(RelPath, Vec<WorkItem>)> {
     if rel.is_root() {
         return Err(invalid("cannot delete the working copy root"));
+    }
+    // Checked before anything else, whatever `force` and `keep_local` say, as svn does.
+    if let Some(def) = external_definer(db, rel)? {
+        return Err(cannot_delete_external(db, rel, &def));
     }
     let info = node_info(db, rel)?;
     if info.schedule == Schedule::Deleted {
