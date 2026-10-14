@@ -3,17 +3,19 @@
 //! Idempotent: it can run again after a crash at any point, including after the node rows
 //! were already updated.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::path::Path;
 
 use svn_types::{ErrorCode, RelPath, Result, SvnError};
 use svn_wc::WcDb;
 use svn_wc::db::CommitInfo;
-use svn_wc::pristine::{Md5Digest, PristineError, Sha1Digest};
+use svn_wc::pristine::{Md5Digest, PristineError, PristineRecord, Sha1Digest};
 use svn_wc::workqueue::WorkItem;
 
 use super::collect::{ItemAction, ItemKind};
 use super::journal::{JournalData, JournalItem, JournalMerge};
+use super::parallel;
 
 fn bad_digest(what: &str, item: &JournalItem) -> SvnError {
     SvnError::new(
@@ -25,16 +27,28 @@ fn bad_digest(what: &str, item: &JournalItem) -> SvnError {
 /// Installs the committed texts as pristines and updates the working copy rows of every
 /// committed path. The caller holds the WC lock and runs the work queue afterwards.
 ///
-/// The node rows, the released lock rows and the `file-commit` work items are written in ONE
+/// The texts are synced and in place first (several at a time); their pristine rows, the node
+/// rows, the released lock rows and the `file-commit` work items are then written in ONE
 /// transaction (`svn_wc__db_global_commit` plus `svn_wc__db_lock_remove` with their work items):
 /// after a crash either nothing changed (the journal finalizes again) or everything did and the
 /// queued items finish the working files.
 pub fn finalize(db: &WcDb, journal: &JournalData, data_dir: &Path) -> Result<()> {
+    finalize_with(db, journal, data_dir, true)
+}
+
+/// [`finalize`] right after this process saved the committed texts (prepared, synced and
+/// hashed them moments ago): the copies become pristines after a size check, without being
+/// read and hashed again. Recovery uses [`finalize`], which verifies them.
+pub fn finalize_fresh(db: &WcDb, journal: &JournalData, data_dir: &Path) -> Result<()> {
+    finalize_with(db, journal, data_dir, false)
+}
+
+fn finalize_with(db: &WcDb, journal: &JournalData, data_dir: &Path, verify: bool) -> Result<()> {
     let merged = journal
         .merged
         .as_ref()
         .ok_or_else(|| SvnError::new(ErrorCode::Internal, "commit was not merged"))?;
-    install_pristines(db, journal, data_dir)?;
+    let pristines = install_pristines(db, journal, data_dir, verify)?;
     let mut items: Vec<&JournalItem> = journal.items.iter().collect();
     items.sort_by(|a, b| a.relpath.cmp(&b.relpath));
     let mut batch = Vec::with_capacity(items.len());
@@ -60,6 +74,9 @@ pub fn finalize(db: &WcDb, journal: &JournalData, data_dir: &Path) -> Result<()>
             .collect::<Result<Vec<_>>>()?
     };
     db.with_txn(|t| {
+        for r in &pristines {
+            t.record_pristine(r)?;
+        }
         // The server released the locks with the commit; drop the cached rows (only those
         // still holding the sent token) while BASE still names the repository locations they
         // are keyed by, including the nodes below a committed deletion.
@@ -104,34 +121,70 @@ fn commit_info(
     Ok(info)
 }
 
-fn install_pristines(db: &WcDb, journal: &JournalData, data_dir: &Path) -> Result<()> {
-    let mut store = db.pristine_store();
+/// Puts every committed text into the pristine store (synced, in place, read-only) and returns
+/// the rows to record. A text whose row already exists is skipped: the row is authoritative,
+/// and on a re-run after a crash the journal's copy may already be gone.
+fn install_pristines(
+    db: &WcDb,
+    journal: &JournalData,
+    data_dir: &Path,
+    verify: bool,
+) -> Result<Vec<PristineRecord>> {
+    let store = db.pristine_store();
+    let mut seen = HashSet::new();
+    let mut jobs = Vec::new();
     for item in &journal.items {
         let Some(text) = &item.text else { continue };
         let sha1 = Sha1Digest::from_hex(&text.sha1).ok_or_else(|| bad_digest("sha1", item))?;
         let md5 = Md5Digest::from_hex(&text.md5).ok_or_else(|| bad_digest("md5", item))?;
-        let path = data_dir.join(&text.data);
-        let mut file = match File::open(&path) {
-            Ok(f) => f,
-            // A re-run after the data was cleaned up: fine when the pristine is already there.
-            Err(e)
-                if e.kind() == std::io::ErrorKind::NotFound
-                    && svn_wc::pristine::PristineIndex::lookup(store.index(), &sha1)
-                        .map_err(SvnError::from)?
-                        .is_some() =>
-            {
-                continue;
-            }
-            Err(e) => {
-                return Err(SvnError::from_io(
-                    format!("open committed text '{}'", path.display()),
-                    &e,
-                ));
-            }
+        if !seen.insert(sha1) {
+            continue;
+        }
+        match svn_wc::pristine::PristineIndex::lookup(store.index(), &sha1)
+            .map_err(SvnError::from)?
+        {
+            Some(row) if row.hydrated => continue,
+            Some(_) => return Err(PristineError::RehydrateUnsupported(sha1).into()),
+            None => {}
+        }
+        let record = PristineRecord {
+            sha1,
+            md5,
+            size: text.size,
+            hydrated: true,
         };
-        store
-            .install(&mut file, Some(&sha1), Some(&md5))
-            .map_err(|e: PristineError| SvnError::from(e))?;
+        jobs.push((data_dir.join(&text.data), record));
     }
-    Ok(())
+    if jobs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let batch = store.batch().map_err(SvnError::from)?;
+    // The journal's copy becomes the pristine (renamed, not copied, on the same file system).
+    // Until the rows below are committed the journal stays; if this runs again after a crash
+    // the copy may already be in the store, where it is checked and taken as it is.
+    let records = parallel::map(jobs, |(path, record)| {
+        let (sha1, md5) = (record.sha1, record.md5);
+        let adopted = if verify {
+            batch.adopt(&path, &sha1, &md5)
+        } else {
+            batch.adopt_trusted(&path, &record)
+        };
+        match adopted {
+            Ok(r) => Ok(r),
+            Err(PristineError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                let placed = batch.path_of(&sha1);
+                let mut file = File::open(&placed).map_err(|e| {
+                    SvnError::from_io(format!("open committed text '{}'", path.display()), &e)
+                })?;
+                batch
+                    .stage(&mut file, Some(&sha1), Some(&md5))
+                    .map_err(SvnError::from)
+            }
+            Err(e) => Err(e.into()),
+        }
+    })?;
+    batch.sync_dirs(&records).map_err(SvnError::from)?;
+    Ok(records)
 }
