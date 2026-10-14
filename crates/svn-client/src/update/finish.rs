@@ -106,10 +106,11 @@ impl UpdateEditor {
                     t,
                     wc,
                     &info,
-                    vec![NewConflict::Tree(reason, TreeAction::Delete)],
+                    vec![NewConflict::Tree(reason.clone(), TreeAction::Delete)],
                 )
             })?;
             self.skipped.push(wc.clone());
+            self.deletion_conflicts.insert(wc.clone(), (base, reason));
             self.emit(wc, NodeKind::None, UpdateAction::TreeConflicted);
             return Ok(());
         }

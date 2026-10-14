@@ -193,6 +193,11 @@ pub fn parse_dump(data: &[u8]) -> Vec<Vec<FakeChange>> {
             known_props.retain(|k, _| k != &path && !k.starts_with(&format!("{path}/")));
             continue;
         }
+        if action == "replace" {
+            // A delete and an add of the same path in one revision.
+            cur.push(FakeChange::Delete(rp(&path)));
+            known_props.retain(|k, _| k != &path && !k.starts_with(&format!("{path}/")));
+        }
         assert!(
             get("Node-copyfrom-path").is_none(),
             "copies are not supported"
@@ -215,7 +220,7 @@ pub fn parse_dump(data: &[u8]) -> Vec<Vec<FakeChange>> {
         } else if let Some(t) = text {
             cur.push(FakeChange::PutFile(rp(&path), t));
         }
-        if plen > 0 || action == "add" {
+        if plen > 0 || action == "add" || action == "replace" {
             let old = known_props.get(&path).cloned().unwrap_or_default();
             if plen > 0 {
                 for (k, v) in &new_props {

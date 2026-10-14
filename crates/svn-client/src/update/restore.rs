@@ -24,9 +24,9 @@ fn walk(
     if node.op_depth != 0 || node.presence != Presence::Normal {
         return Ok(());
     }
-    let missing = match fs::symlink_metadata(abs_path(db, rel)?) {
-        Ok(_) => false,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+    let (missing, real_dir) = match fs::symlink_metadata(abs_path(db, rel)?) {
+        Ok(md) => (false, md.file_type().is_dir()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (true, false),
         Err(e) => return Err(SvnError::from_io(format!("cannot stat '{rel}'"), &e)),
     };
     match node.kind {
@@ -53,6 +53,11 @@ fn walk(
                     .to_skel(),
                 );
                 restored.push((rel.clone(), NodeKind::Dir));
+            }
+            // A directory replaced by a file or a symlink (obstructed) is left alone: nothing
+            // can be restored below it, and a symlink is never followed.
+            if !missing && !real_dir {
+                return Ok(());
             }
             // Like svn's crawler: the children of a crawled directory are restored, and the
             // crawl only descends further for a recursive depth.
