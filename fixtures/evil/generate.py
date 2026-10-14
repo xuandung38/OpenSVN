@@ -93,6 +93,15 @@ write("update", "href-encoded-traversal",
 write("update", "href-outside-repo",
       update(add_file("a.txt", "/other/!svn/rvr/5/trunk/a.txt")), U, "unsafe",
       "checked-in href outside the repository root")
+write("update", "href-trailing-space-dotdot",
+      update(add_file("a.txt", "/svn/repo/!svn/rvr/5/trunk/.. ")), U, "unsafe",
+      "checked-in href ending in '.. ' (the URL parser strips the space, leaving ..)")
+write("update", "href-encoded-dotdot-space",
+      update(add_file("a.txt", "/svn/repo/!svn/rvr/5/trunk/%2e%2e ")), U, "unsafe",
+      "checked-in href ending in an encoded .. plus a space")
+write("update", "href-scheme-in-path",
+      update(add_file("a.txt", "/svn/repo/!svn/rvr/5/../../../etc/x://y")), U, "unsafe",
+      "checked-in href with .. segments before a '://' inside the path (not a scheme)")
 write("update", "truncated", update(add_file("a.txt"))[:-60], U, "corrupt",
       "document cut off in the middle")
 write("update", "mismatched-tags", update("<S:add-file name=\"a\"></S:add-directory>"), U, "corrupt",
@@ -153,6 +162,11 @@ write("propfind", "child-backslash", multistatus(["/svn/repo/!svn/rvr/5/trunk/..
       "quarantine", "list entry with encoded backslash traversal")
 write("propfind", "child-nul", multistatus(["/svn/repo/!svn/rvr/5/trunk/a%00b"]), L, "quarantine",
       "list entry with an encoded NUL")
+write("propfind", "child-dotdot-space", multistatus(["/svn/repo/!svn/rvr/5/trunk/.. "]), L,
+      "quarantine", "list entry href ending in '.. ' (the URL parser strips the space)")
+write("propfind", "child-scheme-in-path",
+      multistatus(["/svn/repo/!svn/rvr/5/trunk/../../../etc/x://y"]), L, "quarantine",
+      "list entry href with .. before a '://' inside the path (not a scheme)")
 
 # ------------------------------------------------------------------------------- log-report ---
 def log(path_xml, msg="m"):
@@ -258,6 +272,12 @@ write("options", "me-other-host", options(**{"SVN-Me-Resource": "http://evil.tes
       O, "reject", "me resource on another host (commits would go there)")
 write("options", "stub-other-host", options(**{"SVN-Rev-Root-Stub": "//evil.test.local/svn/repo/!svn/rvr"}),
       O, "reject", "protocol-relative stub URL on another host")
+write("options", "stub-scheme-in-path",
+      options(**{"SVN-Rev-Root-Stub": "/svn/repo/!svn/../../x://y"}), O, "reject",
+      "stub with .. segments before a '://' inside the path (not a scheme)")
+write("options", "root-scheme-in-path",
+      options(**{"SVN-Repository-Root": "/svn/repo/trunk/..://x"}), O, "reject",
+      "repository root whose '..' segment is followed by '://' (hidden from a scheme split)")
 write("options", "youngest-garbage", options(**{"SVN-Youngest-Rev": "99999999999999999999999"}), O,
       "reject", "youngest revision overflows")
 
