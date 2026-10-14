@@ -443,3 +443,56 @@ async fn updating_a_file_external_on_its_own_is_refused() {
             .file_external
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn committing_a_file_external_keeps_it_a_file_external() {
+    use svn_client::commit::{CommitContext, CommitOptions, commit};
+    let (main, other) = repos("^/lib/a.txt f\n");
+    let opener = FakeOpener::new(vec![main.clone(), other]);
+    let sb = Sandbox::new();
+    let (wc, _) = co(&main, Arc::clone(&opener), &sb).await;
+    std::fs::write(wc.join("f"), "alpha\nedited\n").unwrap();
+    let state = sb.path("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let db = open_db(&wc);
+    db.set_lock_owner(ctx().lock_owner.clone());
+    let cancel = CancelToken::new();
+    let done = commit(
+        &db,
+        &CommitContext {
+            ra: &main,
+            state_dir: &state,
+            cancel: &cancel,
+        },
+        &[wc.join("f")],
+        &CommitOptions::new("edit the external's source"),
+    )
+    .await
+    .expect("commit")
+    .expect("committed");
+    let base = db.read_base(&rp("f")).unwrap().unwrap();
+    assert!(base.file_external, "{base:?}");
+    assert_eq!(base.repos_relpath.as_deref(), Some("lib/a.txt"));
+    assert_eq!(base.revision, Some(done.revision.0));
+    drop(db);
+    // The next update keeps it, at the new revision.
+    let sum = update(
+        &ext_ctx(opener),
+        &trunk(&main),
+        &wc,
+        None,
+        Depth::Unknown,
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(sum.external_warnings().count(), 0, "{:?}", sum.externals);
+    assert!(
+        open_db(&wc)
+            .read_base(&rp("f"))
+            .unwrap()
+            .unwrap()
+            .file_external
+    );
+    assert_eq!(read(&wc.join("f")), "alpha\nedited\n");
+}
