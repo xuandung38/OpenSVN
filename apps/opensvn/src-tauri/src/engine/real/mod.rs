@@ -158,6 +158,9 @@ pub struct RealEngine {
     recovery: Arc<dyn RecoveryHooks>,
     /// Where local operations read svn's runtime configuration (ignores, auto-props).
     svn_config: Arc<SvnConfigSource>,
+    /// Longest time the repository part of commit recovery may take when a working copy is
+    /// opened ([`recovery::RECOVERY_NETWORK_TIMEOUT`]).
+    recovery_network_timeout: std::time::Duration,
 }
 
 impl RealEngine {
@@ -170,7 +173,15 @@ impl RealEngine {
             state_dir: config.state_dir,
             recovery: config.recovery,
             svn_config: Arc::new(SvnConfigSource::default()),
+            recovery_network_timeout: recovery::RECOVERY_NETWORK_TIMEOUT,
         }
+    }
+
+    /// Replaces [`recovery::RECOVERY_NETWORK_TIMEOUT`] (tests with a server that never answers).
+    #[cfg(test)]
+    pub(crate) fn with_recovery_network_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.recovery_network_timeout = timeout;
+        self
     }
 
     /// Reads svn's runtime configuration (`global-ignores`, auto-props) from `dir/config` for
