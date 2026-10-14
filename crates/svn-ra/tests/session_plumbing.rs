@@ -292,3 +292,69 @@ async fn the_session_reports_the_basic_user_it_authenticated_as() {
     .unwrap();
     assert_eq!(fresh.authenticated_user(), None);
 }
+
+/// Path-based authorization that forbids the repository root and allows `/trunk`: a session
+/// opened at `trunk` and reparented to the root still learns the youngest revision (asked where
+/// the session was opened) and reads the log of `trunk` (the REPORT goes to `trunk`, not to the
+/// root).
+#[tokio::test]
+async fn reparented_root_session_works_when_the_root_is_forbidden() {
+    let srv = server(Bulk::Prefer).await;
+    Mock::given(method("OPTIONS"))
+        .and(path(ROOT))
+        .respond_with(ResponseTemplate::new(403))
+        .with_priority(1)
+        .mount(&srv)
+        .await;
+    Mock::given(method("REPORT"))
+        .and(path("/svn/repo/!svn/rvr/5/trunk"))
+        .and(wiremock::matchers::body_string_contains(
+            "<S:path></S:path>",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/xml; charset=\"utf-8\"")
+                .set_body_bytes(fixture("log/head-verbose.resp")),
+        )
+        .mount(&srv)
+        .await;
+    Mock::given(method("REPORT"))
+        .respond_with(ResponseTemplate::new(403))
+        .with_priority(10)
+        .mount(&srv)
+        .await;
+    let s = open(&srv).await;
+    let root = s.reparent(s.repos_root()).unwrap();
+    let cancel = CancelToken::new();
+    assert_eq!(root.youngest_rev(&cancel).await.unwrap(), Revnum(5));
+
+    let mut seen = Vec::new();
+    root.log(
+        &svn_ra_api::LogRequest {
+            paths: vec![p("trunk")],
+            start: None,
+            end: None,
+            limit: None,
+            discover_changed_paths: true,
+            strict_node_history: false,
+        },
+        &mut |e| {
+            seen.push(e);
+            Ok(())
+        },
+        &cancel,
+    )
+    .await
+    .expect("log of trunk through the root session");
+    assert!(!seen.is_empty());
+
+    // A session opened at the root itself has nowhere else to ask: the 403 stands.
+    let at_root = HttpRaSession::open(
+        transport(Arc::new(FixedPrompter::default())),
+        RepoUrl::parse(&format!("{}{ROOT}", srv.uri())).unwrap(),
+        &cancel,
+    )
+    .await
+    .expect_err("root is forbidden");
+    assert_eq!(at_root.code, ErrorCode::Forbidden);
+}
