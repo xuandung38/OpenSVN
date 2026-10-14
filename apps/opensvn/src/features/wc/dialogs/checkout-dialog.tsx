@@ -85,8 +85,9 @@ export function CheckoutDialog({
   const recentId = useId();
   const settings = useSettings();
   const recent = useRecentUrls();
-  // Externals are fetched only by an engine that supports them; the note explains the rest.
-  const externalsUnsupported = useEngineCapabilities().data?.externals === false;
+  // An engine that fetches externals offers to skip them; one that does not says so instead.
+  const externals = useEngineCapabilities().data?.externals;
+  const [ignoreExternals, setIgnoreExternals] = useState(false);
   const [url, setUrl] = useState(initialUrl);
   const [revText, setRevText] = useState("");
   const [depth, setDepth] = useState<Depth>("infinity");
@@ -154,7 +155,7 @@ export function CheckoutDialog({
           sparse: null,
           format: 31,
           storePristine: true,
-          ignoreExternals: false,
+          ignoreExternals: externals === true && ignoreExternals,
         }),
       );
       if (usedPicked) setPicked(null); // grants are single use
@@ -355,7 +356,18 @@ export function CheckoutDialog({
               {d("revisionInvalid")}
             </span>
           )}
-          {externalsUnsupported && (
+          {externals === true && (
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={ignoreExternals}
+                onChange={(e) => setIgnoreExternals(e.target.checked)}
+                className="accent-[var(--accent)]"
+              />
+              {d("ignoreExternals")}
+            </label>
+          )}
+          {externals === false && (
             <span className="text-[12px] text-muted-text">
               {d("externalsNote")}{" "}
               <SafeLink href={EXTERNALS_ISSUE_URL}>{d("externalsIssue")}</SafeLink>
