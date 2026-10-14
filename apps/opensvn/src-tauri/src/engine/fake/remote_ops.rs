@@ -244,22 +244,32 @@ impl FakeEngine {
                 too_complex: None,
             });
         }
-        let left = match against {
-            None => node
-                .base
-                .as_ref()
-                .map(|b| (b.to_vec(), format!("{rp} (base)"))),
+        let (left, left_props) = match against {
+            None => (
+                node.base
+                    .as_ref()
+                    .map(|b| (b.to_vec(), format!("{rp} (base)"))),
+                node.base_props.clone(),
+            ),
             Some(r) => {
                 let session = self.repo_by_root(&repo_root)?;
-                let (_, data) = self
-                    .read_file(
-                        &session,
-                        &RelPath::new(repo_path.trim_matches('/'))?,
-                        Some(Revnum(r.0)),
-                        ctx,
-                    )
+                let path = RelPath::new(repo_path.trim_matches('/'))?;
+                let mut data = Vec::new();
+                let meta = session
+                    .get_file(&path, Some(Revnum(r.0)), &mut data, &ctx.cancel)
                     .await?;
-                Some((data, format!("{rp}@r{}", r.0)))
+                // Like the real engine: the properties of the file at that revision against the
+                // working ones (entry and working copy properties are not user properties).
+                let props = meta
+                    .props
+                    .iter()
+                    .filter(|p| !p.name.starts_with("svn:entry:") && !p.name.starts_with("svn:wc:"))
+                    .filter_map(|p| {
+                        let v = p.value.as_ref()?;
+                        Some((p.name.clone(), String::from_utf8_lossy(v).into_owned()))
+                    })
+                    .collect();
+                (Some((data, format!("{rp}@r{}", r.0))), props)
             }
         };
         let right = node
@@ -267,9 +277,7 @@ impl FakeEngine {
             .as_ref()
             .map(|b| (b.to_vec(), format!("{rp} (working)")));
         let mut diff = file_diff(path, left, right, opts, ctx)?;
-        if against.is_none() {
-            diff.prop_changes = prop_rows(&node.base_props, &working_props);
-        }
+        diff.prop_changes = prop_rows(&left_props, &working_props);
         Ok(diff)
     }
 

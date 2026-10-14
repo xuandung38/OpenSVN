@@ -308,7 +308,7 @@ async fn commit_locked(
     // A revision made by this commit is newer than this: recovery searches the log from here
     // when the outcome of the MERGE is unknown.
     let start_youngest = ctx.ra.youngest_rev(ctx.cancel).await?;
-    let id = store.new_id();
+    let id = store.new_id_for(db.wcroot());
     let data_dir = store.create_data_dir(&id)?;
     let prepared = match prepare_items(db, &harvest.items, &data_dir) {
         Ok(p) => p,

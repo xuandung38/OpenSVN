@@ -60,9 +60,11 @@ impl RealEngine {
         let client = self.client_ctx(ctx);
         let config = self.svn_config.clone();
         let (root, cancel) = (wc.root.clone(), ctx.cancel.clone());
+        let case_insensitive = self.case_insensitive_fs;
         blocking(move || {
             let db = local_util::open_wc_root(&client, &root)?;
-            let env = local_util::local_env(&config, &db, cancel)?;
+            let mut env = local_util::local_env(&config, &db, cancel)?;
+            env.case_insensitive = case_insensitive;
             f(&db, &env)
         })
         .await
@@ -78,7 +80,7 @@ impl RealEngine {
         check_changelist_name(name)?;
         let (paths, name) = (paths.to_vec(), name.map(str::to_owned));
         self.with_local(wc, ctx, move |db, env| {
-            let targets = local_util::targets(db, &paths)?;
+            let targets = local_util::targets_in(db, env, &paths)?;
             client_local::set_changelist(db, &env.cancel, &targets, name.as_deref(), Depth::Empty)
                 .map(|_| ())
         })
@@ -94,7 +96,7 @@ impl RealEngine {
         let pattern = local_util::checked_ignore_pattern(&req.pattern)?.to_owned();
         let (dir, scope) = (req.dir.clone(), req.scope);
         self.with_local(wc, ctx, move |db, env| {
-            let (rel, _) = local_util::target(db, &dir)?;
+            let (rel, _) = local_util::target_in(db, env, &dir)?;
             if db.read_node(&rel)?.is_none() {
                 return Err(SvnError::new(
                     ErrorCode::PathNotFound,
@@ -140,7 +142,7 @@ impl RealEngine {
     ) -> EngineResult<()> {
         let (path, accept) = (req.path.clone(), accept_of(req.choice));
         self.with_local(wc, ctx, move |db, env| {
-            let (rel, _) = local_util::target(db, &path)?;
+            let (rel, _) = local_util::target_in(db, env, &path)?;
             client_local::resolve(db, &env.cancel, &rel, false, ResolveScope::ALL, accept)
                 .map(|_| ())
         })
@@ -157,7 +159,7 @@ impl RealEngine {
     ) -> EngineResult<()> {
         let (path, name, value) = (path.to_owned(), name.to_owned(), value.map(str::to_owned));
         self.with_local(wc, ctx, move |db, env| {
-            let (rel, _) = local_util::target(db, &path)?;
+            let (rel, _) = local_util::target_in(db, env, &path)?;
             client_local::propset(
                 db,
                 &env.cancel,
@@ -182,7 +184,7 @@ impl RealEngine {
             let mut rels = Vec::with_capacity(paths.len());
             let mut targets = Vec::with_capacity(paths.len());
             for p in &paths {
-                let (rel, abs) = local_util::target(db, p)?;
+                let (rel, abs) = local_util::target_in(db, env, p)?;
                 rels.push(rel);
                 targets.push(abs);
             }
@@ -215,7 +217,7 @@ impl RealEngine {
     ) -> EngineResult<()> {
         let (paths, progress) = (paths.to_vec(), ctx.progress.clone());
         self.with_local(wc, ctx, move |db, env| {
-            let targets = local_util::targets(db, &paths)?;
+            let targets = local_util::targets_in(db, env, &paths)?;
             let opts = AddOptions {
                 depth: Depth::Infinity,
                 add_parents: true,
@@ -237,7 +239,7 @@ impl RealEngine {
     ) -> EngineResult<()> {
         let paths = paths.to_vec();
         self.with_local(wc, ctx, move |db, env| {
-            let targets = local_util::targets(db, &paths)?;
+            let targets = local_util::targets_in(db, env, &paths)?;
             let opts = DeleteOptions {
                 keep_local,
                 force: false,
@@ -257,8 +259,8 @@ impl RealEngine {
     ) -> EngineResult<()> {
         let (from, to) = (from.to_owned(), to.to_owned());
         self.with_local(wc, ctx, move |db, env| {
-            let (_, src) = local_util::target(db, &from)?;
-            let (_, dst) = local_util::target(db, &to)?;
+            let (_, src) = local_util::target_in(db, env, &from)?;
+            let (_, dst) = local_util::new_target(db, &to)?;
             client_local::move_path(db, &env.cancel, &src, &dst).map(|_| ())
         })
         .await

@@ -143,6 +143,13 @@ test("read-only operations do not refetch repository views, writing ones do", as
   bus.stop();
 });
 
+test("mock data never carries lock tokens, like the IPC contract", async () => {
+  const { mockStatus } = await import("./mock/data");
+  const locks = mockStatus.flatMap((f) => (f.lock ? [f.lock] : []));
+  expect(locks.length).toBeGreaterThan(0);
+  for (const lock of locks) expect(lock.token).toBeNull();
+});
+
 test("event bus: notice phases update banners, never the operation's progress", async () => {
   const qc = new QueryClient();
   const bus = createEventBus(mockAdapter, qc);
