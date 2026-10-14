@@ -46,6 +46,7 @@ fn local_mods(db: &WcDb, rel: &RelPath, cancel: &CancelToken) -> Result<(bool, b
         show_unmodified: false,
         include_unversioned: true,
         include_ignored: false,
+        include_needs_lock: false,
     };
     let mut modified = false;
     for st in local_status(db, rel, &opts, None, cancel)? {

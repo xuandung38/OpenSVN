@@ -106,6 +106,7 @@ fn auto_add_remove(
         show_unmodified: false,
         include_unversioned: true,
         include_ignored: false,
+        include_needs_lock: false,
     };
     for rel in rels {
         env.cancel.check()?;
