@@ -208,3 +208,69 @@ async fn cancelled_update_is_resumed_by_the_next_update() {
         "rows: {rows:?}"
     );
 }
+
+/// A nested target whose parent is switched cannot be anchored at the session URL: both an
+/// update and a switch of it are refused before anything changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_target_below_a_switched_parent_is_refused_for_update_and_switch() {
+    let s = session();
+    s.seed(
+        "a",
+        "r1",
+        &[
+            put("trunk/src/lib/a.rs", "trunk\n"),
+            put("branches/b/src/lib/a.rs", "branch\n"),
+            put("branches/b/other/x.rs", "other\n"),
+        ],
+    )
+    .expect("seed");
+    let sb = Sandbox::new();
+    let wc = sb.path("wc");
+    let cancel = CancelToken::new();
+    checkout(&ctx(), &s, &wc, None, Depth::Infinity, false, &cancel)
+        .await
+        .expect("checkout");
+    let url = |rel: &str| svn_types::RepoUrl::parse(&format!("{ROOT_URL}/{rel}")).expect("url");
+    svn_client::switch(
+        &ctx(),
+        &s,
+        &wc.join("trunk/src"),
+        &url("branches/b/src"),
+        None,
+        Depth::Unknown,
+        &cancel,
+    )
+    .await
+    .expect("switch trunk/src");
+    assert_eq!(read(&wc.join("trunk/src/lib/a.rs")), "branch\n");
+
+    let err = update(
+        &ctx(),
+        &s,
+        &wc.join("trunk/src/lib"),
+        None,
+        Depth::Unknown,
+        &cancel,
+    )
+    .await
+    .expect_err("update below a switched parent");
+    assert_eq!(err.code, svn_types::ErrorCode::WcInvalidOperation, "{err}");
+    let err = svn_client::switch(
+        &ctx(),
+        &s,
+        &wc.join("trunk/src/lib"),
+        &url("branches/b/other"),
+        None,
+        Depth::Unknown,
+        &cancel,
+    )
+    .await
+    .expect_err("switch below a switched parent");
+    assert_eq!(err.code, svn_types::ErrorCode::WcInvalidOperation, "{err}");
+    assert!(err.to_string().contains("switched"), "{err}");
+    assert_eq!(
+        read(&wc.join("trunk/src/lib/a.rs")),
+        "branch\n",
+        "nothing changed"
+    );
+}

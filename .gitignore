@@ -22,3 +22,5 @@ dist/
 # Tauri generated
 apps/opensvn/src-tauri/gen/
 
+# End-to-end test screenshots and logs
+e2e-artifacts/
