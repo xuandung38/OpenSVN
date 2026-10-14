@@ -68,7 +68,7 @@ async fn repository_reads_over_the_demo_repository() {
     );
     assert!(page.entries[0].changed_paths.is_some());
 
-    let branches = commands::branches_list(f.state(), DEMO_REPO_URL.into())
+    let branches = commands::branches_list(f.state(), DEMO_REPO_URL.into(), None)
         .await
         .unwrap();
     assert!(branches.iter().any(|b| b.kind == BranchKind::Trunk));
@@ -96,7 +96,7 @@ async fn layout_is_stored_per_repository_and_drives_branch_listing() {
         .await
         .unwrap();
     assert!(
-        commands::branches_list(f.state(), DEMO_REPO_URL.into())
+        commands::branches_list(f.state(), DEMO_REPO_URL.into(), None)
             .await
             .unwrap()
             .is_empty()
@@ -200,7 +200,7 @@ async fn remote_edit_copy_and_url_locks() {
         f.wait_op(&h).await.unwrap(),
         OpResult::NewRev { new_rev: Rev(12) }
     );
-    let tags = commands::branches_list(f.state(), DEMO_REPO_URL.into())
+    let tags = commands::branches_list(f.state(), DEMO_REPO_URL.into(), None)
         .await
         .unwrap();
     assert!(tags.iter().any(|b| b.name == "v2.0"));

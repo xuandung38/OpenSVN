@@ -9,6 +9,7 @@ import { SegmentedControl } from "../components/ui/segmented-control";
 import { StatusBar, StatusBarItem } from "../components/ui/status-bar";
 import { Tabs } from "../components/ui/tabs";
 import { BranchPopoverContent } from "../features/remote/branch/branch-popover";
+import { BranchSwitchList } from "../features/remote/branch/branch-switch-list";
 import { CreateBranchTagDialog } from "../features/remote/branch/create-branch-tag-dialog";
 import {
   RemoteBrowse,
@@ -142,6 +143,7 @@ function ShellBody({
   const [createKind, setCreateKind] = useState<"branch" | "tag" | "location" | null>(null);
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [locationOpen, setLocationOpen] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const r = useT(repoStrings);
@@ -207,8 +209,13 @@ function ShellBody({
             wrapLocation={
               current
                 ? (item) => (
-                    <Popover trigger={item}>
+                    <Popover trigger={item} open={locationOpen} onOpenChange={setLocationOpen}>
                       <BranchPopoverContent wc={current} onCreate={setCreateKind} />
+                      <BranchSwitchList
+                        wc={current}
+                        changed={changed}
+                        onSwitched={() => setLocationOpen(false)}
+                      />
                       <div className="mt-1 border-t border-line pt-1.5">
                         <Button small onClick={() => openDialog({ kind: "switch" })}>
                           {t("switchAction")}

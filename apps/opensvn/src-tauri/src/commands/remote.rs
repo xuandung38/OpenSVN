@@ -2,9 +2,9 @@
 //! `repo_cat` returns text (size-limited); `repo_save` streams to disk as an operation.
 
 use opensvn_ipc::{
-    AppError, BranchNode, CopyLocationRequest, EntryKind, Layout, LayoutDetection, LockRequest,
-    LockTargets, LogGetRequest, LogPage, LogTarget, OpResult, OperationHandle, OperationKind,
-    PathGrantId, RemoteEditRequest, RemoteOp, RepoEntry, RepoInfo, Rev, TextSide, UnlockRequest,
+    AppError, BranchNode, CopyLocationRequest, Layout, LayoutDetection, LockRequest, LockTargets,
+    LogGetRequest, LogPage, LogTarget, OpResult, OperationHandle, OperationKind, PathGrantId,
+    RemoteEditRequest, RemoteOp, RepoEntry, RepoInfo, Rev, TextSide, UnlockRequest,
 };
 use tauri::State;
 
@@ -281,18 +281,24 @@ fn layout_valid(layout: &Layout) -> Result<(), AppError> {
 pub async fn branches_list(
     state: State<'_, AppState>,
     repo_root_url: String,
+    at_url: Option<String>,
 ) -> Result<Vec<BranchNode>, AppError> {
     guard(async {
-        let ctx = OpContext::detached();
+        // Read from popovers and dialogs in the background: never raise a credential or
+        // certificate prompt for it.
+        let ctx = OpContext::background();
         let info = state
             .engine
             .repo_info(&repo_root_url, &ctx)
             .await
             .map_err(engine_err)?;
-        let layout = state
-            .db
-            .layout_get(&info.repo_uuid)?
-            .unwrap_or(Layout::Auto);
+        // A stored layout wins. Otherwise list around `at_url`: the root-level convention, or only
+        // the project folder it is in (never every top-level folder of the repository).
+        let layout = match (state.db.layout_get(&info.repo_uuid)?, at_url) {
+            (Some(stored), _) => stored,
+            (None, Some(url)) => crate::layout::layout_near(&repo_root_url, &url),
+            (None, None) => Layout::Auto,
+        };
         state
             .engine
             .branches_list(&repo_root_url, &layout, &ctx)
@@ -322,25 +328,6 @@ pub async fn layout_set(
     .await
 }
 
-/// Lists directories through the engine for layout detection.
-struct EngineDirs(std::sync::Arc<dyn crate::engine::EngineFacade>);
-
-#[async_trait::async_trait]
-impl crate::layout::DirLister for EngineDirs {
-    async fn dirs(&self, url: &str) -> Result<Vec<String>, AppError> {
-        match self.0.repo_list(url, None, &OpContext::detached()).await {
-            Ok(entries) => Ok(entries
-                .into_iter()
-                .filter(|e| e.kind == EntryKind::Dir)
-                .map(|e| e.name)
-                .collect()),
-            // A folder that does not exist simply has no layout below it.
-            Err(e) if e.code == svn_types::ErrorCode::PathNotFound => Ok(Vec::new()),
-            Err(e) => Err(AppError::from(&e)),
-        }
-    }
-}
-
 #[tauri::command]
 #[specta::specta]
 pub async fn layout_detect(
@@ -349,7 +336,7 @@ pub async fn layout_detect(
     url: String,
 ) -> Result<LayoutDetection, AppError> {
     guard(async {
-        let lister = EngineDirs(std::sync::Arc::clone(&state.engine));
+        let lister = crate::layout::EngineDirs(state.engine.as_ref());
         crate::layout::detect(&lister, &repo_root_url, &url).await
     })
     .await

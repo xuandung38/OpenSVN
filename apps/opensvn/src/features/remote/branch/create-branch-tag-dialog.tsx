@@ -63,9 +63,12 @@ export function CreateBranchTagDialog({
     queryKey: queryKeys.layout(repoUuid),
     queryFn: () => unwrap(ipc().commands.layoutGet(repoUuid)),
   });
+  const atUrl = currentRefUrl ?? sourceUrl;
   const nodesQ = useQuery({
-    queryKey: queryKeys.branches(repoRootUrl),
-    queryFn: () => unwrap(ipc().commands.branchesList(repoRootUrl)),
+    queryKey: queryKeys.branches(repoRootUrl, atUrl),
+    queryFn: () => unwrap(ipc().commands.branchesList(repoRootUrl, atUrl)),
+    // Location mode (no trunk/branches/tags) never needs the list.
+    enabled: kind !== "location",
   });
   const lookupPending = kind !== "location" && (layoutQ.isPending || nodesQ.isPending);
   const container = useMemo(

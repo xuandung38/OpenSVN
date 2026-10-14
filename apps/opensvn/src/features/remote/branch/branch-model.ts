@@ -1,7 +1,8 @@
 import type { BranchNode, Layout } from "../../../ipc/bindings";
 import { joinUrl, parentUrl, urlFromRepoPath } from "../repo-url";
 
-const LAYOUT_RE = /^(.*?)\/(trunk|branches\/[^/]+|tags\/[^/]+)(\/.*)?$/i;
+// Case-sensitive, like Subversion paths and the backend detection (`/Trunk` is not trunk).
+const LAYOUT_RE = /^(.*?)\/(trunk|branches\/[^/]+|tags\/[^/]+)(\/.*)?$/;
 
 /**
  * Project root of a layout URL: the part before `/trunk`, `/branches/<name>` or `/tags/<name>`.
@@ -39,7 +40,7 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function projectFromPatterns(url: string, root: string, patterns: string[]): string | null {
   const path = url.slice(root.replace(/\/+$/, "").length);
   for (const p of patterns) {
-    const re = new RegExp(`^${escapeRe(p).replace("\\{project\\}", "([^/]+)")}(?:/|$)`, "i");
+    const re = new RegExp(`^${escapeRe(p).replace("\\{project\\}", "([^/]+)")}(?:/|$)`);
     const m = re.exec(path);
     if (m) return m[1] ?? "";
   }
