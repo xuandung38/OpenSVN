@@ -778,3 +778,46 @@ async fn copying_a_working_copy_to_a_url_is_refused_with_a_user_facing_error() {
     assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{err}");
     assert!(err.message.contains("not supported"), "{err}");
 }
+
+#[cfg(unix)]
+fn writable(root: &Path, rel: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(root.join(rel)).unwrap().permissions().mode() & 0o222 != 0
+}
+
+/// Doc 01 flow 10.4: a `svn:needs-lock` file is read-only until locked, writable while the lock
+/// is held, read-only again after an unlock and after a commit that releases the lock.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_needs_lock_file_is_writable_only_while_locked() {
+    use crate::engine::facade::LockScope;
+    let e = env();
+    let wc = e.checkout("wc").await;
+    e.f.engine
+        .props_set(&wc, "README.md", "svn:needs-lock", Some("*"), &ctx())
+        .await
+        .expect("props_set");
+    e.commit(&wc, &["README.md"], false).await.expect("commit");
+    assert!(!writable(&wc.root, "README.md"), "read-only once committed");
+
+    let scope = LockScope::Wc {
+        wc: wc.clone(),
+        paths: vec!["README.md".into()],
+    };
+    e.f.engine
+        .lock(&scope, Some("editing"), false, &ctx())
+        .await
+        .expect("lock");
+    assert!(writable(&wc.root, "README.md"), "writable while locked");
+    e.f.engine.unlock(&scope, false, &ctx()).await.expect("unlock");
+    assert!(!writable(&wc.root, "README.md"), "read-only after unlock");
+
+    e.f.engine
+        .lock(&scope, None, false, &ctx())
+        .await
+        .expect("lock again");
+    write(&wc.root, "README.md", "hello\nlocked edit\n");
+    e.commit(&wc, &["README.md"], false).await.expect("commit");
+    assert!(!writable(&wc.root, "README.md"), "the commit released the lock");
+    assert_eq!(e.text_in_repo("trunk/README.md").await, "hello\nlocked edit\n");
+}
