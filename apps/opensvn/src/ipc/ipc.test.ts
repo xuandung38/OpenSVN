@@ -142,3 +142,23 @@ test("read-only operations do not refetch repository views, writing ones do", as
   expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.logRoot });
   bus.stop();
 });
+
+test("event bus: notice phases update banners, never the operation's progress", async () => {
+  const qc = new QueryClient();
+  const bus = createEventBus(mockAdapter, qc);
+  await bus.start();
+  mockEmit("op://started", { opId: "n1", kind: "commit", wcId: "wc-main", title: "Commit" });
+  mockEmit("op://progress", { opId: "n1", phase: "commit", current: 3, total: 3 });
+  mockEmit("op://progress", {
+    opId: "n1",
+    phase: "needs-cleanup",
+    currentPath: "file in use",
+  });
+  mockEmit("op://progress", { opId: "n1", phase: "nested-wc-skipped", currentPath: "x" });
+  const ops = qc.getQueryData<Record<string, OpState>>(queryKeys.ops) ?? {};
+  expect(ops.n1?.progress?.phase).toBe("commit");
+  expect(qc.getQueryData(queryKeys.banners("wc-main"))).toEqual([
+    { wcId: "wc-main", kind: "needs-cleanup", data: ["file in use"] },
+  ]);
+  bus.stop();
+});

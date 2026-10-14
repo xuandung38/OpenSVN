@@ -268,7 +268,10 @@ impl EngineFacade for RealEngine {
     fn capabilities(&self) -> EngineCapabilities {
         // `svn-client` does not fetch `svn:externals` yet (issue #97): checkout, update and switch
         // behave like `svn --ignore-externals`.
-        EngineCapabilities { externals: false }
+        EngineCapabilities {
+            externals: false,
+            demo: false,
+        }
     }
 
     async fn wc_info(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcInfo> {

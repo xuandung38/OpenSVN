@@ -431,6 +431,12 @@ export type EngineCapabilities = {
 	 *  (https://github.com/xuandung38/OpenSVN/issues/97).
 	 */
 	externals: boolean,
+	/**
+	 *  The in-memory demo engine runs in a release build: nothing is read from or written to a
+	 *  real repository, and the UI says so with a permanent banner. Always `false` in debug builds,
+	 *  where the demo engine is the development default.
+	 */
+	demo: boolean,
 };
 
 export type EntryKind = "file" | "dir";
