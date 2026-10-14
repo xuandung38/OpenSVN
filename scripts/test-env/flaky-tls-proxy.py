@@ -38,23 +38,25 @@ def log(msg):
 
 
 def hard_close(sock, reset):
-    """Closes without a TLS close_notify; with `reset`, the peer sees an RST."""
+    """Ends the TCP connection under `sock` without a TLS close_notify; with `reset`, the peer
+    sees an RST. Works on a duplicate descriptor, so the TLS object that other threads may still
+    be using is never touched here (OpenSSL objects are not safe to close across threads); the
+    pump threads wake up, end, and the TLS sockets are closed once they are done."""
+    try:
+        dup = socket.fromfd(sock.fileno(), socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        return
     try:
         if reset:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
-            # Wakes the thread blocked in recv(); the last close then sends the RST.
-            how = socket.SHUT_RD
+            dup.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            # Wakes the thread blocked in recv(); the final close then sends the RST.
+            dup.shutdown(socket.SHUT_RD)
         else:
-            how = socket.SHUT_RDWR
-        # SSLSocket.shutdown() and close() drop the TLS state without sending close_notify.
-        # close() alone would not send the FIN while another thread still blocks in recv().
-        sock.shutdown(how)
+            dup.shutdown(socket.SHUT_RDWR)
     except OSError:
         pass
-    try:
-        sock.close()
-    except OSError:
-        pass
+    finally:
+        dup.close()
 
 
 class Conn:
@@ -175,6 +177,7 @@ def handle(args, server_ctx, up_ctx, up_host, up_port, raw, cid):
     except OSError as e:
         log(f"conn {cid}: upstream failed: {e}")
         hard_close(client, False)
+        client.close()
         return
     threads = [
         threading.Thread(target=conn.client_to_upstream, daemon=True),
@@ -184,6 +187,14 @@ def handle(args, server_ctx, up_ctx, up_host, up_port, raw, cid):
         threads.append(threading.Thread(target=conn.idle_watch, daemon=True))
     for t in threads:
         t.start()
+    for t in threads[:2]:
+        t.join()
+    conn.closed = True
+    for sock in (client, conn.upstream):
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 def main():
