@@ -853,9 +853,6 @@ pub async fn commit_with_auto_add_remove(h: &dyn Harness) {
     );
 }
 
-/// An update that merges an incoming change into a locally modified file conflicts: the update
-/// itself succeeds and reaches the target revision, other incoming changes are applied, and the
-/// conflicted file can be resolved to the local version and committed.
 /// `svn update PATH` on a folder, a file inside a folder and a top-level file of a working copy
 /// whose session is anchored at its root: only the named paths move to the new revision.
 pub async fn update_of_sub_paths(h: &dyn Harness) {
@@ -946,6 +943,9 @@ pub async fn update_of_sub_paths(h: &dyn Harness) {
     assert!(status(h, &wc2).await.is_empty(), "nothing is left modified");
 }
 
+/// An update that merges an incoming change into a locally modified file conflicts: the update
+/// itself succeeds and reaches the target revision, other incoming changes are applied, and the
+/// conflicted file can be resolved to the local version and committed.
 pub async fn update_ends_in_conflict(h: &dyn Harness) {
     let e = h.engine();
     let url = h.repo_url();
