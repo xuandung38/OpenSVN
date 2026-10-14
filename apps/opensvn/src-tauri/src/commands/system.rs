@@ -42,7 +42,20 @@ pub async fn accounts_list(state: State<'_, AppState>) -> Result<Vec<Account>, A
 #[tauri::command]
 #[specta::specta]
 pub async fn accounts_sign_out(state: State<'_, AppState>, realm: String) -> Result<(), AppError> {
-    guard(async { state.auth.sign_out(&realm) }).await
+    guard(async {
+        // Keychain calls block, and sign-out waits for a save in progress to finish: keep both
+        // off the async runtime.
+        let auth = std::sync::Arc::clone(&state.auth);
+        match tokio::task::spawn_blocking(move || auth.sign_out(&realm)).await {
+            Ok(result) => result,
+            // `guard` turns the panic into an `internal` error.
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => {
+                Err(AppError::internal("Sign-out was interrupted.").with_detail(e.to_string()))
+            }
+        }
+    })
+    .await
 }
 
 /// What the running engine supports, so the UI can hide or explain options it would ignore
