@@ -95,3 +95,23 @@ pub fn open_containing(owner: &svn_wc::db::LockOwner, path: &Path) -> Result<(Wc
     let rel = rel_of(&root, &canonical)?;
     Ok((db, rel))
 }
+
+/// `svn upgrade` to working copy format `to`. Only the format the working copy already has is
+/// accepted (a no-op): OpenSVN writes format 31 only, which svn 1.8 to 1.15 and TortoiseSVN use;
+/// converting between formats 31 and 32 (`svn upgrade --compatible-version 1.15`) is not
+/// supported and fails with [`ErrorCode::WcFormatUnsupported`] without touching anything.
+pub fn upgrade_format(db: &WcDb, to: u32) -> Result<()> {
+    let current = db.format();
+    if to == current {
+        return Ok(());
+    }
+    Err(SvnError::new(
+        ErrorCode::WcFormatUnsupported,
+        format!(
+            "changing the working copy format from {current} to {to} is not supported; \
+             OpenSVN writes format {} only. Check out a new working copy with a client that \
+             writes format {to} if you need it",
+            svn_wc::db::FORMAT_WRITE
+        ),
+    ))
+}
