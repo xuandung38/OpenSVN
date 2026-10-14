@@ -169,7 +169,8 @@ export class App {
     const driver = spawn(
       process.env.TAURI_DRIVER ?? "tauri-driver",
       ["--port", String(port), "--native-port", String(nativePort)],
-      { env, stdio: ["ignore", "pipe", "pipe"] },
+      // Own process group: stop() ends the driver, WebKitWebDriver and the app together.
+      { env, stdio: ["ignore", "pipe", "pipe"], detached: true },
     );
     let log = "";
     driver.stdout.on("data", (d) => (log += d));
@@ -216,8 +217,18 @@ export class App {
     } catch {
       // the app may already be gone
     }
-    this.driver.kill("SIGTERM");
-    await sleep(300);
+    // An app the session did not close would keep the driver's pipes, and this process, alive.
+    for (const signal of ["SIGTERM", "SIGKILL"]) {
+      try {
+        process.kill(-this.driver.pid, signal);
+      } catch {
+        break; // the group is gone
+      }
+      await sleep(500);
+    }
+    this.driver.stdout.destroy();
+    this.driver.stderr.destroy();
+    this.driver.unref();
     rmSync(this.home, { recursive: true, force: true });
   }
 
