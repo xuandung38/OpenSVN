@@ -43,6 +43,7 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             resolve,
             props_set,
             repo_info,
+            repo_resolve_url,
             repo_list,
             repo_cat,
             repo_save,

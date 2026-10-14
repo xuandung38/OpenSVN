@@ -18,7 +18,9 @@ use super::nodes::{self, Node, Presence, Props, kind_word, parent_text, relpath_
 use super::ops::{self, BaseNode, CommitInfo, scope_sql};
 use super::{WcDb, sql_err};
 use crate::conflicts::{Conflict, ConflictSkel, OperationInfo};
+use crate::pristine::PristineRecord;
 use crate::skel::Skel;
+use crate::workqueue::Unsettled;
 
 /// Typed writers bound to one open write transaction; see the module documentation.
 pub struct WcTxn<'a> {
@@ -66,13 +68,13 @@ impl WcTxn<'_> {
 
     /// `(root URL, UUID)` of the `REPOSITORY` row `repos_id`.
     pub fn repository(&self, repos_id: i64) -> Result<(String, String)> {
-        self.conn
-            .query_row(
-                "SELECT root, uuid FROM repository WHERE id = ?1",
-                [repos_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .map_err(sql_err)
+        super::connection::cached_row(
+            self.conn,
+            "SELECT root, uuid FROM repository WHERE id = ?1",
+            [repos_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(sql_err)
     }
 
     // ---- BASE layer ---------------------------------------------------------------------
@@ -95,14 +97,14 @@ impl WcTxn<'_> {
         rev: u64,
         repos_relpath: Option<&str>,
     ) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE nodes SET presence = 'incomplete', revision = ?3, \
+        super::connection::cached_exec(
+            self.conn,
+            "UPDATE nodes SET presence = 'incomplete', revision = ?3, \
                  repos_path = COALESCE(?4, repos_path) \
                  WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = 0",
-                params![self.wc_id, path.as_str(), to_i64(rev)?, repos_relpath],
-            )
-            .map_err(sql_err)?;
+            params![self.wc_id, path.as_str(), to_i64(rev)?, repos_relpath],
+        )
+        .map_err(sql_err)?;
         Ok(())
     }
 
@@ -131,18 +133,18 @@ impl WcTxn<'_> {
                  ELSE {p} || '/' || {suffix} END)"
             )
         };
-        self.conn
-            .execute(
-                &format!(
-                    "UPDATE nodes SET repos_path = {} \
+        super::connection::cached_exec(
+            self.conn,
+            &format!(
+                "UPDATE nodes SET repos_path = {} \
                      WHERE wc_id = ?1 AND op_depth = 0 AND {scope} AND repos_path IS NOT NULL \
                      AND repos_path = {}",
-                    under("?4"),
-                    under("?3")
-                ),
-                params![self.wc_id, root.as_str(), old_prefix, new_prefix],
-            )
-            .map_err(sql_err)?;
+                under("?4"),
+                under("?3")
+            ),
+            params![self.wc_id, root.as_str(), old_prefix, new_prefix],
+        )
+        .map_err(sql_err)?;
         Ok(())
     }
 
@@ -168,24 +170,25 @@ impl WcTxn<'_> {
             Depth::Unknown | Depth::Exclude => Depth::Infinity,
             d => d,
         };
-        self.bump_node(root, to_i64(rev)?, depth, skipped, true, false)
+        let Some(node) = self.read_base(root)? else {
+            return Ok(());
+        };
+        self.bump_node(node, to_i64(rev)?, depth, skipped, true, false)
     }
 
     fn bump_node(
         &self,
-        path: &RelPath,
+        node: Node,
         rev: i64,
         depth: Depth,
         skipped: &[RelPath],
         is_root: bool,
         skip_when_dir: bool,
     ) -> Result<()> {
+        let path = &node.relpath;
         if skipped.contains(path) {
             return Ok(());
         }
-        let Some(node) = self.read_base(path)? else {
-            return Ok(());
-        };
         if skip_when_dir && node.kind == NodeKind::Dir {
             return Ok(());
         }
@@ -201,13 +204,13 @@ impl WcTxn<'_> {
             return ops::base_remove(self.conn, self.wc_id, path);
         }
         if old_rev.is_some() && old_rev != Some(rev) {
-            self.conn
-                .execute(
-                    "UPDATE nodes SET revision = ?3 WHERE wc_id = ?1 AND local_relpath = ?2 \
+            super::connection::cached_exec(
+                self.conn,
+                "UPDATE nodes SET revision = ?3 WHERE wc_id = ?1 AND local_relpath = ?2 \
                      AND op_depth = 0",
-                    params![self.wc_id, path.as_str(), rev],
-                )
-                .map_err(sql_err)?;
+                params![self.wc_id, path.as_str(), rev],
+            )
+            .map_err(sql_err)?;
         }
         if depth == Depth::Empty
             || node.kind != NodeKind::Dir
@@ -223,8 +226,9 @@ impl WcTxn<'_> {
         } else {
             depth
         };
-        for child in self.base_children(path)? {
-            self.bump_node(&child, rev, below, skipped, false, depth == Depth::Files)?;
+        // One query per directory; each child's row comes with it.
+        for child in nodes::base_children(self.conn, self.wc_id, path)? {
+            self.bump_node(child, rev, below, skipped, false, depth == Depth::Files)?;
         }
         Ok(())
     }
@@ -241,23 +245,22 @@ impl WcTxn<'_> {
     /// Caches `lock` for the BASE node at `path` (`svn_wc__db_lock_add`): the row is keyed by
     /// the node's repository location and replaces an older one. `PathNotFound` without BASE.
     pub fn lock_add(&self, path: &RelPath, lock: &LockInfo) -> Result<()> {
-        let n = self
-            .conn
-            .execute(
-                "INSERT OR REPLACE INTO lock (repos_id, repos_relpath, lock_token, lock_owner, \
+        let n = super::connection::cached_exec(
+            self.conn,
+            "INSERT OR REPLACE INTO lock (repos_id, repos_relpath, lock_token, lock_owner, \
                  lock_comment, lock_date) SELECT repos_id, repos_path, ?3, ?4, ?5, ?6 FROM nodes \
                  WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = 0 \
                  AND repos_id IS NOT NULL AND repos_path IS NOT NULL",
-                params![
-                    self.wc_id,
-                    path.as_str(),
-                    lock.token,
-                    lock.owner,
-                    lock.comment,
-                    lock.date
-                ],
-            )
-            .map_err(sql_err)?;
+            params![
+                self.wc_id,
+                path.as_str(),
+                lock.token,
+                lock.owner,
+                lock.comment,
+                lock.date
+            ],
+        )
+        .map_err(sql_err)?;
         if n == 0 {
             return Err(SvnError::new(
                 ErrorCode::PathNotFound,
@@ -270,28 +273,28 @@ impl WcTxn<'_> {
     /// Drops the cached lock of the BASE node at `path` (`svn_wc__db_lock_remove`). A path
     /// without BASE or without a cached lock is left alone, so this can be repeated.
     pub fn lock_remove(&self, path: &RelPath) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM lock WHERE EXISTS (SELECT 1 FROM nodes n WHERE n.wc_id = ?1 \
+        super::connection::cached_exec(
+            self.conn,
+            "DELETE FROM lock WHERE EXISTS (SELECT 1 FROM nodes n WHERE n.wc_id = ?1 \
                  AND n.local_relpath = ?2 AND n.op_depth = 0 AND n.repos_id = lock.repos_id \
                  AND n.repos_path = lock.repos_relpath)",
-                params![self.wc_id, path.as_str()],
-            )
-            .map_err(sql_err)?;
+            params![self.wc_id, path.as_str()],
+        )
+        .map_err(sql_err)?;
         Ok(())
     }
 
     /// Like [`lock_remove`](Self::lock_remove), but only when the cached lock still has
     /// `token`: a lock taken again since then is left alone.
     pub fn lock_remove_token(&self, path: &RelPath, token: &str) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM lock WHERE lock_token = ?3 AND EXISTS (SELECT 1 FROM nodes n \
+        super::connection::cached_exec(
+            self.conn,
+            "DELETE FROM lock WHERE lock_token = ?3 AND EXISTS (SELECT 1 FROM nodes n \
                  WHERE n.wc_id = ?1 AND n.local_relpath = ?2 AND n.op_depth = 0 \
                  AND n.repos_id = lock.repos_id AND n.repos_path = lock.repos_relpath)",
-                params![self.wc_id, path.as_str(), token],
-            )
-            .map_err(sql_err)?;
+            params![self.wc_id, path.as_str(), token],
+        )
+        .map_err(sql_err)?;
         Ok(())
     }
 
@@ -659,21 +662,21 @@ impl WcTxn<'_> {
         kind: NodeKind,
         op_depth: u32,
     ) -> Result<()> {
-        self.conn
-            .execute(
-                "INSERT INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
+        super::connection::cached_exec(
+            self.conn,
+            "INSERT INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
                  presence, kind) SELECT ?1, ?2, ?3, ?4, 'base-deleted', ?5 \
                  WHERE NOT EXISTS (SELECT 1 FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
                  AND op_depth > 0 AND op_depth <= ?3)",
-                params![
-                    self.wc_id,
-                    path.as_str(),
-                    op_depth,
-                    parent_text(path),
-                    kind_word(kind)
-                ],
-            )
-            .map_err(sql_err)?;
+            params![
+                self.wc_id,
+                path.as_str(),
+                op_depth,
+                parent_text(path),
+                kind_word(kind)
+            ],
+        )
+        .map_err(sql_err)?;
         Ok(())
     }
 
@@ -740,6 +743,35 @@ impl WcTxn<'_> {
         ops::queue_work(self.conn, items)
     }
 
+    /// Completes work items that already ran ([`Unsettled`] from
+    /// [`WcDb::run_work_queue_unsettled`]): deletes them and stores their stat caches, like the
+    /// runner's own completion (a path that is gone is skipped). The caller makes their files
+    /// durable before this transaction commits.
+    pub fn complete_work(&self, done: &Unsettled) -> Result<()> {
+        for id in &done.ids {
+            let id = i64::try_from(*id)
+                .map_err(|_| SvnError::new(ErrorCode::Internal, "work item id out of range"))?;
+            super::connection::cached_exec(self.conn, "DELETE FROM work_queue WHERE id = ?1", [id])
+                .map_err(sql_err)?;
+        }
+        super::failpoint!("wc.wq.after_delete");
+        for r in &done.fileinfo {
+            let path = RelPath::new(&r.relpath)?;
+            match ops::record_fileinfo(
+                self.conn,
+                self.wc_id,
+                &path,
+                Some(r.translated_size),
+                Some(r.last_mod_time_micros),
+            ) {
+                Err(e) if e.code == ErrorCode::PathNotFound => {}
+                other => other?,
+            }
+        }
+        super::failpoint!("wc.wq.after_fileinfo");
+        Ok(())
+    }
+
     /// Removes finished work items by id (an id that is already gone is fine), like the
     /// deletion step of [`WcDb::wq_record_and_fetch_next`] for many items at once.
     pub fn complete_work_items(&self, ids: &[i64]) -> Result<()> {
@@ -753,23 +785,27 @@ impl WcTxn<'_> {
         Ok(())
     }
 
-    /// Records a pristine text staged with [`crate::pristine::PristineBatch`] (what
-    /// [`crate::pristine::PristineIndex::record`] writes, inside this transaction).
-    pub fn record_pristine(&self, record: &crate::pristine::PristineRecord) -> Result<()> {
+    // ---- pristine index -----------------------------------------------------------------
+
+    /// Records the `PRISTINE` row of a text placed with
+    /// [`PristineStore::place`](crate::pristine::PristineStore::place); an existing row (and
+    /// its refcount) is left alone, like [`PristineIndex::record`](crate::pristine::PristineIndex::record).
+    /// Also records a text staged with [`crate::pristine::PristineBatch`]. Must run before the
+    /// NODES row that references the text is written, so the refcount trigger counts it.
+    pub fn record_pristine(&self, record: &PristineRecord) -> Result<()> {
         let size = i64::try_from(record.size)
-            .map_err(|_| SvnError::new(ErrorCode::Internal, "size out of range"))?;
-        self.conn
-            .prepare_cached(
-                "INSERT OR IGNORE INTO pristine (checksum, compression, size, refcount, \
+            .map_err(|_| SvnError::new(ErrorCode::Internal, "pristine size out of range"))?;
+        super::connection::cached_exec(
+            self.conn,
+            "INSERT OR IGNORE INTO pristine (checksum, compression, size, refcount, \
                  md5_checksum) VALUES (?1, NULL, ?2, 0, ?3)",
-            )
-            .map_err(sql_err)?
-            .execute(params![
+            params![
                 record.sha1.to_svn_string(),
                 size,
                 record.md5.to_svn_string()
-            ])
-            .map_err(sql_err)?;
+            ],
+        )
+        .map_err(sql_err)?;
         Ok(())
     }
 }

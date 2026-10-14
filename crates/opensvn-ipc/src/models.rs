@@ -504,6 +504,19 @@ pub struct RepoInfo {
     pub kind: EntryKind,
 }
 
+/// Result of `repo_resolve_url`: the URL to use, converted when the input was a VisualSVN
+/// web-interface link.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedRepoUrl {
+    /// Repository URL to use (the input unchanged when it was not a web link).
+    pub url: String,
+    /// Whether `url` was derived from a VisualSVN web-interface link and confirmed by the server.
+    pub converted: bool,
+    /// Revision the web link pointed at (`/view/r1234/...`), as a suggestion.
+    pub peg_rev: Option<Rev>,
+}
+
 /// Result of `layout_detect`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
