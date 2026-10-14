@@ -150,13 +150,13 @@ impl RealEngine {
     async fn session_at(&self, url: &str, ctx: &OpContext) -> EngineResult<Arc<dyn RaSession>> {
         ctx.check()?;
         let parsed = RepoUrl::parse(url)?;
-        Ok(open_at(
+        open_at(
             self.connector.as_ref(),
             &parsed,
             &ConnectOptions::at_url(ctx),
             &ctx.cancel,
         )
-        .await?)
+        .await
     }
 
     /// `svn-client` context of an operation that reports progress under `phase`; externals are
