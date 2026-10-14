@@ -85,25 +85,42 @@ pub(crate) fn tls_server_end_point(der: &[u8]) -> Option<Vec<u8>> {
     use x509_parser::signature_algorithm::SignatureAlgorithm;
     let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
     let alg = &cert.signature_algorithm;
-    let hash_oid = match SignatureAlgorithm::try_from(alg).ok()? {
-        SignatureAlgorithm::RSASSA_PSS(params) => params.hash_algorithm_oid().to_id_string(),
-        _ => alg.algorithm.to_id_string(),
+    let sig_oid = alg.algorithm.to_id_string();
+    // Only RSASSA-PSS names its hash in the parameters; every other algorithm OID implies it.
+    // (x509-parser does not classify the NIST DSA OIDs, so only parse the parameters for PSS.)
+    let hash_oid = if sig_oid == "1.2.840.113549.1.1.10" {
+        match SignatureAlgorithm::try_from(alg).ok()? {
+            SignatureAlgorithm::RSASSA_PSS(params) => params.hash_algorithm_oid().to_id_string(),
+            _ => return None,
+        }
+    } else {
+        sig_oid
     };
     let digest: Vec<u8> = match hash_oid.as_str() {
-        // md5/sha1/sha256 with RSA, ecdsa-with-SHA1/SHA256, and the bare SHA-1/SHA-256 hash OIDs.
+        // MD5 and SHA-1 (upgraded to SHA-256) and SHA-256: md5/sha1/sha256 with RSA,
+        // ecdsa-with-SHA1/SHA256, dsa-with-SHA1/SHA256, and the bare SHA-1/SHA-256 hash OIDs.
         "1.2.840.113549.1.1.4"
         | "1.2.840.113549.1.1.5"
         | "1.2.840.113549.1.1.11"
         | "1.2.840.10045.4.1"
         | "1.2.840.10045.4.3.2"
+        | "1.2.840.10040.4.3"
+        | "2.16.840.1.101.3.4.3.2"
         | "1.3.14.3.2.26"
         | "2.16.840.1.101.3.4.2.1" => Sha256::digest(der).to_vec(),
-        "1.2.840.113549.1.1.12" | "1.2.840.10045.4.3.3" | "2.16.840.1.101.3.4.2.2" => {
-            sha2::Sha384::digest(der).to_vec()
-        }
-        "1.2.840.113549.1.1.13" | "1.2.840.10045.4.3.4" | "2.16.840.1.101.3.4.2.3" => {
-            sha2::Sha512::digest(der).to_vec()
-        }
+        // SHA-224: sha224WithRSAEncryption, ecdsa-with-SHA224, dsa-with-SHA224, id-sha224.
+        "1.2.840.113549.1.1.14"
+        | "1.2.840.10045.4.3.1"
+        | "2.16.840.1.101.3.4.3.1"
+        | "2.16.840.1.101.3.4.2.4" => sha2::Sha224::digest(der).to_vec(),
+        "1.2.840.113549.1.1.12"
+        | "1.2.840.10045.4.3.3"
+        | "2.16.840.1.101.3.4.3.3"
+        | "2.16.840.1.101.3.4.2.2" => sha2::Sha384::digest(der).to_vec(),
+        "1.2.840.113549.1.1.13"
+        | "1.2.840.10045.4.3.4"
+        | "2.16.840.1.101.3.4.3.4"
+        | "2.16.840.1.101.3.4.2.3" => sha2::Sha512::digest(der).to_vec(),
         _ => return None,
     };
     let mut data = b"tls-server-end-point:".to_vec();
@@ -539,6 +556,18 @@ mod tests {
         let der = cert_with(&rcgen::PKCS_ECDSA_P384_SHA384);
         let cb = tls_server_end_point(&der).expect("sha384");
         assert_eq!(&cb[prefix.len()..], sha2::Sha384::digest(&der).as_slice());
+
+        // Certificates rcgen cannot make (generated once with OpenSSL; see testdata/README.md).
+        let der = include_bytes!("testdata/rsa-sha224.der");
+        let cb = tls_server_end_point(der).expect("rsa sha224");
+        assert_eq!(&cb[..prefix.len()], prefix);
+        assert_eq!(&cb[prefix.len()..], sha2::Sha224::digest(der).as_slice());
+        let der = include_bytes!("testdata/ecdsa-sha224.der");
+        let cb = tls_server_end_point(der).expect("ecdsa sha224");
+        assert_eq!(&cb[prefix.len()..], sha2::Sha224::digest(der).as_slice());
+        let der = include_bytes!("testdata/dsa-sha256.der");
+        let cb = tls_server_end_point(der).expect("dsa sha256");
+        assert_eq!(&cb[prefix.len()..], sha256_fingerprint(der).as_slice());
 
         // Ed25519 has no RFC 5929 hash: no binding rather than a wrong one.
         assert_eq!(tls_server_end_point(&cert_with(&rcgen::PKCS_ED25519)), None);
