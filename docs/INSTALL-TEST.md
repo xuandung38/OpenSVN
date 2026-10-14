@@ -1,20 +1,24 @@
 # Cài bản thử nghiệm OpenSVN (chưa ký số)
 
 Bản thử nghiệm dùng **engine thật** (cargo feature `release`), kết nối thẳng tới server SVN qua
-HTTP/HTTPS. Các bản cài **chưa ký số** và **không tự cập nhật**: mỗi lần có bản mới, anh tải và
-cài đè lên bản cũ.
+HTTP/HTTPS. Bản cài **chưa ký số** là đường phát hành chính thức hiện tại (PO không cần bản ký số);
+ký số chỉ là tuỳ chọn. Bản cài **không tự cập nhật**: mỗi lần có bản mới, anh tải và cài đè lên
+bản cũ.
 
-Bản Linux đầu tiên (`v0.0.1-test1`) nằm ở mục Releases của repo (draft, prerelease). Kèm theo bản cài
-có `SHA256SUMS` để kiểm tra file tải về.
+Bản cài đến từ draft release (prerelease) trong mục Releases của repo, từ mục *Artifacts* của một
+lần chạy workflow `release`, hoặc từ `scripts/release/build-linux.sh` chạy trên máy (kết quả nằm ở
+`packaging/generated/out/<version>/`). Đi kèm bản cài luôn có file checksum.
 
 ## Linux (AppImage hoặc .deb)
 
 Yêu cầu: Ubuntu 22.04+/Debian 12+ (hoặc distro có WebKitGTK 4.1), x86_64.
 
-Kiểm tra checksum trước khi cài:
+Kiểm tra checksum trước khi cài. Tên file checksum tuỳ nguồn: build bằng script trên máy tạo
+`SHA256SUMS`, còn workflow (artifact và draft release) tạo `SHA256SUMS-linux.txt`:
 
 ```sh
-sha256sum -c SHA256SUMS --ignore-missing
+sha256sum -c SHA256SUMS-linux.txt --ignore-missing   # bản từ workflow
+sha256sum -c SHA256SUMS --ignore-missing             # bản build bằng script
 ```
 
 **Cách 1: .deb** (Ubuntu/Debian, khuyến nghị)
@@ -57,9 +61,12 @@ lỗi ngay khi khởi động, nên Windows/macOS chưa có bản cài. Khi Acti
      `0.0.1-test2` làm hỏng job Windows.
    * `release_tag`: ví dụ `v0.0.2`. Bỏ trống thì chỉ có artifact, không tạo release.
    * `updater`: để `false`.
-2. Hoặc đẩy một tag `v*`: workflow build xong tự tạo **draft release** (không bao giờ tự publish).
+2. Hoặc đẩy một tag `v*`, ví dụ `v0.0.2` hoặc `v0.0.1-1`. Workflow lấy version từ tag (bỏ chữ `v`),
+   build xong thì tự tạo **draft release**, không bao giờ tự publish. Tag kiểu `v0.0.1-test1` làm
+   hỏng job Windows (lý do MSI như trên).
 3. Tải bản cài ở trang draft release, hoặc ở mục *Artifacts* của lần chạy
-   (`opensvn-windows`, `opensvn-macos-universal`, `opensvn-linux`).
+   (`opensvn-windows`, `opensvn-macos-universal`, `opensvn-linux`). Mỗi OS kèm một file
+   `SHA256SUMS-<os>.txt`.
 
 Kết quả:
 
@@ -74,9 +81,10 @@ Build tay trên máy từng OS vẫn dùng được: `scripts/release/build-linu
 `docs/deployment-guide.md`). Các script mặc định bật feature `release` (engine thật; macOS/Linux
 thêm `negotiate-gssapi`). Đặt `OPENSVN_FEATURES=""` để build bản chỉ có engine giả.
 
-### Ký số và auto-update (chưa bật)
+### Ký số và auto-update (tuỳ chọn, không cần cho bản thử)
 
-Workflow để sẵn chỗ, chỉ bật khi có secret/variable tương ứng:
+Không cấu hình gì thì workflow build bản chưa ký, và đây là đường mặc định. Workflow vẫn để sẵn
+chỗ cho ký số và updater, chỉ bật khi có secret/variable tương ứng:
 
 * macOS: `APPLE_SIGNING_IDENTITY`, `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, và để
   notarize: `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`.
