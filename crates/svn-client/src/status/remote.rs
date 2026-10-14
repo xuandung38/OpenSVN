@@ -183,6 +183,7 @@ pub async fn fetch(
         anchor.clone(),
         target.clone(),
         depth,
+        false,
         repos_root,
     );
     session

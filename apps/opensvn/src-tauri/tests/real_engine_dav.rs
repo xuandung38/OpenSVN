@@ -369,16 +369,7 @@ scenario!(commit_with_auto_add_remove);
 scenario!(update_ends_in_conflict);
 scenario!(update_of_sub_paths);
 
-/// `mark_move` and `set_depth` are refused until https://github.com/xuandung38/OpenSVN/issues/90
-/// and https://github.com/xuandung38/OpenSVN/issues/109 land (same gap
-/// as on the in-memory repository, see `engine/real/tests/conformance_tests.rs`).
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
-#[should_panic(expected = "mark_move: SvnError { code: WcInvalidOperation")]
-async fn mark_move_and_set_depth_is_a_known_gap() {
-    let (_, host) = servers().remove(0);
-    conformance::mark_move_and_set_depth(&harness(&host, "mark-move")).await;
-}
+scenario!(mark_move_and_set_depth);
 
 // ---- path-based authorization ----
 
