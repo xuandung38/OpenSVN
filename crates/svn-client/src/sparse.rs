@@ -259,6 +259,8 @@ pub fn exclude(db: &WcDb, cancel: &CancelToken, rel: &RelPath) -> Result<Vec<(Re
 /// A narrower depth crops first (see the module documentation; locally modified items are kept
 /// and reported by nothing being removed for them), a wider one fetches what is missing. `exclude`
 /// removes the directory itself and records it as excluded, without contacting the server.
+/// Externals whose definition the crop leaves outside depth infinity are removed as after an
+/// update (local changes stay) when [`ClientCtx::externals`] is set.
 /// Only directories can change depth; a file can only be excluded. Anchor `session` at the
 /// directory itself (the HTTP layer expects the report to start with the update target).
 pub async fn set_depth(
@@ -322,11 +324,14 @@ pub async fn set_depth(
     for e in &events {
         ctx.notify(e);
     }
+    // Like svn after a crop, the externals whose definition left the working copy or no longer
+    // sits at depth infinity are removed (local changes stay).
+    let externals = crate::externals::remove_cropped(ctx, &db, &rel, cancel).await?;
     if depth == Depth::Exclude {
         return Ok(UpdateSummary {
             revision: None,
             events,
-            externals: Vec::new(),
+            externals,
         });
     }
     let mut summary = drive_update(
@@ -348,5 +353,6 @@ pub async fn set_depth(
     let mut all = events;
     all.append(&mut summary.events);
     summary.events = all;
+    summary.externals.splice(0..0, externals);
     Ok(summary)
 }

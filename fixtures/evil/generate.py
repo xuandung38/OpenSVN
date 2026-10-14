@@ -93,6 +93,10 @@ write("update", "href-encoded-traversal",
 write("update", "href-outside-repo",
       update(add_file("a.txt", "/other/!svn/rvr/5/trunk/a.txt")), U, "unsafe",
       "checked-in href outside the repository root")
+# The whitespace cases below (and propfind/child-dotdot-space) document intent only: the XML
+# parsers trim href text before vetting it, so these pass even without the whitespace check in
+# check_server_url_text. The unit test the_whitespace_fixture_hrefs_are_refused_untrimmed
+# (crates/svn-protocol/src/caps/url_builder.rs) guards that check.
 write("update", "href-trailing-space-dotdot",
       update(add_file("a.txt", "/svn/repo/!svn/rvr/5/trunk/.. ")), U, "unsafe",
       "checked-in href ending in '.. ' (the URL parser strips the space, leaving ..)")

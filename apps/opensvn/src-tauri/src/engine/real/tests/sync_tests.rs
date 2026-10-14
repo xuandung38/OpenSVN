@@ -916,3 +916,45 @@ async fn set_depth_crops_without_losing_local_changes_and_widens_again() {
     assert_eq!(read(&wc.join("README.md")), "hello\n");
     assert_eq!(read(&wc.join("src/main.rs")), "fn main() { local(); }\n");
 }
+
+/// A checked-out `svn:needs-lock` file is read-only, writable while locked and read-only
+/// again after the unlock (`svn lock` / `svn unlock`).
+#[tokio::test]
+async fn locking_a_needs_lock_file_makes_it_writable_until_unlocked() {
+    use crate::engine::facade::LockScope;
+
+    let s = setup();
+    s.f.repo
+        .seed(
+            "alice",
+            "needs-lock",
+            &[FakeChange::SetProp(
+                RelPath::new("trunk/README.md").unwrap(),
+                PropChange {
+                    name: "svn:needs-lock".into(),
+                    value: Some(Bytes::from_static(b"*")),
+                },
+            )],
+        )
+        .unwrap();
+    let wc = s.tmp.path().join("wc");
+    s.f.engine
+        .checkout(&plan(&format!("{URL}/trunk"), &wc), &ctx())
+        .await
+        .unwrap();
+    let read_only = || {
+        std::fs::metadata(wc.join("README.md"))
+            .unwrap()
+            .permissions()
+            .readonly()
+    };
+    assert!(read_only(), "read-only after checkout");
+    let scope = LockScope::Wc {
+        wc: wc_ref(&wc),
+        paths: vec!["README.md".into()],
+    };
+    s.f.engine.lock(&scope, None, false, &ctx()).await.unwrap();
+    assert!(!read_only(), "writable while locked");
+    s.f.engine.unlock(&scope, false, &ctx()).await.unwrap();
+    assert!(read_only(), "read-only again after the unlock");
+}

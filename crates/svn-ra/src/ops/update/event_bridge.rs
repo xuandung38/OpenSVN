@@ -123,7 +123,8 @@ impl<'a> EventBridge<'a> {
             | E::TxDeltaEnd { path }
             | E::CloseFile { path, .. }
             | E::CloseDir { path } => path,
-            _ => return Ok(()),
+            // Listed rather than matched by `_`, so a new path-bearing event cannot skip this.
+            E::ReportStart { .. } | E::TargetRevision(_) => return Ok(()),
         };
         *path = if path.is_root() {
             self.prefix.clone()
@@ -167,6 +168,10 @@ impl<'a> EventBridge<'a> {
                     if self.root_closed {
                         return Err(corrupt("update entry after the root was closed"));
                     }
+                    // The directories down to `prefix` get the server root's `base_rev` too:
+                    // the session has no working copy to read their own revisions from, and the
+                    // update editor ignores `base_rev` (it reads BASE itself). These directories
+                    // lie outside the target, so nothing in them is edited or bumped.
                     let mut id = self.editor.open_root(base_rev).await?;
                     let mut at = String::new();
                     for c in self.prefix.components() {
