@@ -471,6 +471,39 @@ async fn send_and_read_gives_up_after_the_retry_budget() {
 }
 
 #[tokio::test]
+async fn a_cancel_during_the_retry_delay_stops_at_once() {
+    let ca = TestCa::new();
+    let server = RawServer::start(
+        &ca,
+        vec![Act::Truncate {
+            body: "z".repeat(500),
+            keep: 50,
+        }],
+    )
+    .await;
+    // SLOW_RETRY: the retry would wait 5 s; the cancel comes after 200 ms.
+    let t = transport(&ca, |_| {});
+    let cancel = CancelToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        trigger.cancel();
+    });
+    let started = Instant::now();
+    let err = t
+        .send_and_read(req("REPORT", &server.url("/r")), 1024, &cancel)
+        .await
+        .expect_err("cancelled");
+    assert_eq!(err.code, ErrorCode::Cancelled, "{err:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(server.seen(), ["REPORT"]);
+}
+
+#[tokio::test]
 async fn a_stalled_body_is_a_typed_timeout() {
     let ca = TestCa::new();
     let server = RawServer::start(&ca, vec![Act::Stall]).await;
