@@ -12,7 +12,8 @@ export type CertFailure =
   | { other: string };
 
 export type AuthMethod = "basic" | "negotiate";
-export type CredentialReason = "initial" | "rejected" | "negotiate-failed";
+/** `expired`: a saved password was rejected earlier and is no longer offered automatically. */
+export type CredentialReason = "initial" | "rejected" | "negotiate-failed" | "expired";
 
 export interface CredentialsPromptInfo {
   kind: "credentials";
@@ -101,7 +102,10 @@ export function normalizeAuthPrompt(p: AuthPromptEvent): AuthPromptInfo | null {
     requestId: p.requestId,
     realm: p.realm,
     url: p.url,
-    reason: p.reason === "rejected" || p.reason === "negotiate-failed" ? p.reason : "initial",
+    reason:
+      p.reason === "rejected" || p.reason === "negotiate-failed" || p.reason === "expired"
+        ? p.reason
+        : "initial",
     attempt: p.attempt >= 0 ? p.attempt : 0,
     offered: asMethods(p.offered),
   };

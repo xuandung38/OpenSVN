@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use opensvn_ipc::AppError;
 use rusqlite::Connection;
 
-pub use app_db::{AccountRecord, AppDb};
+pub use app_db::{AccountRecord, AppDb, SavedAccount};
 pub use cache_db::CacheDb;
 pub use clock::now_iso;
 pub use data_dir::{Os, current_data_dir};
