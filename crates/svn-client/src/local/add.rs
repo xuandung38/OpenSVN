@@ -201,14 +201,15 @@ fn add_children(
             }
             continue;
         }
+        // Ignore rules come first: svn skips an ignored nested working copy silently.
+        if !opts.no_ignore && is_ignored(db, dir, &name, &config.global_ignores)? {
+            continue;
+        }
         let child_abs = abs_of(db, &child);
         if meta.is_dir() && is_wc_root_dir(&child_abs) {
             // Another working copy (a separate checkout or an external): svn warns with
             // W150002 and leaves it, and all it contains, unversioned.
             out.warnings.push(nested_wc(&child_abs));
-            continue;
-        }
-        if !opts.no_ignore && is_ignored(db, dir, &name, &config.global_ignores)? {
             continue;
         }
         add_one(db, &child, &child_abs, &meta, opts, config)?;

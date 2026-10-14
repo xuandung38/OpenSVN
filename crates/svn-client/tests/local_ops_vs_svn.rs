@@ -982,6 +982,13 @@ fn resolve_nothing_to_do_returns_empty() {
     assert!(done.is_empty());
 }
 
+/// Runs svn with `args` in `cwd`, expecting it to succeed; returns its stderr.
+fn svn_out_err(o: &opensvn_svn_oracle::Oracle, cwd: &Path, args: &[&str]) -> String {
+    let out = o.svn().args(args).current_dir(cwd).output().expect("svn");
+    assert!(out.status.success(), "svn {args:?} failed");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
 /// Runs svn with `args` in `cwd`, expecting it to fail; returns its stderr.
 fn svn_fails(o: &opensvn_svn_oracle::Oracle, cwd: &Path, args: &[&str]) -> String {
     let out = o.svn().args(args).current_dir(cwd).output().expect("svn");
@@ -1049,8 +1056,9 @@ fn delete_refuses_a_file_external_like_svn() {
         );
     }
 
-    // A deletion of the external written by anything else is refused by the commit harvest
-    // instead of deleting the external's source (`top.txt`) from the repository.
+    // A deletion of the external written by anything else never deletes the external's source
+    // (`top.txt`) from the repository: committing an enclosing folder skips the external, as
+    // svn does, and naming it explicitly is refused.
     let db = open(&b);
     db.with_write(|tx| {
         tx.execute(
@@ -1063,16 +1071,100 @@ fn delete_refuses_a_file_external_like_svn() {
         .map_err(svn_wc::db::sql_err)
     })
     .expect("plant");
-    let err = svn_client::commit::collect::collect(
-        &db,
-        &[rp("")],
+    for t in ["", "e"] {
+        let h = collect(&db, &[rp(t)]).expect("collect");
+        assert!(h.items.is_empty(), "{t:?}: {:?}", h.items);
+    }
+    let err = collect(&db, &[rp("e/ext.txt")]).expect_err("collect");
+    assert_eq!(err.svn_code, Some(155_030), "{err}");
+}
+
+fn collect(
+    db: &WcDb,
+    targets: &[svn_types::RelPath],
+) -> svn_types::Result<svn_client::commit::collect::Harvest> {
+    svn_client::commit::collect::collect(
+        db,
+        targets,
         &svn_client::commit::collect::CollectOptions {
             depth: Depth::Infinity,
             changelists: Vec::new(),
         },
     )
-    .expect_err("collect");
-    assert_eq!(err.svn_code, Some(155_030), "{err}");
+}
+
+/// svn 1.15 never commits an edited file external as part of an enclosing folder: `svn ci e`
+/// and `svn ci .` send nothing and the external's source is unchanged; only `svn ci e/ext.txt`
+/// commits it. Our harvest of the same working copy (made by svn) matches: no item for `e` or
+/// `""`, and a Modify of the source for the explicit path. A directory external is a separate
+/// working copy with no rows in the outer one, so its edits are never harvested either.
+#[test]
+fn commit_skips_a_file_external_unless_named_like_svn() {
+    let Some(fx) = fixture() else { return };
+    let seed = checkout(&fx.oracle, &fx.base, &fx.url, "ext-seed");
+    svn(
+        &fx.oracle,
+        &seed,
+        &[
+            "propset",
+            "-q",
+            "svn:externals",
+            "^/top.txt ext.txt\n^/d dext",
+            "e",
+        ],
+    );
+    svn(&fx.oracle, &seed, &["commit", "-q", "-m", "externals"]);
+    let a = checkout(&fx.oracle, &fx.base, &fx.url, "svn-side");
+    let b = checkout(&fx.oracle, &fx.base, &fx.url, "our-side");
+    for wc in [&a, &b] {
+        write(wc, "e/ext.txt", "edited via external\n");
+        write(wc, "e/dext/f1", "edited in dir external\n");
+    }
+    let youngest = |wc: &Path| {
+        svn_out(&fx.oracle, wc, &["info", "--show-item", "revision", "^/"])
+            .trim()
+            .to_owned()
+    };
+    let before = youngest(&a);
+
+    for target in ["e", "."] {
+        svn(&fx.oracle, &a, &["commit", "-q", "-m", "try", target]);
+        assert_eq!(youngest(&a), before, "svn ci {target} made a revision");
+        assert_eq!(svn_out(&fx.oracle, &a, &["cat", "^/top.txt"]), "t\n");
+        assert_eq!(svn_out(&fx.oracle, &a, &["cat", "^/d/f1"]), "1\n");
+    }
+    let db = open(&b);
+    assert!(db.read_node(&rp("e/dext")).expect("read").is_none());
+    for target in ["e", ""] {
+        let h = collect(&db, &[rp(target)]).expect("collect");
+        assert!(h.items.is_empty(), "{target:?}: {:?}", h.items);
+    }
+
+    svn(
+        &fx.oracle,
+        &a,
+        &["commit", "-q", "-m", "named", "e/ext.txt"],
+    );
+    assert_ne!(youngest(&a), before);
+    assert_eq!(
+        svn_out(&fx.oracle, &a, &["cat", "^/top.txt"]),
+        "edited via external\n"
+    );
+    let h = collect(&db, &[rp("e/ext.txt")]).expect("collect");
+    let got: Vec<_> = h
+        .items
+        .iter()
+        .map(|i| (i.relpath.to_string(), i.repos_relpath.clone(), i.action))
+        .collect();
+    assert_eq!(
+        got,
+        [(
+            "e/ext.txt".to_owned(),
+            "top.txt".to_owned(),
+            svn_client::commit::collect::ItemAction::Modify
+        )]
+    );
+    assert!(h.items[0].needs_text);
 }
 
 /// svn 1.15 `svn add` of an unversioned folder skips a working copy nested in it at any depth
@@ -1130,7 +1222,9 @@ fn add_skips_nested_working_copies_like_svn() {
         .collect();
     assert_eq!(ours, svn_warnings);
 
-    // A nested working copy as an explicit target is refused before anything is added.
+    // A nested working copy as an explicit target is refused before anything is added: the
+    // other target exists on disk, so only the pre-check keeps it unversioned.
+    write(&b, "top-new.txt", "new\n");
     let err = local::add(
         &db,
         &CancelToken::new(),
@@ -1140,7 +1234,39 @@ fn add_skips_nested_working_copies_like_svn() {
     )
     .expect_err("nested target");
     assert_eq!(err.svn_code, Some(150_002), "{err}");
+    assert!(db.read_node(&rp("top-new.txt")).expect("read").is_none());
+
+    // An ignored nested working copy is skipped silently: svn applies ignores first.
+    for (wc, side) in [(&a, "a"), (&b, "b")] {
+        let other = checkout(&fx.oracle, &fx.base, &fx.url, &format!("{side}-n3"));
+        fs::create_dir_all(wc.join("z")).expect("mkdir");
+        fs::rename(&other, wc.join("z/ign")).expect("mv");
+    }
+    let stderr = svn_out_err(
+        &fx.oracle,
+        &a,
+        &[
+            "add",
+            "--config-option",
+            "config:miscellany:global-ignores=ign",
+            "z",
+        ],
+    );
+    assert_eq!(stderr, "", "svn warned");
+    let mut ignoring = cfg();
+    ignoring.global_ignores.push("ign".to_owned());
+    let out = local::add_reporting(
+        &db,
+        &CancelToken::new(),
+        &[p(&b, "z")],
+        &AddOptions::default(),
+        &ignoring,
+    )
+    .expect("add");
+    assert_eq!(out.added, [rp("z")]);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     drop(db);
+    fs::remove_file(b.join("top-new.txt")).expect("rm");
     assert_rows_equal("add-nested", &dump_rows(&a), &dump_rows(&b));
     assert_eq!(
         status_xml(&fx.oracle, &a).replace("svn-side", "X"),
