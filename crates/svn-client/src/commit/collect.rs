@@ -10,9 +10,7 @@ use svn_wc::pristine::Sha1Digest;
 
 use crate::local::delete::{cannot_delete_external, external_definer};
 use crate::local::paths::{abs_of, depth_of};
-use crate::local::state::{
-    NodeInfo, Schedule, live_children, node_info, props_modified, text_modified,
-};
+use crate::local::state::{NodeInfo, Schedule, node_info, props_modified, text_modified};
 
 /// What a committable does in the repository.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,16 +118,33 @@ struct Collector<'a> {
     opts: &'a CollectOptions,
     items: BTreeMap<RelPath, Committable>,
     locks: BTreeMap<RelPath, HarvestLock>,
+    /// Paths below the targets with an `ACTUAL_NODE` row: only these can have local property
+    /// changes, a conflict or a changelist, so the others skip those queries.
+    actual: BTreeSet<RelPath>,
+    /// Paths below the targets whose BASE node has a lock token in the working copy.
+    locked: BTreeSet<RelPath>,
 }
 
 /// Harvests the changes below `targets`.
 pub fn collect(db: &WcDb, targets: &[RelPath], opts: &CollectOptions) -> Result<Harvest> {
+    // Tens of thousands of reads: one read transaction instead of one per statement.
+    db.read_txn(|| collect_inner(db, targets, opts))
+}
+
+fn collect_inner(db: &WcDb, targets: &[RelPath], opts: &CollectOptions) -> Result<Harvest> {
     let mut c = Collector {
         db,
         opts,
         items: BTreeMap::new(),
         locks: BTreeMap::new(),
+        actual: BTreeSet::new(),
+        locked: BTreeSet::new(),
     };
+    for t in targets {
+        c.actual.extend(db.actual_rows_below(t)?);
+        c.locked
+            .extend(db.repos_locks_below(t)?.into_iter().map(|(rel, _, _)| rel));
+    }
     for t in targets {
         // An explicit target must be versioned.
         node_info(db, t)?;
@@ -140,9 +155,14 @@ pub fn collect(db: &WcDb, targets: &[RelPath], opts: &CollectOptions) -> Result<
     let mut items: Vec<Committable> = c.items.into_values().collect();
     items.sort_by(|a, b| a.repos_relpath.cmp(&b.repos_relpath));
     let mut dir_revisions = BTreeMap::new();
+    let mut seen_dirs = BTreeSet::new();
     for it in &items {
         let mut cur = it.relpath.parent();
         while let Some(d) = cur {
+            // Its ancestors were looked at with it.
+            if !seen_dirs.insert(d.clone()) {
+                break;
+            }
             cur = d.parent();
             if let Some(n) = db.read_node(&d)?
                 && n.op_depth == 0
@@ -173,7 +193,7 @@ impl Collector<'_> {
         if !explicit && info.base.as_ref().is_some_and(|b| b.file_external) {
             return Ok(());
         }
-        if self.db.conflict(rel)?.is_some() {
+        if self.actual.contains(rel) && self.db.conflict(rel)?.is_some() {
             return Err(blocked(format!(
                 "aborting commit: '{rel}' remains in conflict"
             )));
@@ -191,7 +211,9 @@ impl Collector<'_> {
             Depth::Immediates => (Depth::Empty, false),
             Depth::Infinity | Depth::Unknown => (Depth::Infinity, false),
         };
-        for child in live_children(self.db, rel)? {
+        // Every child row: `walk` itself skips what is not live (not versioned, not-present,
+        // excluded), like `live_children` would, without reading each node twice.
+        for child in self.db.children(rel)? {
             if files_only
                 && self
                     .db
@@ -214,9 +236,10 @@ impl Collector<'_> {
             _ => return Ok(()),
         };
         if !self.opts.changelists.is_empty() {
-            let member = db
-                .changelist(rel)?
-                .is_some_and(|c| self.opts.changelists.contains(&c));
+            let member = self.actual.contains(rel)
+                && db
+                    .changelist(rel)?
+                    .is_some_and(|c| self.opts.changelists.contains(&c));
             if !member {
                 return Ok(());
             }
@@ -264,14 +287,14 @@ impl Collector<'_> {
             Schedule::Added | Schedule::Replaced => {
                 // Below an added or copied root: only changes against the copy are sent.
                 let text = kind == ItemKind::File && self.file_needs_text(info, false)?;
-                if !text && !props_modified(db, rel)? {
+                if !text && !self.props_modified(rel)? {
                     return Ok(());
                 }
                 (ItemAction::Modify, None, None, text)
             }
             Schedule::Normal => {
                 let text = kind == ItemKind::File && self.file_needs_text(info, false)?;
-                if !text && !props_modified(db, rel)? {
+                if !text && !self.props_modified(rel)? {
                     return Ok(());
                 }
                 (ItemAction::Modify, None, info.node.revision, text)
@@ -286,7 +309,7 @@ impl Collector<'_> {
                 action == ItemAction::Replace && copy_from.is_none(),
             )?
         };
-        let lock_token = if info.schedule == Schedule::Added {
+        let lock_token = if info.schedule == Schedule::Added || !self.locked.contains(rel) {
             None
         } else {
             db.repos_lock(rel)?.map(|l| l.token)
@@ -328,7 +351,12 @@ impl Collector<'_> {
             } else if info.schedule == Schedule::Deleted {
                 Vec::new() // gathered with its deletion root
             } else {
-                match (&info.base, self.db.repos_lock(&info.rel)?) {
+                let lock = if self.locked.contains(&info.rel) {
+                    self.db.repos_lock(&info.rel)?
+                } else {
+                    None
+                };
+                match (&info.base, lock) {
                     (Some(b), Some(l)) => b
                         .repos_relpath
                         .clone()
@@ -352,6 +380,12 @@ impl Collector<'_> {
 
     /// `rel` or one of its ancestors is committed (a move source inside a deleted directory is
     /// committed with that deletion).
+    /// [`props_modified`], answered without a query for a node without an `ACTUAL_NODE` row
+    /// (its working properties are its pristine ones).
+    fn props_modified(&self, rel: &RelPath) -> Result<bool> {
+        Ok(self.actual.contains(rel) && props_modified(self.db, rel)?)
+    }
+
     fn covers(&self, rel: &RelPath, ancestor_action: ItemAction) -> bool {
         if self.items.contains_key(rel) {
             return true;

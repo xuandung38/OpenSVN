@@ -379,8 +379,10 @@ async fn commit_one_byte_change(local_base: &[u8]) -> (wiremock::Request, Vec<u8
 async fn changed_file_is_sent_as_a_delta_against_its_base() {
     let (base, _) = big_pair();
     let (put, base, target) = commit_one_byte_change(&base).await;
-    // svndiff 1 (the server announces it), a few hundred bytes for 1.5 MB.
-    assert_eq!(&put.body[..4], b"SVN\x01");
+    // svndiff 2 on a low-latency connection, 1 otherwise (as svn picks; both are announced),
+    // a few hundred bytes for 1.5 MB.
+    assert_eq!(&put.body[..3], b"SVN");
+    assert!(matches!(put.body[3], 1 | 2));
     assert!(
         put.body.len() < 2_000,
         "PUT body is {} bytes",

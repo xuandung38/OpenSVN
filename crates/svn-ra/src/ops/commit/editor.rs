@@ -24,7 +24,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use super::merge::{CommitFailure, check_proppatch, cleanup_txn, merge};
-use super::put::{PutJob, put_empty, require_md5, run_put};
+use super::put::{PutJob, TxnWriter, put_empty, require_md5, run_put, write_turn};
 use crate::ops::update::RaWire;
 
 /// A background upload that is aborted when dropped.
@@ -104,6 +104,8 @@ pub struct HttpCommitEditor {
     /// Session-relative paths deleted so far; mod_dav removes the lock of a deleted node itself.
     deleted: HashSet<RelPath>,
     slots: Arc<Semaphore>,
+    /// Every request that writes into the transaction takes this turn (see [`TxnWriter`]).
+    writer: TxnWriter,
     /// Closed files still finishing in the background (upload, then `PROPPATCH`), in close
     /// order.
     closing: Vec<Upload>,
@@ -134,6 +136,7 @@ impl HttpCommitEditor {
             files: HashMap::new(),
             deleted: HashSet::new(),
             slots,
+            writer: TxnWriter::default(),
             closing: Vec::new(),
             settled: false,
         }
@@ -217,6 +220,7 @@ impl HttpCommitEditor {
         {
             req = req.header("If", header);
         }
+        let _turn = write_turn(&self.writer, &self.cancel).await?;
         self.wire.send_ok(req, &self.cancel).await?;
         Ok(())
     }
@@ -228,7 +232,11 @@ impl HttpCommitEditor {
         base_rev: Option<Revnum>,
         props: &[PropChange],
     ) -> Result<()> {
+        if props.is_empty() {
+            return Ok(());
+        }
         let lock = self.lock_for(session_path);
+        let _turn = write_turn(&self.writer, &self.cancel).await?;
         send_proppatch(
             &self.wire,
             &self.txn,
@@ -341,6 +349,7 @@ impl CommitEditor for HttpCommitEditor {
                 if let Some(header) = self.recursive_if_header(path)? {
                     req = req.header("If", header);
                 }
+                let _turn = write_turn(&self.writer, &self.cancel).await?;
                 self.wire.send_ok(req, &self.cancel).await?;
             }
         }
@@ -465,6 +474,7 @@ impl CommitEditor for HttpCommitEditor {
             result_md5,
             lock: self.lock_for(&path).map(str::to_owned),
             slots: Arc::clone(&self.slots),
+            writer: Arc::clone(&self.writer),
             cancel: self.cancel.clone(),
         };
         let upload = Upload(tokio::spawn(run_put(job)));
@@ -513,6 +523,7 @@ impl CommitEditor for HttpCommitEditor {
                 req = req.header("X-SVN-Options", "keep-locks");
             }
         }
+        let _turn = write_turn(&self.writer, &self.cancel).await?;
         self.wire.send_ok(req, &self.cancel).await?;
         self.deleted.insert(path.clone());
         Ok(())
@@ -539,6 +550,7 @@ impl CommitEditor for HttpCommitEditor {
             create_empty,
             lock: self.lock_for(&state.path).map(str::to_owned),
             slots: Arc::clone(&self.slots),
+            writer: Arc::clone(&self.writer),
             cancel: self.cancel.clone(),
         };
         self.closing
@@ -657,12 +669,13 @@ struct CloseJob {
     create_empty: bool,
     lock: Option<String>,
     slots: Arc<Semaphore>,
+    writer: TxnWriter,
     cancel: CancelToken,
 }
 
 /// Finishes a closed file: waits for its upload, then creates it empty if it had no text, then
-/// sends its property changes. The requests of this step take an upload slot too, so the
-/// number of requests in flight stays bounded.
+/// sends its property changes. This step takes an upload slot too, so the number of finished
+/// files waiting for the write turn stays bounded.
 async fn finish_file(upload: Option<Upload>, job: CloseJob) -> Result<()> {
     if let Some(up) = upload {
         up.finish().await?;
@@ -679,6 +692,7 @@ async fn finish_file(upload: Option<Upload>, job: CloseJob) -> Result<()> {
     };
     job.cancel.check()?;
     let lock = job.lock.as_deref();
+    let _turn = write_turn(&job.writer, &job.cancel).await?;
     if job.create_empty {
         put_empty(&job.wire, &job.txn, &job.repo, lock, &job.cancel).await?;
     }

@@ -25,10 +25,31 @@ use svn_protocol::{Body, TxnName};
 use svn_ra_api::ReplayableSource;
 use svn_types::{CancelToken, Checksum, ErrorCode, RelPath, Result, Revnum, SvnError};
 use tempfile::NamedTempFile;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
 
 use crate::ops::update::RaWire;
 use crate::transport::RequestBody;
+
+/// Serializes the requests that write into the transaction. mod_dav_svn on FSFS cannot take
+/// two writes into one transaction at once (both update the transaction's `next-ids` and
+/// proto-revision files; the second fails or, worse, corrupts them), and libsvn_ra_serf never
+/// sends them in parallel. Encoding still runs ahead of the wire.
+pub(super) type TxnWriter = Arc<Mutex<()>>;
+
+/// Waits for the turn to write into the transaction, or for cancellation.
+pub(super) async fn write_turn(
+    writer: &TxnWriter,
+    cancel: &CancelToken,
+) -> Result<OwnedMutexGuard<()>> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(cancel
+            .check()
+            .err()
+            .unwrap_or_else(|| SvnError::new(ErrorCode::Cancelled, "cancelled"))),
+        g = Arc::clone(writer).lock_owned() => Ok(g),
+    }
+}
 
 /// Encoded streams up to this size are kept in memory instead of a temporary file.
 const MEMORY_LIMIT: usize = 1 << 20;
@@ -260,7 +281,7 @@ pub(super) fn encode(
 }
 
 fn version_of(wire: &RaWire) -> SvndiffVersion {
-    match wire.caps().svndiff_version(false) {
+    match wire.caps().svndiff_version(wire.is_low_latency()) {
         2 => SvndiffVersion::V2,
         1 => SvndiffVersion::V1,
         _ => SvndiffVersion::V0,
@@ -280,7 +301,9 @@ pub(super) struct PutJob {
     pub base_md5: Option<[u8; 16]>,
     pub result_md5: [u8; 16],
     pub lock: Option<String>,
+    /// Bounds the files being encoded or sent (and so the encoded streams waiting).
     pub slots: Arc<Semaphore>,
+    pub writer: TxnWriter,
     pub cancel: CancelToken,
 }
 
@@ -331,6 +354,7 @@ async fn send_put(job: &PutJob, spill: &Spill) -> Result<()> {
     }
     .with_result_md5(job.wire.caps(), &result_hex);
     let req = put_request(job.wire.urls(), &job.txn, &job.path, Body::Empty, &opts)?;
+    let _turn = write_turn(&job.writer, &job.cancel).await?;
     let resp = job
         .wire
         .send_with_body(req, spill.body(), &job.cancel)
@@ -339,7 +363,8 @@ async fn send_put(job: &PutJob, spill: &Spill) -> Result<()> {
     Ok(())
 }
 
-/// Creates an empty file: the server expects a svndiff stream, here just its header.
+/// Creates an empty file: the server expects a svndiff stream, here just its header. The
+/// caller holds the write turn.
 pub(super) async fn put_empty(
     wire: &RaWire,
     txn: &TxnName,

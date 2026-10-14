@@ -380,6 +380,22 @@ impl WcDb {
         f(&self.conn_guard())
     }
 
+    /// Runs `f`, which makes many reads through this handle, inside ONE read transaction
+    /// (`BEGIN DEFERRED` ... `COMMIT`): SQLite then takes its shared lock and validates its
+    /// page cache once instead of for every statement. `f` must not write: a write transaction
+    /// cannot start inside it. Other processes can still read meanwhile; their writes wait
+    /// (busy timeout) until it ends, so keep it free of network I/O.
+    pub fn read_txn<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.conn_guard()
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(sql_err)?;
+        let out = f();
+        let end = self.conn_guard().execute_batch("COMMIT").map_err(sql_err);
+        let value = out?;
+        end?;
+        Ok(value)
+    }
+
     /// Runs `f` inside a `BEGIN IMMEDIATE` transaction; commits on `Ok`, rolls back on `Err`.
     /// Fails with [`ErrorCode::WcFormatUnsupported`] on format 32 working copies.
     pub fn with_write<T>(&self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
