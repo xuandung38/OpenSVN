@@ -3,15 +3,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use opensvn_ipc::Settings;
+use opensvn_ipc::{AppError, OpResult, OperationKind, Settings};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::publisher::StatusPublisher;
 use super::remote_check::run_remote_check;
-use crate::engine::{EngineFacade, OpContext};
+use crate::engine::EngineFacade;
 use crate::notify::{Notifier, incoming_text};
-use crate::wc::WcRegistry;
+use crate::ops::{OpSpec, OperationManager};
+use crate::wc::{ResolvedWc, WcRegistry};
 
 /// Period between checks for a given setting.
 pub fn period_from(settings: &Settings) -> Duration {
@@ -28,6 +29,8 @@ pub struct PollerDeps {
     pub wcs: Arc<WcRegistry>,
     /// Desktop notifications for new revisions.
     pub notifier: Arc<dyn Notifier>,
+    /// Runs each check as a background operation, and knows which working copies are busy.
+    pub ops: OperationManager,
     /// Settings changes (the interval).
     pub settings: watch::Receiver<Settings>,
     /// Fixed period instead of the setting (tests).
@@ -73,16 +76,69 @@ async fn poll_loop(mut deps: PollerDeps) {
     }
 }
 
+/// Why a periodic check leaves a working copy alone this round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// One of our operations (a checkout, an update, ...) is working on it.
+    Busy,
+    /// A checkout or update stopped half-way; the user finishes it with an update first.
+    Incomplete,
+}
+
+/// Whether the periodic check must skip `wc` this round. A skipped check is retried at the next
+/// round and never reported to the user.
+pub async fn skip_reason(
+    engine: &Arc<dyn EngineFacade>,
+    ops: &OperationManager,
+    wc: &ResolvedWc,
+) -> Option<SkipReason> {
+    if ops.running_on(&wc.wc.root).is_some() || wc.actor.is_writing() {
+        return Some(SkipReason::Busy);
+    }
+    match engine
+        .wc_info(&wc.wc.root, &crate::engine::OpContext::background())
+        .await
+    {
+        Ok(info) if info.incomplete => Some(SkipReason::Incomplete),
+        // Unreadable right now (locked by a writer, being created): try again next round.
+        Err(_) => Some(SkipReason::Busy),
+        Ok(_) => None,
+    }
+}
+
 async fn check_all(deps: &PollerDeps) {
     for id in deps.wcs.open_ids() {
         let Ok(resolved) = deps.wcs.resolve(&id) else {
             continue;
         };
-        // Unattended: the engine must not prompt; a missing login just skips this round.
-        let ctx = OpContext::background();
+        if let Some(reason) = skip_reason(&deps.engine, &deps.ops, &resolved).await {
+            tracing::debug!(wc = %id.0, ?reason, "periodic update check skipped");
+            continue;
+        }
         let before = deps.wcs.incoming_of(&id);
-        match run_remote_check(&deps.engine, &deps.publisher, &deps.wcs, &resolved, &ctx).await {
-            Ok(()) => {
+        // A background operation: unattended (never prompts; a missing login just fails this
+        // round) and reported quietly by the UI.
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), AppError>>();
+        let spec = OpSpec::new(
+            OperationKind::StatusRemote,
+            Some(id.clone()),
+            format!("Check {} for updates", resolved.row.name),
+        )
+        .at(&resolved.wc.root)
+        .in_background();
+        let (engine, publisher, wcs, wc) = (
+            Arc::clone(&deps.engine),
+            Arc::clone(&deps.publisher),
+            Arc::clone(&deps.wcs),
+            resolved.clone(),
+        );
+        deps.ops.spawn_with(spec, move |ctx| async move {
+            let result = run_remote_check(&engine, &publisher, &wcs, &wc, &ctx).await;
+            let _ = tx.send(result.clone());
+            result.map(|()| OpResult::Done)
+        });
+        match rx.await {
+            Ok(Ok(())) => {
                 // Notify only when more revisions arrived since the last check.
                 let after = deps.wcs.incoming_of(&id);
                 if after > before {
@@ -90,9 +146,11 @@ async fn check_all(deps: &PollerDeps) {
                     deps.notifier.notify(&title, &body);
                 }
             }
-            Err(e) => {
-                tracing::info!(wc = %id.0, code = ?e.code, "periodic update check skipped");
+            Ok(Err(e)) => {
+                tracing::info!(wc = %id.0, code = ?e.code, "periodic update check failed");
             }
+            // The operation panicked before answering; already reported as failed.
+            Err(_) => {}
         }
     }
 }

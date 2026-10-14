@@ -90,7 +90,14 @@ function simulateOp(
   onDone?: () => void,
   failure?: AppError,
 ): OperationHandle {
-  const handle: OperationHandle = { opId: `mock-op-${++opSeq}`, kind, wcId, title };
+  const handle: OperationHandle = {
+    opId: `mock-op-${++opSeq}`,
+    kind,
+    wcId,
+    title,
+    rootPath: null,
+    background: false,
+  };
   setTimeout(() => mockEmit("op://started", handle), 0);
   for (const pct of [25, 50, 75]) {
     setTimeout(
@@ -101,9 +108,23 @@ function simulateOp(
           phase: kind,
           current: progressTotal === null ? pct / 25 : pct,
           total: progressTotal,
-          bytesDone: null,
+          bytesDone: pct * 4096,
           bytesTotal: null,
-          currentPath: null,
+          currentPath: `src/file-${pct}.txt`,
+          stage: pct === 75 ? "finishing" : "fetching",
+          entries: [{ action: "added", path: `src/file-${pct}.txt` }],
+          entriesDropped: 0,
+          counts: {
+            added: pct / 25,
+            deleted: 0,
+            updated: 0,
+            merged: 0,
+            conflicted: 0,
+            treeConflicted: 0,
+            existed: 0,
+            restored: 0,
+            skipped: 0,
+          },
         });
       },
       (pct / 100) * opDurationMs * 0.9,

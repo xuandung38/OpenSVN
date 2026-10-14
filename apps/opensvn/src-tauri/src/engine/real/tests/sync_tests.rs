@@ -145,6 +145,17 @@ fn recording_ctx() -> (OpContext, Arc<Mutex<Vec<ProgressUpdate>>>) {
 }
 
 fn assert_monotonic(samples: &[ProgressUpdate], phase: &str) {
+    // Stage samples (connecting, fetching, finishing) carry no count; the path samples do.
+    let stages: Vec<_> = samples.iter().filter_map(|u| u.stage).collect();
+    assert!(
+        stages.is_empty() || stages.first() == Some(&opensvn_ipc::OpStage::Connecting),
+        "stages start with connecting: {stages:?}"
+    );
+    let samples: Vec<_> = samples
+        .iter()
+        .filter(|u| u.entry.is_some())
+        .cloned()
+        .collect();
     assert!(!samples.is_empty(), "no progress reported");
     let currents: Vec<u64> = samples.iter().map(|u| u.current.unwrap()).collect();
     let expected: Vec<u64> = (1..=samples.len() as u64).collect();
@@ -343,8 +354,11 @@ async fn a_checkout_cancelled_half_way_is_finished_by_update() {
     let c = OpContext {
         cancel: cancel.clone(),
         progress: ProgressReporter::new(move |u: ProgressUpdate| {
+            let path = u.entry.is_some();
             sink.lock().unwrap().push(u);
-            trip.cancel(); // first path applied: the user cancels
+            if path {
+                trip.cancel(); // first path applied: the user cancels
+            }
         }),
         interactive: true,
     };

@@ -222,6 +222,7 @@ impl HttpResponse {
             r = self.inner.chunk() => match r {
                 Ok(Some(chunk)) => {
                     self.received += chunk.len() as u64;
+                    self.cancel.add_received(chunk.len() as u64);
                     Ok(Some(chunk))
                 }
                 Ok(None) => {

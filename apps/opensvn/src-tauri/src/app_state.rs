@@ -13,7 +13,7 @@ use crate::diagnostics::DiagnosticsService;
 use crate::engine::{EngineFacade, OpContext, WcRef};
 use crate::menu::MenuControl;
 use crate::notify::Notifier;
-use crate::ops::{AppEvents, OperationManager};
+use crate::ops::{AppEvents, OpSpec, OperationManager};
 use crate::os_integration::OsOpener;
 use crate::path_grants::{PathGrants, PathPicker};
 use crate::programs::{ProgramLauncher, ProgramPicker, ProgramService};
@@ -324,21 +324,20 @@ impl AppState {
         let r = self.wcs.resolve(id)?;
         let (engine, publisher) = (Arc::clone(&self.engine), Arc::clone(&self.status));
         let wc = r.wc.clone();
-        Ok(self
-            .ops
-            .spawn(kind, Some(id.clone()), title, move |ctx| async move {
-                // Authenticate first: a prompt must never wait while the working copy is locked.
-                engine
-                    .ensure_authenticated(&wc, &ctx)
-                    .await
-                    .map_err(|e| AppError::from(&e))?;
-                let cancel = ctx.cancel.clone();
-                let result = r.actor.write_cancellable(f(engine, wc, ctx), &cancel).await;
-                if let Err(e) = publisher.publish(&r).await {
-                    tracing::warn!(code = ?e.code, "status refresh after operation failed");
-                }
-                result
-            }))
+        let spec = OpSpec::new(kind, Some(id.clone()), title).at(&wc.root);
+        Ok(self.ops.spawn_with(spec, move |ctx| async move {
+            // Authenticate first: a prompt must never wait while the working copy is locked.
+            engine
+                .ensure_authenticated(&wc, &ctx)
+                .await
+                .map_err(|e| AppError::from(&e))?;
+            let cancel = ctx.cancel.clone();
+            let result = r.actor.write_cancellable(f(engine, wc, ctx), &cancel).await;
+            if let Err(e) = publisher.publish(&r).await {
+                tracing::warn!(code = ?e.code, "status refresh after operation failed");
+            }
+            result
+        }))
     }
 
     /// Like [`start_op`](Self::start_op), for work that builds its own `AppError`.
@@ -386,6 +385,7 @@ impl AppState {
             publisher: Arc::clone(&self.status),
             wcs: Arc::clone(&self.wcs),
             notifier: Arc::clone(&self.notifier),
+            ops: self.ops.clone(),
             settings: self.settings.subscribe(),
             period_override: period,
         });
@@ -406,7 +406,13 @@ impl AppState {
         if !report.recovered.is_empty() {
             tracing::info!(wc = %id.0, dirs = report.recovered.len(), "recovered stale working copy locks");
         }
-        if !report.needs_user_action.is_empty() {
+        // A lock held by one of our own running operations (a checkout still writing this
+        // working copy) is not stale: offering cleanup would interfere with that operation.
+        let ours = self.ops.running_on(std::path::Path::new(&wc.root_path));
+        if let Some(op) = &ours {
+            tracing::info!(wc = %id.0, op = %op.title, "working copy locked by a running operation");
+        }
+        if !report.needs_user_action.is_empty() && ours.is_none() {
             self.events.banner(&opensvn_ipc::Banner {
                 wc_id: id.clone(),
                 kind: opensvn_ipc::BannerKind::NeedsCleanup,

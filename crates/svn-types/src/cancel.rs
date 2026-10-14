@@ -14,10 +14,16 @@ struct Inner {
     /// Registered futures by id; an entry is removed when its future completes or is dropped.
     wakers: Mutex<Vec<(u64, Waker)>>,
     next_id: AtomicU64,
+    /// Response body bytes received by requests made under this token (see
+    /// [`CancelToken::add_received`]).
+    received: AtomicU64,
 }
 
 /// Cloneable cancellation flag usable from sync code (`check`) and any async runtime
 /// (`cancelled().await`). All clones share state.
+///
+/// One token travels with every request of an operation, so it also meters the response bytes
+/// the operation received ([`CancelToken::received_bytes`]) for its progress display.
 #[derive(Debug, Clone, Default)]
 pub struct CancelToken(Arc<Inner>);
 
@@ -49,6 +55,16 @@ impl CancelToken {
         } else {
             Ok(())
         }
+    }
+
+    /// Records `n` more response body bytes received under this token.
+    pub fn add_received(&self, n: u64) {
+        self.0.received.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Response body bytes received so far under this token (all clones together).
+    pub fn received_bytes(&self) -> u64 {
+        self.0.received.load(Ordering::Relaxed)
     }
 
     /// Number of futures currently waiting on this token (diagnostics and tests).
