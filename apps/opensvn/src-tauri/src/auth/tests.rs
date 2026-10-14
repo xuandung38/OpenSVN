@@ -592,7 +592,7 @@ impl secure_store::CredentialStore for GatedStore {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_sign_out_during_the_keychain_write_removes_the_saved_password() {
     use secure_store::CredentialStore;
     let (release, rx) = std::sync::mpsc::channel();
@@ -626,6 +626,26 @@ async fn a_sign_out_during_the_keychain_write_removes_the_saved_password() {
         !sign_out.is_finished(),
         "sign-out waits for the account gate"
     );
+    // Neither the stalled write nor the waiting sign-out blocks a new prompt: it reads the
+    // sign-out count, which is not the gate.
+    let other = CredentialRequest::new(
+        OriginKey {
+            realm: "another realm".into(),
+            ..origin()
+        },
+        0,
+        vec![AuthMethod::Basic],
+        PromptReason::Initial,
+    );
+    let prompt = tokio::time::timeout(
+        Duration::from_secs(5),
+        typed(&broker, &events, &other, 1, "pw2", false),
+    )
+    .await;
+    if prompt.is_err() {
+        release.send(()).unwrap();
+        panic!("a prompt waited for the keychain write");
+    }
     release.send(()).unwrap();
     accepted.await.unwrap();
     sign_out.join().unwrap().unwrap();
