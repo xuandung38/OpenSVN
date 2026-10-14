@@ -10,7 +10,18 @@ Reduced benchmark of the P13 harness (`compare-svn --files 20000 --binaries 1 --
 --update-files 2000`), release build, same machine (4 vCPU Linux VM, Apache 2.4.58 +
 mod_dav_svn 1.14.3 over HTTP on 127.0.0.1, svn CLI 1.14.3):
 
-BENCH_TABLE
+| operation | svn CLI | before (main 9425158) | after (ad6b57f) | after / svn |
+|---|---:|---:|---:|---:|
+| checkout HEAD | 7.05 s | 201.88 s (svn 6.50 s, x31.0) | **5.45 s** | **0.77** |
+| update r1 -> r2 (2000 files + 1 binary) | 1.76 s | 20.97 s (svn 1.98 s, x10.6) | **1.54 s** | **0.88** |
+
+- "after": `--reps 5`, medians, order alternating per repetition (harness default). Per rep,
+  checkout svn/engine: 5.93/5.45, 7.05/6.91, 9.34/5.19, 7.11/7.73, 5.67/4.82 s.
+- "before": the same harness and machine, `--reps 1` (an engine checkout took 3.4 minutes).
+- The same run on a journaled ext4 (loop device, `TMPDIR` there, `--reps 3`): checkout 5.52 s
+  (svn) vs 5.03 s (0.91), update 0.90 s vs 0.84 s (0.93).
+- Status (not in scope) also dropped from 3.04 s to 1.2 s for a repeat run, as a side effect of
+  the statement cache. It is still slower than svn; the status session owns that.
 
 ## Profile: where the time went
 
@@ -113,9 +124,29 @@ want the same bulk readers.
 - **Divergence from svn, kept on purpose:** we still `syncfs` (svn does not sync at all). It costs
   nothing on the critical path now (background), apart from the final drain's barrier (~0.1 s).
 
-## Gates (head GATE_SHA)
+## Gates (head ad6b57f)
 
-GATES
+All on `ad6b57f` (merged with origin/main 05b8955, which includes #138, the #119 fix):
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | 0 warnings |
+| `cargo clippy -p opensvn --features real-engine --all-targets --locked -- -D warnings` | 0 warnings |
+| `cargo clippy -p svn-wc -p svn-client -p opensvn-crash --features failpoints --all-targets -- -D warnings` | 0 warnings |
+| `cargo test --workspace --locked` (oracle: svn 1.15.0 built from the release tarball, `OPENSVN_REQUIRE_SVN=1`) | 1404 passed, 0 failed, 22 ignored |
+| `cargo test -p svn-wc --features failpoints --locked` | 242 passed, 0 failed, 1 ignored |
+| `cargo test -p opensvn --features opensvn/real-engine --locked` | 487 passed, 0 failed |
+| `cargo test -p opensvn --features failpoints --locked` | 493 passed, 0 failed |
+| DAV suite `real_engine_dav -- --ignored` (local Apache 2.4.58 + mod_dav_svn 1.14.3 over HTTPS, Basic auth, `mod_authz_svn`, `OPENSVN_COMPAT_LOCAL_URL/_REPOS/_CA/_AUTHZ`) | 20 passed, 0 failed |
+| crash suite, random SIGKILL (`CRASH_RANDOM_ITERS=6`) | 35 cases, 0 failed |
+| crash suite, named failpoints (`CRASH_FP_ITERS=3`) | 89 cases, 0 failed; every failpoint reached |
+| crash suite, random SIGKILL, extra run on 175839d+fixes (`CRASH_RANDOM_ITERS=20`) | 105 cases, 0 failed |
+
+New tests: runner batching (`self_contained_items_complete_together_and_others_alone`,
+`run_unsettled_leaves_completion_to_the_caller`,
+`carried_items_complete_before_an_item_that_runs_alone`) and `incoming_replacements_vs_svn`
+(svn 1.15 oracle).
 
 ## Notes, limits
 
@@ -126,3 +157,9 @@ GATES
 - macOS and Windows keep per-file fsync (`BATCHED_SYNC` = false); not measured here.
 - More HTTP connections (8, serf's maximum) cut the checkout further in a quick test, but the
   default stays at svn's 4.
+- Found while testing, **pre-existing and not touched here**: when the server replaces a file by
+  a directory, the engine's working copy differs from svn 1.15's (same result on `main`). It is
+  left out of `incoming_replacements_vs_svn`; it needs its own issue.
+- Two review findings were fixed in this branch before it left draft. One: a batch that cannot
+  be committed now stops every later commit. Two: a re-added path is settled when its deletion
+  sits in the staged batch, not only the pending one.
