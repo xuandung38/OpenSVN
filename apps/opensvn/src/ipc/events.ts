@@ -378,6 +378,21 @@ function applyToCache(qc: QueryClient, name: EventName, payload: unknown): void 
     case "op://failed": {
       const p = payload as OpFailed;
       setOutcome(qc, p.opId, { status: "failed", error: p.error });
+      const failed = qc.getQueryData<Record<string, OpState>>(queryKeys.ops)?.[p.opId]?.handle;
+      if (failed?.background) {
+        // Offline, a check fails every round: only the newest failure per working copy stays, so
+        // they never push the user's own operations out of the panel (MAX_OPS).
+        const ops = qc.getQueryData<Record<string, OpState>>(queryKeys.ops) ?? {};
+        for (const o of Object.values(ops)) {
+          if (
+            o.handle.opId !== p.opId &&
+            o.handle.background &&
+            o.state === "failed" &&
+            o.handle.wcId === failed.wcId
+          )
+            removeOp(qc, o.handle.opId);
+        }
+      }
       updateOp(qc, p.opId, (cur) =>
         cur
           ? {

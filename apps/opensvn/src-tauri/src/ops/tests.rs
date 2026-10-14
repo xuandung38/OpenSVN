@@ -359,3 +359,57 @@ async fn running_on_finds_our_writer_of_a_working_copy() {
     assert!(m.list().iter().all(|o| o.op_id != bg.op_id));
     assert!(m.list().iter().any(|o| o.op_id == h.op_id));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_checkout_target_not_created_yet_matches_its_folder_once_created() {
+    let (m, events) = manager();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("real")).unwrap();
+    // The user picked the folder through a link (macOS: /tmp is /private/tmp).
+    std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+    let target = dir.path().join("link").join("wc");
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let h = m.spawn_with(
+        OpSpec::new(OperationKind::Checkout, None, "Checkout wc").at(&target),
+        |_| async move {
+            let _ = release_rx.await;
+            Ok(OpResult::Done)
+        },
+    );
+    std::fs::create_dir(&target).unwrap();
+    let registered = dunce::canonicalize(&target).unwrap();
+    assert_eq!(
+        m.running_on(&registered).map(|o| o.op_id),
+        Some(h.op_id.clone())
+    );
+    let _ = release_tx.send(());
+    wait_for(&events, "finished", &h.op_id).await;
+}
+
+#[tokio::test]
+async fn no_progress_follows_the_end_of_an_operation() {
+    let (m, events) = manager();
+    let (keep_tx, keep_rx) = tokio::sync::oneshot::channel();
+    let h = m.spawn(OperationKind::Update, None, "Update", |ctx| async move {
+        let _ = keep_tx.send(ctx.progress.clone());
+        Ok(OpResult::Done)
+    });
+    let reporter = keep_rx.await.unwrap();
+    wait_for(&events, "finished", &h.op_id).await;
+    reporter.report(ProgressUpdate {
+        phase: "update".into(),
+        current: Some(1),
+        ..ProgressUpdate::default()
+    });
+    reporter.report(ProgressUpdate {
+        phase: "needs-cleanup".into(),
+        ..ProgressUpdate::default()
+    });
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let names = events.names();
+    assert_eq!(
+        names.last().map(String::as_str),
+        Some(format!("finished:{}", h.op_id.0).as_str())
+    );
+}

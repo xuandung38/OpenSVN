@@ -113,9 +113,24 @@ pub fn new_op_id() -> OpId {
     OpId(uuid::Uuid::now_v7().to_string())
 }
 
-/// `path` resolved (symlinks, `..`) when it exists, so one folder has one spelling.
+/// `path` resolved (symlinks, `..`), so one folder has one spelling. A folder that does not exist
+/// yet (a checkout target) is resolved through its nearest existing parent: once created, it must
+/// still match the spelling of the working copy registered there.
 fn canonical(path: &Path) -> PathBuf {
-    dunce::canonicalize(path).unwrap_or_else(|_| path.components().collect())
+    let mut rest = Vec::new();
+    let mut base = path;
+    loop {
+        if let Ok(real) = dunce::canonicalize(base) {
+            return rest.iter().rev().fold(real, |p, name| p.join(name));
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                base = parent;
+            }
+            _ => return path.components().collect(),
+        }
+    }
 }
 
 /// Whether an operation of this kind writes to (and locks) its working copy. Reads and
@@ -199,19 +214,24 @@ impl OperationManager {
 
         let events = Arc::clone(&self.inner.events);
         let reporter = {
-            let (progress, events, op_id) = (
+            let (progress, done, events, op_id) = (
                 Arc::clone(&progress),
+                Arc::clone(&done),
                 Arc::clone(&events),
                 handle.op_id.clone(),
             );
             ProgressReporter::new(move |u| {
+                // Sent under the lock so samples leave in the order they were merged, and none
+                // after `finish` flushed the last one (work that outlived its operation).
+                let mut merged = progress.lock().unwrap_or_else(PoisonError::into_inner);
+                if done.load(Ordering::SeqCst) {
+                    return;
+                }
                 if u.is_notice() {
                     // Notices are for the user: delivered at once, never coalesced away.
                     events.op_progress(&notice(&op_id, u));
                     return;
                 }
-                // Sent under the lock so samples leave in the order they were merged.
-                let mut merged = progress.lock().unwrap_or_else(PoisonError::into_inner);
                 if let Some(p) = merged.push(u, Instant::now()) {
                     events.op_progress(&p);
                 }

@@ -219,5 +219,15 @@ test("event bus: path logs, warnings and results stay with the operation; backgr
   ops = qc.getQueryData<Record<string, OpState>>(queryKeys.ops) ?? {};
   expect(ops.b2?.state).toBe("failed");
   expect(ops.b2?.appError?.message).toBe("offline");
+  // Every round fails while offline: only the newest failure of each working copy stays.
+  mockEmit("op://started", { ...bg, opId: "b3", background: true });
+  mockEmit("op://failed", { opId: "b3", error: { code: "network", message: "offline" } });
+  mockEmit("op://started", { ...bg, opId: "b4", wcId: "w8", background: true });
+  mockEmit("op://failed", { opId: "b4", error: { code: "network", message: "offline" } });
+  ops = qc.getQueryData<Record<string, OpState>>(queryKeys.ops) ?? {};
+  expect(ops.b2).toBeUndefined();
+  expect(ops.b3?.state).toBe("failed");
+  expect(ops.b4?.state).toBe("failed");
+  expect(ops.k1?.state).toBe("done");
   bus.stop();
 });
