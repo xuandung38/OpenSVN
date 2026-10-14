@@ -182,9 +182,9 @@ pub async fn drive_update(
         )
     })?;
     // The drive is anchored at the target's parent (svn's anchor/target split), named by its
-    // path below the session URL: that parent must be where the session URL says it is.
-    if matches!(params.kind, UpdateKind::Update)
-        && let Some(parent) = target_wc.parent().filter(|_| !target.is_root())
+    // path below the session URL: that parent must be where the session URL says it is. This
+    // holds for a switch too: only the target moves, its parent still anchors the drive.
+    if let Some(parent) = target_wc.parent().filter(|_| !target.is_root())
         && parent.starts_with(&anchor)
     {
         let session_rel = repos_relpath_of(session.repos_root(), session.session_url())?;

@@ -819,3 +819,113 @@ fn negotiate_failure(available: bool) -> SvnError {
 fn auth_refused(msg: &str) -> SvnError {
     SvnError::new(ErrorCode::AuthRequired, msg)
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use svn_ra_api::{CertDecision, CertInfo, Credentials};
+
+    /// Answers every prompt with a password; offers a stored one when `stored` is set.
+    struct Answers {
+        stored: bool,
+    }
+
+    fn creds(password: &str) -> Credentials {
+        Credentials {
+            username: "alice".into(),
+            password: SecretString::from(password.to_owned()),
+            save: false,
+            method: AuthMethod::Basic,
+        }
+    }
+
+    #[async_trait]
+    impl AuthPrompter for Answers {
+        async fn credentials(&self, _: &CredentialRequest) -> Option<Credentials> {
+            Some(creds("typed"))
+        }
+        async fn stored_credentials(&self, _: &CredentialRequest) -> Option<Credentials> {
+            self.stored.then(|| creds("stored"))
+        }
+        async fn confirm_certificate(&self, _: &CertInfo) -> CertDecision {
+            CertDecision::Reject
+        }
+    }
+
+    fn challenge() -> Challenges {
+        Challenges {
+            basic_realm: Some("Repo".into()),
+            ..Challenges::default()
+        }
+    }
+
+    /// A manager whose denial sequence has moved on, so a `seq` left at its default shows.
+    fn manager(stored: bool, url: &Url) -> AuthManager {
+        let mgr = AuthManager::new(Arc::new(Answers { stored }), None);
+        let origin = HostKey::from_url(url).expect("key").origin("Repo");
+        let flight = mgr.flight(&origin);
+        for _ in 0..3 {
+            mgr.deny(&mut lock(&flight.state));
+        }
+        lock(&flight.state).denied = false;
+        mgr
+    }
+
+    /// #113: every Basic answer carries the denial sequence read while the flight gate is
+    /// held. Read after the gate is released, a prompt that ends without credentials in
+    /// between would look newer than the request, which would then prompt again instead of
+    /// failing with the round it waited for.
+    #[tokio::test]
+    async fn basic_answers_carry_the_sequence_read_under_the_gate() {
+        let url = Url::parse("https://svn.test/repo/trunk").expect("url");
+        let cancel = CancelToken::new();
+        for stored in [true, false] {
+            let mgr = manager(stored, &url);
+            let next = mgr
+                .answer_unauthorized(
+                    &url,
+                    &challenge(),
+                    &Attached::default(),
+                    None,
+                    true,
+                    &cancel,
+                )
+                .await
+                .expect("credentials");
+            assert!(next.header.is_some());
+            assert_eq!(next.seq, 3, "stored: {stored}");
+
+            // Another request that was sent without credentials reuses them.
+            let again = mgr
+                .answer_unauthorized(
+                    &url,
+                    &challenge(),
+                    &Attached::default(),
+                    None,
+                    true,
+                    &cancel,
+                )
+                .await
+                .expect("reused credentials");
+            assert_eq!(again.generation, next.generation, "reused, not prompted");
+            assert_eq!(again.seq, 3, "stored: {stored}");
+
+            // `on_unauthorized` keeps that value.
+            let resent = mgr
+                .on_unauthorized(
+                    &reqwest::Method::GET,
+                    &url,
+                    &challenge(),
+                    &Attached::default(),
+                    None,
+                    true,
+                    &cancel,
+                )
+                .await
+                .expect("credentials");
+            assert_eq!(resent.seq, 3, "stored: {stored}");
+        }
+    }
+}

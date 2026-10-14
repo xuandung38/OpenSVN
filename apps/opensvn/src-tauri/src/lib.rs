@@ -274,9 +274,16 @@ fn report_startup_failure(error: &dyn std::fmt::Display, show: impl FnOnce(&str)
     show(&text);
 }
 
-/// Native error dialog for [`report_startup_failure`]. Without a desktop session (no display)
-/// the dialog cannot appear; stderr and the log still have the message.
+/// Native error dialog for [`report_startup_failure`], shown only when a desktop session can
+/// display it. Without one, rfd's gtk3 backend does not fail: `MessageDialog::show` waits
+/// forever for a GTK thread that never started, and `catch_unwind` cannot help with a hang. So
+/// on Linux and the BSDs the dialog is skipped when neither `DISPLAY` nor `WAYLAND_DISPLAY` is
+/// set; stderr and the log already have the message.
 fn show_error_dialog(text: &str) {
+    if !has_display(|name| std::env::var_os(name)) {
+        eprintln!("(no display; the error dialog is not shown)");
+        return;
+    }
     let text = text.to_owned();
     let shown = std::panic::catch_unwind(move || {
         rfd::MessageDialog::new()
@@ -291,10 +298,54 @@ fn show_error_dialog(text: &str) {
     }
 }
 
+/// Whether a native dialog can appear: always on Windows and macOS; on the X11/Wayland
+/// platforms only with `DISPLAY` or `WAYLAND_DISPLAY` set (and not empty).
+fn has_display(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    if cfg!(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )) {
+        ["DISPLAY", "WAYLAND_DISPLAY"]
+            .iter()
+            .any(|name| var(name).is_some_and(|v| !v.is_empty()))
+    } else {
+        true
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_startup_dialog_needs_a_display_on_x11_and_wayland_platforms() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| std::ffi::OsString::from(v))
+            }
+        };
+        assert!(has_display(env(&[("DISPLAY", ":0")])));
+        assert!(has_display(env(&[("WAYLAND_DISPLAY", "wayland-0")])));
+        let free_desktop = cfg!(any(
+            target_os = "linux",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ));
+        assert_eq!(has_display(env(&[])), !free_desktop);
+        assert_eq!(
+            has_display(env(&[("DISPLAY", ""), ("WAYLAND_DISPLAY", "")])),
+            !free_desktop
+        );
+    }
 
     /// Exports bindings the same way `pnpm gen:ipc` does, into a directory unique to this call.
     fn export_to_string() -> String {
