@@ -41,6 +41,13 @@ export const EVENT_NAMES: EventName[] = [
   "auth://prompt",
 ];
 
+/**
+ * Notice phases of `op://progress` (Rust `engine::context::PHASE_*`): not counts but news for the
+ * user, never dropped by the backend's throttle. `currentPath` carries the text.
+ */
+export const PHASE_NEEDS_CLEANUP = "needs-cleanup";
+export const PHASE_NESTED_WC_SKIPPED = "nested-wc-skipped";
+
 /** Native menu events (`menu://wc.update`, `menu://file.checkout`, ...) carry no payload. */
 export type MenuEventName = `menu://${string}`;
 
@@ -233,6 +240,24 @@ function applyToCache(qc: QueryClient, name: EventName, payload: unknown): void 
     }
     case "op://progress": {
       const p = payload as OpProgress;
+      if (p.phase === PHASE_NEEDS_CLEANUP) {
+        // The operation went through but left work for `cleanup` (e.g. a committed file in
+        // use): the working copy shows its "needs cleanup" banner, as for a stale lock.
+        const wcId = qc.getQueryData<Record<string, OpState>>(queryKeys.ops)?.[p.opId]?.handle.wcId;
+        if (wcId) {
+          const banner: Banner = {
+            wcId,
+            kind: "needs-cleanup",
+            data: p.currentPath ? [p.currentPath] : [],
+          };
+          qc.setQueryData<Banner[]>(queryKeys.banners(wcId), (cur) => [
+            ...(cur ?? []).filter((b) => b.kind !== banner.kind),
+            banner,
+          ]);
+        }
+        break;
+      }
+      if (p.phase === PHASE_NESTED_WC_SKIPPED) break; // a toast (useOpNotifications), not progress
       updateOp(qc, p.opId, (cur) => (cur ? { ...cur, progress: p } : cur));
       break;
     }

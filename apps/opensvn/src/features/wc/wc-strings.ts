@@ -114,6 +114,7 @@ export const wcStrings = defineStrings({
     cancelRequested: "Cancel requested",
     opFailed: "{title} failed: {message}",
     updatedTo: "Updated to r{rev}",
+    nestedWcSkipped: "Skipped a nested working copy, which stays unversioned: {detail}",
     // Shortcuts help
     shortcutsTitle: "Keyboard shortcuts",
     menuNotYet: "This menu item is not available yet.",
@@ -220,6 +221,8 @@ export const wcStrings = defineStrings({
     cancelRequested: "Đã yêu cầu hủy",
     opFailed: "{title} thất bại: {message}",
     updatedTo: "Đã update đến r{rev}",
+    nestedWcSkipped:
+      "Đã bỏ qua một working copy lồng bên trong, nó vẫn chưa được version: {detail}",
     shortcutsTitle: "Phím tắt",
     menuNotYet: "Mục menu này chưa có trong phiên bản này.",
   },
