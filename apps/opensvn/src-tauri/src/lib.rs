@@ -72,8 +72,10 @@ struct EngineChoice {
 /// Picks the engine from the value of [`ENGINE_ENV`]. The real engine is the default whenever it
 /// is compiled in; the fake engine needs `OPENSVN_ENGINE=fake` then. A release build running the
 /// fake engine (selected or because the real one is not compiled in) gets a loud warning: none of
-/// its data reaches a real repository.
-fn choose_engine(env: Option<&str>, release: bool) -> EngineChoice {
+/// its data reaches a real repository. An unknown value is a startup error in debug builds (a
+/// typo must not silently pick the other engine during development) and a warning in release
+/// builds.
+fn choose_engine(env: Option<&str>, release: bool) -> Result<EngineChoice, String> {
     let real_available = cfg!(feature = "real-engine");
     let mut warnings = Vec::new();
     let requested = env.map(str::trim).filter(|v| !v.is_empty());
@@ -86,6 +88,11 @@ fn choose_engine(env: Option<&str>, release: bool) -> EngineChoice {
                 "{ENGINE_ENV}=real ignored: this build has no real engine (feature `real-engine`)"
             ));
             true
+        }
+        Some(other) if !release => {
+            return Err(format!(
+                "{ENGINE_ENV}={other:?} is not an engine: expected \"fake\" or \"real\""
+            ));
         }
         Some(other) => {
             warnings.push(format!(
@@ -113,7 +120,7 @@ fn choose_engine(env: Option<&str>, release: bool) -> EngineChoice {
                 .to_owned(),
         );
     }
-    EngineChoice { kind, warnings }
+    Ok(EngineChoice { kind, warnings })
 }
 
 /// Builds the engine of `kind`.
@@ -151,7 +158,8 @@ fn build_state<R: tauri::Runtime>(
     let choice = choose_engine(
         std::env::var(ENGINE_ENV).ok().as_deref(),
         !cfg!(debug_assertions),
-    );
+    )
+    .map_err(startup_error)?;
     let data_dir = engine_data_dir(
         db::current_data_dir(&app.config().identifier).map_err(startup_error)?,
         choice.kind,
@@ -252,8 +260,34 @@ pub fn run() {
         })
         .run(context);
     if let Err(e) = result {
-        eprintln!("OpenSVN failed to start: {e}");
+        report_startup_failure(&e, show_error_dialog);
         std::process::exit(1);
+    }
+}
+
+/// Last-resort report of a failed start: the log (when logging got that far), stderr, and a
+/// native error dialog, since the app is usually started without a terminal.
+fn report_startup_failure(error: &dyn std::fmt::Display, show: impl FnOnce(&str)) {
+    let text = format!("OpenSVN failed to start: {error}");
+    tracing::error!("{text}");
+    eprintln!("{text}");
+    show(&text);
+}
+
+/// Native error dialog for [`report_startup_failure`]. Without a desktop session (no display)
+/// the dialog cannot appear; stderr and the log still have the message.
+fn show_error_dialog(text: &str) {
+    let text = text.to_owned();
+    let shown = std::panic::catch_unwind(move || {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("OpenSVN")
+            .set_description(text)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show()
+    });
+    if shown.is_err() {
+        eprintln!("(the error dialog could not be shown)");
     }
 }
 
@@ -312,21 +346,25 @@ mod tests {
         assert_eq!(perms.len(), COMMAND_NAMES.len() + core.len());
     }
 
+    fn choice(env: Option<&str>, release: bool) -> EngineChoice {
+        choose_engine(env, release).expect("engine choice")
+    }
+
     fn kind(env: Option<&str>, release: bool) -> EngineKind {
-        choose_engine(env, release).kind
+        choice(env, release).kind
     }
 
     #[test]
     fn opensvn_engine_fake_selects_the_fake_engine() {
         for env in ["fake", "FAKE", " fake "] {
             assert_eq!(kind(Some(env), false), EngineKind::Fake);
-            assert!(choose_engine(Some(env), false).warnings.is_empty());
+            assert!(choice(Some(env), false).warnings.is_empty());
         }
     }
 
     #[test]
     fn fake_engine_in_a_release_build_warns_loudly() {
-        let choice = choose_engine(Some("fake"), true);
+        let choice = choice(Some("fake"), true);
         assert_eq!(choice.kind, EngineKind::Fake);
         assert!(
             choice
@@ -339,13 +377,32 @@ mod tests {
     }
 
     #[test]
-    fn unknown_engine_value_is_ignored_with_a_warning() {
-        let choice = choose_engine(Some("mock"), false);
-        assert_eq!(choice.kind, kind(None, false));
+    fn unknown_engine_value_is_ignored_with_a_warning_in_release_builds() {
+        let choice = choice(Some("mock"), true);
+        assert_eq!(choice.kind, kind(None, true));
         assert!(
             choice.warnings[0].contains("ignored"),
             "{:?}",
             choice.warnings
+        );
+    }
+
+    #[test]
+    fn unknown_engine_value_is_fatal_in_debug_builds() {
+        let err = choose_engine(Some("mock"), false).expect_err("typo");
+        assert!(
+            err.contains("OPENSVN_ENGINE") && err.contains("mock"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_startup_failure_is_shown_in_a_dialog() {
+        let mut shown = None;
+        report_startup_failure(&"no data directory", |t| shown = Some(t.to_owned()));
+        assert_eq!(
+            shown.as_deref(),
+            Some("OpenSVN failed to start: no data directory")
         );
     }
 
@@ -362,7 +419,7 @@ mod tests {
     #[test]
     fn real_engine_is_the_default_when_compiled_in() {
         for env in [None, Some(""), Some("real"), Some("Real")] {
-            let choice = choose_engine(env, true);
+            let choice = choice(env, true);
             assert_eq!(choice.kind, EngineKind::Real, "{env:?}");
             assert!(choice.warnings.is_empty(), "{:?}", choice.warnings);
         }
@@ -378,8 +435,8 @@ mod tests {
     #[test]
     fn without_the_real_engine_the_fake_one_runs() {
         assert_eq!(kind(None, false), EngineKind::Fake);
-        assert!(choose_engine(None, false).warnings.is_empty());
-        let real = choose_engine(Some("real"), false);
+        assert!(choice(None, false).warnings.is_empty());
+        let real = choice(Some("real"), false);
         assert_eq!(real.kind, EngineKind::Fake);
         assert!(
             real.warnings[0].contains("no real engine"),
@@ -387,7 +444,7 @@ mod tests {
             real.warnings
         );
         assert!(
-            choose_engine(None, true)
+            choice(None, true)
                 .warnings
                 .iter()
                 .any(|w| w.contains("FAKE ENGINE IN USE"))

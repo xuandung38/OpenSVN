@@ -37,6 +37,10 @@ svn-client = { workspace = true, optional = true }
 svn-delta = { workspace = true, optional = true }
 md-5 = { workspace = true, optional = true }
 sha1 = { workspace = true, optional = true }
+# The session URL check reuses the protocol layer's root comparison.
+svn-protocol = { workspace = true, optional = true }
+# Case-insensitive matching of request paths against wc.db (macOS, Windows).
+unicode-normalization = { workspace = true, optional = true }
 # `fake` ships the in-memory repository that backs FakeEngine (the engine of builds without the
 # `real-engine` feature, and of `OPENSVN_ENGINE=fake`).
 svn-ra-api = { workspace = true, features = ["fake"] }
@@ -81,12 +85,24 @@ dunce = "=1.0.5"
 # Native file picker and confirmation dialogs for program settings (no JS plugin is registered).
 rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }
 
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW` / `ELOOP` for opening working files without following a swapped-in symlink.
+libc = "=0.2.190"
+
 [features]
 # Compiles in `engine::real::RealEngine`, the `EngineFacade` backed by the Subversion crates, and
 # makes it the app's engine (`OPENSVN_ENGINE=fake` still selects the demo engine). Not a default
 # feature yet: the rollout turns it on after the conformance run against Apache and a manual
 # VisualSVN smoke test on all three OSes.
-real-engine = ["dep:svn-wc", "dep:svn-client", "dep:svn-delta", "dep:md-5", "dep:sha1"]
+real-engine = [
+  "dep:svn-wc",
+  "dep:svn-client",
+  "dep:svn-delta",
+  "dep:md-5",
+  "dep:sha1",
+  "dep:unicode-normalization",
+  "dep:svn-protocol",
+]
 # Feature set of the installers built by scripts/release/build-* and .github/workflows/release.yml
 # (`pnpm tauri build --features release`): the real engine, without making it a cargo default.
 # macOS and Linux installers add `negotiate-gssapi` on top.
