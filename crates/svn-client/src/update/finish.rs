@@ -156,7 +156,7 @@ impl UpdateEditor {
             .unwrap_or_default();
         // A shadowed directory (deleted or replaced locally, or below an obstruction) only moves
         // BASE on; its working properties are not merged into.
-        let shadowed = d.shadow.is_some();
+        let mut shadowed = d.shadow.is_some();
         let actual = if shadowed {
             old_pristine.clone()
         } else if d.added || d.base.is_none() {
@@ -164,7 +164,14 @@ impl UpdateEditor {
         } else {
             db.actual_props(&d.wc)?
         };
-        let pm = merge_props(&old_pristine, &d.prop_changes, &actual);
+        let mut pm = merge_props(&old_pristine, &d.prop_changes, &actual);
+        if d.obstructed && !pm.conflicted.is_empty() {
+            // A property conflict needs a marker file inside the directory, which is not there
+            // (and a symlink is never written through): only BASE moves on, the local
+            // properties stay as they are, and the tree conflict tells the user.
+            shadowed = true;
+            pm = merge_props(&old_pristine, &d.prop_changes, &old_pristine);
+        }
         let mut work: Vec<Skel> = Vec::new();
         let mut conflicts = Vec::new();
         let mut action = None;

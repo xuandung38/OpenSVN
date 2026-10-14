@@ -107,6 +107,11 @@ pub struct DirState {
     /// the disk is left alone and every node gets a `base-deleted` row at this op depth. 0: no
     /// working layer to extend (an incoming replacement of a node deleted locally), BASE only.
     pub shadow: Option<u32>,
+    /// The versioned directory is replaced on disk by a file or a symlink (svn's
+    /// `edit_obstructed`): it gets a tree conflict "local obstruction, incoming edit", its own
+    /// BASE moves on, and everything below is shadowed with no working layer (BASE only). The
+    /// disk at and below it is never touched, so a symlink is never followed.
+    pub obstructed: bool,
     /// Incoming property changes, applied at close.
     pub prop_changes: Vec<PropChange>,
     /// Entry properties.

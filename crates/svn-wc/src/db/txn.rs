@@ -367,6 +367,10 @@ impl WcTxn<'_> {
     ///
     /// Fails without changing anything when a working row already exists at that depth in the
     /// subtree (a local replacement must never be overwritten).
+    ///
+    /// An `incomplete` directory (left by an interrupted update) is copied as a normal one:
+    /// leaving it out would leave its copied children without a parent row. svn refuses to
+    /// copy such a node ("Cannot handle status") and fails the update.
     pub fn convert_base_to_copy(&self, path: &RelPath) -> Result<()> {
         let scope = scope_sql();
         let taken: i64 = self
@@ -393,10 +397,11 @@ impl WcTxn<'_> {
                      properties, translated_size, last_mod_time, changed_revision, changed_date, \
                      changed_author, depth) \
                      SELECT wc_id, local_relpath, ?3, parent_relpath, repos_id, repos_path, \
-                     revision, presence, kind, checksum, symlink_target, properties, \
+                     revision, 'normal', kind, checksum, symlink_target, properties, \
                      translated_size, last_mod_time, changed_revision, changed_date, \
                      changed_author, depth FROM nodes \
-                     WHERE wc_id = ?1 AND op_depth = 0 AND presence = 'normal' AND {scope}"
+                     WHERE wc_id = ?1 AND op_depth = 0 \
+                     AND presence IN ('normal', 'incomplete') AND {scope}"
                 ),
                 params![self.wc_id, path.as_str(), relpath_depth(path)],
             )
