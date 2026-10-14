@@ -1,0 +1,30 @@
+[package]
+name = "opensvn-crash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Crash-safety suite: kills real engine processes mid-operation and verifies the working copy with the svn CLI"
+
+[lints]
+workspace = true
+
+[features]
+# Named failpoints of svn-wc/svn-client, turned into a SIGKILL of the worker process. Off by default
+# so that `cargo test --workspace` does not compile the engine with failpoints through feature
+# unification; the nightly suite runs `cargo test -p opensvn-crash --features failpoints`.
+failpoints = ["dep:fail", "svn-client/failpoints"]
+
+[dependencies]
+svn-types.workspace = true
+svn-ra-api.workspace = true
+svn-ra.workspace = true
+svn-wc.workspace = true
+svn-client.workspace = true
+opensvn-svn-oracle = { path = "../svn-oracle" }
+async-trait.workspace = true
+rusqlite.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+fail = { workspace = true, optional = true }
