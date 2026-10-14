@@ -154,7 +154,10 @@ pub fn subtree_has_local_changes(db: &WcDb, rel: &RelPath) -> Result<bool> {
     if props_modified(db, rel)? {
         return Ok(true);
     }
-    if cur.presence == Presence::Normal && obstructed(db, rel, &cur)? {
+    // An `incomplete` directory (left by an interrupted update) is on disk like a normal one:
+    // one replaced by a file or a symlink is obstructed too, and nothing below it is looked at.
+    if matches!(cur.presence, Presence::Normal | Presence::Incomplete) && obstructed(db, rel, &cur)?
+    {
         return Ok(true);
     }
     if cur.kind == NodeKind::File {
