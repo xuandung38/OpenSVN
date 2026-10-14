@@ -161,11 +161,9 @@ pub(super) struct DeltaBase<'a> {
     pub md5: [u8; 16],
 }
 
-/// Reads the base text window by window, hashing everything it reads.
+/// Reads the base text window by window.
 struct BaseReader {
     file: std::fs::File,
-    hasher: Md5,
-    total: u64,
     offset: u64,
     buf: Vec<u8>,
 }
@@ -175,28 +173,36 @@ impl BaseReader {
     fn next_view(&mut self) -> Result<(u64, &[u8])> {
         let n = fill(&mut self.file, &mut self.buf)
             .map_err(|e| io_err("cannot read the base text", &e))?;
-        self.hasher.update(&self.buf[..n]);
-        self.total += n as u64;
         let offset = self.offset;
         self.offset += n as u64;
         Ok((offset, &self.buf[..n]))
     }
-
-    /// Reads the rest and says whether the whole base has the expected size and MD5.
-    fn matches(mut self, base: &DeltaBase<'_>) -> Result<bool> {
-        loop {
-            let n = fill(&mut self.file, &mut self.buf)
-                .map_err(|e| io_err("cannot read the base text", &e))?;
-            if n == 0 {
-                break;
-            }
-            self.hasher.update(&self.buf[..n]);
-            self.total += n as u64;
-        }
-        let digest: [u8; 16] = self.hasher.finalize().into();
-        Ok(digest == base.md5 && base.source.size.is_none_or(|s| s == self.total))
-    }
 }
+
+/// Whether the base on disk has the size and MD5 the caller named (`false` when unreadable).
+fn base_matches(base: &DeltaBase<'_>) -> bool {
+    let Ok(mut file) = base.source.open() else {
+        return false;
+    };
+    let mut hasher = Md5::new();
+    let mut buf = vec![0_u8; WINDOW_SIZE];
+    let mut total = 0_u64;
+    loop {
+        match fill(&mut file, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                hasher.update(&buf[..n]);
+                total += n as u64;
+            }
+            Err(_) => return false,
+        }
+    }
+    let digest: [u8; 16] = hasher.finalize().into();
+    digest == base.md5 && base.source.size.is_none_or(|s| s == total)
+}
+
+/// Bases larger than this are checked on a second thread while the delta is computed.
+const PARALLEL_BASE_CHECK: u64 = 1 << 20;
 
 /// Encodes `target` as an svndiff stream, against `base` when given, checking the target's
 /// size and MD5 on the way. Returns the stream and whether it is a delta against the base;
@@ -208,19 +214,47 @@ pub(super) fn encode(
     version: SvndiffVersion,
     expected: &[u8; 16],
 ) -> Result<(Spill, bool)> {
-    let mut base_reader = match base {
-        Some(b) => match b.source.open() {
-            Ok(file) => Some(BaseReader {
-                file,
-                hasher: Md5::new(),
-                total: 0,
-                offset: 0,
-                buf: vec![0_u8; WINDOW_SIZE],
-            }),
-            // A missing pristine only costs bandwidth.
-            Err(_) => None,
-        },
-        None => None,
+    let Some(b) = base else {
+        return Ok((encode_with(target, None, version, expected)?, false));
+    };
+    // The base is checked as a whole (size and MD5) besides being read window by window; for
+    // a large one the check runs on a second thread meanwhile.
+    let (delta, matches) = if b.source.size.unwrap_or(0) > PARALLEL_BASE_CHECK {
+        std::thread::scope(|s| {
+            let check = s.spawn(|| base_matches(b));
+            let delta = encode_with(target, Some(b), version, expected);
+            (delta, check.join().unwrap_or(false))
+        })
+    } else {
+        let delta = encode_with(target, Some(b), version, expected);
+        (delta, base_matches(b))
+    };
+    let delta = delta?;
+    if matches {
+        Ok((delta, true))
+    } else {
+        // The local base is not the text the server will apply the delta to.
+        drop(delta);
+        Ok((encode_with(target, None, version, expected)?, false))
+    }
+}
+
+/// Encodes `target` as an svndiff stream, as a delta against `base` when given (whose content
+/// the caller checks), checking the target's size and MD5 on the way.
+fn encode_with(
+    target: &ReplayableSource,
+    base: Option<&DeltaBase<'_>>,
+    version: SvndiffVersion,
+    expected: &[u8; 16],
+) -> Result<Spill> {
+    let mut base_reader = match base.map(|b| b.source.open()) {
+        Some(Ok(file)) => Some(BaseReader {
+            file,
+            offset: 0,
+            buf: vec![0_u8; WINDOW_SIZE],
+        }),
+        // A missing pristine only costs bandwidth (the base check fails too).
+        Some(Err(_)) | None => None,
     };
     let mut input = target
         .open()
@@ -266,18 +300,7 @@ pub(super) fn encode(
             "file changed while committing: its content does not match the expected checksum",
         ));
     }
-    match (base_reader, base) {
-        (Some(r), Some(b)) => {
-            if r.matches(b)? {
-                Ok((out.finish()?, true))
-            } else {
-                // The local base is not the text the server will apply the delta to.
-                drop(out);
-                Ok((encode(target, None, version, expected)?.0, false))
-            }
-        }
-        _ => Ok((out.finish()?, false)),
-    }
+    out.finish()
 }
 
 fn version_of(wire: &RaWire) -> SvndiffVersion {
