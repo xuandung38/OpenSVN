@@ -65,7 +65,7 @@ impl BlockIndex {
             slots: vec![(0, EMPTY); size],
             mask: size - 1,
         };
-        for (i, block) in source.chunks_exact(MATCH_BLOCKSIZE).enumerate() {
+        for (i, block) in source.as_chunks::<MATCH_BLOCKSIZE>().0.iter().enumerate() {
             let key = Adler::of(block).key();
             let mut slot = Self::hash(key) & idx.mask;
             loop {

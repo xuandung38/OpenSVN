@@ -386,13 +386,26 @@ impl WcDb {
     /// cannot start inside it. Other processes can still read meanwhile; their writes wait
     /// (busy timeout) until it ends, so keep it free of network I/O.
     pub fn read_txn<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        /// Ends the read transaction even when `f` panics.
+        struct End<'a>(&'a WcDb);
+        impl Drop for End<'_> {
+            fn drop(&mut self) {
+                let conn = self.0.conn_guard();
+                if !conn.is_autocommit() {
+                    let _ = conn.execute_batch("ROLLBACK");
+                }
+            }
+        }
         self.conn_guard()
             .execute_batch("BEGIN DEFERRED")
             .map_err(sql_err)?;
+        let end = End(self);
         let out = f();
-        let end = self.conn_guard().execute_batch("COMMIT").map_err(sql_err);
+        // Nothing was written: COMMIT and ROLLBACK both just release the shared lock.
+        let done = self.conn_guard().execute_batch("COMMIT").map_err(sql_err);
+        drop(end);
         let value = out?;
-        end?;
+        done?;
         Ok(value)
     }
 

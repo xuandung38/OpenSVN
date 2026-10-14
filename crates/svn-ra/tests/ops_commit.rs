@@ -978,15 +978,39 @@ async fn checksum_mismatch_is_caught_before_upload() {
     let root = ed.open_root(None).await.unwrap();
     let f = ed.add_file(&p("a"), root, None).await.unwrap();
     ed.apply_text(f, None, src, None, wrong).await.unwrap();
-    // The file finishes in the background: the failure stops the commit before the MERGE.
+    // The text is read before close_file returns, so the mismatch is reported there.
+    let err = ed.close_file(f).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Corrupt);
+    assert!(requests(&srv).await.iter().all(|(m, _)| m != "PUT"));
+    ed.abort_edit().await.unwrap();
+    assert!(rec.events().iter().all(|e| !e.starts_with("merged")));
+}
+
+#[tokio::test]
+async fn a_refused_upload_stops_the_commit_before_the_merge() {
+    let srv = server(Bulk::Prefer).await;
+    mount_txn(&srv).await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(423))
+        .mount(&srv)
+        .await;
+    mount_merge(&srv, fixture("commit/full-merge.resp")).await;
+    let rec = Arc::new(Recorder::default());
+    let mut ed = begin(&srv, &rec, &[], &CancelToken::new()).await.unwrap();
+    let root = ed.open_root(None).await.unwrap();
+    let f = ed.add_file(&p("a"), root, None).await.unwrap();
+    let (keep, src, md5) = source("text");
+    ed.apply_text(f, None, src, None, md5).await.unwrap();
+    // The PUT goes on in the background; the source may go once close_file returned.
     ed.close_file(f).await.unwrap();
+    drop(keep);
     ed.close_directory(root).await.unwrap();
     let err = ed.close_edit().await.unwrap_err();
-    assert_eq!(err.code, ErrorCode::Corrupt);
+    assert_ne!(err.code, ErrorCode::CommitOutcomeUnknown);
     let reqs = requests(&srv).await;
-    assert!(reqs.iter().all(|(m, _)| m != "PUT" && m != "MERGE"));
+    assert!(reqs.iter().any(|(m, _)| m == "PUT"));
+    assert!(reqs.iter().all(|(m, _)| m != "MERGE"));
     assert_eq!(reqs.last().unwrap().0, "DELETE");
-    assert!(rec.events().iter().all(|e| !e.starts_with("merged")));
 }
 
 #[tokio::test]

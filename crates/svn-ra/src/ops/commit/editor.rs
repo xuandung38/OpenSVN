@@ -63,6 +63,8 @@ struct FileState {
     text_sent: bool,
     props: Vec<PropChange>,
     upload: Option<Upload>,
+    /// Fires once the upload has read and encoded the text.
+    encoded: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 /// Commit editor bound to one server transaction.
@@ -407,6 +409,7 @@ impl CommitEditor for HttpCommitEditor {
                 text_sent: false,
                 props: Vec::new(),
                 upload: None,
+                encoded: None,
             },
         );
         Ok(FileId(id))
@@ -431,6 +434,7 @@ impl CommitEditor for HttpCommitEditor {
                 text_sent: false,
                 props: Vec::new(),
                 upload: None,
+                encoded: None,
             },
         );
         Ok(FileId(id))
@@ -463,6 +467,7 @@ impl CommitEditor for HttpCommitEditor {
             }
             (f.path.clone(), f.base_rev)
         };
+        let (encoded_tx, encoded_rx) = tokio::sync::oneshot::channel();
         let job = PutJob {
             wire: self.wire.clone(),
             txn: self.txn.clone(),
@@ -476,10 +481,12 @@ impl CommitEditor for HttpCommitEditor {
             slots: Arc::clone(&self.slots),
             writer: Arc::clone(&self.writer),
             cancel: self.cancel.clone(),
+            encoded: encoded_tx,
         };
         let upload = Upload(tokio::spawn(run_put(job)));
         if let Some(f) = self.files.get_mut(&file.0) {
             f.upload = Some(upload);
+            f.encoded = Some(encoded_rx);
             f.text_sent = true;
         }
         Ok(())
@@ -536,6 +543,20 @@ impl CommitEditor for HttpCommitEditor {
             .remove(&file.0)
             .ok_or_else(|| SvnError::new(ErrorCode::Internal, "close_file: unknown file"))?;
         let upload = state.upload.take();
+        // The text is read and encoded before this returns, so the caller may drop its sources
+        // and a local failure (checksum, unreadable file) is reported here; only the request
+        // goes on in the background.
+        if let Some(encoded) = state.encoded.take()
+            && encoded.await.is_err()
+        {
+            let failure = match upload {
+                Some(up) => up.finish().await.err(),
+                None => None,
+            };
+            return Err(
+                failure.unwrap_or_else(|| SvnError::new(ErrorCode::Internal, "upload stopped"))
+            );
+        }
         // A new file without text still has to exist.
         let create_empty = state.added && !state.copied && !state.text_sent;
         if upload.is_none() && !create_empty && state.props.is_empty() {
@@ -555,7 +576,7 @@ impl CommitEditor for HttpCommitEditor {
         };
         self.closing
             .push(Upload(tokio::spawn(finish_file(upload, job))));
-        if self.closing.len() % 64 == 0 {
+        if self.closing.len().is_multiple_of(64) {
             self.reap_closed().await?;
         }
         Ok(())
