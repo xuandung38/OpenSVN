@@ -367,6 +367,7 @@ scenario!(open_recovers_dead_locks_and_reports_foreign_ones);
 scenario!(locked_unmodified_file_in_status);
 scenario!(commit_with_auto_add_remove);
 scenario!(update_ends_in_conflict);
+scenario!(update_of_sub_paths);
 
 /// `mark_move` and `set_depth` are refused until https://github.com/xuandung38/OpenSVN/issues/90
 /// and https://github.com/xuandung38/OpenSVN/issues/109 land (same gap
