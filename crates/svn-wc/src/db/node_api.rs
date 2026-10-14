@@ -251,6 +251,28 @@ impl WcDb {
         self.write_with_work(work, |c| ops::op_move(c, self.wc_id, src, dst))
     }
 
+    /// Records that `src` was moved to `dst` outside version control, without touching the disk
+    /// (see [`super::MarkMove`]); `work` is queued in the same transaction.
+    pub fn op_mark_move(
+        &self,
+        src: &RelPath,
+        dst: &RelPath,
+        work: &[Skel],
+    ) -> Result<super::MarkMove> {
+        self.write_with_work(work, |c| {
+            super::mark_move::op_mark_move(c, self.wc_id, src, dst)
+        })
+    }
+
+    /// Removes `path` and its subtree from the working copy because the depth of its parent no
+    /// longer covers it, or marks it `excluded` (`svn update --set-depth exclude`). The removal
+    /// of its working files is queued; the caller decides that nothing modified is below it.
+    pub fn sparse_remove(&self, path: &RelPath, exclude: bool, work: &[Skel]) -> Result<()> {
+        self.write_with_work(work, |c| {
+            super::sparse::sparse_remove(c, self.wc_id, path, exclude)
+        })
+    }
+
     /// `svn revert`: drops local changes at `path` (whole layer for an operation root).
     pub fn op_revert(&self, path: &RelPath, recursive: bool, work: &[Skel]) -> Result<()> {
         self.write_with_work(work, |c| ops::op_revert(c, self.wc_id, path, recursive))

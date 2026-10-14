@@ -168,3 +168,79 @@ pub fn move_path(db: &WcDb, cancel: &CancelToken, src: &Path, dst: &Path) -> Res
         Ok(d)
     })
 }
+
+/// Kind of what is on disk at `path`, symlinks not followed; `None` when nothing is there.
+fn disk_kind(path: &Path) -> Option<NodeKind> {
+    let meta = path.symlink_metadata().ok()?;
+    let ft = meta.file_type();
+    Some(if ft.is_symlink() {
+        NodeKind::Symlink
+    } else if ft.is_dir() {
+        NodeKind::Dir
+    } else {
+        NodeKind::File
+    })
+}
+
+/// Records that versioned `src` was moved to `dst` (both absolute) outside version control,
+/// like TortoiseSVN's "Repair move": the rows `svn move` writes, without touching the disk, so
+/// `dst` keeps its content and the change commits as a move.
+///
+/// `src` must be missing from disk or scheduled for deletion; `dst` must exist on disk with the
+/// node kind of `src` and be unversioned, a plain addition (reverted first, like TortoiseSVN
+/// does, so additions below it become unversioned again) or a copy of `src`. Recording the same
+/// move again is a no-op. A mixed-revision directory is recorded as a copy plus a delete, like
+/// `svn move --allow-mixed-revisions`. Returns what was recorded.
+pub fn mark_move(
+    db: &WcDb,
+    cancel: &CancelToken,
+    src: &Path,
+    dst: &Path,
+) -> Result<svn_wc::db::MarkMove> {
+    write_op(db, cancel, || {
+        let (s, d) = (rel_of(db, src)?, rel_of(db, dst)?);
+        if s.is_root() || d.is_root() {
+            return Err(invalid("the working copy root cannot be part of a move"));
+        }
+        let info = node_info(db, &s)?;
+        if info.node.moved_to.as_ref() == Some(&d) {
+            return Ok(svn_wc::db::MarkMove::AlreadyMoved);
+        }
+        let src_kind = db
+            .read_base(&s)?
+            .map(|b| b.kind)
+            .ok_or_else(|| invalid(format!("'{s}' has no committed version to move")))?;
+        if info.schedule != Schedule::Deleted && disk_kind(&abs_of(db, &s)).is_some() {
+            return Err(invalid(format!(
+                "'{s}' still exists on disk; only a missing or deleted item can be marked as moved"
+            )));
+        }
+        let parent = d
+            .parent()
+            .ok_or_else(|| invalid("destination has no parent"))?;
+        if !is_versioned(db, &parent)? || node_info(db, &parent)?.schedule == Schedule::Deleted {
+            return Err(invalid(format!(
+                "destination parent '{parent}' is not under version control"
+            )));
+        }
+        let dst_abs = abs_of(db, &d);
+        let found =
+            disk_kind(&dst_abs).ok_or_else(|| invalid(format!("'{d}' does not exist on disk")))?;
+        let same_kind = match src_kind {
+            NodeKind::Dir => found == NodeKind::Dir,
+            NodeKind::Symlink => found == NodeKind::Symlink || cfg!(windows),
+            _ => found == NodeKind::File || (cfg!(windows) && found == NodeKind::Symlink),
+        };
+        if !same_kind {
+            return Err(invalid(format!(
+                "'{d}' is not of the same kind as '{s}' ({src_kind:?} expected)"
+            )));
+        }
+        if found == NodeKind::Dir && dst_abs.join(svn_wc::db::ADM_DIR).exists() {
+            return Err(invalid(format!(
+                "'{d}' contains a separate working copy and cannot be marked as moved"
+            )));
+        }
+        db.op_mark_move(&s, &d, &[])
+    })
+}

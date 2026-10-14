@@ -27,7 +27,7 @@ pub use autoprops::AddConfig;
 pub use changelist::set_changelist;
 pub use cleanup::{CleanupReport, cleanup};
 pub use delete::{DeleteOptions, delete};
-pub use move_copy::{copy, move_path};
+pub use move_copy::{copy, mark_move, move_path};
 pub use props::{PropSetOptions, ignore_add, propget, proplist, propset};
 pub use resolve::{ResolveChoice, ResolveScope, resolve};
 pub use revert::{RevertOptions, revert};
