@@ -441,6 +441,7 @@ async fn crash_after_merge_sent_is_found_in_the_log_and_finalized() {
 
     let report = e.recover_wc(true).await;
     assert_eq!(report.finalized, vec![j.id.clone()], "{report:?}");
+    assert_eq!(report.finalized_revisions, vec![(j.id.clone(), 2)]);
     assert!(report.needs_user.is_empty() && report.failed.is_empty());
     e.assert_no_journal();
     assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
