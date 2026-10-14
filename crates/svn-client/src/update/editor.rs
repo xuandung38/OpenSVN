@@ -64,6 +64,10 @@ pub struct UpdateEditor {
     staged: Option<Staged>,
     /// Work items that ran after the last commit, completed with the next one.
     unsettled: svn_wc::workqueue::Unsettled,
+    /// A batch could not be committed: nothing prepared after it may be committed either, or
+    /// the committed state would no longer be a prefix of the drive (a file could land below a
+    /// directory whose row was in the lost batch).
+    poisoned: bool,
     /// `.svn/tmp` exists.
     tmp_ready: bool,
 }
@@ -109,6 +113,7 @@ impl UpdateEditor {
                 batch: Batch::default(),
                 staged: None,
                 unsettled: svn_wc::workqueue::Unsettled::default(),
+                poisoned: false,
                 tmp_ready: false,
             },
             out,
@@ -173,6 +178,15 @@ impl UpdateEditor {
     /// Cancellation is not checked here: what was prepared is committed (the queue run stops at
     /// the next item when cancelled and the rest stays queued).
     pub(super) fn flush(&mut self) -> Result<()> {
+        if self.poisoned {
+            // Dropped, not committed: the pristines stay as orphans and the directories keep
+            // their `incomplete` markers, so the next update fetches these nodes again.
+            drop(self.batch.take());
+            return Err(SvnError::new(
+                ErrorCode::Internal,
+                "an earlier batch of the update could not be committed",
+            ));
+        }
         self.commit_staged()?;
         if self.batch.is_empty() && self.unsettled.is_empty() {
             return Ok(());
@@ -213,24 +227,33 @@ impl UpdateEditor {
         let Some(staged) = self.staged.take() else {
             return Ok(());
         };
-        if let Some(ticket) = staged.ticket {
-            let root = self.s.db.wcroot();
-            ticket
-                .join()
-                .map_err(|_| SvnError::new(ErrorCode::Internal, "sync thread panicked"))?
-                .map_err(|e| SvnError::from_io(format!("cannot sync '{}'", root.display()), &e))?;
-        }
         let p = staged.pending;
         let has_ops = !p.ops.is_empty();
-        if has_ops || !staged.settle.is_empty() {
-            let settle = staged.settle;
-            self.s.db.with_txn(|t| {
-                t.complete_work(&settle)?;
-                for op in p.ops {
-                    op(t)?;
-                }
-                Ok(())
-            })?;
+        let committed = (|| {
+            if let Some(ticket) = staged.ticket {
+                let root = self.s.db.wcroot();
+                ticket
+                    .join()
+                    .map_err(|_| SvnError::new(ErrorCode::Internal, "sync thread panicked"))?
+                    .map_err(|e| {
+                        SvnError::from_io(format!("cannot sync '{}'", root.display()), &e)
+                    })?;
+            }
+            if has_ops || !staged.settle.is_empty() {
+                let settle = staged.settle;
+                self.s.db.with_txn(|t| {
+                    t.complete_work(&settle)?;
+                    for op in p.ops {
+                        op(t)?;
+                    }
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = committed {
+            self.poisoned = true;
+            return Err(e);
         }
         if has_ops {
             // Committed: the queue owns the merge results now (it removes them after installing).

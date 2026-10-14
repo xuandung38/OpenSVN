@@ -247,16 +247,22 @@ impl WorkingCopyOps for DbWorkingCopyOps<'_> {
         let (node, repos, has_lock) = self
             .db
             .with_read(|c| {
-                let tx = c.unchecked_transaction().map_err(sql_err)?;
-                let node = super::nodes::read_current(&tx, wc_id, &rp)?;
-                let found = match node {
-                    Some(node) => Some((
-                        node,
-                        super::repos_info::read_repos_info_on(&tx, wc_id, &rp)?,
-                        super::misc::repos_lock_on(&tx, wc_id, &rp)?.is_some(),
-                    )),
-                    None => None,
+                let read = |c: &rusqlite::Connection| -> Result<_> {
+                    Ok(match super::nodes::read_current(c, wc_id, &rp)? {
+                        Some(node) => Some((
+                            node,
+                            super::repos_info::read_repos_info_on(c, wc_id, &rp)?,
+                            super::misc::repos_lock_on(c, wc_id, &rp)?.is_some(),
+                        )),
+                        None => None,
+                    })
                 };
+                if !c.is_autocommit() {
+                    // Already inside a transaction: its snapshot serves.
+                    return read(c);
+                }
+                let tx = c.unchecked_transaction().map_err(sql_err)?;
+                let found = read(&tx)?;
                 tx.commit().map_err(sql_err)?;
                 Ok(found)
             })?

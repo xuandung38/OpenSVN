@@ -226,6 +226,8 @@ fn rejects_unknown_and_malformed_items() {
 struct MemQueue {
     items: Vec<(u64, Vec<u8>)>,
     fileinfo: Vec<FileInfoRecord>,
+    /// Every non-empty completion, in order (one entry per transaction).
+    completions: Vec<Vec<u64>>,
 }
 
 impl MemQueue {
@@ -237,6 +239,7 @@ impl MemQueue {
                 .map(|(i, it)| (i as u64 + 1, it.encode()))
                 .collect(),
             fileinfo: Vec::new(),
+            completions: Vec::new(),
         }
     }
 }
@@ -249,6 +252,9 @@ impl WorkQueueStore for MemQueue {
         after: Option<u64>,
         limit: usize,
     ) -> Result<Vec<(u64, Vec<u8>)>, WorkQueueError> {
+        if !completed.is_empty() {
+            self.completions.push(completed.to_vec());
+        }
         self.items.retain(|(i, _)| !completed.contains(i));
         self.fileinfo.extend_from_slice(fileinfo);
         Ok(self
@@ -958,6 +964,7 @@ fn interrupted_svn_revert_queue_completes() {
             .map(|(i, b)| (i as u64 + 1, b))
             .collect(),
         fileinfo: Vec::new(),
+        completions: Vec::new(),
     };
     assert_eq!(run(&w, &mut ops, &mut q).unwrap(), 2);
     assert_eq!(
@@ -982,6 +989,7 @@ fn interrupted_svn_update_queue_removes_the_deleted_file() {
     let mut q = MemQueue {
         items: vec![(1, items[0].clone())],
         fileinfo: Vec::new(),
+        completions: Vec::new(),
     };
     run(&w, &mut ops, &mut q).unwrap();
     assert!(!w.dir.path().join("c.txt").exists());
@@ -1524,4 +1532,109 @@ fn a_pristine_is_not_accepted_as_a_file_install_source() {
     };
     assert!(matches!(*source, WorkQueueError::UnsafePath(_)), "{source}");
     assert!(!w.dir.path().join("f").exists());
+}
+
+fn runner_config(w: &Wc) -> RunnerConfig<'static> {
+    RunnerConfig {
+        wc_root: w.dir.path().to_path_buf(),
+        tz: &utc_offset_zero,
+        cancelled: None,
+        defer_sync: true,
+    }
+}
+
+fn install_item(rel: &str) -> WorkItem {
+    WorkItem::FileInstall {
+        relpath: rel.into(),
+        use_commit_times: false,
+        record_fileinfo: true,
+        source: None,
+    }
+}
+
+#[test]
+fn self_contained_items_complete_together_and_others_alone() {
+    let mut w = wc();
+    let sha = install(&mut w, b"text\n");
+    let mut ops = FakeOps::default();
+    for f in ["a", "b", "d"] {
+        ops.nodes.insert(f.into(), node(sha, &[]));
+    }
+    std::fs::write(w.dir.path().join("c"), b"old").unwrap();
+    let mut q = MemQueue::with(&[
+        install_item("a"),
+        install_item("b"),
+        WorkItem::FileRemove {
+            relpath: "c".into(),
+        },
+        install_item("d"),
+    ]);
+    assert_eq!(run(&w, &mut ops, &mut q).unwrap(), 4);
+    assert!(q.items.is_empty());
+    // The removal may consume what an earlier item needs, so everything before it is completed
+    // first and it is completed on its own; the installs around it share transactions.
+    assert_eq!(q.completions, vec![vec![1, 2], vec![3], vec![4]]);
+    assert_eq!(q.fileinfo.len(), 3);
+    assert!(!w.dir.path().join("c").exists());
+}
+
+#[test]
+fn run_unsettled_leaves_completion_to_the_caller() {
+    let mut w = wc();
+    let sha = install(&mut w, b"text\n");
+    let mut ops = FakeOps::default();
+    ops.nodes.insert("a".into(), node(sha, &[]));
+    let mut q = MemQueue::with(&[
+        install_item("a"),
+        WorkItem::DirInstall {
+            relpath: "d".into(),
+        },
+    ]);
+    let (ran, unsettled) = WorkQueueRunner::new(runner_config(&w), &mut ops, &w.pristine)
+        .run_unsettled(&mut q, Unsettled::default())
+        .unwrap();
+    assert_eq!(ran, 2);
+    assert_eq!(unsettled.ids, vec![1, 2]);
+    assert_eq!(unsettled.fileinfo.len(), 1);
+    assert_eq!(unsettled.unsynced, crate::durable::BATCHED_SYNC);
+    // Nothing completed: a crash would run both again.
+    assert_eq!(q.items.len(), 2);
+    assert!(q.completions.is_empty());
+    assert!(w.dir.path().join("a").is_file() && w.dir.path().join("d").is_dir());
+
+    // A later run carries them: they do not run again and stay unsettled.
+    std::fs::remove_file(w.dir.path().join("a")).unwrap();
+    let (ran, unsettled) = WorkQueueRunner::new(runner_config(&w), &mut ops, &w.pristine)
+        .run_unsettled(&mut q, unsettled)
+        .unwrap();
+    assert_eq!(ran, 0);
+    assert_eq!(unsettled.ids, vec![1, 2]);
+    assert!(!w.dir.path().join("a").exists());
+}
+
+#[test]
+fn carried_items_complete_before_an_item_that_runs_alone() {
+    let mut w = wc();
+    let sha = install(&mut w, b"text\n");
+    let mut ops = FakeOps::default();
+    ops.nodes.insert("a".into(), node(sha, &[]));
+    let mut q = MemQueue::with(&[install_item("a")]);
+    let (_, carried) = WorkQueueRunner::new(runner_config(&w), &mut ops, &w.pristine)
+        .run_unsettled(&mut q, Unsettled::default())
+        .unwrap();
+    q.items.push((
+        2,
+        WorkItem::FileRemove {
+            relpath: "a".into(),
+        }
+        .encode(),
+    ));
+    let (ran, unsettled) = WorkQueueRunner::new(runner_config(&w), &mut ops, &w.pristine)
+        .run_unsettled(&mut q, carried)
+        .unwrap();
+    assert_eq!(ran, 1);
+    assert!(unsettled.is_empty());
+    assert_eq!(q.completions, vec![vec![1], vec![2]]);
+    assert_eq!(q.fileinfo.len(), 1);
+    assert!(q.items.is_empty());
 }
