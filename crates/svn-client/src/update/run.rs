@@ -231,6 +231,7 @@ pub async fn drive_update(
         uuid,
         ctx: ctx.clone(),
         cancel: cancel.clone(),
+        file_external: None,
     };
     let (editor, outcome) = UpdateEditor::new(setup)?;
     let report = build_report(Arc::clone(&db), anchor, target.clone(), params.depth, root);
@@ -265,5 +266,6 @@ pub async fn drive_update(
     Ok(UpdateSummary {
         revision: out.revision,
         events,
+        externals: Vec::new(),
     })
 }

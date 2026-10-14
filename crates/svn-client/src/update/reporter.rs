@@ -107,6 +107,10 @@ impl Ctx<'_> {
                 Presence::BaseDeleted => continue,
                 Presence::Normal | Presence::Incomplete => {}
             }
+            // File externals are not part of this tree; their own fetch reports them.
+            if node.file_external {
+                continue;
+            }
             let depth = match node.kind {
                 NodeKind::Dir => node
                     .depth
