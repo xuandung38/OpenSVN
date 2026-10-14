@@ -173,7 +173,13 @@ fn auto_add_remove(db: &WcDb, env: &LocalEnv, rels: &[RelPath]) -> EngineResult<
         add_parents: true,
         ..AddOptions::default()
     };
-    let added = client_local::add(db, &env.cancel, &abs(&add)?, &opts, &env.add)?;
+    // Nested working copies found while recursing are skipped (svn's W150002) and stay
+    // unversioned: their content belongs to another repository location.
+    let outcome = client_local::add_reporting(db, &env.cancel, &abs(&add)?, &opts, &env.add)?;
+    for w in &outcome.warnings {
+        tracing::warn!(warning = %w, "auto-add skipped a nested working copy");
+    }
+    let added = outcome.added;
     // Parents added on the way are new directories outside the selection: the commit must
     // include them, or the server is asked to add an item into a directory it does not have.
     let mut parents = Vec::new();

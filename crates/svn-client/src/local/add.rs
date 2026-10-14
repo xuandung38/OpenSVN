@@ -12,6 +12,7 @@ use super::lock::write_op;
 use super::paths::{abs_of, rel_of};
 use super::props::{PropSetOptions, propset_locked};
 use super::state::{is_versioned, node_info};
+use crate::status::is_wc_root_dir;
 
 /// Options of [`add`].
 #[derive(Debug, Clone, Copy)]
@@ -48,8 +49,29 @@ fn io_err(path: &Path, e: &std::io::Error) -> SvnError {
     SvnError::from_io(format!("'{}'", path.display()), e)
 }
 
+/// `SVN_ERR_WC_PATH_FOUND` (W150002): `abs` is the root of another working copy.
+fn nested_wc(abs: &Path) -> SvnError {
+    invalid(format!(
+        "'{}' is already under version control",
+        abs.display()
+    ))
+    .with_svn_code(150_002)
+}
+
+/// Result of [`add_reporting`].
+#[derive(Debug, Default)]
+pub struct AddOutcome {
+    /// Every newly scheduled path, in the order it was added.
+    pub added: Vec<RelPath>,
+    /// svn's W150002 warnings: directories met while recursing that are the root of another
+    /// working copy (a separate checkout or an external). They are skipped with everything they
+    /// contain and stay unversioned, as `svn add` leaves them.
+    pub warnings: Vec<SvnError>,
+}
+
 /// Adds `targets` (absolute paths inside the working copy) and returns every newly scheduled
-/// path in the order it was added.
+/// path in the order it was added. Nested working copies met while recursing are skipped
+/// silently; [`add_reporting`] also returns a warning for each.
 pub fn add(
     db: &WcDb,
     cancel: &CancelToken,
@@ -57,14 +79,44 @@ pub fn add(
     opts: &AddOptions,
     config: &AddConfig,
 ) -> Result<Vec<RelPath>> {
+    add_reporting(db, cancel, targets, opts, config).map(|o| o.added)
+}
+
+/// [`add`], also returning the W150002 warning of every nested working copy that was skipped.
+///
+/// A target that is itself the root of another working copy (or lies below one, through
+/// `add_parents`) is refused with W150002 before anything is added.
+pub fn add_reporting(
+    db: &WcDb,
+    cancel: &CancelToken,
+    targets: &[std::path::PathBuf],
+    opts: &AddOptions,
+    config: &AddConfig,
+) -> Result<AddOutcome> {
     write_op(db, cancel, || {
-        let mut added = Vec::new();
+        let mut rels = Vec::with_capacity(targets.len());
         for t in targets {
-            cancel.check()?;
             let rel = rel_of(db, t)?;
-            add_target(db, cancel, &rel, opts, config, &mut added)?;
+            // Refuse every target first so a refusal leaves the whole call without effect.
+            let mut cur = Some(rel.clone());
+            while let Some(r) = cur {
+                if r.is_root() || is_versioned(db, &r)? {
+                    break;
+                }
+                let abs = abs_of(db, &r);
+                if is_wc_root_dir(&abs) {
+                    return Err(nested_wc(&abs));
+                }
+                cur = r.parent();
+            }
+            rels.push(rel);
         }
-        Ok(added)
+        let mut out = AddOutcome::default();
+        for rel in &rels {
+            cancel.check()?;
+            add_target(db, cancel, rel, opts, config, &mut out)?;
+        }
+        Ok(out)
     })
 }
 
@@ -74,7 +126,7 @@ fn add_target(
     rel: &RelPath,
     opts: &AddOptions,
     config: &AddConfig,
-    added: &mut Vec<RelPath>,
+    out: &mut AddOutcome,
 ) -> Result<()> {
     let abs = abs_of(db, rel);
     let meta = fs::symlink_metadata(&abs).map_err(|e| io_err(&abs, &e))?;
@@ -85,7 +137,7 @@ fn add_target(
         let info = node_info(db, rel)?;
         let deleted = info.schedule == super::state::Schedule::Deleted;
         if opts.force && meta.is_dir() && !deleted {
-            return add_children(db, cancel, rel, opts, config, added);
+            return add_children(db, cancel, rel, opts, config, out);
         }
         if !deleted {
             return Err(invalid(format!("'{rel}' is already under version control")));
@@ -99,12 +151,12 @@ fn add_target(
                 "can't add '{rel}': its parent directory is not under version control"
             )));
         }
-        add_target(db, cancel, &parent, &shallow(opts), config, added)?;
+        add_target(db, cancel, &parent, &shallow(opts), config, out)?;
     }
     add_one(db, rel, &abs, &meta, opts, config)?;
-    added.push(rel.clone());
+    out.added.push(rel.clone());
     if meta.is_dir() && !matches!(opts.depth, Depth::Empty | Depth::Exclude) {
-        add_children(db, cancel, rel, opts, config, added)?;
+        add_children(db, cancel, rel, opts, config, out)?;
     }
     Ok(())
 }
@@ -122,7 +174,7 @@ fn add_children(
     dir: &RelPath,
     opts: &AddOptions,
     config: &AddConfig,
-    added: &mut Vec<RelPath>,
+    out: &mut AddOutcome,
 ) -> Result<()> {
     let abs = abs_of(db, dir);
     let mut names: Vec<(String, fs::Metadata)> = Vec::new();
@@ -145,18 +197,24 @@ fn add_children(
         };
         if is_versioned(db, &child)? {
             if meta.is_dir() && matches!(opts.depth, Depth::Infinity | Depth::Unknown) {
-                add_children(db, cancel, &child, opts, config, added)?;
+                add_children(db, cancel, &child, opts, config, out)?;
             }
+            continue;
+        }
+        let child_abs = abs_of(db, &child);
+        if meta.is_dir() && is_wc_root_dir(&child_abs) {
+            // Another working copy (a separate checkout or an external): svn warns with
+            // W150002 and leaves it, and all it contains, unversioned.
+            out.warnings.push(nested_wc(&child_abs));
             continue;
         }
         if !opts.no_ignore && is_ignored(db, dir, &name, &config.global_ignores)? {
             continue;
         }
-        let child_abs = abs_of(db, &child);
         add_one(db, &child, &child_abs, &meta, opts, config)?;
-        added.push(child.clone());
+        out.added.push(child.clone());
         if meta.is_dir() && matches!(opts.depth, Depth::Infinity | Depth::Unknown) {
-            add_children(db, cancel, &child, opts, config, added)?;
+            add_children(db, cancel, &child, opts, config, out)?;
         }
     }
     Ok(())
