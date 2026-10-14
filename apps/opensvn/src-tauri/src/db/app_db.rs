@@ -211,13 +211,22 @@ impl AppDb {
     }
 }
 
-/// An account removed by [`AppDb::account_delete_realm`].
+/// An account of a realm, as [`AppDb::accounts_of_realm`] lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedAccount {
     pub scheme: String,
     pub host: String,
     pub port: u16,
     pub username: Option<String>,
+}
+
+/// The saved account of one origin and realm, as [`AppDb::account_get`] returns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedAccount {
+    pub username: Option<String>,
+    pub negotiate: bool,
+    /// The server rejected the saved password; it must not be offered automatically.
+    pub stale: bool,
 }
 
 /// Origin and account fields stored for a saved credential.
@@ -231,7 +240,8 @@ pub struct AccountRecord<'a> {
 }
 
 impl AppDb {
-    /// Records (or refreshes) the metadata of a saved credential. Never stores a password.
+    /// Records (or refreshes) the metadata of a saved credential and clears its stale flag (a
+    /// new password was saved). Never stores a password.
     pub fn account_upsert(&self, a: &AccountRecord<'_>) -> Result<(), DbError> {
         self.db.with(|c| {
             c.execute(
@@ -239,7 +249,7 @@ impl AppDb {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(scheme, host, port, realm) DO UPDATE SET
                    username = excluded.username, method = excluded.method,
-                   last_used_at = excluded.last_used_at",
+                   last_used_at = excluded.last_used_at, stale = 0",
                 params![
                     a.scheme,
                     a.host,
@@ -254,39 +264,58 @@ impl AppDb {
         })
     }
 
-    /// The saved account of one origin and realm: `(username, negotiate)`.
+    /// The saved account of one origin and realm.
     pub fn account_get(
         &self,
         scheme: &str,
         host: &str,
         port: u16,
         realm: &str,
-    ) -> Result<Option<(Option<String>, bool)>, DbError> {
+    ) -> Result<Option<SavedAccount>, DbError> {
         self.db.with(|c| {
             Ok(c.query_row(
-                "SELECT username, method FROM account
+                "SELECT username, method, stale FROM account
                  WHERE scheme = ?1 AND host = ?2 AND port = ?3 AND realm = ?4",
                 params![scheme, host, port, realm],
                 |r| {
-                    Ok((
-                        r.get::<_, Option<String>>(0)?,
-                        r.get::<_, String>(1)? == "negotiate",
-                    ))
+                    Ok(SavedAccount {
+                        username: r.get::<_, Option<String>>(0)?,
+                        negotiate: r.get::<_, String>(1)? == "negotiate",
+                        stale: r.get::<_, i64>(2)? != 0,
+                    })
                 },
             )
             .optional()?)
         })
     }
 
-    /// Removes the accounts of a realm; returns `(scheme, host, port, username)` of each removed
-    /// origin so the matching secrets can be purged.
-    pub fn account_delete_realm(&self, realm: &str) -> Result<Vec<RemovedAccount>, DbError> {
+    /// Marks the saved password of `username` at one origin and realm as rejected by the
+    /// server. Returns whether such an account exists. Only [`Self::account_upsert`] (a newly
+    /// saved password) clears the flag.
+    pub fn account_mark_stale(
+        &self,
+        scheme: &str,
+        host: &str,
+        port: u16,
+        realm: &str,
+        username: &str,
+    ) -> Result<bool, DbError> {
         self.db.with(|c| {
-            let tx = c.transaction()?;
-            let origins = {
-                let mut stmt = tx
-                    .prepare("SELECT scheme, host, port, username FROM account WHERE realm = ?1")?;
-                stmt.query_map(params![realm], |r| {
+            Ok(c.execute(
+                "UPDATE account SET stale = 1
+                 WHERE scheme = ?1 AND host = ?2 AND port = ?3 AND realm = ?4 AND username = ?5",
+                params![scheme, host, port, realm, username],
+            )? > 0)
+        })
+    }
+
+    /// The accounts of a realm, as `(scheme, host, port, username)`.
+    pub fn accounts_of_realm(&self, realm: &str) -> Result<Vec<RemovedAccount>, DbError> {
+        self.db.with(|c| {
+            let mut stmt =
+                c.prepare("SELECT scheme, host, port, username FROM account WHERE realm = ?1")?;
+            Ok(stmt
+                .query_map(params![realm], |r| {
                     Ok(RemovedAccount {
                         scheme: r.get(0)?,
                         host: r.get(1)?,
@@ -294,11 +323,23 @@ impl AppDb {
                         username: r.get(3)?,
                     })
                 })?
-                .collect::<Result<Vec<_>, _>>()?
-            };
-            tx.execute("DELETE FROM account WHERE realm = ?1", params![realm])?;
-            tx.commit()?;
-            Ok(origins)
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// Removes the account of one origin and realm; returns whether it existed.
+    pub fn account_delete(
+        &self,
+        scheme: &str,
+        host: &str,
+        port: u16,
+        realm: &str,
+    ) -> Result<bool, DbError> {
+        self.db.with(|c| {
+            Ok(c.execute(
+                "DELETE FROM account WHERE scheme = ?1 AND host = ?2 AND port = ?3 AND realm = ?4",
+                params![scheme, host, port, realm],
+            )? > 0)
         })
     }
 

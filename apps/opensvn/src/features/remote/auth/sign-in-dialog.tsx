@@ -39,15 +39,21 @@ export function SignInDialog({
   const [save, setSave] = useState(true);
   const exhausted = prompt.reason === "rejected" && prompt.attempt >= MAX_AUTH_ATTEMPTS;
 
+  // `rejected` at attempt 0: the password typed last time was rejected (and so not saved), but
+  // this is a new sign-in round, so there is no attempt counter to show.
   const reason =
-    prompt.reason === "rejected"
-      ? t("reasonRejected", {
-          attempt: Math.min(prompt.attempt, MAX_AUTH_ATTEMPTS),
-          max: MAX_AUTH_ATTEMPTS,
-        })
-      : prompt.reason === "negotiate-failed"
-        ? t("reasonNegotiateFailed")
-        : t("reasonInitial");
+    prompt.reason === "rejected" && prompt.attempt === 0
+      ? t("reasonRejectedEarlier")
+      : prompt.reason === "rejected"
+        ? t("reasonRejected", {
+            attempt: Math.min(prompt.attempt, MAX_AUTH_ATTEMPTS),
+            max: MAX_AUTH_ATTEMPTS,
+          })
+        : prompt.reason === "negotiate-failed"
+          ? t("reasonNegotiateFailed")
+          : prompt.reason === "expired"
+            ? t("reasonExpired")
+            : t("reasonInitial");
 
   const valid = username.trim().length > 0 && password.length > 0;
   const submit = () => {

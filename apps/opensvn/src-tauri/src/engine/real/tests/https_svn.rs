@@ -18,6 +18,9 @@ use tokio_rustls::TlsAcceptor;
 /// Repository root path.
 pub(super) const ROOT: &str = "/svn/repo";
 pub(super) const REPO_UUID: &str = "7462d98e-4071-4508-b797-d2922b5cda8f";
+/// Root of the second repository ([`Script::second_repo`]); [`ROOT`] is a prefix of it.
+pub(super) const ROOT2: &str = "/svn/repo2";
+pub(super) const REPO2_UUID: &str = "0b8f3c5e-58a1-4c55-9d7e-2b1f0a6c9e41";
 pub(super) const REALM: &str = "OpenSVN test";
 pub(super) const USER: &str = "alice";
 pub(super) const PASSWORD: &str = "s3cret";
@@ -40,6 +43,11 @@ pub(super) struct Script {
     /// Path-based authorization: everything outside `/trunk` (and the `!svn` resources) is
     /// forbidden, like `[/] * =` plus `[/trunk] alice = rw`.
     pub(super) trunk_only: bool,
+    /// Also serve a second repository at [`ROOT2`].
+    pub(super) second_repo: bool,
+    /// Repository names ignore ASCII case, like VisualSVN on Windows: `/svn/REPO/trunk` is in
+    /// the repository announced as [`ROOT`].
+    pub(super) ignore_case: bool,
 }
 
 /// Running server.
@@ -111,6 +119,11 @@ impl SvnServer {
         self.log.lock().unwrap().clone()
     }
 
+    /// `https://127.0.0.1:<port><path>` (no repository prefix).
+    pub(super) fn raw_url(&self, path: &str) -> String {
+        format!("https://127.0.0.1:{}{path}", self.port)
+    }
+
     /// `OPTIONS` requests the server answered with 200 (session opens and authentication
     /// checks), by path.
     pub(super) fn options_paths(&self) -> Vec<String> {
@@ -124,6 +137,28 @@ impl SvnServer {
 
 fn reply(status: u16) -> hyper::http::response::Builder {
     Response::builder().status(status)
+}
+
+fn under(path: &str, root: &str, fold: bool) -> bool {
+    let head_ok = if fold {
+        path.len() >= root.len()
+            && path.is_char_boundary(root.len())
+            && path[..root.len()].eq_ignore_ascii_case(root)
+    } else {
+        path.starts_with(root)
+    };
+    head_ok && (path.len() == root.len() || path.as_bytes()[root.len()] == b'/')
+}
+
+/// The repository (root, UUID) serving `path`, in the server's spelling.
+fn repository(path: &str, script: Script) -> Option<(&'static str, &'static str)> {
+    let mut repos = vec![(ROOT, REPO_UUID)];
+    if script.second_repo {
+        repos.push((ROOT2, REPO2_UUID));
+    }
+    repos
+        .into_iter()
+        .find(|(root, _)| under(path, root, script.ignore_case))
 }
 
 fn allowed(path: &str, script: Script) -> bool {
@@ -175,7 +210,10 @@ async fn serve(
         return reply(403).body(Full::new(Bytes::new())).unwrap();
     }
     match parts.method.as_str() {
-        "OPTIONS" => options_reply(),
+        "OPTIONS" => match repository(&path, script) {
+            Some((root, uuid)) => options_reply(root, uuid),
+            None => reply(404).body(Full::new(Bytes::new())).unwrap(),
+        },
         "REPORT" if path == format!("{ROOT}/!svn/me") => {
             let checkout = String::from_utf8_lossy(&body).contains("start-empty=\"true\"");
             let body = if checkout {
@@ -201,7 +239,7 @@ const UP_TO_DATE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 </S:update-report>
 "#;
 
-fn options_reply() -> Response<Full<Bytes>> {
+fn options_reply(root: &str, uuid: &str) -> Response<Full<Bytes>> {
     let mut b = reply(200);
     for dav in [
         "1,2",
@@ -213,15 +251,15 @@ fn options_reply() -> Response<Full<Bytes>> {
         b = b.header("DAV", dav);
     }
     b.header("SVN-Youngest-Rev", "5")
-        .header("SVN-Repository-UUID", REPO_UUID)
-        .header("SVN-Repository-Root", ROOT)
-        .header("SVN-Me-Resource", format!("{ROOT}/!svn/me"))
-        .header("SVN-Rev-Root-Stub", format!("{ROOT}/!svn/rvr"))
-        .header("SVN-Rev-Stub", format!("{ROOT}/!svn/rev"))
-        .header("SVN-Txn-Root-Stub", format!("{ROOT}/!svn/txr"))
-        .header("SVN-Txn-Stub", format!("{ROOT}/!svn/txn"))
-        .header("SVN-VTxn-Root-Stub", format!("{ROOT}/!svn/vtxr"))
-        .header("SVN-VTxn-Stub", format!("{ROOT}/!svn/vtxn"))
+        .header("SVN-Repository-UUID", uuid)
+        .header("SVN-Repository-Root", root)
+        .header("SVN-Me-Resource", format!("{root}/!svn/me"))
+        .header("SVN-Rev-Root-Stub", format!("{root}/!svn/rvr"))
+        .header("SVN-Rev-Stub", format!("{root}/!svn/rev"))
+        .header("SVN-Txn-Root-Stub", format!("{root}/!svn/txr"))
+        .header("SVN-Txn-Stub", format!("{root}/!svn/txn"))
+        .header("SVN-VTxn-Root-Stub", format!("{root}/!svn/vtxr"))
+        .header("SVN-VTxn-Stub", format!("{root}/!svn/vtxn"))
         .header("SVN-Allow-Bulk-Updates", "Prefer")
         .body(Full::new(Bytes::new()))
         .unwrap()
