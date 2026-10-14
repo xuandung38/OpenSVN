@@ -69,7 +69,7 @@ export function setMockProgressTotal(total: number | null): void {
   progressTotal = total;
 }
 /** What `engine_capabilities` reports (tests switch it to an engine without externals). */
-let engineCaps: EngineCapabilities = { externals: true };
+let engineCaps: EngineCapabilities = { externals: true, demo: false };
 export function setMockEngineCapabilities(caps: EngineCapabilities): void {
   engineCaps = caps;
 }

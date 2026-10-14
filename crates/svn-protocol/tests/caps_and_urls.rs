@@ -239,6 +239,20 @@ fn rejects_hostile_hrefs() {
         "/svn/repo/trunk/a%0ab",
         "/svn/repo/trunk/a%7Fb",
         "/svn/repo/trunk/a%5cb",
+        // The URL parser strips surrounding whitespace; `.. ` would become `..` (#102).
+        "/svn/repo/trunk/.. ",
+        "/svn/repo/trunk/%2e%2e ",
+        "/svn/repo/!svn/rvr/4/trunk/.. ",
+        " /svn/repo/trunk/..",
+        " /svn/repo/trunk",
+        "/svn/repo/trunk ",
+        "/svn/repo/trunk\u{a0}",
+        "/svn/repo/trunk\u{3000}",
+        // `://` inside a path is not a scheme separator: the `..` before it still counts.
+        "/svn/repo/trunk/../branches/x://y",
+        "/svn/repo/!svn/rvr/4/trunk/%2e%2e/x://y",
+        "http://svn.test.local/svn/repo/trunk/../x://y",
+        "trunk/../x://y",
     ];
     for href in hostile {
         let err = u.accept_href(href).expect_err(href);
@@ -433,12 +447,29 @@ fn check_server_url_text_accepts_ordinary_escapes() {
         "/svn/repo/%E2%82%AC",
         "http://svn.test.local/svn/repo/%2Fx",
         "/svn/repo/100%",
+        "/svn/repo/a b",
+        "/svn/repo/a%20",
     ] {
         svn_protocol::check_server_url_text("t", ok).unwrap();
     }
     for bad in [
-        "a\tb", "a\rb", "a\nb", "a\\b", "a%09b", "a%0db", "a%0Ab", "a%1fb", "a%7fb", "a%5cb",
-        "a%5Cb", "a\u{85}b",
+        "a\tb",
+        "a\rb",
+        "a\nb",
+        "a\\b",
+        "a%09b",
+        "a%0db",
+        "a%0Ab",
+        "a%1fb",
+        "a%7fb",
+        "a%5cb",
+        "a%5Cb",
+        "a\u{85}b",
+        " a",
+        "a ",
+        "/svn/repo/trunk/.. ",
+        "\u{a0}/svn",
+        "/svn\u{2003}",
     ] {
         assert_eq!(
             svn_protocol::check_server_url_text("t", bad)

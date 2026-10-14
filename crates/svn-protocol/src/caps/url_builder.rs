@@ -16,8 +16,15 @@ fn unsafe_href(msg: impl Into<String>) -> SvnError {
 /// `http://host\svn\repo\..` both collapse to `/svn` after a raw dot-segment scan passed them.
 /// A real mod_dav_svn or VisualSVN never sends any of these, so the text is refused, never
 /// normalised: any `\` or control character, and any percent escape of a control character
-/// or of `\` (`%5C`), which later decoding steps would turn into the same thing.
+/// or of `\` (`%5C`), which later decoding steps would turn into the same thing. Leading or
+/// trailing whitespace is refused too: the parser strips it, so `/svn/repo/trunk/.. ` would
+/// pass a raw dot-segment scan (the last segment is `.. `) and then collapse to the root.
 pub fn check_server_url_text(what: &str, value: &str) -> Result<()> {
+    if value.starts_with(char::is_whitespace) || value.ends_with(char::is_whitespace) {
+        return Err(unsafe_href(format!(
+            "{what} has leading or trailing whitespace"
+        )));
+    }
     if let Some(c) = value.chars().find(|c| c.is_control() || *c == '\\') {
         return Err(unsafe_href(format!(
             "{what} contains a forbidden character {c:?}"
@@ -57,13 +64,24 @@ pub(crate) fn check_server_path_text(what: &str, value: &str) -> Result<()> {
 
 /// The raw path of server-supplied URL text, before the URL parser touched it: after
 /// `scheme://authority` for an absolute URL (the authority ends at `/` or, defensively, `\`,
-/// where the parser ends it for http(s)), and without query or fragment.
+/// where the parser ends it for http(s)), and without query or fragment. `://` only separates
+/// a scheme when the value starts with one: in `/svn/repo/../x://y` it is part of the path.
 pub(crate) fn raw_path_of(value: &str) -> &str {
-    let raw = match value.split_once("://") {
+    let raw = match split_scheme(value) {
         Some((_, rest)) => rest.find(['/', '\\']).map_or("", |i| &rest[i..]),
         None => value,
     };
     raw.split(['?', '#']).next().unwrap_or("")
+}
+
+/// `(scheme, rest)` when `value` starts with `scheme://` (RFC 3986:
+/// `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`), else `None`.
+fn split_scheme(value: &str) -> Option<(&str, &str)> {
+    let (scheme, rest) = value.split_once("://")?;
+    let mut chars = scheme.chars();
+    let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    valid.then_some((scheme, rest))
 }
 
 /// Name of a transaction and which kind of stub addresses it: the server answers
@@ -460,7 +478,7 @@ impl UrlBuilder {
                 return Err(unsafe_href("network-path reference in href"));
             }
             self.origin.join(href)
-        } else if let Some((scheme, _)) = href.split_once("://") {
+        } else if let Some((scheme, _)) = split_scheme(href) {
             if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
                 return Err(unsafe_href("href with unsupported scheme"));
             }
@@ -586,4 +604,34 @@ fn rel_from_decoded(decoded: &str) -> Result<RelPath> {
         return Ok(RelPath::root());
     }
     RelPath::from_server(decoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_path_only_splits_a_leading_scheme() {
+        assert_eq!(raw_path_of("http://h/svn/repo?x#y"), "/svn/repo");
+        assert_eq!(raw_path_of("HTTPS://h:1/a"), "/a");
+        assert_eq!(raw_path_of("svn+ssh://h/a"), "/a");
+        assert_eq!(raw_path_of("http://h"), "");
+        assert_eq!(raw_path_of("http://h\\a\\b"), "\\a\\b");
+        assert_eq!(
+            raw_path_of("/svn/repo/trunk/../branches/x://y"),
+            "/svn/repo/trunk/../branches/x://y"
+        );
+        assert_eq!(raw_path_of("a/b://c"), "a/b://c");
+        assert_eq!(raw_path_of("1http://h/a"), "1http://h/a");
+        assert_eq!(raw_path_of("://h/a"), "://h/a");
+        assert_eq!(raw_path_of("http://h/a/x://y"), "/a/x://y");
+    }
+
+    #[test]
+    fn dot_segment_before_an_embedded_scheme_separator_is_refused() {
+        let e = check_server_path_text("stub", "/svn/repo/../x://y").expect_err("dotdot");
+        assert_eq!(e.code, ErrorCode::UnsafePath);
+        let e = check_server_path_text("stub", "/svn/repo/!svn/.. ").expect_err("space");
+        assert_eq!(e.code, ErrorCode::UnsafePath);
+    }
 }

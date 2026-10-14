@@ -8,7 +8,7 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use svn_types::{
-    Depth, ErrorCode, PropChange, RelPath, RepoUrl, Reporter, Result, Revnum, SvnError,
+    Depth, ErrorCode, NodeKind, PropChange, RelPath, RepoUrl, Reporter, Result, Revnum, SvnError,
 };
 
 use super::repo::{Node, NodeData, Tree};
@@ -20,6 +20,8 @@ pub(super) struct ReportEntry {
     pub rev: Revnum,
     pub start_empty: bool,
     pub deleted: bool,
+    /// Depth the working copy has at this path (`Exclude`: excluded node).
+    pub depth: Depth,
 }
 
 /// Reporter that records entries.
@@ -33,7 +35,7 @@ impl Reporter for CollectingReporter {
         &mut self,
         path: &RelPath,
         rev: Revnum,
-        _depth: Depth,
+        depth: Depth,
         start_empty: bool,
         _lock: Option<&str>,
     ) -> Result<()> {
@@ -42,6 +44,7 @@ impl Reporter for CollectingReporter {
             rev,
             start_empty,
             deleted: false,
+            depth,
         });
         Ok(())
     }
@@ -51,6 +54,7 @@ impl Reporter for CollectingReporter {
             rev: Revnum(0),
             start_empty: true,
             deleted: true,
+            depth: Depth::Infinity,
         });
         Ok(())
     }
@@ -59,7 +63,7 @@ impl Reporter for CollectingReporter {
         path: &RelPath,
         _url: &RepoUrl,
         rev: Revnum,
-        _depth: Depth,
+        depth: Depth,
         start_empty: bool,
         _lock: Option<&str>,
     ) -> Result<()> {
@@ -68,6 +72,7 @@ impl Reporter for CollectingReporter {
             rev,
             start_empty,
             deleted: false,
+            depth,
         });
         Ok(())
     }
@@ -125,6 +130,8 @@ pub(super) struct PlanInput<'a> {
     pub tree_target: RelPath,
     pub send_text: bool,
     pub max_open_files: usize,
+    /// Depth of the update request (`Unknown`: the depths the working copy reports).
+    pub requested_depth: Depth,
 }
 
 struct Planner<'a> {
@@ -169,6 +176,39 @@ fn prop_changes(base: Option<&Node>, new: &Node) -> Vec<PropChange> {
         }
     }
     out
+}
+
+/// Order of depths as svn compares them (`unknown < exclude < empty < ...`).
+fn dv(d: Depth) -> i8 {
+    match d {
+        Depth::Unknown => -2,
+        Depth::Exclude => -1,
+        Depth::Empty => 0,
+        Depth::Files => 1,
+        Depth::Immediates => 2,
+        Depth::Infinity => 3,
+    }
+}
+
+/// svn_repos' `DEPTH_BELOW_HERE`.
+fn below(d: Depth) -> Depth {
+    if d == Depth::Immediates {
+        Depth::Empty
+    } else {
+        d
+    }
+}
+
+/// svn_repos' `is_depth_upgrade`: the drive makes the working copy deeper for an entry of
+/// `kind`, so the entry is sent as an addition whatever the working copy has.
+fn is_depth_upgrade(wc_depth: Depth, req: Depth, kind: NodeKind) -> bool {
+    if req == Depth::Unknown || dv(req) <= dv(wc_depth) || wc_depth == Depth::Immediates {
+        return false;
+    }
+    if kind == NodeKind::File && wc_depth == Depth::Files {
+        return false;
+    }
+    !(kind == NodeKind::Dir && wc_depth == Depth::Empty && req == Depth::Files)
 }
 
 /// Builds the operation list.
@@ -249,8 +289,10 @@ impl Planner<'_> {
             opened.push(slot);
             parent = slot;
         }
+        let req = self.input.requested_depth;
+        let wc_depth = self.entry_at(&anchor).map_or(Depth::Infinity, |e| e.depth);
         if anchor.is_root() {
-            self.children(&anchor, 0, false)?;
+            self.children(&anchor, 0, false, wc_depth, req)?;
             let base = self.base_node(&anchor, false).map(|(n, _)| n);
             if let Some(t) = self.input.target_tree.get(&self.input.tree_target) {
                 for c in prop_changes(base, t) {
@@ -266,7 +308,7 @@ impl Planner<'_> {
                     format!("{anchor} does not exist"),
                 ));
             }
-            self.entry(parent, &anchor, false)?;
+            self.entry(parent, &anchor, false, wc_depth, req)?;
         }
         for slot in opened.into_iter().rev() {
             self.close_dir(slot, &RelPath::root());
@@ -300,7 +342,24 @@ impl Planner<'_> {
         self.ops.push(Op::CloseDir(slot));
     }
 
-    fn children(&mut self, dir: &RelPath, slot: DirSlot, empty_base: bool) -> Result<()> {
+    /// Report entry made exactly for `path`.
+    fn entry_at(&self, path: &RelPath) -> Option<&ReportEntry> {
+        self.input.entries.iter().rev().find(|e| e.path == *path)
+    }
+
+    /// Children of `dir`, like svn_repos' `delta_dirs`: `wc_depth` is what the working copy has
+    /// there, `req` the depth the drive covers (`Unknown`: the working copy depths).
+    fn children(
+        &mut self,
+        dir: &RelPath,
+        slot: DirSlot,
+        empty_base: bool,
+        wc_depth: Depth,
+        req: Depth,
+    ) -> Result<()> {
+        if !(dv(req) > dv(Depth::Empty) || req == Depth::Unknown) {
+            return Ok(());
+        }
         let mut names = BTreeSet::new();
         if !empty_base {
             let rev = self
@@ -313,8 +372,6 @@ impl Planner<'_> {
                         .filter_map(|(k, _)| k.file_name().map(str::to_owned)),
                 );
             }
-        }
-        if !empty_base {
             // Children reported at their own revision (mixed-revision working copies) exist in
             // the working copy even when the parent's base revision does not have them.
             names.extend(
@@ -332,12 +389,87 @@ impl Planner<'_> {
         );
         for name in names {
             let cp = dir.child(&name)?;
-            self.entry(slot, &cp, empty_base)?;
+            let info = if empty_base {
+                None
+            } else {
+                self.entry_at(&cp).cloned()
+            };
+            let source = self
+                .base_node(&cp, empty_base)
+                .map(|(n, _)| n.kind())
+                .filter(|_| !info.as_ref().is_some_and(|i| i.deleted));
+            let target = self.new_node(&cp)?.map(Node::kind);
+            match info {
+                Some(i) if !i.deleted => {
+                    let is_dir = |k: Option<NodeKind>| k == Some(NodeKind::Dir);
+                    if i.depth == Depth::Exclude {
+                        // An excluded node the repository deleted is deleted in the working
+                        // copy too; otherwise it is left alone.
+                        if target.is_none() && source.is_some() {
+                            self.entry(slot, &cp, false, i.depth, below(req))?;
+                        }
+                        continue;
+                    }
+                    if req == Depth::Files && (is_dir(source) || is_dir(target)) {
+                        continue;
+                    }
+                    self.entry(slot, &cp, false, i.depth, below(req))?;
+                }
+                deleted => {
+                    let forced_absent = deleted.is_some();
+                    let child_wc = below(wc_depth);
+                    match target {
+                        None => {
+                            let Some(kind) = source else { continue };
+                            if kind == NodeKind::File && dv(wc_depth) < dv(Depth::Files) {
+                                continue;
+                            }
+                            if kind == NodeKind::Dir
+                                && (dv(wc_depth) < dv(Depth::Immediates) || req == Depth::Files)
+                            {
+                                continue;
+                            }
+                            self.entry(slot, &cp, empty_base, child_wc, below(req))?;
+                        }
+                        Some(kind) => {
+                            if is_depth_upgrade(wc_depth, req, kind) {
+                                self.entry(slot, &cp, true, child_wc, below(req))?;
+                                continue;
+                            }
+                            if kind == NodeKind::File
+                                && req == Depth::Unknown
+                                && dv(wc_depth) < dv(Depth::Files)
+                            {
+                                continue;
+                            }
+                            if kind == NodeKind::Dir
+                                && (dv(wc_depth) < dv(Depth::Immediates) || req == Depth::Files)
+                            {
+                                continue;
+                            }
+                            self.entry(
+                                slot,
+                                &cp,
+                                empty_base || forced_absent,
+                                child_wc,
+                                below(req),
+                            )?;
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
 
-    fn entry(&mut self, parent: DirSlot, cp: &RelPath, empty_base: bool) -> Result<()> {
+    fn entry(
+        &mut self,
+        parent: DirSlot,
+        cp: &RelPath,
+        empty_base: bool,
+        wc_depth: Depth,
+        req: Depth,
+    ) -> Result<()> {
         let base = self.base_node(cp, empty_base).map(|(n, r)| (n.clone(), r));
         let new = self.new_node(cp)?.cloned();
         match (base, new) {
@@ -350,14 +482,14 @@ impl Planner<'_> {
                 });
                 Ok(())
             }
-            (None, Some(t)) => self.add(parent, cp, &t),
+            (None, Some(t)) => self.add(parent, cp, &t, wc_depth, req),
             (Some((b, r)), Some(t)) if b.kind() != t.kind() => {
                 self.ops.push(Op::Delete {
                     path: cp.clone(),
                     rev: Some(r),
                     parent,
                 });
-                self.add(parent, cp, &t)
+                self.add(parent, cp, &t, wc_depth, req)
             }
             (Some((b, r)), Some(t)) => match &t.data {
                 NodeData::Dir => {
@@ -373,9 +505,11 @@ impl Planner<'_> {
                     for c in prop_changes(Some(&b), &t) {
                         self.ops.push(Op::DirProp(slot, c));
                     }
-                    self.children(cp, slot, false)?;
-                    if self.ops.len() == mark + 1 {
-                        self.ops.pop(); // nothing changed below: leave the directory unopened
+                    self.children(cp, slot, false, wc_depth, req)?;
+                    // Nothing changed below: leave the directory unopened, unless the drive
+                    // makes it deeper (the server opens it then).
+                    if self.ops.len() == mark + 1 && dv(req) <= dv(wc_depth) {
+                        self.ops.pop();
                     } else {
                         self.close_dir(slot, cp);
                     }
@@ -408,7 +542,14 @@ impl Planner<'_> {
         }
     }
 
-    fn add(&mut self, parent: DirSlot, cp: &RelPath, t: &Node) -> Result<()> {
+    fn add(
+        &mut self,
+        parent: DirSlot,
+        cp: &RelPath,
+        t: &Node,
+        wc_depth: Depth,
+        req: Depth,
+    ) -> Result<()> {
         match &t.data {
             NodeData::Dir => {
                 let slot = self.alloc_dir();
@@ -422,7 +563,7 @@ impl Planner<'_> {
                 for c in prop_changes(None, t) {
                     self.ops.push(Op::DirProp(slot, c));
                 }
-                self.children(cp, slot, true)?;
+                self.children(cp, slot, true, wc_depth, req)?;
                 self.close_dir(slot, cp);
             }
             NodeData::File(content) => {

@@ -211,3 +211,30 @@ async fn the_last_sample_is_not_lost_to_the_throttle() {
         .unwrap();
     assert!(last_progress < finished);
 }
+
+#[tokio::test]
+async fn notices_are_never_dropped_by_the_throttle() {
+    let (m, events) = manager();
+    let h = m.spawn(OperationKind::Commit, None, "Commit", |ctx| async move {
+        for i in 1..=20u64 {
+            ctx.progress.report(ProgressUpdate {
+                phase: "commit".into(),
+                current: Some(i),
+                ..ProgressUpdate::default()
+            });
+            ctx.progress.report(ProgressUpdate {
+                phase: crate::engine::context::PHASE_NESTED_WC_SKIPPED.into(),
+                current_path: Some(format!("skipped {i}")),
+                ..ProgressUpdate::default()
+            });
+        }
+        Ok(OpResult::Done)
+    });
+    wait_for(&events, "finished", &h.op_id).await;
+    let notices: Vec<_> = events
+        .progress()
+        .into_iter()
+        .filter(|p| p.phase == crate::engine::context::PHASE_NESTED_WC_SKIPPED)
+        .collect();
+    assert_eq!(notices.len(), 20, "every notice reaches the UI");
+}
