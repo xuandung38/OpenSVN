@@ -105,8 +105,10 @@ pub struct DirState {
     /// Children dropped by `limit` that the server adds become `not-present` rows: the limit
     /// comes from a requested depth narrower than the recorded one (svn issue #3569).
     pub not_present_on_drop: bool,
-    /// The directory lies under an unversioned obstruction: BASE is written, the disk is left
-    /// alone and every node gets a `base-deleted` row at this op depth.
+    /// The directory is shadowed (it lies under an unversioned obstruction, a local delete or
+    /// replace, or it is an incoming replacement of a locally changed node): BASE is written,
+    /// the disk is left alone and every node gets a `base-deleted` row at this op depth. 0: no
+    /// working layer to extend (an incoming replacement of a node deleted locally), BASE only.
     pub shadow: Option<u32>,
     /// Incoming property changes, applied at close.
     pub prop_changes: Vec<PropChange>,
@@ -153,8 +155,8 @@ pub struct FileState {
     pub text: TextSlot,
     /// Tree conflict to record when the file closes.
     pub tree_conflict: Option<PendingTreeConflict>,
-    /// The file lies under an unversioned directory obstruction: BASE only, with a
-    /// `base-deleted` row at this op depth (see [`DirState::shadow`]).
+    /// The file is shadowed: BASE only, with a `base-deleted` row at this op depth unless it
+    /// is 0 (see [`DirState::shadow`]).
     pub shadow: Option<u32>,
 }
 

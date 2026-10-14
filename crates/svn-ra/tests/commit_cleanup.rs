@@ -7,7 +7,8 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{Handler, Reply, ScriptedPrompter, TestCa, TlsServer, transport_trusting};
+use bytes::Bytes;
+use common::{Handler, Reply, ScriptedPrompter, TestBody, TestCa, TlsServer, transport_trusting};
 use reqwest::Method;
 use svn_ra::ops::commit::{abort_txn, abort_txn_checked, start_commit};
 use svn_ra::ops::update::RaWire;
@@ -236,9 +237,11 @@ async fn server_by_path(
 const VTXN_PATH: &str = "/svn/repo/!svn/vtxn/7-a";
 
 /// `abort_txn_checked` tells "deleted now" from "already gone", trying the plain and the virtual
-/// name, and refuses to guess from an answer that says neither.
+/// name, reports a server failure (5xx) as "unknown" and refuses to guess from an answer that
+/// says neither.
 #[tokio::test]
 async fn checked_abort_tells_deleted_from_gone() {
+    let unknown = || Some(TxnAbort::Unknown("HTTP 500: request failed".to_owned()));
     for (plain, virt, expected) in [
         (204, 404, Some(TxnAbort::Deleted)),
         (404, 204, Some(TxnAbort::Deleted)),
@@ -246,12 +249,18 @@ async fn checked_abort_tells_deleted_from_gone() {
         (404, 404, Some(TxnAbort::Gone)),
         (400, 404, Some(TxnAbort::Gone)),
         (400, 400, None),
-        (500, 404, None),
+        // A 5xx for either kind leaves the transaction's fate open (#148): never "gone", even
+        // with a 404 for the other kind, and never "deleted".
+        (500, 404, unknown()),
+        (404, 500, unknown()),
+        (500, 400, unknown()),
+        (500, 500, unknown()),
+        (500, 204, Some(TxnAbort::Deleted)),
         // Forbidden (authz) says nothing about the transaction: never taken as "gone".
         (403, 404, None),
         (404, 403, None),
         (403, 403, None),
-        (404, 500, None),
+        (403, 500, None),
     ] {
         let (ca, srv) = server_by_path(move |m, path| match (m.as_str(), path) {
             ("DELETE", TXN_PATH) => Reply::status(plain),
@@ -273,6 +282,74 @@ async fn checked_abort_tells_deleted_from_gone() {
             }
         }
     }
+}
+
+/// #148: svn 1.15 FSFS answers 500 "Transaction cleanup failed" (an svn error body) when the
+/// `DELETE` races the commit's own purge, and a `DELETE` whose answer never arrives says nothing
+/// either: both are [`TxnAbort::Unknown`], with the server's message, never an error that stops
+/// the caller and never "gone" or "deleted".
+#[tokio::test]
+async fn checked_abort_reports_server_and_transport_failures_as_unknown() {
+    const CLEANUP_FAILED: &str = concat!(
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        r#"<D:error xmlns:D="DAV:" xmlns:m="http://apache.org/dav/xmlns" xmlns:C="svn:">"#,
+        r#"<C:error/><m:human-readable errcode="160030">"#,
+        "Transaction '7-a' cleanup failed",
+        "</m:human-readable></D:error>"
+    );
+    let (ca, srv) = server_by_path(|m, path| match (m.as_str(), path) {
+        ("DELETE", TXN_PATH) => {
+            let mut r = Reply::status(500).header("content-type", "text/xml; charset=utf-8");
+            r.body = TestBody::Full(Some(Bytes::from_static(CLEANUP_FAILED.as_bytes())));
+            r
+        }
+        ("DELETE", VTXN_PATH) => Reply::status(404),
+        _ => Reply::status(500),
+    })
+    .await;
+    let transport = transport_trusting(&ca, ScriptedPrompter::with_credentials("a", "b"), |_| {});
+    let url = RepoUrl::parse(srv.url("/svn/repo/trunk").as_str()).unwrap();
+    let wire = RaWire::open(transport, url, &CancelToken::new())
+        .await
+        .unwrap();
+    match abort_txn_checked(&wire, TXN, &CancelToken::new()).await {
+        Ok(TxnAbort::Unknown(why)) => assert!(why.contains("cleanup failed"), "{why}"),
+        other => panic!("expected unknown, got {other:?}"),
+    }
+
+    // The answer to the DELETE never arrives (read timeout).
+    let (ca, srv) = server_by_path(|m, path| match (m.as_str(), path) {
+        ("DELETE", TXN_PATH) => {
+            let mut r = Reply::status(204);
+            r.delay = Duration::from_secs(5);
+            r
+        }
+        ("DELETE", VTXN_PATH) => Reply::status(404),
+        _ => Reply::status(500),
+    })
+    .await;
+    let transport = transport_trusting(&ca, ScriptedPrompter::with_credentials("a", "b"), |c| {
+        c.read_timeout = Duration::from_millis(300);
+    });
+    let url = RepoUrl::parse(srv.url("/svn/repo/trunk").as_str()).unwrap();
+    let wire = RaWire::open(transport, url, &CancelToken::new())
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            abort_txn_checked(&wire, TXN, &CancelToken::new()).await,
+            Ok(TxnAbort::Unknown(_))
+        ),
+        "a lost answer is unknown"
+    );
+
+    // A cancelled call is still an error, not "unknown".
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let err = abort_txn_checked(&wire, TXN, &cancel)
+        .await
+        .expect_err("cancelled");
+    assert_eq!(err.code, ErrorCode::Cancelled);
 }
 
 /// Records the observer calls; `on_merge_sending` can be told to fail.

@@ -1221,3 +1221,186 @@ async fn recovery_keeps_journals_it_cannot_use() {
 fn serde_json_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
+
+// ---- #148: the recovery DELETE of the transaction fails with a 5xx ----
+
+/// What svn 1.15 FSFS answers (HTTP 500) when the `DELETE` races the commit's own purge.
+const CLEANUP_FAILED: &str = "Transaction '1-1' cleanup failed";
+
+impl Env {
+    async fn recover_wc(&self) -> svn_client::commit::WcCommitRecovery {
+        svn_client::commit::recover_wc_commits(&self.state, &self.db, Some(&self.ra), &self.cancel)
+            .await
+            .expect("recover")
+    }
+
+    fn only_journal(&self) -> svn_client::commit::journal::JournalData {
+        let files = svn_client::commit::journal::JournalStore::new(&self.state)
+            .list()
+            .expect("list");
+        assert_eq!(files.len(), 1, "exactly one journal: {files:?}");
+        svn_client::commit::journal::JournalStore::read(&files[0]).expect("read")
+    }
+
+    fn journal_count(&self) -> usize {
+        svn_client::commit::journal::JournalStore::new(&self.state)
+            .list()
+            .map_or(0, |l| l.len())
+    }
+
+    async fn youngest(&self) -> u64 {
+        self.ra
+            .inner
+            .youngest_rev(&self.cancel)
+            .await
+            .expect("rev")
+            .0
+    }
+}
+
+/// The MERGE was applied but its answer was lost, and the recovery `DELETE` of the transaction
+/// answers 500 (the race of #148). Recovery no longer stops there: the log shows the commit
+/// exactly once and the journal is finalized, without a second cleanup and without committing
+/// anything again.
+#[tokio::test]
+async fn recovery_finalizes_from_the_log_when_the_txn_delete_fails_with_500() {
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "changed\n");
+    write(&e.wc, "new.txt", "new\n");
+    e.add(&["new.txt"]);
+    e.ra.inner
+        .fail_next_merge(svn_ra_api::fake::FakeMergeFault::LostAfterMerge);
+    let err = e.commit_all("m").await.expect_err("unknown");
+    assert_eq!(err.code, ErrorCode::CommitOutcomeUnknown, "{err}");
+    let j = e.only_journal();
+    assert!(j.outcome_unknown(), "{j:?}");
+    assert_eq!(e.youngest().await, 2, "the server has the revision");
+
+    e.ra.inner.fail_txn_deletes(Some(CLEANUP_FAILED));
+    let report = e.recover_wc().await;
+    assert_eq!(report.finalized, vec![j.id.clone()], "{report:?}");
+    assert_eq!(report.finalized_revisions, vec![(j.id, 2)]);
+    assert!(report.needs_user.is_empty() && report.failed.is_empty());
+    assert!(
+        e.ra.events()
+            .iter()
+            .any(|l| l.starts_with("abort_txn_checked")),
+        "the DELETE was tried: {:?}",
+        e.ra.events()
+    );
+    assert_eq!(e.journal_count(), 0);
+    assert_eq!(e.youngest().await, 2, "nothing committed twice");
+    assert_eq!(svn_status(&e.fx.oracle, &e.wc), "");
+    let f1 = e.db.read_base(&rp("d/f1")).expect("read").expect("base");
+    assert_eq!(f1.revision, Some(2));
+}
+
+/// The recovery `DELETE` answers 500 and the log does not show the commit exactly once: no
+/// revision at all, a revision that is not ours, or two revisions that both match. The journal
+/// is kept and reported every time (a 5xx is never "deleted", so never "not committed"), the
+/// transaction is not touched, and nothing is committed again.
+#[tokio::test]
+async fn recovery_keeps_the_journal_when_the_txn_delete_fails_and_the_log_does_not_settle_it() {
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "changed\n");
+    e.ra.inner
+        .fail_next_merge(svn_ra_api::fake::FakeMergeFault::LostBeforeMerge);
+    e.commit_all("m").await.expect_err("unknown");
+    let j = e.only_journal();
+    let open_txns = e.ra.inner.open_txns();
+    assert_eq!(open_txns.len(), 1, "transaction kept by the commit");
+    e.ra.inner.fail_txn_deletes(Some(CLEANUP_FAILED));
+
+    let needs_user = |report: &svn_client::commit::WcCommitRecovery, what: &str| {
+        assert_eq!(report.needs_user.len(), 1, "{what}: {report:?}");
+        assert!(
+            report.finalized.is_empty() && report.aborted.is_empty(),
+            "{what}"
+        );
+        let err = &report.needs_user[0].1;
+        assert_eq!(err.code, ErrorCode::WcNeedsCleanup, "{what}: {err}");
+        if what != "two matches" {
+            // Why the log alone did not settle it: the server's answer to the DELETE.
+            assert!(err.message.contains(CLEANUP_FAILED), "{what}: {err}");
+        }
+        assert_eq!(e.only_journal(), j, "{what}: journal untouched");
+        assert_eq!(
+            e.ra.inner.open_txns(),
+            open_txns,
+            "{what}: transaction kept"
+        );
+    };
+
+    // No revision since the commit started (the transaction may still be merged later).
+    needs_user(&e.recover_wc().await, "no new revision");
+    assert_eq!(e.youngest().await, 1);
+
+    // 0 matches: another user's revision with the same message, other text.
+    e.ra.inner
+        .seed(
+            "other",
+            "m",
+            &[FakeChange::PutFile(
+                rp("d/f1"),
+                Bytes::from_static(b"other\n"),
+            )],
+        )
+        .expect("seed");
+    needs_user(&e.recover_wc().await, "no match");
+
+    // 2 matches: two revisions carry exactly this commit.
+    for _ in 0..2 {
+        e.ra.inner
+            .seed(
+                "tester",
+                "m",
+                &[FakeChange::PutFile(
+                    rp("d/f1"),
+                    Bytes::from_static(b"changed\n"),
+                )],
+            )
+            .expect("seed");
+    }
+    let report = e.recover_wc().await;
+    needs_user(&report, "two matches");
+    assert!(
+        report.needs_user[0].1.message.contains("revisions match"),
+        "{report:?}"
+    );
+    assert_eq!(e.youngest().await, 4, "nothing committed by recovery");
+
+    // The next commit of this working copy stays blocked.
+    write(&e.wc, "top.txt", "blocked?\n");
+    let err = e.commit_all("next").await.expect_err("refused");
+    assert_eq!(err.code, ErrorCode::WcNeedsCleanup, "{err}");
+}
+
+/// The server refuses the MERGE (out of date) and then fails the `DELETE` with a 500: the commit
+/// cannot prove nothing was merged, so it keeps the journal instead of dropping it.
+#[tokio::test]
+async fn refused_merge_with_a_failing_txn_delete_keeps_the_journal() {
+    let Some(mut e) = env() else { return };
+    write(&e.wc, "d/f1", "mine\n");
+    e.ra.seed_on_text = Some((
+        "tester".into(),
+        "m".into(),
+        vec![FakeChange::PutFile(
+            rp("d/f1"),
+            Bytes::from_static(b"theirs\n"),
+        )],
+    ));
+    e.ra.inner.fail_txn_deletes(Some(CLEANUP_FAILED));
+    let before = dump_rows(&e.wc);
+    let err = e.commit_all("m").await.expect_err("out of date");
+    assert_eq!(err.code, ErrorCode::WcNeedsCleanup, "{err}");
+    assert!(err.message.contains(CLEANUP_FAILED), "{err}");
+    assert_eq!(e.journal_count(), 1, "journal kept");
+    assert_eq!(dump_rows(&e.wc), before, "WC untouched");
+    assert_eq!(e.youngest().await, 2);
+
+    // Once the server deletes transactions again, recovery settles it: the transaction is gone
+    // (the refused MERGE removed it) and no revision matches, so the user is asked.
+    e.ra.inner.fail_txn_deletes(None);
+    let report = e.recover_wc().await;
+    assert_eq!(report.needs_user.len(), 1, "{report:?}");
+}

@@ -24,7 +24,7 @@ use svn_wc::db::{ActualRow, ConflictRecord, Node, Presence, Props, SubtreeRows, 
 use super::StatusOptions;
 use super::externals::ExternalPaths;
 use super::ignore::{DEFAULT_GLOBAL_IGNORES, is_ignored, split_global, split_property};
-use crate::wc::{abs_path, inspect, join_rel};
+use crate::wc::{inspect, join_rel};
 
 /// What `lstat` found at a path: `None` when nothing is there.
 type Disk = Option<fs::Metadata>;
@@ -39,6 +39,46 @@ fn lstat(abs: &Path, rel: &RelPath) -> Result<Disk> {
             &e,
         )),
     }
+}
+
+/// Path of `rel` below `root` and its `lstat`, for a walk that reports a versioned directory
+/// replaced on disk (by a file, a symlink, or nothing) instead of failing on it. The `lstat` is
+/// `None` when nothing is there or when a directory between `root` and `rel` is not a real
+/// directory: a symlink there is never followed, so nothing below it is looked at (svn follows
+/// it, out of the working copy if it points there). Names are checked like `safe_join`.
+fn reach(root: &Path, rel: &RelPath) -> Result<(std::path::PathBuf, Disk)> {
+    let mut path = root.to_path_buf();
+    let mut cur = RelPath::root();
+    // The root is the trust anchor and may itself be a symlink (`safe_join` accepts that).
+    let mut disk: Disk = match fs::metadata(root) {
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(svn_types::SvnError::from_io(
+                format!("cannot stat '{}'", root.display()),
+                &e,
+            ));
+        }
+    };
+    let mut parents_are_dirs = disk.as_ref().is_some_and(fs::Metadata::is_dir);
+    for seg in rel.components() {
+        cur = join_rel(&cur, &RelPath::new(seg)?)?;
+        // No parent `lstat` is passed: an unreachable parent is handled here, and the path is
+        // only used for I/O when every parent proved to be a real directory.
+        path = safe_join_child(&path, None, &cur)?;
+        disk = if parents_are_dirs {
+            lstat(&path, &cur)?
+        } else {
+            None
+        };
+        parents_are_dirs = is_real_dir(disk.as_ref());
+    }
+    Ok((path, disk))
+}
+
+/// True when `disk` is a directory, not a symlink to one.
+fn is_real_dir(disk: Option<&fs::Metadata>) -> bool {
+    disk.is_some_and(|m| m.file_type().is_dir())
 }
 
 /// Kind of the item on disk and its size (files and symlinks).
@@ -218,6 +258,19 @@ fn sorted(p: &Props) -> Props {
     v
 }
 
+/// True when a file is a symlink on disk without `svn:special` in its working properties, or
+/// the other way round: svn reports such a file as obstructed rather than comparing texts.
+/// Platforms without symlinks (Windows) install special files as regular files and never
+/// report this, like svn built without `HAVE_SYMLINK`.
+fn special_mismatch(snap: &Snapshot<'_>, rel: &RelPath, md: &fs::Metadata) -> Result<bool> {
+    if !cfg!(unix) {
+        return Ok(false);
+    }
+    let props = snap.actual_props(rel)?;
+    let special = inspect::prop_value(&props, "svn:special").is_some();
+    Ok(special != md.file_type().is_symlink())
+}
+
 /// Status of one versioned node, `None` for nodes that are not part of the working copy.
 /// `disk` is the `lstat` of its working item.
 fn node_status(
@@ -262,12 +315,16 @@ fn node_status(
                 Some(NodeKind::File | NodeKind::Symlink),
                 NodeKind::File | NodeKind::Symlink,
                 Some(md),
-            ) if text == NodeStatus::Normal
-                && inspect::text_modified_stat(abs, md, cur, || {
-                    snap.actual_props(rel).map(Cow::into_owned)
-                })? =>
-            {
-                text = NodeStatus::Modified;
+            ) => {
+                if special_mismatch(snap, rel, md)? {
+                    text = NodeStatus::Obstructed;
+                } else if text == NodeStatus::Normal
+                    && inspect::text_modified_stat(abs, md, cur, || {
+                        snap.actual_props(rel).map(Cow::into_owned)
+                    })?
+                {
+                    text = NodeStatus::Modified;
+                }
             }
             _ => {}
         }
@@ -499,13 +556,11 @@ impl Lister<'_> {
         let (rel, depth, snap) = (&job.rel, job.depth, self.snap);
         let (abs, disk) = match &job.target {
             Some((abs, disk)) => (abs.clone(), disk.clone()),
-            None => {
-                // The parent's listing proved the same path safe before this job's items count.
-                let abs = abs_path(snap.db, rel)?;
-                let disk = lstat(&abs, rel)?;
-                (abs, disk)
-            }
+            None => reach(snap.db.wcroot(), rel)?,
         };
+        // A versioned directory replaced by a file or a symlink (or below one) is not listed:
+        // its versioned children are missing, as in svn, and a symlink is never followed.
+        let listable = is_real_dir(disk.as_ref());
         // Names of versioned children and of whatever is on disk, with one `lstat` per entry.
         let mut names: BTreeSet<String> = BTreeSet::new();
         for c in snap.children(rel) {
@@ -515,7 +570,7 @@ impl Lister<'_> {
         }
         let versioned: BTreeSet<String> = names.clone();
         let mut listing = Listing::new();
-        if let Ok(rd) = fs::read_dir(&abs) {
+        if listable && let Ok(rd) = fs::read_dir(&abs) {
             for e in rd.flatten() {
                 if let Some(n) = e.file_name().to_str()
                     && n != svn_wc::db::ADM_DIR
@@ -529,10 +584,15 @@ impl Lister<'_> {
         let mut local_ignores: Option<Vec<String>> = None;
         for name in names {
             let child = join_rel(rel, &RelPath::new(&name)?)?;
-            // Same path and errors as `abs_path(child)`, without `lstat`ing the ancestors again.
-            let child_abs = safe_join_child(&abs, disk.as_ref(), &child)?;
+            // Same path and errors as `abs_path(child)`, without `lstat`ing the ancestors again
+            // (only the name is checked below a directory that is not listed).
+            let child_abs = safe_join_child(&abs, disk.as_ref().filter(|_| listable), &child)?;
             let is_versioned = versioned.contains(&name);
-            let child_disk = child_disk(&mut listing, &name, &child, &child_abs)?;
+            let child_disk = if listable {
+                child_disk(&mut listing, &name, &child, &child_abs)?
+            } else {
+                None
+            };
             if depth == Depth::Files {
                 // `--depth files`: subdirectories are not part of the status. A versioned child
                 // is a directory by its working node, anything else by what is on disk.
@@ -783,8 +843,7 @@ fn status_of_rows(
 
     // The target itself.
     cancel.check()?;
-    let abs = abs_path(db, rel)?;
-    let disk = lstat(&abs, rel)?;
+    let (abs, disk) = reach(db.wcroot(), rel)?;
     let Some(cur) = snap.read_node(rel)? else {
         return Ok(out);
     };

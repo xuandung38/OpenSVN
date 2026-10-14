@@ -65,7 +65,7 @@ pub async fn status(
         ctx.config.global_ignores.clone(),
     );
     tokio::task::spawn_blocking(move || {
-        let (db, rel) = wc::open_containing(&owner, &p)?;
+        let (db, rel) = wc::open_target(&owner, &p)?;
         local_status(&db, &rel, &opts, globals.as_deref(), &cancel)
     })
     .await

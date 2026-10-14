@@ -110,14 +110,19 @@ fn apply_pragmas(conn: &Connection, writable: bool) -> Result<()> {
         // svn uses OFF; OpenSVN keeps pristine/work-queue ordering durable across power loss.
         conn.execute_batch("PRAGMA synchronous = FULL;")
             .map_err(sql_err)?;
+        // Room for the tree an update or checkout works through (the default is 2 MiB). Only
+        // for writers: this pragma loads the schema, which takes the shared lock, and a
+        // read-only helper connection opened while another one holds a read transaction must
+        // not wait for a writer that waits for that transaction (see `subtree::helper_rows`).
+        conn.execute_batch("PRAGMA cache_size = -16384;")
+            .map_err(sql_err)?;
     }
     conn.execute_batch(
         "PRAGMA locking_mode = NORMAL;
          PRAGMA foreign_keys = OFF;
          PRAGMA recursive_triggers = ON;
          PRAGMA case_sensitive_like = 1;
-         PRAGMA temp_store = MEMORY;
-         PRAGMA cache_size = -16384;",
+         PRAGMA temp_store = MEMORY;",
     )
     .map_err(sql_err)?;
     // svn enables this only in SVN_DEBUG builds (it surfaces missing ORDER BY clauses); mirror that.

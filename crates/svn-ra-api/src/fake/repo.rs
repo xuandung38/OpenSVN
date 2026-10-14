@@ -69,6 +69,9 @@ pub struct RepoState {
     pub next_txn: u64,
     /// Fault injected into the next commit's `MERGE` (see `FakeRaSession::fail_next_merge`).
     pub merge_fault: Option<FakeMergeFault>,
+    /// When set, every checked `DELETE` of a transaction fails with this server error and
+    /// changes nothing (see `FakeRaSession::fail_txn_deletes`).
+    pub txn_delete_fault: Option<String>,
 }
 
 /// A `MERGE` whose answer is lost, injected with `FakeRaSession::fail_next_merge`. Either way
@@ -121,6 +124,7 @@ impl RepoState {
             txns: HashSet::new(),
             next_txn: 1,
             merge_fault: None,
+            txn_delete_fault: None,
         }
     }
 

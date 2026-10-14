@@ -90,6 +90,20 @@ fn walk(
                 );
                 restored.push((rel.clone(), NodeKind::Dir));
             }
+            // One query and one directory listing per directory instead of one of each per
+            // child (a missing directory has nothing below it on disk).
+            let names = if missing {
+                Some(None)
+            } else {
+                match fs::symlink_metadata(abs_path(db, rel)?) {
+                    Ok(m) if m.file_type().is_dir() => Some(listing(db, rel)?),
+                    // A directory replaced by a file or a symlink (obstructed) is left alone:
+                    // nothing can be restored below it, and a symlink is never followed.
+                    Ok(_) => return Ok(()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(None),
+                    Err(e) => return Err(SvnError::from_io(format!("cannot stat '{rel}'"), &e)),
+                }
+            };
             // Like svn's crawler: the children of a crawled directory are restored, and the
             // crawl only descends further for a recursive depth.
             if matches!(depth, Depth::Empty | Depth::Exclude) {
@@ -98,17 +112,6 @@ fn walk(
             let below = match depth {
                 Depth::Files | Depth::Immediates => Depth::Empty,
                 d => d,
-            };
-            // One query and one directory listing per directory instead of one of each per
-            // child. Anything but a real directory (a missing one aside) keeps the per-child
-            // `stat`, which reports an obstruction as before.
-            let names = if missing {
-                Some(None)
-            } else {
-                match fs::symlink_metadata(abs_path(db, rel)?) {
-                    Ok(m) if m.file_type().is_dir() => Some(listing(db, rel)?),
-                    _ => None,
-                }
             };
             for child in db.current_children(rel)? {
                 walk(

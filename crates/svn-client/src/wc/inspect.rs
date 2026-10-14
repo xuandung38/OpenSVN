@@ -142,7 +142,8 @@ pub fn working_repo_normal(db: &WcDb, rel: &RelPath) -> Result<Vec<u8>> {
 }
 
 /// Whether `rel` or anything below it carries a local change that an incoming delete would lose:
-/// edited files, changed properties, or working layers (add, delete, replace, copy, move).
+/// edited files, changed properties, obstructed nodes, or working layers (add, delete, replace,
+/// copy, move).
 pub fn subtree_has_local_changes(db: &WcDb, rel: &RelPath) -> Result<bool> {
     let Some(cur) = db.read_node(rel)? else {
         return Ok(false);
@@ -151,6 +152,9 @@ pub fn subtree_has_local_changes(db: &WcDb, rel: &RelPath) -> Result<bool> {
         return Ok(true);
     }
     if props_modified(db, rel)? {
+        return Ok(true);
+    }
+    if cur.presence == Presence::Normal && obstructed(db, rel, &cur)? {
         return Ok(true);
     }
     if cur.kind == NodeKind::File {
@@ -165,6 +169,27 @@ pub fn subtree_has_local_changes(db: &WcDb, rel: &RelPath) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// True when something other than the node's kind is on disk (what status reports as
+/// obstructed): a directory replaced by a file or symlink, a file replaced by a directory, or
+/// (where symlinks exist) a symlink without `svn:special` or the other way round. svn counts
+/// that as a local modification (`modcheck_callback`), so an incoming delete keeps it.
+fn obstructed(db: &WcDb, rel: &RelPath, node: &Node) -> Result<bool> {
+    let Ok(md) = fs::symlink_metadata(abs_path(db, rel)?) else {
+        return Ok(false);
+    };
+    let is_dir = md.file_type().is_dir();
+    Ok(match node.kind {
+        NodeKind::Dir => !is_dir,
+        NodeKind::File | NodeKind::Symlink => {
+            is_dir
+                || (cfg!(unix)
+                    && prop_value(&db.actual_props(rel)?, "svn:special").is_some()
+                        != md.file_type().is_symlink())
+        }
+        _ => false,
+    })
 }
 
 /// Error for a node that is expected to exist in BASE.

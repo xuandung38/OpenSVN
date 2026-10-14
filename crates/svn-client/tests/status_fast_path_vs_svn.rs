@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 use common::oracle::*;
 use common::*;
 use svn_client::{StatusOptions, checkout, status};
-use svn_types::{CancelToken, Depth, ErrorCode, NodeStatus, PropStatus, WcStatus};
+use svn_types::{CancelToken, Depth, NodeStatus, PropStatus, WcStatus};
 
 fn letters(s: &WcStatus) -> String {
     let c0 = match s.text {
@@ -305,11 +305,12 @@ async fn fast_path_matches_svn_on_our_checkout() {
     assert_matches_svn(&oracle, &wc).await;
 }
 
-/// The walk keeps the errors of the per-path `safe_join`: a versioned directory replaced by a
-/// symlink is not walked through.
+/// A versioned directory replaced by a symlink is obstructed and the rest of the working copy
+/// is still reported (the whole status used to fail with `UnsafePath`). The link is not followed:
+/// what is behind it is never listed or compared, and the versioned children are missing.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn symlinked_versioned_directory_is_refused() {
+async fn symlinked_versioned_directory_is_obstructed_not_followed() {
     let Some(oracle) = oracle() else { return };
     let repo = Repo::new(&oracle);
     build_tree(&repo);
@@ -317,9 +318,30 @@ async fn symlinked_versioned_directory_is_refused() {
     let elsewhere = repo.base().join("elsewhere");
     fs::rename(wc.join("d02"), &elsewhere).expect("move away");
     std::os::unix::fs::symlink(&elsewhere, wc.join("d02")).expect("symlink");
-    let err = status(&ctx(), &wc, &StatusOptions::default(), &CancelToken::new())
+    write(
+        &elsewhere.join("behind.txt"),
+        "unversioned behind the link\n",
+    );
+    write(&elsewhere.join("s0/f0.txt"), "edited behind the link\n");
+    write(&wc.join("d08/new.txt"), "new\n");
+    let got = status(&ctx(), &wc, &StatusOptions::default(), &CancelToken::new())
         .await
-        .expect_err("walks through a symlink");
-    assert_eq!(err.code, ErrorCode::UnsafePath, "{err}");
-    assert!(err.to_string().contains("d02/s0"), "{err}");
+        .expect("status");
+    let lines: Vec<String> = got.iter().map(letters).collect();
+    assert!(lines.contains(&"~  d02".to_owned()), "{lines:?}");
+    assert!(lines.contains(&"!  d02/s0/f0.txt".to_owned()), "{lines:?}");
+    assert!(lines.contains(&"?  d08/new.txt".to_owned()), "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.contains("behind")),
+        "listed through the link: {lines:?}"
+    );
+    let below: Vec<&WcStatus> = got
+        .iter()
+        .filter(|s| s.path.as_str().starts_with("d02/"))
+        .collect();
+    assert_eq!(below.len(), SUBDIRS * (FILES + 1), "{lines:?}");
+    assert!(
+        below.iter().all(|s| s.text == NodeStatus::Missing),
+        "{lines:?}"
+    );
 }

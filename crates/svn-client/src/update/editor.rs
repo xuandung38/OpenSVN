@@ -63,6 +63,10 @@ pub struct UpdateEditor {
     pub(super) dirs: HashMap<u32, DirState>,
     pub(super) files: HashMap<u32, FileState>,
     pub(super) skipped: Vec<RelPath>,
+    /// Tree conflicts raised by `delete_entry` in this drive, with the BASE node that was
+    /// deleted: an add of the same name that follows is a replacement (svn's
+    /// `deletion_conflicts`), see [`UpdateEditor::take_replacement`].
+    pub(super) deletion_conflicts: HashMap<RelPath, (Node, TreeReason)>,
     old_target_repos: Option<String>,
     finished: bool,
     /// Nodes prepared but not committed yet.
@@ -125,6 +129,7 @@ impl UpdateEditor {
                 dirs: HashMap::new(),
                 files: HashMap::new(),
                 skipped: Vec::new(),
+                deletion_conflicts: HashMap::new(),
                 old_target_repos,
                 finished: false,
                 batch: Batch::default(),
@@ -392,6 +397,50 @@ impl UpdateEditor {
         self.skipped.push(wc.clone());
         self.emit(wc, kind, UpdateAction::TreeConflicted);
         Ok(())
+    }
+
+    /// When `delete_entry` of this drive raised a tree conflict on `wc`, the add of `kind` that
+    /// follows makes it a replacement, like svn's `add_directory`/`add_file`: the conflict
+    /// becomes "local <reason>, incoming replace" (left side the deleted node, right side the
+    /// added one) and the new node only goes into BASE, shadowed: the local node stays as it
+    /// is, on disk too. Returns the op depth whose layer the new subtree extends with
+    /// `base-deleted` rows: that of the local working node, or 0 when there is none (deleted
+    /// locally: BASE only, as in svn).
+    fn take_replacement(
+        &mut self,
+        wc: &RelPath,
+        new_repos: &str,
+        kind: NodeKind,
+    ) -> Result<Option<u32>> {
+        let Some((old, reason)) = self.deletion_conflicts.remove(wc) else {
+            return Ok(None);
+        };
+        // The deletion's rows may still sit in the batch: commit them before this transaction,
+        // which records the replacement on top of them and reads the working layer back.
+        self.settle(wc)?;
+        let (left, right) = self.side(Some(&old), new_repos, kind);
+        let info = conflict_record::operation_info(
+            self.s.switch_relpath.is_some(),
+            &self.s.repos_root,
+            &self.s.uuid,
+            left.as_ref(),
+            right.as_ref(),
+        );
+        self.s.db.with_txn(|t| {
+            conflict_record::record(
+                t,
+                wc,
+                &info,
+                vec![NewConflict::Tree(reason, TreeAction::Replace)],
+            )
+        })?;
+        let layer = self
+            .s
+            .db
+            .read_node(wc)?
+            .filter(|n| n.op_depth > 0 && n.presence != Presence::BaseDeleted)
+            .map_or(0, |n| n.op_depth);
+        Ok(Some(layer))
     }
 
     fn base_node_for(
@@ -771,7 +820,12 @@ impl DeltaEditor for UpdateEditor {
         } else {
             (self.s.db.read_node(&wc)?, self.s.db.read_base(&wc)?)
         };
-        if !skipped && shadow.is_none() {
+        if !skipped
+            && shadow.is_none()
+            && let Some(layer) = self.take_replacement(&wc, &new_repos, NodeKind::Dir)?
+        {
+            shadow = Some(layer);
+        } else if !skipped && shadow.is_none() {
             let disk = self.disk_kind(&wc)?;
             match (&existing, &base) {
                 (_, Some(b)) if b.kind == NodeKind::Dir && b.presence.is_present() => {
@@ -836,7 +890,7 @@ impl DeltaEditor for UpdateEditor {
             let path = wc.clone();
             self.defer(Box::new(move |t| {
                 t.base_add(&path, &node)?;
-                if let Some(op_depth) = shadow {
+                if let Some(op_depth) = shadow.filter(|d| *d > 0) {
                     t.mark_base_deleted_at(&path, NodeKind::Dir, op_depth)?;
                 }
                 t.queue_work(&work)
@@ -851,7 +905,8 @@ impl DeltaEditor for UpdateEditor {
             DirState {
                 wc,
                 added: !was_incomplete,
-                fresh: !was_incomplete && !skipped,
+                // A shadowed directory keeps the local working rows below it.
+                fresh: !was_incomplete && !skipped && shadow.is_none(),
                 in_target: true,
                 skipped,
                 new_repos,
@@ -1091,12 +1146,17 @@ impl UpdateEditor {
         };
         let mut tree_conflict = None;
         let mut adopt_existing = false;
-        if !skipped && !p.fresh && self.s.db.conflict(&wc)?.is_some() {
+        let mut shadow = if skipped { None } else { p.shadow };
+        if !skipped && add && shadow.is_none() {
+            shadow = self.take_replacement(&wc, &new_repos, NodeKind::File)?;
+        }
+        let replacing = shadow.is_some() && p.shadow.is_none();
+        if !skipped && !replacing && !p.fresh && self.s.db.conflict(&wc)?.is_some() {
             skipped = true;
             self.skipped.push(wc.clone());
             self.emit(&wc, NodeKind::File, UpdateAction::Skipped);
         }
-        if !skipped && p.shadow.is_none() {
+        if !skipped && shadow.is_none() {
             let cur = if p.fresh {
                 None
             } else {
@@ -1172,7 +1232,7 @@ impl UpdateEditor {
                 entry: EntryProps::default(),
                 text: Arc::new(Mutex::new(None)),
                 tree_conflict,
-                shadow: if skipped { None } else { p.shadow },
+                shadow: if skipped { None } else { shadow },
             },
         );
         Ok(id)

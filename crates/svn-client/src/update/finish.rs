@@ -96,6 +96,7 @@ impl UpdateEditor {
                 new.as_ref(),
             );
             let path = wc.clone();
+            let recorded = reason.clone();
             self.defer(Box::new(move |t| {
                 if keep_as_working {
                     t.convert_base_to_copy(&path)?;
@@ -109,11 +110,12 @@ impl UpdateEditor {
                     t,
                     &path,
                     &info,
-                    vec![NewConflict::Tree(reason, TreeAction::Delete)],
+                    vec![NewConflict::Tree(recorded, TreeAction::Delete)],
                 )
             }))?;
             self.batch.removed(wc.clone());
             self.skipped.push(wc.clone());
+            self.deletion_conflicts.insert(wc.clone(), (base, reason));
             self.emit(wc, NodeKind::None, UpdateAction::TreeConflicted);
             return Ok(());
         }
