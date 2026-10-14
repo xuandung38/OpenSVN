@@ -83,16 +83,19 @@ fn repair_move(o: &Oracle, wc: &Path, from: &str, to: &str, extra: &[&str]) {
     svn(o, wc, &args);
 }
 
+/// What one side runs on its working copy.
+type Step<'a> = &'a dyn Fn(&Oracle, &Path);
+
 struct Case<'a> {
     name: &'a str,
     /// Same local changes in both working copies (the move "outside version control").
-    prep: &'a dyn Fn(&Oracle, &Path),
+    prep: Step<'a>,
     from: &'a str,
     to: &'a str,
     /// Extra `svn move` options on the svn side.
     svn_extra: &'a [&'a str],
     /// What the svn side runs instead of the repair (after `prep`).
-    theirs: Option<&'a dyn Fn(&Oracle, &Path)>,
+    theirs: Option<Step<'a>>,
     expect: MarkMove,
 }
 

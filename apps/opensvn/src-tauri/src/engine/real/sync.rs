@@ -245,8 +245,30 @@ impl RealEngine {
         ctx.check()?;
         let rel = RelPath::new(path)?;
         let target = svn_types::safe_join(&wc.root, &rel)?;
-        let info = wc_read::wc_info(&wc.root, ctx).await?;
-        let session = self.session_at(&info.url, ctx).await?;
+        // The session is anchored at the folder itself, so the drive targets the session root
+        // (the report then starts with the folder, as the HTTP layer requires).
+        let (root, rel2) = (wc.root.clone(), rel.clone());
+        let url = wc_read::blocking(move || {
+            let db = wc_read::open_db(&root)?;
+            let (repos_root, _) = svn_client::wc::repos_identity(&db)?;
+            let base = db.read_base(&rel2)?.ok_or_else(|| {
+                SvnError::new(
+                    ErrorCode::PathNotFound,
+                    format!("'{rel2}' is not under version control"),
+                )
+            })?;
+            let root_url = RepoUrl::parse(&repos_root)?;
+            match base.repos_relpath.as_deref() {
+                Some(p) if !p.is_empty() && base.kind == svn_types::NodeKind::Dir => {
+                    Ok(root_url.join(&RelPath::new(p)?)?.to_string())
+                }
+                // A file has no depth: svn-client refuses it before talking to the server.
+                Some("") if base.kind == svn_types::NodeKind::Dir => Ok(root_url.to_string()),
+                _ => Ok(wc_read::describe(&db)?.url),
+            }
+        })
+        .await?;
+        let session = self.session_at(&url, ctx).await?;
         svn_client::set_depth(
             &self.sync_ctx(ctx, PHASE_UPDATE),
             session.as_ref(),

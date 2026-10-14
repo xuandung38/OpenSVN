@@ -17,7 +17,7 @@ use svn_types::{
 use svn_wc::db::{Presence, WcDb};
 
 use crate::ctx::{ClientCtx, UpdateAction, UpdateEvent, UpdateSummary};
-use crate::local::lock::write_op;
+use crate::local::lock::with_wc_lock;
 use crate::local::paths::abs_of;
 use crate::status::{StatusOptions, local_status};
 use crate::update::{UpdateKind, UpdateParams, drive_update};
@@ -131,6 +131,23 @@ fn crop_children(
     Ok(())
 }
 
+/// Runs `f` under the working copy lock, then the work it queued, also when `f` fails or is
+/// cancelled half-way: the removals already recorded in wc.db must not wait for a later
+/// operation, by which time the user may have put new content at those paths.
+fn write_op_finishing<T>(
+    db: &WcDb,
+    cancel: &CancelToken,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    with_wc_lock(db, cancel, || {
+        let value = f();
+        let ran = wc::run_work_queue(db, &CancelToken::new());
+        let value = value?;
+        ran?;
+        Ok(value)
+    })
+}
+
 /// The BASE directory `rel` must be a present, unscheduled directory to change its depth.
 fn check_target(db: &WcDb, rel: &RelPath, what: &str) -> Result<svn_wc::db::Node> {
     let base = db.read_base(rel)?;
@@ -176,7 +193,7 @@ pub fn crop(
             "can only crop a working copy with a restrictive depth".to_owned(),
         ));
     }
-    write_op(db, cancel, || {
+    write_op_finishing(db, cancel, || {
         let base = check_target(db, rel, "crop")?;
         if base.presence == Presence::Excluded {
             return Ok(Vec::new());
@@ -197,7 +214,7 @@ pub fn crop(
 /// and records it as `excluded`, unless something below it is locally modified; then it is
 /// cropped to depth `empty` instead. Returns the removed nodes.
 pub fn exclude(db: &WcDb, cancel: &CancelToken, rel: &RelPath) -> Result<Vec<(RelPath, NodeKind)>> {
-    write_op(db, cancel, || {
+    write_op_finishing(db, cancel, || {
         let Some(parent) = rel.parent() else {
             return Err(unsupported(format!(
                 "cannot exclude '{rel}': it is a working copy root"
@@ -241,7 +258,8 @@ pub fn exclude(db: &WcDb, cancel: &CancelToken, rel: &RelPath) -> Result<Vec<(Re
 /// A narrower depth crops first (see the module documentation; locally modified items are kept
 /// and reported by nothing being removed for them), a wider one fetches what is missing. `exclude`
 /// removes the directory itself and records it as excluded, without contacting the server.
-/// Only directories can change depth; a file can only be excluded.
+/// Only directories can change depth; a file can only be excluded. Anchor `session` at the
+/// directory itself (the HTTP layer expects the report to start with the update target).
 pub async fn set_depth(
     ctx: &ClientCtx,
     session: &dyn RaSession,
