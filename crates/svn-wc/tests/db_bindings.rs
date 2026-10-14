@@ -444,3 +444,91 @@ fn relocation_to_a_path_below_the_old_one_is_applied_once() {
         "switched node keeps its path"
     );
 }
+
+#[test]
+fn batch_writers_for_commit_post_processing() {
+    let (_tmp, db) = new_wc();
+    db.base_add(&rp("a.txt"), &base_file("a.txt", 1, None), &[])
+        .expect("base");
+    db.base_add(&rp("b.txt"), &base_file("b.txt", 1, None), &[])
+        .expect("base");
+
+    // Only nodes with an ACTUAL_NODE row are listed.
+    assert!(
+        db.actual_rows_below(&RelPath::root())
+            .expect("rows")
+            .is_empty()
+    );
+    db.set_changelist(&rp("b.txt"), Some("cl")).expect("cl");
+    assert_eq!(
+        db.actual_rows_below(&RelPath::root()).expect("rows"),
+        vec![rp("b.txt")]
+    );
+    assert!(db.actual_rows_below(&rp("a.txt")).expect("rows").is_empty());
+
+    // Many reads in one read transaction; a nested write fails instead of escaping it.
+    let n = db
+        .read_txn(|| {
+            let a = db.read_node(&rp("a.txt"))?.is_some();
+            let b = db.changelist(&rp("b.txt"))?;
+            assert!(db.queue_work(&[]).is_err());
+            Ok(usize::from(a) + usize::from(b.is_some()))
+        })
+        .expect("read txn");
+    assert_eq!(n, 2);
+    // The connection is usable for writes again afterwards.
+    db.queue_work(&[]).expect("write after read txn");
+
+    // A staged pristine and the completion of work items join the caller's transaction.
+    let batch = db.pristine_store().batch().expect("batch");
+    let rec = batch
+        .stage(&mut &b"hello\n"[..], None, None)
+        .expect("stage");
+    let items = [
+        WorkItem::FileCommit {
+            relpath: "a.txt".into(),
+        }
+        .to_skel(),
+        WorkItem::FileCommit {
+            relpath: "b.txt".into(),
+        }
+        .to_skel(),
+    ];
+    db.queue_work(&items).expect("queue");
+    let ids: Vec<i64> = db
+        .work_items()
+        .expect("items")
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(ids.len(), 2);
+    let err = db.with_txn(|t| {
+        t.record_pristine(&rec)?;
+        t.complete_work_items(&ids)?;
+        Err::<(), _>(svn_types::SvnError::new(ErrorCode::Internal, "roll back"))
+    });
+    assert!(err.is_err());
+    assert_eq!(db.work_items().expect("items").len(), 2);
+    assert!(
+        db.pristine_store()
+            .index()
+            .lookup(&rec.sha1)
+            .expect("lookup")
+            .is_none()
+    );
+    db.with_txn(|t| {
+        t.record_pristine(&rec)?;
+        t.record_pristine(&rec)?;
+        t.complete_work_items(&ids)?;
+        t.complete_work_items(&ids)
+    })
+    .expect("commit");
+    assert!(db.work_items().expect("items").is_empty());
+    assert_eq!(
+        db.pristine_store()
+            .index()
+            .lookup(&rec.sha1)
+            .expect("lookup"),
+        Some(rec)
+    );
+}

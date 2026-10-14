@@ -26,7 +26,8 @@ pub struct ContentDigest {
 struct HashingWriter<W: Write> {
     inner: W,
     sha1: Sha1,
-    md5: Md5,
+    /// `None` when only the SHA-1 is wanted (comparing with a pristine key).
+    md5: Option<Md5>,
     size: u64,
 }
 
@@ -34,7 +35,9 @@ impl<W: Write> Write for HashingWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let n = self.inner.write(buf)?;
         self.sha1.update(&buf[..n]);
-        self.md5.update(&buf[..n]);
+        if let Some(md5) = &mut self.md5 {
+            md5.update(&buf[..n]);
+        }
         self.size += n as u64;
         Ok(n)
     }
@@ -63,11 +66,26 @@ pub fn detranslate_into(
     abs: &Path,
     out: &mut dyn Write,
 ) -> Result<ContentDigest> {
+    let (sha1, md5, size) = detranslate_hashing(db, rel, abs, out, true)?;
+    Ok(ContentDigest {
+        sha1,
+        md5: md5.unwrap_or(Md5Digest([0; 16])),
+        size,
+    })
+}
+
+fn detranslate_hashing(
+    db: &WcDb,
+    rel: &RelPath,
+    abs: &Path,
+    out: &mut dyn Write,
+    want_md5: bool,
+) -> Result<(Sha1Digest, Option<Md5Digest>, u64)> {
     let info = translate_info(db, rel)?;
     let mut hw = HashingWriter {
         inner: out,
         sha1: Sha1::new(),
-        md5: Md5::new(),
+        md5: want_md5.then(Md5::new),
         size: 0,
     };
     if info.special {
@@ -80,11 +98,17 @@ pub fn detranslate_into(
             .map_err(|e| SvnError::from_io(format!("open '{}'", abs.display()), &e))?;
         translate_stream(&mut file, &mut hw, translator).map_err(SvnError::from)?;
     }
-    Ok(ContentDigest {
-        sha1: Sha1Digest(hw.sha1.finalize().into()),
-        md5: Md5Digest(hw.md5.finalize().into()),
-        size: hw.size,
-    })
+    Ok((
+        Sha1Digest(hw.sha1.finalize().into()),
+        hw.md5.map(|m| Md5Digest(m.finalize().into())),
+        hw.size,
+    ))
+}
+
+/// SHA-1 of the working file in repository-normal form: what is compared with a pristine
+/// key, at half the hashing cost of [`detranslate_digest`].
+pub fn detranslate_sha1(db: &WcDb, rel: &RelPath, abs: &Path) -> Result<Sha1Digest> {
+    Ok(detranslate_hashing(db, rel, abs, &mut io::sink(), false)?.0)
 }
 
 /// Digests of the working file in repository-normal form, without keeping the output.
@@ -92,8 +116,8 @@ pub fn detranslate_digest(db: &WcDb, rel: &RelPath, abs: &Path) -> Result<Conten
     detranslate_into(db, rel, abs, &mut io::sink())
 }
 
-/// Writes the repository-normal form of the working file to `dest` (created or truncated and
-/// synced) and returns its digests.
+/// Writes the repository-normal form of the working file to `dest` (created or truncated, not
+/// synced: the caller flushes it, typically together with others) and returns its digests.
 pub fn detranslate_to_file(
     db: &WcDb,
     rel: &RelPath,
@@ -102,10 +126,7 @@ pub fn detranslate_to_file(
 ) -> Result<ContentDigest> {
     let mut file = File::create(dest)
         .map_err(|e| SvnError::from_io(format!("create '{}'", dest.display()), &e))?;
-    let digest = detranslate_into(db, rel, abs, &mut file)?;
-    file.sync_all()
-        .map_err(|e| SvnError::from_io(format!("sync '{}'", dest.display()), &e))?;
-    Ok(digest)
+    detranslate_into(db, rel, abs, &mut file)
 }
 
 /// Size and modification time (APR microseconds) of `path`, as svn caches them.

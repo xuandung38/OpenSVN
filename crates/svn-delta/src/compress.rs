@@ -19,6 +19,10 @@ use crate::varint::{decode_varint, encode_varint};
 /// Sections shorter than this are stored raw, as Subversion does.
 const MIN_COMPRESS_SIZE: usize = 512;
 
+/// zlib level of svndiff 1 sections: `SVN_DELTA_COMPRESSION_LEVEL_DEFAULT`, what svn's commit
+/// uses.
+const ZLIB_LEVEL: u32 = 5;
+
 fn corrupt(msg: &str) -> SvnError {
     SvnError::new(ErrorCode::Corrupt, msg)
 }
@@ -95,7 +99,7 @@ pub(crate) fn encode_section(
     if data.len() >= MIN_COMPRESS_SIZE {
         let packed = match version {
             SvndiffVersion::V1 => {
-                let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+                let mut enc = ZlibEncoder::new(Vec::new(), Compression::new(ZLIB_LEVEL));
                 enc.write_all(data)
                     .map_err(|e| SvnError::from_io("zlib compression", &e))?;
                 enc.finish()
