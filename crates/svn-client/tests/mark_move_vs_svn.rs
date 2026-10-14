@@ -24,12 +24,20 @@ fn tree(wc: &Path) -> Vec<String> {
             if e.file_name() == ".svn" {
                 continue;
             }
-            let rel = e.path().strip_prefix(base).expect("prefix").display().to_string();
+            let rel = e
+                .path()
+                .strip_prefix(base)
+                .expect("prefix")
+                .display()
+                .to_string();
             if e.path().is_dir() {
                 out.push(format!("D {rel}"));
                 walk(&e.path(), base, out);
             } else {
-                out.push(format!("F {rel} {:?}", fs::read(e.path()).unwrap_or_default()));
+                out.push(format!(
+                    "F {rel} {:?}",
+                    fs::read(e.path()).unwrap_or_default()
+                ));
             }
         }
     }
@@ -46,7 +54,10 @@ fn status_char(o: &Oracle, wc: &Path, rel: &str) -> char {
         .current_dir(wc)
         .output()
         .expect("svn status");
-    String::from_utf8_lossy(&out.stdout).chars().next().unwrap_or(' ')
+    String::from_utf8_lossy(&out.stdout)
+        .chars()
+        .next()
+        .unwrap_or(' ')
 }
 
 /// The repair TortoiseSVN does, run with the real svn: revert what svn recorded for the two
@@ -258,8 +269,13 @@ fn already_moved_is_a_no_op() {
     svn(&fx.oracle, &wc, &["mv", "-q", "top.txt", "t2.txt"]);
     let before = dump_rows(&wc);
     let db = open(&wc);
-    let got = local::mark_move(&db, &CancelToken::new(), &wc.join("top.txt"), &wc.join("t2.txt"))
-        .expect("mark_move");
+    let got = local::mark_move(
+        &db,
+        &CancelToken::new(),
+        &wc.join("top.txt"),
+        &wc.join("t2.txt"),
+    )
+    .expect("mark_move");
     assert_eq!(got, MarkMove::AlreadyMoved);
     drop(db);
     assert_eq!(dump_rows(&wc), before);
@@ -275,10 +291,13 @@ fn refusals_change_nothing() {
     let db = open(&wc);
     let cancel = CancelToken::new();
     let refused = |from: &str, to: &str| {
-        let err = local::mark_move(&db, &cancel, &wc.join(from), &wc.join(to))
-            .expect_err("refused");
+        let err =
+            local::mark_move(&db, &cancel, &wc.join(from), &wc.join(to)).expect_err("refused");
         assert!(
-            matches!(err.code, ErrorCode::WcInvalidOperation | ErrorCode::PathNotFound),
+            matches!(
+                err.code,
+                ErrorCode::WcInvalidOperation | ErrorCode::PathNotFound
+            ),
             "{from}->{to}: {err}"
         );
     };
