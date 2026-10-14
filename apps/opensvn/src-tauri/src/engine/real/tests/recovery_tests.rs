@@ -638,3 +638,140 @@ async fn a_merged_commit_waits_for_a_foreign_lock() {
     assert_eq!(opened.recovery.recovered, vec![String::new()]);
     assert!(journals(&f).is_empty());
 }
+
+/// Moves the journal `file` to a name with the owner hint of `wcroot`, as this build writes it.
+fn with_owner_hint(file: &Path, wcroot: &Path) -> PathBuf {
+    let name = file.file_name().unwrap().to_string_lossy().into_owned();
+    let rest = name.strip_prefix("commit-").unwrap();
+    let hinted = file.with_file_name(format!(
+        "commit-{}-{rest}",
+        svn_client::commit::journal::owner_hint(wcroot)
+    ));
+    std::fs::rename(file, &hinted).unwrap();
+    hinted
+}
+
+#[tokio::test]
+async fn a_journal_of_an_unknown_format_without_a_root_is_reported_where_it_may_belong() {
+    let f = fixture();
+    let (_tmp, root) = make_wc(1);
+    let (_tmp2, other) = make_wc(1);
+    let file = plant_journal(&f, &wcroot_of(&root), None, false);
+    let contents = serde_json::json!({ "version": 99, "something": "new" }).to_string();
+    std::fs::write(&file, &contents).unwrap();
+
+    // No owner hint: it may belong to any working copy, which it blocks, so each reports it.
+    for wc in [&root, &other] {
+        let opened = f.engine.open_wc(wc, &ctx()).await.unwrap();
+        assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    }
+    // With the owner hint of `root`: reported there only.
+    let hinted = with_owner_hint(&file, &wcroot_of(&root));
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    let opened = f.engine.open_wc(&other, &ctx()).await.unwrap();
+    assert!(opened.recovery.needs_user_action.is_empty(), "{opened:?}");
+    assert_eq!(std::fs::read_to_string(&hinted).unwrap(), contents);
+}
+
+#[tokio::test]
+async fn new_journals_carry_the_owner_hint_of_their_working_copy() {
+    let (f, _session) = scripted(None);
+    let (_tmp, root) = checkout_trunk(&f).await;
+    std::fs::write(root.join("README.md"), "changed\n").unwrap();
+    f.repo.fail_next_merge(FakeMergeFault::LostAfterMerge);
+    client_commit(&f, &root, &f.repo, "edit readme")
+        .await
+        .unwrap_err();
+    let files = journals(&f);
+    assert_eq!(files.len(), 1);
+    let hint = svn_client::commit::journal::owner_hint(&wcroot_of(&root));
+    let name = files[0].file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with(&format!("commit-{hint}-")), "{name}");
+}
+
+#[tokio::test]
+async fn unusable_journals_of_another_working_copy_neither_block_nor_report_this_one() {
+    let (f, _session) = scripted(None);
+    let (_tmp, root) = checkout_trunk(&f).await;
+    let (_tmp2, other) = make_wc(1);
+    let other_root = wcroot_of(&other);
+    // An unreadable file and a corrupt one, both named for `other`.
+    let unreadable = with_owner_hint(&plant_journal(&f, &other_root, None, false), &other_root);
+    std::fs::remove_file(&unreadable).unwrap();
+    std::fs::create_dir(&unreadable).unwrap();
+    let corrupt = with_owner_hint(&plant_journal(&f, &other_root, None, false), &other_root);
+    std::fs::write(&corrupt, b"{ not json").unwrap();
+
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert!(opened.recovery.needs_user_action.is_empty(), "{opened:?}");
+    assert!(corrupt.exists(), "left for its own working copy");
+    std::fs::write(root.join("README.md"), "changed\n").unwrap();
+    client_commit(&f, &root, &f.repo, "not blocked")
+        .await
+        .unwrap()
+        .expect("committed");
+
+    // The owner sees both: the corrupt one is set aside, the unreadable one stays.
+    let opened = f.engine.open_wc(&other, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    assert!(!corrupt.exists() && unreadable.is_dir());
+}
+
+#[tokio::test]
+async fn a_corrupt_journal_that_may_be_this_working_copys_blocks_its_commits_until_set_aside() {
+    let (f, _session) = scripted(None);
+    let (_tmp, root) = checkout_trunk(&f).await;
+    let file = plant_journal(&f, &wcroot_of(&root), None, false);
+    std::fs::write(&file, b"{ not json").unwrap();
+    std::fs::write(root.join("README.md"), "changed\n").unwrap();
+    let err = client_commit(&f, &root, &f.repo, "blocked")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::WcNeedsCleanup, "{err}");
+    assert!(file.exists(), "nothing done to it by the commit");
+
+    let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
+    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    client_commit(&f, &root, &f.repo, "after recovery")
+        .await
+        .unwrap()
+        .expect("committed");
+}
+
+/// Connector of a server that never answers.
+struct Hanging;
+
+#[async_trait]
+impl super::super::SessionConnector for Hanging {
+    async fn connect(
+        &self,
+        _url: &svn_types::RepoUrl,
+        _cancel: &CancelToken,
+    ) -> Result<Arc<dyn RaSession>, SvnError> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn commit_recovery_gives_up_on_a_server_that_never_answers() {
+    let mut f = fixture_on(
+        standard_repo(),
+        Arc::new(Hanging),
+        Arc::new(super::super::ClientRecovery),
+    );
+    f.engine = f
+        .engine
+        .with_recovery_network_timeout(std::time::Duration::from_millis(200));
+    let (_tmp, root) = make_wc(1);
+    plant_journal(&f, &wcroot_of(&root), Some("txn-1"), true);
+    let opened = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        f.engine.open_wc(&root, &ctx()),
+    )
+    .await
+    .expect("opening is bounded")
+    .unwrap();
+    assert_eq!(opened.recovery.needs_user_action, vec![String::new()]);
+    assert_eq!(journals(&f).len(), 1, "kept for the next open");
+}
