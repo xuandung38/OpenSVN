@@ -1,0 +1,21 @@
+[package]
+name = "opensvn-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Benchmarks: engine vs the svn CLI on the same local Apache (checkout, update, status)"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "compare-svn"
+path = "src/main.rs"
+
+[dependencies]
+opensvn-crash = { path = "../tests/crash" }
+svn-types.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+tempfile.workspace = true
