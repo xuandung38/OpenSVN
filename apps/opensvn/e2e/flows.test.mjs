@@ -92,7 +92,8 @@ test("10.1 first use: checkout with certificate trust and sign-in opens an empty
   assert.ok(existsSync(join(wc, ".svn", "wc.db")));
   const text = await app.bodyText();
   assert.match(text, new RegExp(`Current repository\\s+${repo.name}`));
-  assert.match(text, /\/trunk/);
+  // trunk/branches/tags layout: the toolbar shows the branch, not the in-repo path (#129).
+  assert.match(text, /Branch\s+trunk/);
   assert.match(text, /0 changed/);
 });
 
