@@ -1,6 +1,6 @@
 //! Directory completion, deletion of nodes and the final revision bump of an update drive.
 
-use svn_types::{DirId, NodeKind, RelPath, Result, SvnError};
+use svn_types::{DirId, NodeKind, PropChange, RelPath, Result, SvnError};
 use svn_wc::conflicts::markers::create_prop_marker;
 use svn_wc::conflicts::{PropConflict, TreeAction, TreeReason};
 use svn_wc::db::{BaseNode, Presence, WcDb};
@@ -156,6 +156,20 @@ impl UpdateEditor {
             .unwrap_or_default();
         // A shadowed directory (deleted or replaced locally, or below an obstruction) only moves
         // BASE on; its working properties are not merged into.
+        let mut prop_changes = d.prop_changes.clone();
+        if d.was_incomplete {
+            // Reported `start_empty`: the server sent every property the directory has, so a
+            // BASE property it did not mention is gone (svn's `close_directory`).
+            for (name, _) in &old_pristine {
+                let name = String::from_utf8_lossy(name);
+                if !prop_changes.iter().any(|c| c.name == name) {
+                    prop_changes.push(PropChange {
+                        name: name.into_owned(),
+                        value: None,
+                    });
+                }
+            }
+        }
         let mut shadowed = d.shadow.is_some();
         let actual = if shadowed {
             old_pristine.clone()
@@ -164,13 +178,13 @@ impl UpdateEditor {
         } else {
             db.actual_props(&d.wc)?
         };
-        let mut pm = merge_props(&old_pristine, &d.prop_changes, &actual);
+        let mut pm = merge_props(&old_pristine, &prop_changes, &actual);
         if d.obstructed && !pm.conflicted.is_empty() {
             // A property conflict needs a marker file inside the directory, which is not there
             // (and a symlink is never written through): only BASE moves on, the local
             // properties stay as they are, and the tree conflict tells the user.
             shadowed = true;
-            pm = merge_props(&old_pristine, &d.prop_changes, &old_pristine);
+            pm = merge_props(&old_pristine, &prop_changes, &old_pristine);
         }
         let mut work: Vec<Skel> = Vec::new();
         let mut conflicts = Vec::new();

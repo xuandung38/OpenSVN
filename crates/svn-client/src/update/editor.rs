@@ -316,6 +316,7 @@ impl UpdateEditor {
         let base = base
             .filter(|n| n.kind == NodeKind::Dir && n.presence.is_present())
             .ok_or_else(|| corrupt(format!("directory '{wc}' is not in the working copy base")))?;
+        let was_incomplete = base.presence == Presence::Incomplete;
         let is_switch_root = self.s.switch_relpath.is_some() && wc == self.target_wc;
         let p = parent.unwrap_or_else(ParentInfo::anchor);
         let relocating = is_switch_root || p.relocating;
@@ -408,6 +409,7 @@ impl UpdateEditor {
                 not_present_on_drop,
                 shadow,
                 obstructed,
+                was_incomplete,
                 prop_changes: Vec::new(),
                 entry: EntryProps::default(),
                 tree_conflict,
@@ -467,6 +469,7 @@ impl UpdateEditor {
                 not_present_on_drop: false,
                 shadow: None,
                 obstructed: false,
+                was_incomplete: false,
                 prop_changes: Vec::new(),
                 entry: EntryProps::default(),
                 tree_conflict: None,
@@ -749,6 +752,7 @@ impl DeltaEditor for UpdateEditor {
                 not_present_on_drop: false,
                 shadow,
                 obstructed,
+                was_incomplete,
                 prop_changes: Vec::new(),
                 entry: EntryProps::default(),
                 tree_conflict,
