@@ -19,7 +19,8 @@
 //!   stripped and IP literals are refused, never derived from anything the server sends.
 //! - Kerberos only: both backends inspect their first token with [`check_kerberos_token`] before
 //!   it is sent, so a context that would start NTLM (or any other mechanism) never leaves the
-//!   machine. This holds whether or not the server later returns a final token. When it does, the
+//!   machine. For SPNEGO both the first `mechTypes` entry and the optimistic `mechToken` must be
+//!   Kerberos (the token a Kerberos AP-REQ); malformed DER is refused. This holds whether or not the server later returns a final token. When it does, the
 //!   completed context is checked again (SSPI: by `cross-krb5`; GSSAPI: the negotiated mech OID).
 //! - TLS channel bindings (`tls-server-end-point`, RFC 5929) are passed to the backend when the
 //!   transport knows the server certificate, for servers with Extended Protection enabled.
@@ -138,62 +139,145 @@ fn der(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     (rest.len() >= len).then(|| (tag, &rest[..len], &rest[len..]))
 }
 
-/// The mechanism an initial context token is for: the token's own OID for a raw mechanism
-/// token, or the first (optimistic) entry of `mechTypes` for a SPNEGO `NegTokenInit`.
-fn initial_token_mech(token: &[u8]) -> Option<&[u8]> {
-    let (0x60, body, _) = der(token)? else {
+/// What an initial context token starts.
+#[derive(Debug, PartialEq, Eq)]
+enum InitialMech<'a> {
+    /// A Kerberos AP-REQ, raw or as the SPNEGO optimistic `mechToken` behind a Kerberos
+    /// first `mechTypes` entry.
+    Kerberos,
+    /// Another mechanism, by OID (DER body).
+    Other(&'a [u8]),
+    /// An NTLM message where a Kerberos AP-REQ was expected.
+    Ntlm,
+    /// Not a well-formed initial token.
+    Malformed,
+}
+
+/// One DER TLV that must be the whole input.
+fn der_exact(input: &[u8]) -> Option<(u8, &[u8])> {
+    let (tag, body, rest) = der(input)?;
+    rest.is_empty().then_some((tag, body))
+}
+
+/// A raw mechanism token: `[APPLICATION 0] { thisMech OID, innerToken }` (RFC 2743 3.1).
+/// Returns the OID and the inner token.
+fn raw_mech_token(token: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (0x60, body) = der_exact(token)? else {
         return None;
     };
     let (0x06, oid, inner) = der(body)? else {
         return None;
     };
+    Some((oid, inner))
+}
+
+/// Whether a raw token is a Kerberos AP-REQ: Kerberos OID, `TOK_ID` 01 00, then one complete
+/// `[APPLICATION 14] AP-REQ` (RFC 4121 4.1).
+fn is_kerberos_ap_req(token: &[u8]) -> bool {
+    let Some((oid, inner)) = raw_mech_token(token) else {
+        return false;
+    };
+    let Some(ap_req) = inner.strip_prefix(&[0x01, 0x00]) else {
+        return false;
+    };
+    is_kerberos_oid(oid) && matches!(der_exact(ap_req), Some((0x6e, _)))
+}
+
+/// The mechanism an initial context token starts. For SPNEGO both the first (optimistic)
+/// `mechTypes` entry and the `mechToken` must be Kerberos: a library that lists Kerberos but
+/// sends an NTLM token is refused. Anything not well-formed DER is `Malformed`.
+fn initial_token_mech(token: &[u8]) -> InitialMech<'_> {
+    let Some((oid, inner)) = raw_mech_token(token) else {
+        return InitialMech::Malformed;
+    };
     if oid != OID_SPNEGO {
-        return Some(oid);
+        return if !is_kerberos_oid(oid) {
+            InitialMech::Other(oid)
+        } else if is_kerberos_ap_req(token) {
+            InitialMech::Kerberos
+        } else {
+            InitialMech::Malformed
+        };
     }
-    // [0] NegTokenInit ::= SEQUENCE { mechTypes [0] SEQUENCE OF OID, ... }
-    let (0xa0, init, _) = der(inner)? else {
+    spnego_init_mech(inner).unwrap_or(InitialMech::Malformed)
+}
+
+/// `[0] NegTokenInit ::= SEQUENCE { mechTypes [0], reqFlags [1] OPTIONAL,
+/// mechToken [2] OCTET STRING OPTIONAL, mechListMIC [3] OPTIONAL }` (RFC 4178 4.2.1; MS-SPNG
+/// NegTokenInit2 adds negHints at `[3]` and moves mechListMIC to `[4]`).
+fn spnego_init_mech(inner: &[u8]) -> Option<InitialMech<'_>> {
+    let (0xa0, init) = der_exact(inner)? else {
         return None;
     };
-    let (0x30, fields, _) = der(init)? else {
+    let (0x30, mut fields) = der_exact(init)? else {
         return None;
     };
-    let (0xa0, mech_types, _) = der(fields)? else {
+    let (0xa0, mech_types, rest) = der(fields)? else {
         return None;
     };
-    let (0x30, list, _) = der(mech_types)? else {
+    fields = rest;
+    let (0x30, list) = der_exact(mech_types)? else {
         return None;
     };
     let (0x06, first, _) = der(list)? else {
         return None;
     };
-    Some(first)
+    if !is_kerberos_oid(first) {
+        return Some(InitialMech::Other(first));
+    }
+    let mut mech_token = None;
+    let mut last_tag = 0xa0;
+    while !fields.is_empty() {
+        let (tag, body, rest) = der(fields)?;
+        // Optional fields, each at most once and in order. `[4]` is the mechListMIC of
+        // Microsoft's NegTokenInit2 layout, where `[3]` holds negHints.
+        if !(0xa1..=0xa4).contains(&tag) || tag <= last_tag {
+            return None;
+        }
+        if tag == 0xa2 {
+            let (0x04, token) = der_exact(body)? else {
+                return None;
+            };
+            mech_token = Some(token);
+        }
+        last_tag = tag;
+        fields = rest;
+    }
+    // Kerberos always sends an optimistic AP-REQ; without one there is nothing to check.
+    let token = mech_token?;
+    Some(if is_kerberos_ap_req(token) {
+        InitialMech::Kerberos
+    } else if token.starts_with(b"NTLMSSP\0") {
+        InitialMech::Ntlm
+    } else if let Some((oid, _)) = raw_mech_token(token).filter(|(oid, _)| !is_kerberos_oid(oid)) {
+        InitialMech::Other(oid)
+    } else {
+        InitialMech::Malformed
+    })
 }
 
 /// Refuses an initial token that does not start Kerberos. Backends call this before returning
 /// a token, so an NTLM (or NegoEx, or unknown) exchange is never started.
 pub fn check_kerberos_token(token: &[u8]) -> Result<()> {
-    match initial_token_mech(token) {
-        Some(oid) if oid == OID_KRB5 || oid == OID_KRB5_MS => Ok(()),
-        Some(oid) => {
-            let what = match oid {
-                OID_NTLM => "NTLM",
-                OID_NEGOEX => "NegoEx",
-                _ => "a mechanism other than Kerberos",
-            };
-            Err(negotiate_failed(format!(
-                "Kerberos is not available for this server (the system offered {what}, which \
-                 OpenSVN does not use); check that you have a Kerberos ticket and that the \
-                 repository URL uses the server's full host name"
-            )))
+    let what = match initial_token_mech(token) {
+        InitialMech::Kerberos => return Ok(()),
+        InitialMech::Ntlm | InitialMech::Other(OID_NTLM) => "NTLM",
+        InitialMech::Other(OID_NEGOEX) => "NegoEx",
+        InitialMech::Other(_) => "a mechanism other than Kerberos",
+        InitialMech::Malformed => {
+            return Err(negotiate_failed(
+                "the system produced an unrecognised Negotiate token",
+            ));
         }
-        None => Err(negotiate_failed(
-            "the system produced an unrecognised Negotiate token",
-        )),
-    }
+    };
+    Err(negotiate_failed(format!(
+        "Kerberos is not available for this server (the system offered {what}, which \
+         OpenSVN does not use); check that you have a Kerberos ticket and that the \
+         repository URL uses the server's full host name"
+    )))
 }
 
 /// Whether a mechanism OID (DER body) is Kerberos 5.
-#[cfg_attr(not(all(unix, feature = "negotiate-gssapi")), allow(dead_code))]
 pub(crate) fn is_kerberos_oid(oid: &[u8]) -> bool {
     oid == OID_KRB5 || oid == OID_KRB5_MS
 }
@@ -369,9 +453,22 @@ mod tests {
         tlv(0x60, &body)
     }
 
-    fn raw(oid: &[u8]) -> Vec<u8> {
+    fn raw_with(oid: &[u8], inner: &[u8]) -> Vec<u8> {
         let mut body = tlv(0x06, oid);
-        body.extend_from_slice(&[0x01, 0x00, 0x6e, 0x00]);
+        body.extend_from_slice(inner);
+        tlv(0x60, &body)
+    }
+
+    fn raw(oid: &[u8]) -> Vec<u8> {
+        raw_with(oid, &[0x01, 0x00, 0x6e, 0x00])
+    }
+
+    fn spnego_fields(mechs: &[&[u8]], extra: &[u8]) -> Vec<u8> {
+        let list: Vec<u8> = mechs.iter().flat_map(|m| tlv(0x06, m)).collect();
+        let mut fields = tlv(0xa0, &tlv(0x30, &list));
+        fields.extend_from_slice(extra);
+        let mut body = tlv(0x06, OID_SPNEGO);
+        body.extend(tlv(0xa0, &tlv(0x30, &fields)));
         tlv(0x60, &body)
     }
 
@@ -380,9 +477,21 @@ mod tests {
         let ap_req = raw(OID_KRB5);
         check_kerberos_token(&ap_req).expect("raw krb5");
         // Windows: MS-KRB5 first, long mechToken (multi-byte DER length).
-        let big = vec![0xab; 1500];
+        let mut big_inner = vec![0x01, 0x00];
+        big_inner.extend(tlv(0x6e, &[0xab; 1500]));
+        let big = raw_with(OID_KRB5, &big_inner);
         check_kerberos_token(&spnego(&[OID_KRB5_MS, OID_KRB5, OID_NTLM], &big)).expect("ms");
         check_kerberos_token(&spnego(&[OID_KRB5, OID_NTLM], &ap_req)).expect("mit");
+        // Optional reqFlags and mechListMIC around the mechToken.
+        let mut extra = tlv(0xa1, &[0x03, 0x02, 0x00, 0x60]);
+        extra.extend(tlv(0xa2, &tlv(0x04, &ap_req)));
+        extra.extend(tlv(0xa3, &tlv(0x04, b"mic")));
+        check_kerberos_token(&spnego_fields(&[OID_KRB5], &extra)).expect("all fields");
+        // MS-SPNG NegTokenInit2 layout: negHints [3], mechListMIC [4].
+        let mut extra = tlv(0xa2, &tlv(0x04, &ap_req));
+        extra.extend(tlv(0xa3, &tlv(0x30, &[])));
+        extra.extend(tlv(0xa4, &tlv(0x04, b"mic")));
+        check_kerberos_token(&spnego_fields(&[OID_KRB5_MS], &extra)).expect("init2");
 
         let e = check_kerberos_token(&spnego(&[OID_NTLM], b"NTLMSSP\0")).expect_err("ntlm");
         assert_eq!(e.code, ErrorCode::NegotiateFailed);
@@ -399,5 +508,61 @@ mod tests {
         ] {
             check_kerberos_token(junk).expect_err("junk");
         }
+    }
+
+    #[test]
+    fn spnego_mech_token_must_be_a_kerberos_ap_req() {
+        // Kerberos listed first but the optimistic token is NTLM.
+        let e = check_kerberos_token(&spnego(&[OID_KRB5, OID_NTLM], b"NTLMSSP\0\x01\0\0\0"))
+            .expect_err("ntlm inner");
+        assert!(e.message.contains("NTLM"), "{}", e.message);
+        let e = check_kerberos_token(&spnego(&[OID_KRB5_MS, OID_NTLM], &raw(OID_NTLM)))
+            .expect_err("wrapped ntlm inner");
+        assert!(e.message.contains("NTLM"), "{}", e.message);
+        let e = check_kerberos_token(&spnego(&[OID_KRB5], &raw(OID_NEGOEX))).expect_err("negoex");
+        assert!(e.message.contains("NegoEx"), "{}", e.message);
+        // No mechToken at all.
+        check_kerberos_token(&spnego_fields(&[OID_KRB5], &[])).expect_err("no mech token");
+        // Kerberos OID but not an AP-REQ: wrong TOK_ID, AP-REP tag, trailing bytes, truncated.
+        for inner in [
+            &[0x02, 0x00, 0x6e, 0x00][..],
+            &[0x01, 0x00, 0x6f, 0x00],
+            &[0x01, 0x00, 0x6e, 0x00, 0x00],
+            &[0x01, 0x00, 0x6e, 0x05, 0x00],
+            &[0x01, 0x00],
+        ] {
+            let e = check_kerberos_token(&spnego(&[OID_KRB5], &raw_with(OID_KRB5, inner)))
+                .expect_err("not ap-req");
+            assert!(e.message.contains("unrecognised"), "{}", e.message);
+            check_kerberos_token(&raw_with(OID_KRB5, inner)).expect_err("raw not ap-req");
+        }
+        // Malformed DER around a valid AP-REQ fails closed.
+        let good = spnego(&[OID_KRB5], &ap_req_token());
+        let mut trailing = good.clone();
+        trailing.push(0);
+        check_kerberos_token(&trailing).expect_err("trailing outer byte");
+        // mechToken not an OCTET STRING.
+        let bad = tlv(0xa2, &tlv(0x03, &ap_req_token()));
+        check_kerberos_token(&spnego_fields(&[OID_KRB5], &bad)).expect_err("bit string");
+        // Duplicate / out-of-order / unknown context tags.
+        let tok = tlv(0xa2, &tlv(0x04, &ap_req_token()));
+        let mut dup = tok.clone();
+        dup.extend_from_slice(&tok);
+        check_kerberos_token(&spnego_fields(&[OID_KRB5], &dup)).expect_err("duplicate");
+        let mut order = tok.clone();
+        order.extend(tlv(0xa1, &[0x03, 0x01, 0x00]));
+        check_kerberos_token(&spnego_fields(&[OID_KRB5], &order)).expect_err("order");
+        let mut unknown = tok;
+        unknown.extend(tlv(0xa5, &[]));
+        check_kerberos_token(&spnego_fields(&[OID_KRB5], &unknown)).expect_err("unknown");
+        // Truncated anywhere: never accepted.
+        for n in 0..good.len() {
+            check_kerberos_token(&good[..n]).expect_err("truncated");
+        }
+        check_kerberos_token(&good).expect("good");
+    }
+
+    fn ap_req_token() -> Vec<u8> {
+        raw(OID_KRB5)
     }
 }
