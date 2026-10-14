@@ -17,9 +17,9 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use opensvn_ipc::{
     BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
-    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage,
-    RepoEntry, RepoInfo, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest, WcFormat,
-    WcId,
+    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, Layout, LockConflict,
+    LogGetRequest, LogPage, RepoEntry, RepoInfo, ResolveRequest, Rev, RevertRequest, TextSide,
+    UpdateRequest, WcFormat, WcId,
 };
 use svn_types::SvnError;
 
@@ -215,7 +215,8 @@ pub trait EngineFacade: Send + Sync {
     /// calls it through the working copy's write path. Locks of foreign or unknown owners are only
     /// reported in `needs_user_action`.
     async fn open_wc(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcOpened>;
-    /// Local status of the working copy (changed nodes, plus locked or changelisted ones).
+    /// Local status of the working copy (changed nodes, plus locked, changelisted or
+    /// `svn:needs-lock` ones, so an unmodified file can be locked before editing).
     async fn status(
         &self,
         wc: &WcRef,
@@ -381,6 +382,15 @@ pub trait EngineFacade: Send + Sync {
         break_lock: bool,
         ctx: &OpContext,
     ) -> EngineResult<()>;
+    /// Locks held by someone else on the scope's paths, as the server reports them now (asked
+    /// after a lock failed with `LockedByOther`, so the UI can name the owner before a steal).
+    /// Locks this working copy holds the token of are left out (a URL scope has no token, so
+    /// every lock is reported). `path` is the requested path (relative path or URL). Read only.
+    async fn lock_conflicts(
+        &self,
+        scope: &LockScope,
+        ctx: &OpContext,
+    ) -> EngineResult<Vec<LockConflict>>;
     /// Applies server-side edits in one commit; returns the new revision.
     async fn remote_edit(&self, plan: &RemoteEditPlan, ctx: &OpContext) -> EngineResult<Rev>;
     /// Copies in the repository (branch, tag); returns the new revision. With `from_wc` the

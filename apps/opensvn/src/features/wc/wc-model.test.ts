@@ -12,6 +12,7 @@ import {
   isCheckoutUrl,
   joinMessage,
   loadMessageHistory,
+  lockFiles,
   pushMessageHistory,
   splitMessage,
   suggestMoves,
@@ -173,4 +174,20 @@ test("shortcuts need Mod and exact modifiers; Alt chords match on the physical k
   ).toBe(true);
   expect(shortcutLabel("update", false)).toBe("Ctrl+Shift+U");
   expect(shortcutLabel("commit", true)).toBe("⌘Enter");
+});
+
+test("lockFiles: unmodified needs-lock or locked files, never changes or directories", () => {
+  const mine = { owner: "you", comment: null, createdAt: "", token: null, mine: true };
+  const files = [
+    f("a.psd", { text: "normal", needsLock: true }),
+    f("b.docx", { text: "normal", lock: mine }),
+    f("c.txt", { text: "normal" }),
+    f("d.psd", { text: "modified", needsLock: true }),
+    f("e", { kind: "dir", text: "normal", lock: mine }),
+    f("f.psd", { text: "normal", props: "modified", needsLock: true }),
+  ];
+  expect(lockFiles(files).map((x) => x.path)).toEqual(["a.psd", "b.docx"]);
+  // Disjoint from the Changes list, so they are never ticked for a commit.
+  const changed = new Set(changedFiles(files).map((x) => x.path));
+  expect(lockFiles(files).some((x) => changed.has(x.path))).toBe(false);
 });

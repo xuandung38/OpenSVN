@@ -20,6 +20,16 @@ export function changedFiles(files: readonly FileStatus[]): FileStatus[] {
 }
 
 /**
+ * Unmodified files that matter for locking (doc 01 §10.4): read-only `svn:needs-lock` files to lock
+ * before editing, and locked files to unlock. They are not changes, so never part of a commit.
+ */
+export function lockFiles(files: readonly FileStatus[]): FileStatus[] {
+  return files.filter(
+    (f) => f.kind === "file" && fileGlyph(f) === null && (f.needsLock || f.lock !== null),
+  );
+}
+
+/**
  * Pre-ticked on first sight: tracked changes. Unversioned (`?`) files are never auto-ticked (a tick
  * means "add on commit"), and conflicted files cannot be committed.
  */
