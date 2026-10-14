@@ -653,6 +653,86 @@ pub async fn switch_to_a_branch(h: &dyn Harness) {
     assert!(status(h, &wc).await.is_empty());
 }
 
+/// The trunk/branches/tags layout around a working copy URL is found through the engine, follows a
+/// switch, and lists the branches to switch to. A location outside the layout has no branch.
+pub async fn branch_detection_follows_a_switch(h: &dyn Harness) {
+    use opensvn_ipc::BranchKind;
+
+    use crate::layout::{EngineDirs, branch_from_url, detect};
+
+    let e = h.engine();
+    let url = h.repo_url();
+    for to in ["branches/feature-y", "lib-copy"] {
+        e.copy_location(
+            &CopyLocationRequest {
+                from_url: format!("{url}/trunk"),
+                from_rev: None,
+                to_url: format!("{url}/{to}"),
+                message: format!("Copy to {to}"),
+                switch_wc_id: None,
+                from_wc: None,
+            },
+            None,
+            &ctx(),
+        )
+        .await
+        .expect("copy");
+    }
+    let (wc, info) = checkout(h, "branch-detect", None).await;
+    let lister = EngineDirs(e);
+    let found = detect(&lister, &info.repo_root_url, &info.url)
+        .await
+        .expect("detect");
+    assert!(found.found);
+    let current = found.current.expect("trunk is a branch");
+    // The offline derivation used for the toolbar agrees with the server-side detection.
+    assert_eq!(
+        branch_from_url(&info.repo_root_url, &info.url, None),
+        Some(current.clone())
+    );
+    assert_eq!(
+        (current.kind, current.name.as_str()),
+        (BranchKind::Trunk, "trunk")
+    );
+
+    let nodes = e
+        .branches_list(&info.repo_root_url, &Layout::Auto, &ctx())
+        .await
+        .expect("branches");
+    let target = nodes
+        .iter()
+        .find(|n| n.kind == BranchKind::Branch && n.name == "feature-y")
+        .expect("listed branch");
+    e.switch(&wc, &target.url, None, &ctx())
+        .await
+        .expect("switch");
+    let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
+    let current = detect(&lister, &info.repo_root_url, &info.url)
+        .await
+        .expect("detect")
+        .current
+        .expect("branch after switch");
+    assert_eq!(
+        branch_from_url(&info.repo_root_url, &info.url, None),
+        Some(current.clone())
+    );
+    assert_eq!(
+        (current.kind, current.name.as_str()),
+        (BranchKind::Branch, "feature-y")
+    );
+    assert_eq!(current.url, target.url);
+
+    e.switch(&wc, &format!("{url}/lib-copy"), None, &ctx())
+        .await
+        .expect("switch outside the layout");
+    let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
+    let outside = detect(&lister, &info.repo_root_url, &info.url)
+        .await
+        .expect("detect");
+    assert!(outside.current.is_none(), "{:?}", outside.current);
+    assert_eq!(branch_from_url(&info.repo_root_url, &info.url, None), None);
+}
+
 /// Downloads, revision diffs and blame.
 pub async fn repository_content_tools(h: &dyn Harness) {
     let e = h.engine();
@@ -787,6 +867,157 @@ pub async fn locked_unmodified_file_in_status(h: &dyn Harness) {
         status(h, &wc).await.is_empty(),
         "committing the locked file releases its lock"
     );
+}
+
+/// An unmodified `svn:needs-lock` file is listed (read-only until locked, doc 01 §10.4), with
+/// and without its lock, and is never reported as a change.
+pub async fn needs_lock_unmodified_file_in_status(h: &dyn Harness) {
+    let e = h.engine();
+    let (wc, _) = checkout(h, "needs-lock-clean", None).await;
+    e.props_set(&wc, "README.md", "svn:needs-lock", Some("*"), &ctx())
+        .await
+        .expect("props_set");
+    e.commit(
+        &wc,
+        &CommitRequest {
+            wc_id: wc.id.clone(),
+            paths: vec!["README.md".into()],
+            message: "needs lock".into(),
+            keep_locks: false,
+            auto_add_remove: false,
+        },
+        &ctx(),
+    )
+    .await
+    .expect("commit the property");
+    let only_readme = |st: &[FileStatus]| {
+        assert_eq!(st.len(), 1, "only the needs-lock file is listed: {st:?}");
+        let f = find(st, "README.md")
+            .expect("unmodified needs-lock file is listed")
+            .clone();
+        assert_eq!(f.text, NodeStatus::Normal, "{f:?}");
+        assert_eq!(f.props, opensvn_ipc::PropStatus::Normal, "{f:?}");
+        assert!(f.needs_lock, "{f:?}");
+        f
+    };
+    for query in [
+        ALL,
+        StatusQuery {
+            include_ignored: false,
+            include_unversioned: false,
+        },
+    ] {
+        let st = e.status(&wc, query, &ctx()).await.expect("status");
+        assert!(only_readme(&st).lock.is_none());
+    }
+
+    let scope = LockScope::Wc {
+        wc: wc.clone(),
+        paths: vec!["README.md".into()],
+    };
+    e.lock(&scope, Some("lock to edit"), false, &ctx())
+        .await
+        .expect("lock");
+    let lock = only_readme(&status(h, &wc).await)
+        .lock
+        .expect("lock in status");
+    assert!(lock.mine);
+    e.unlock(&scope, false, &ctx()).await.expect("unlock");
+    assert!(only_readme(&status(h, &wc).await).lock.is_none());
+}
+
+/// A lock held elsewhere refuses a lock with `LockedByOther`; `lock_conflicts` names its owner,
+/// comment and date (never the token), and only an explicit steal takes it over; a stale token
+/// cannot unlock it, only an explicit break can.
+pub async fn lock_held_elsewhere_and_steal(h: &dyn Harness) {
+    let e = h.engine();
+    let (holder, _) = checkout(h, "lock-holder", None).await;
+    let (other, _) = checkout(h, "lock-other", None).await;
+    let scope = |wc: &WcRef| LockScope::Wc {
+        wc: wc.clone(),
+        paths: vec!["README.md".into()],
+    };
+    e.lock(&scope(&holder), Some("held elsewhere"), false, &ctx())
+        .await
+        .expect("lock in the first working copy");
+    assert!(
+        e.lock_conflicts(&scope(&holder), &ctx())
+            .await
+            .expect("conflicts of the holder")
+            .is_empty(),
+        "the holder's own lock is not a conflict"
+    );
+
+    let err = e
+        .lock(&scope(&other), None, false, &ctx())
+        .await
+        .expect_err("locked elsewhere");
+    assert_eq!(err.code, ErrorCode::LockedByOther, "{err}");
+    let conflicts = e
+        .lock_conflicts(&scope(&other), &ctx())
+        .await
+        .expect("conflicts");
+    assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+    let c = &conflicts[0];
+    assert_eq!(c.path, "README.md");
+    assert!(!c.owner.is_empty());
+    assert_eq!(c.comment.as_deref(), Some("held elsewhere"));
+    assert!(
+        c.created_at.as_deref().is_some_and(|d| d.contains('T')),
+        "{c:?}"
+    );
+    let url = format!("{}/trunk/README.md", h.repo_url());
+    let by_url = e
+        .lock_conflicts(&LockScope::Urls(vec![url.clone()]), &ctx())
+        .await
+        .expect("conflicts by URL");
+    assert_eq!(by_url.len(), 1, "{by_url:?}");
+    assert_eq!(by_url[0].path, url);
+    assert!(
+        find(&status(h, &other).await, "README.md").is_none(),
+        "a refused lock records nothing"
+    );
+
+    e.lock(&scope(&other), Some("stolen"), true, &ctx())
+        .await
+        .expect("steal");
+    let lock = find(&status(h, &other).await, "README.md")
+        .and_then(|s| s.lock.clone())
+        .expect("stolen lock in status");
+    assert!(lock.mine);
+    assert!(
+        e.lock_conflicts(&scope(&other), &ctx())
+            .await
+            .expect("conflicts after the steal")
+            .is_empty()
+    );
+
+    // The first working copy's token is stale now: a plain unlock is refused, and only an
+    // explicit break removes the lock held elsewhere.
+    e.unlock(&scope(&holder), false, &ctx())
+        .await
+        .expect_err("a stolen lock cannot be released with the old token");
+    assert_eq!(
+        by_url_conflicts(h).await.len(),
+        1,
+        "the refused unlock kept the lock"
+    );
+    e.unlock(&scope(&holder), true, &ctx())
+        .await
+        .expect("break the lock held elsewhere");
+    assert!(by_url_conflicts(h).await.is_empty(), "the lock is broken");
+    assert!(
+        find(&status(h, &holder).await, "README.md").is_none_or(|s| s.lock.is_none()),
+        "the breaking working copy forgets its old token"
+    );
+}
+
+async fn by_url_conflicts(h: &dyn Harness) -> Vec<opensvn_ipc::LockConflict> {
+    let url = format!("{}/trunk/README.md", h.repo_url());
+    h.engine()
+        .lock_conflicts(&LockScope::Urls(vec![url]), &ctx())
+        .await
+        .expect("conflicts by URL")
 }
 
 /// Commit with `auto_add_remove` adds selected unversioned files and deletes selected missing
@@ -1076,9 +1307,12 @@ pub async fn run_all<H: Harness>(make: impl Fn() -> H) {
     working_copy_metadata_operations(&make()).await;
     mark_move_and_set_depth(&make()).await;
     switch_to_a_branch(&make()).await;
+    branch_detection_follows_a_switch(&make()).await;
     repository_content_tools(&make()).await;
     open_recovers_dead_locks_and_reports_foreign_ones(&make()).await;
     locked_unmodified_file_in_status(&make()).await;
+    needs_lock_unmodified_file_in_status(&make()).await;
+    lock_held_elsewhere_and_steal(&make()).await;
     commit_with_auto_add_remove(&make()).await;
     update_ends_in_conflict(&make()).await;
     update_of_sub_paths(&make()).await;

@@ -17,7 +17,7 @@ pub mod status_map;
 pub mod time_fmt;
 
 pub use commands::*;
-pub use error::{AppError, ErrorAction, ErrorCode, map_svn_error_code};
+pub use error::{AppError, ErrorAction, ErrorCode, LockConflict, map_svn_error_code};
 pub use events::*;
 pub use ids::{OpId, Rev, Size, WcId};
 pub use models::*;

@@ -1,6 +1,6 @@
 #![allow(missing_docs, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use opensvn_ipc::{AppError, ErrorCode, map_svn_error_code};
+use opensvn_ipc::{AppError, ErrorCode, LockConflict, map_svn_error_code};
 use svn_types::{ErrorCode as SvnErrorCode, SvnError};
 
 /// Exhaustive on purpose (no wildcard): adding an engine code breaks this test until mapped.
@@ -104,9 +104,42 @@ fn app_error_wire_shape() {
             "path": "src/a.txt",
             "retryable": false,
             "actions": ["update"],
+            "lockConflicts": null,
         })
     );
     assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), e);
+}
+
+#[test]
+fn lock_conflicts_ride_on_the_error_only_when_known() {
+    let e = AppError::from_code(SvnErrorCode::LockedByOther, "locked").with_lock_conflicts(vec![
+        LockConflict {
+            path: "README.md".into(),
+            owner: "an".into(),
+            comment: Some("editing".into()),
+            created_at: Some("2026-10-14T05:00:00Z".into()),
+        },
+    ]);
+    let v = serde_json::to_value(&e).unwrap();
+    assert_eq!(v["actions"], serde_json::json!(["open-lock-dialog"]));
+    assert_eq!(
+        v["lockConflicts"],
+        serde_json::json!([{
+            "path": "README.md",
+            "owner": "an",
+            "comment": "editing",
+            "createdAt": "2026-10-14T05:00:00Z",
+        }])
+    );
+    assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), e);
+    let none =
+        AppError::from_code(SvnErrorCode::LockedByOther, "locked").with_lock_conflicts(vec![]);
+    assert!(none.lock_conflicts.is_none());
+    // Payloads without the field still read.
+    let mut v = serde_json::to_value(&none).unwrap();
+    assert_eq!(v["lockConflicts"], serde_json::Value::Null);
+    v.as_object_mut().unwrap().remove("lockConflicts");
+    assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), none);
 }
 
 #[test]

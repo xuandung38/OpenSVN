@@ -10,8 +10,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use opensvn_ipc::LockConflict;
+use opensvn_ipc::time_fmt::timestamp_to_iso;
 use svn_ra_api::RaSession;
-use svn_types::{ErrorCode, RelPath, Revnum, SvnError};
+use svn_types::{Depth, ErrorCode, RelPath, Revnum, SvnError};
 use svn_wc::WcDb;
 use svn_wc::db::DbWorkingCopyOps;
 use svn_wc::db::ObtainMode;
@@ -101,7 +103,14 @@ impl RealEngine {
                         .await?;
                     let held = self.lock_parent_dir(&wc.root, rel).await?;
                     let done = async {
-                        let token = recorded_token(&held.db, &loc).await?;
+                        // Like `svn unlock --force`: a break presents the server's current
+                        // token, not the recorded one (it may be stale after a steal, and
+                        // mod_dav_svn refuses a mismatched token with 400 even when breaking).
+                        let token = if break_lock {
+                            None
+                        } else {
+                            recorded_token(&held.db, &loc).await?
+                        };
                         session
                             .unlock(&path, token.as_deref(), break_lock, &ctx.cancel)
                             .await?;
@@ -113,6 +122,55 @@ impl RealEngine {
                 Ok(())
             }
         }
+    }
+}
+
+impl RealEngine {
+    pub(super) async fn do_lock_conflicts(
+        &self,
+        scope: &LockScope,
+        ctx: &OpContext,
+    ) -> EngineResult<Vec<LockConflict>> {
+        let mut out = Vec::new();
+        match scope {
+            LockScope::Urls(urls) => {
+                for url in urls {
+                    let (session, path) = self.locate(url, ctx).await?;
+                    for l in session.get_locks(&path, Depth::Empty, &ctx.cancel).await? {
+                        out.push(conflict(url, l));
+                    }
+                }
+            }
+            LockScope::Wc { wc, paths } => {
+                for rel in paths {
+                    ctx.check()?;
+                    let loc = node_location(&wc.root, rel).await?;
+                    let (session, path) = self
+                        .locate_repo_path(&loc.repo_root, &loc.repos_path, ctx)
+                        .await?;
+                    let ours = {
+                        let (root, loc) = (wc.root.clone(), loc.clone());
+                        blocking(move || recorded_token_in(&open_db(&root)?, &loc)).await?
+                    };
+                    for l in session.get_locks(&path, Depth::Empty, &ctx.cancel).await? {
+                        if ours.as_deref() != Some(l.token.as_str()) {
+                            out.push(conflict(rel, l));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// IPC description of a lock someone else holds on the requested `path`; the token stays here.
+fn conflict(path: &str, l: svn_types::LockInfo) -> LockConflict {
+    LockConflict {
+        path: path.to_owned(),
+        owner: l.owner,
+        comment: l.comment,
+        created_at: Some(timestamp_to_iso(l.created)),
     }
 }
 
@@ -227,20 +285,22 @@ async fn record_lock(
 }
 
 async fn recorded_token(db: &Arc<WcDb>, loc: &NodeLocation) -> EngineResult<Option<String>> {
-    use rusqlite::OptionalExtension;
     let (db, loc) = (db.clone(), loc.clone());
-    blocking(move || {
-        db.with_read(|c| {
-            c.query_row(
-                "SELECT lock_token FROM lock WHERE repos_id = ?1 AND repos_relpath = ?2",
-                (loc.repos_id, loc.repos_path.as_str()),
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(svn_wc::db::sql_err)
-        })
+    blocking(move || recorded_token_in(&db, &loc)).await
+}
+
+/// Token of the lock `wc.db` records for the node at `loc`.
+fn recorded_token_in(db: &WcDb, loc: &NodeLocation) -> EngineResult<Option<String>> {
+    use rusqlite::OptionalExtension;
+    db.with_read(|c| {
+        c.query_row(
+            "SELECT lock_token FROM lock WHERE repos_id = ?1 AND repos_relpath = ?2",
+            (loc.repos_id, loc.repos_path.as_str()),
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(svn_wc::db::sql_err)
     })
-    .await
 }
 
 async fn forget_lock(

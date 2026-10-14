@@ -1,5 +1,5 @@
 import { createContext, type ReactNode, useContext, useMemo, useState } from "react";
-import type { FileStatus, WorkingCopy } from "../../ipc/bindings";
+import type { FileStatus, LockConflict, WorkingCopy } from "../../ipc/bindings";
 
 /** Dialogs and panes the working-copy screens can open. Paths are working-copy relative. */
 export type WcDialog =
@@ -8,7 +8,13 @@ export type WcDialog =
   | { kind: "ignore"; path: string }
   | { kind: "rename"; path: string }
   | { kind: "delete"; paths: string[] }
-  | { kind: "lock"; mode: "lock" | "unlock"; paths: string[] }
+  | {
+      kind: "lock";
+      mode: "lock" | "unlock";
+      paths: string[];
+      /** Locks known to refuse the request (reopened after a failed lock). */
+      conflicts?: LockConflict[];
+    }
   | { kind: "changelist"; paths: string[] }
   | { kind: "update-rev" }
   | { kind: "switch" }
