@@ -281,29 +281,27 @@ fn layout_valid(layout: &Layout) -> Result<(), AppError> {
 pub async fn branches_list(
     state: State<'_, AppState>,
     repo_root_url: String,
+    at_url: Option<String>,
 ) -> Result<Vec<BranchNode>, AppError> {
     guard(async {
-        let ctx = OpContext::detached();
+        // Read from popovers and dialogs in the background: never raise a credential or
+        // certificate prompt for it.
+        let ctx = OpContext::background();
         let info = state
             .engine
             .repo_info(&repo_root_url, &ctx)
             .await
             .map_err(engine_err)?;
-        let stored = state.db.layout_get(&info.repo_uuid)?;
-        let layout = stored.clone().unwrap_or(Layout::Auto);
-        let nodes = state
-            .engine
-            .branches_list(&repo_root_url, &layout, &ctx)
-            .await
-            .map_err(engine_err)?;
-        if !nodes.is_empty() || stored.is_some() {
-            return Ok(nodes);
-        }
-        // Nothing configured and nothing at the root: try the layout one project level down, the
-        // other shape that working-copy branch detection recognises.
+        // A stored layout wins. Otherwise list around `at_url`: the root-level convention, or only
+        // the project folder it is in (never every top-level folder of the repository).
+        let layout = match (state.db.layout_get(&info.repo_uuid)?, at_url) {
+            (Some(stored), _) => stored,
+            (None, Some(url)) => crate::layout::layout_near(&repo_root_url, &url),
+            (None, None) => Layout::Auto,
+        };
         state
             .engine
-            .branches_list(&repo_root_url, &crate::layout::project_layout(), &ctx)
+            .branches_list(&repo_root_url, &layout, &ctx)
             .await
             .map_err(engine_err)
     })

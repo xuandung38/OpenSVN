@@ -658,7 +658,7 @@ pub async fn switch_to_a_branch(h: &dyn Harness) {
 pub async fn branch_detection_follows_a_switch(h: &dyn Harness) {
     use opensvn_ipc::BranchKind;
 
-    use crate::layout::{EngineDirs, detect};
+    use crate::layout::{EngineDirs, branch_from_url, detect};
 
     let e = h.engine();
     let url = h.repo_url();
@@ -685,6 +685,11 @@ pub async fn branch_detection_follows_a_switch(h: &dyn Harness) {
         .expect("detect");
     assert!(found.found);
     let current = found.current.expect("trunk is a branch");
+    // The offline derivation used for the toolbar agrees with the server-side detection.
+    assert_eq!(
+        branch_from_url(&info.repo_root_url, &info.url, None),
+        Some(current.clone())
+    );
     assert_eq!(
         (current.kind, current.name.as_str()),
         (BranchKind::Trunk, "trunk")
@@ -708,6 +713,10 @@ pub async fn branch_detection_follows_a_switch(h: &dyn Harness) {
         .current
         .expect("branch after switch");
     assert_eq!(
+        branch_from_url(&info.repo_root_url, &info.url, None),
+        Some(current.clone())
+    );
+    assert_eq!(
         (current.kind, current.name.as_str()),
         (BranchKind::Branch, "feature-y")
     );
@@ -721,10 +730,7 @@ pub async fn branch_detection_follows_a_switch(h: &dyn Harness) {
         .await
         .expect("detect");
     assert!(outside.current.is_none(), "{:?}", outside.current);
-    assert!(!crate::layout::may_be_in_layout(
-        &info.repo_root_url,
-        &info.url
-    ));
+    assert_eq!(branch_from_url(&info.repo_root_url, &info.url, None), None);
 }
 
 /// Downloads, revision diffs and blame.
