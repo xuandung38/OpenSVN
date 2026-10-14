@@ -358,3 +358,77 @@ async fn reparented_root_session_works_when_the_root_is_forbidden() {
     .expect_err("root is forbidden");
     assert_eq!(at_root.code, ErrorCode::Forbidden);
 }
+
+/// mod_dav_svn's answer to `OPTIONS` on an `SVNParentPath` location: a bare 500.
+fn parent_path_options_500() -> ResponseTemplate {
+    ResponseTemplate::new(500)
+        .insert_header("Content-Type", "text/html; charset=iso-8859-1")
+        .set_body_string("<html><title>500 Internal Server Error</title></html>")
+}
+
+#[tokio::test]
+async fn opening_the_repository_list_of_a_parent_path_names_the_repositories() {
+    let srv = MockServer::start().await;
+    Mock::given(method("OPTIONS"))
+        .and(path("/svn"))
+        .respond_with(parent_path_options_500())
+        .mount(&srv)
+        .await;
+    // VisualSVN serves the XML index with an XSLT stylesheet.
+    Mock::given(method("GET"))
+        .and(path("/svn/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="/svnindex.xsl"?>
+<svn version="1.14.3 (r1914484)" href="http://subversion.apache.org/">
+  <index rev="0" path="Collection of Repositories">
+    <dir name="Dự án" href="D%e1%bb%b1%20%c3%a1n/" />
+    <dir name="MyRepo" href="MyRepo/" />
+  </index>
+</svn>"#,
+        ))
+        .mount(&srv)
+        .await;
+    let url = RepoUrl::parse(&format!("{}/svn", srv.uri())).unwrap();
+    let Err(err) = HttpRaSession::open(
+        transport(Arc::new(FixedPrompter::default())),
+        url,
+        &CancelToken::new(),
+    )
+    .await
+    else {
+        panic!("a repository list is not a repository");
+    };
+    assert_eq!(err.code, ErrorCode::PathNotFound, "{err:?}");
+    assert!(
+        err.message.contains("list of repositories")
+            && err.message.contains("Repositories here: Dự án, MyRepo"),
+        "{}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn a_plain_server_error_on_open_stays_a_server_error() {
+    let srv = MockServer::start().await;
+    Mock::given(method("OPTIONS"))
+        .respond_with(parent_path_options_500())
+        .mount(&srv)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>It works!</html>"))
+        .mount(&srv)
+        .await;
+    let url = RepoUrl::parse(&format!("{}/svn/repo", srv.uri())).unwrap();
+    let Err(err) = HttpRaSession::open(
+        transport(Arc::new(FixedPrompter::default())),
+        url,
+        &CancelToken::new(),
+    )
+    .await
+    else {
+        panic!("server error");
+    };
+    assert_ne!(err.code, ErrorCode::PathNotFound, "{err:?}");
+    assert!(err.message.contains("HTTP 500"), "{err:?}");
+}
