@@ -188,7 +188,8 @@ fn ipc_app(f: &Fixture) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRu
         .unwrap();
     let state = crate::app_state::AppState::build(crate::app_state::AppDeps {
         data_dir: tempfile::tempdir().unwrap().keep(),
-        engine: f.engine.clone(),
+        engine: crate::app_state::EngineSource::Ready(f.engine.clone()),
+        credentials: std::sync::Arc::new(secure_store::MemoryStore::new()),
         events: std::sync::Arc::new(crate::ops::events::RecordingEvents::default()),
         picker: f.picker.clone(),
         status_timing: crate::status::StatusTiming::default(),

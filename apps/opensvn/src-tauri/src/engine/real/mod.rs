@@ -38,6 +38,7 @@ use super::facade::{
 
 mod blame;
 mod commit;
+mod connector;
 mod layout;
 mod local;
 mod local_util;
@@ -57,6 +58,7 @@ mod wc_read;
 #[cfg(test)]
 mod tests;
 
+pub use connector::HttpConnector;
 pub use local_util::{SvnConfigSource, default_subversion_config_dir, read_local_ignores};
 pub use recovery::{ClientRecovery, RecoveryHooks};
 
@@ -193,9 +195,8 @@ impl RealEngine {
     ) -> EngineResult<(Arc<dyn RaSession>, RelPath)> {
         ctx.check()?;
         let parsed = RepoUrl::parse(url)?;
-        let session = self.connector.connect(&parsed, &ctx.cancel).await?;
+        let session = self.connect_root(&parsed, ctx).await?;
         let path = path_below_root(session.as_ref(), &parsed)?;
-        session.ensure_authenticated(&ctx.cancel).await?;
         Ok((session, path))
     }
 
@@ -209,10 +210,26 @@ impl RealEngine {
     ) -> EngineResult<(Arc<dyn RaSession>, RelPath)> {
         ctx.check()?;
         let parsed = RepoUrl::parse(root)?;
-        let session = self.connector.connect(&parsed, &ctx.cancel).await?;
+        let session = self.connect_root(&parsed.join(path)?, ctx).await?;
         path_below_root(session.as_ref(), &parsed)?;
-        session.ensure_authenticated(&ctx.cancel).await?;
         Ok((session, path.clone()))
+    }
+
+    /// Authenticates at `url` (path-based authorization may forbid the repository root) and
+    /// returns the root session of its repository, honoring `ctx.interactive`.
+    async fn connect_root(
+        &self,
+        url: &RepoUrl,
+        ctx: &OpContext,
+    ) -> EngineResult<Arc<dyn RaSession>> {
+        let at_url = self
+            .connector
+            .connect_with(url, &ConnectOptions::at_url(ctx), &ctx.cancel)
+            .await?;
+        at_url.ensure_authenticated(&ctx.cancel).await?;
+        self.connector
+            .connect_with(url, &ConnectOptions::root(ctx), &ctx.cancel)
+            .await
     }
 }
 
@@ -262,10 +279,15 @@ impl EngineFacade for RealEngine {
         if !ctx.interactive {
             return Ok(()); // background work never prompts
         }
+        // At the working copy's URL: a user allowed below the repository root only must still
+        // be able to authenticate.
         let info = wc_read::wc_info(&wc.root, ctx).await?;
-        self.locate_repo_path(&info.repo_root_url, &RelPath::root(), ctx)
-            .await
-            .map(|_| ())
+        let url = RepoUrl::parse(&info.url)?;
+        let session = self
+            .connector
+            .connect_with(&url, &ConnectOptions::at_url(ctx), &ctx.cancel)
+            .await?;
+        session.ensure_authenticated(&ctx.cancel).await
     }
 
     async fn open_wc(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcOpened> {
