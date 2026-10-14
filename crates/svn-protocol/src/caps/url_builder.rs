@@ -242,6 +242,18 @@ fn below_root(root: &str, path: &str) -> Option<(Vec<String>, bool)> {
     folded.then_some((rest, true))
 }
 
+/// Decoded path segments of the URL path `path` below the repository root path `root_path` (both
+/// percent-encoded absolute paths, as `Url::path` gives them), with the rule the session's
+/// [`UrlBuilder`] applies: every segment is percent-decoded once (so `%C3%A1` and `%c3%a1` are
+/// the same), the root segments match exactly or, failing that, ASCII-case-insensitively (the
+/// VisualSVN fallback; never full Unicode folding), and the segments below the root are
+/// returned decoded for an exact comparison (repository paths are case-sensitive). `None` when
+/// `path` is not at or below the root; an error for a bad escape or an encoded `/`.
+pub fn segments_below_root(root_path: &str, path: &str) -> Result<Option<Vec<String>>> {
+    let (root, path) = (decode_path(root_path)?, decode_path(path)?);
+    Ok(below_root(&root, &path).map(|(rest, _)| rest))
+}
+
 /// Appends segments to an encoded base path, percent-encoding each segment.
 fn join_encoded(origin: &Url, base: &str, segments: &[&str]) -> Result<Url> {
     let mut url = origin.clone();

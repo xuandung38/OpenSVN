@@ -37,6 +37,8 @@ svn-client = { workspace = true, optional = true }
 svn-delta = { workspace = true, optional = true }
 md-5 = { workspace = true, optional = true }
 sha1 = { workspace = true, optional = true }
+# The session URL check reuses the protocol layer's root comparison.
+svn-protocol = { workspace = true, optional = true }
 # Case-insensitive matching of request paths against wc.db (macOS, Windows).
 unicode-normalization = { workspace = true, optional = true }
 # `fake` ships the in-memory repository that backs FakeEngine (the engine of builds without the
@@ -99,6 +101,7 @@ real-engine = [
   "dep:md-5",
   "dep:sha1",
   "dep:unicode-normalization",
+  "dep:svn-protocol",
 ]
 # Kerberos single sign-on on macOS/Linux through the system GSSAPI library (needs the krb5
 # development headers and libclang to build). Off by default so CI builds without them; release
