@@ -24,6 +24,10 @@ pub struct UpdateSetup {
     /// `svn update --depth`, it limits the drive and is never recorded: the working copy keeps
     /// its depths (checkout records the depth up front).
     pub depth: Depth,
+    /// `svn update --set-depth`: the requested depth becomes the recorded depth of the target
+    /// (and of every directory below it when it is `Infinity`), and the drive may bring in what
+    /// the recorded depths left out.
+    pub sticky_depth: bool,
     /// An unversioned file that is in the way is adopted instead of becoming a tree conflict.
     pub allow_unversioned_obstructions: bool,
     /// Repository root URL as stored in wc.db.
