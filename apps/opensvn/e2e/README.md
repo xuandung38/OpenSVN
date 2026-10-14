@@ -18,7 +18,8 @@ Apache + mod_dav_svn over HTTPS with Basic auth. It covers the MVP flows of
 
 `settings.test.mjs` needs no server (a fresh profile starts on the Welcome screen, like a fresh
 install): the toolbar gear, Ctrl+, and Cmd+, (page reporting macOS) open a visible Settings sheet,
-and Tauri accepts the menu event names the UI subscribes to. `pnpm e2e` runs only the flows; run
+Tauri accepts the menu event names the UI subscribes to, and the Network page refuses an
+out-of-range connection count inline, then saves a valid one through the real backend. `pnpm e2e` runs only the flows; run
 this one after the same build with `xvfb-run -a node e2e/settings.test.mjs` (tauri-driver and
 WebKitWebDriver on `PATH`).
 

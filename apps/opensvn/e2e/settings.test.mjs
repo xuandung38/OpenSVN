@@ -56,6 +56,22 @@ async function waitSettingsVisible() {
   );
 }
 
+/** Replaces the value of the number input labelled `label` (the harness's `fill` covers text boxes). */
+async function fillNumber(label, text) {
+  const el = await app.waitFor(
+    () =>
+      app.exec(
+        `return [...document.querySelectorAll('label')].find((l) => l.innerText.trim().startsWith(arguments[0]))?.querySelector('input[type=number]') ?? null`,
+        label,
+      ),
+    10_000,
+    `number input ${label}`,
+  );
+  const id = el["element-6066-11e4-a52e-4f735466cecf"];
+  await app.s.clear(id);
+  await app.s.type(id, text);
+}
+
 async function closeSettings() {
   await app.click("button", "Cancel");
   await app.waitFor(
@@ -114,4 +130,31 @@ test("Settings: Tauri accepts the menu event names the UI subscribes to, and ref
   );
   assert.equal(result[0], "ok");
   assert.match(result[1], /^refused: .*Event name must include only/);
+});
+
+test("Settings: Network refuses 16 connections inline and saves 8 through the real backend", async () => {
+  await app.click("button", "Settings");
+  await waitSettingsVisible();
+  await app.click("button", "Network");
+  await fillNumber("Parallel connections (1–8)", "16");
+  await app.waitText("Enter a whole number from 1 to 8");
+  const save = await app.role("button", "Save");
+  assert.equal(await app.exec("return arguments[0].disabled", save), true);
+  await fillNumber("Parallel connections (1–8)", "8");
+  await app.waitFor(
+    () => app.exec("return !arguments[0].disabled", save),
+    10_000,
+    "Save to enable",
+  );
+  await app.click("button", "Save");
+  await app.waitText("Settings saved");
+  assert.doesNotMatch(await app.bodyText(), /Invalid value for setting/);
+  await app.click("button", "Settings");
+  await app.click("button", "Network");
+  assert.equal(
+    await app.exec(
+      `return [...document.querySelectorAll('dialog[open] input[type=number]')].map((i) => i.value).join(',')`,
+    ),
+    "8,60",
+  );
 });
