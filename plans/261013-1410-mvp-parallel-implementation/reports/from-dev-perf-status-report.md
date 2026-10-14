@@ -81,17 +81,20 @@ Checkout and update are still 8 to 25 times slower than svn. Another session own
   subtree now fails the status run while the rows load. Before, it failed only when the walk
   reached that node.
 
-## Gates (head `ef2f7e8` + report)
+## Gates (after merging origin/main `05b8955`, merge commit `38bbbf3`)
 
 - `cargo fmt --all --check`: clean
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean
 - `cargo clippy -p opensvn --features real-engine --all-targets -- -D warnings`: clean
-- `cargo test --workspace --locked`: 1374 passed, 0 failed, 22 ignored
-- `cargo test -p opensvn --features opensvn/real-engine`: 474 passed, 0 failed
+- `cargo test --workspace --locked`: 1407 passed, 0 failed, 22 ignored
+- `cargo test -p opensvn --features opensvn/real-engine`: 487 passed, 0 failed
 - Oracle: svn 1.15.0 built from the repo's pinned recipe (`docker/compose.yml` version +
   SHA-512, `docker/svn-client/Dockerfile` configure flags), run with
   `OPENSVN_SVN_BIN=<1.15.0> OPENSVN_REQUIRE_SVN=1`. Nothing skipped. This includes
   `status_vs_svn`, `oracle_status_diff` and the new `status_fast_path_vs_svn`.
+
+Merge note: main added `StatusOptions::include_needs_lock`. Both report filters of the new walk
+apply it (the shared `wanted` helper).
 
 ## Shared code touched (all additive)
 
