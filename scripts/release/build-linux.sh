@@ -8,6 +8,8 @@
 #   Node 24 + pnpm 11, Rust via rustup (rust-toolchain.toml pins the compiler), cargo-about.
 #
 #   scripts/release/build-linux.sh
+# Cargo features default to `release,negotiate-gssapi` (real engine + Kerberos SSO, which needs
+# libkrb5-dev and libclang-dev); override with OPENSVN_FEATURES (empty = fake engine only).
 # No signing certificates are involved; for update artifacts set OPENSVN_UPDATER=1 with
 # TAURI_SIGNING_PRIVATE_KEY and OPENSVN_UPDATER_PUBKEY (see packaging/updater/README.md).
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -24,9 +26,10 @@ if [[ "${OPENSVN_UPDATER:-0}" == "1" ]]; then
   [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]] || die "OPENSVN_UPDATER=1 needs TAURI_SIGNING_PRIVATE_KEY"
 fi
 tauri_config_args
+tauri_feature_args "release,negotiate-gssapi"
 (cd "$REPO_ROOT" && pnpm install --frozen-lockfile)
 MARK="$(mktemp)"; trap 'rm -f "$MARK"' EXIT
-(cd "$APP_DIR" && pnpm tauri build --bundles appimage,deb "${CONFIG_ARGS[@]}")
+(cd "$APP_DIR" && pnpm tauri build --bundles appimage,deb ${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"} "${CONFIG_ARGS[@]}")
 
 OUT="$GEN_DIR/out/$VERSION"
 rm -rf "$OUT"; mkdir -p "$OUT"

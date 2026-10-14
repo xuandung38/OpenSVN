@@ -81,8 +81,10 @@ pub struct CheckoutPlan {
     /// Store pristine copies. Format 31 always stores them, so an engine that cannot create a
     /// pristine-less working copy refuses `false` instead of ignoring it.
     pub store_pristine: bool,
-    /// Skip externals. Only meaningful when [`EngineFacade::capabilities`] reports `externals`;
-    /// otherwise externals are never fetched, whatever this says (`svn --ignore-externals`).
+    /// Skip externals (`svn --ignore-externals`). Only meaningful when
+    /// [`EngineFacade::capabilities`] reports `externals`; otherwise externals are never fetched,
+    /// whatever this says. It applies to this checkout only: like svn, a later update or switch
+    /// fetches the externals.
     pub ignore_externals: bool,
 }
 

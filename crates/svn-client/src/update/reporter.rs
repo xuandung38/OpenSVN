@@ -113,6 +113,10 @@ impl Ctx<'_> {
                 Presence::BaseDeleted => continue,
                 Presence::Normal | Presence::Incomplete => {}
             }
+            // File externals are not part of this tree; their own fetch reports them.
+            if node.file_external {
+                continue;
+            }
             if node.kind != NodeKind::Dir {
                 // The mere presence of a file in a depth-empty directory is news to the server.
                 self.report_entry(

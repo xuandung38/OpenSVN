@@ -18,12 +18,41 @@ async fn open(ctx: &ClientCtx, path: &Path) -> Result<(Arc<svn_wc::db::WcDb>, sv
     Ok((Arc::new(db), rel))
 }
 
+/// A file external is updated through its definition, never on its own: a drive on it would
+/// turn it into an ordinary (switched) file.
+fn refuse_file_external(db: &svn_wc::db::WcDb, rel: &svn_types::RelPath) -> Result<()> {
+    if db.read_base(rel)?.is_some_and(|n| n.file_external) {
+        return Err(SvnError::new(
+            ErrorCode::WcInvalidOperation,
+            format!("'{rel}' is a file external; update the folder that defines it instead"),
+        ));
+    }
+    Ok(())
+}
+
+/// Processes the externals below `rel` after a drive (see [`crate::externals`]).
+async fn with_externals(
+    ctx: &ClientCtx,
+    db: &Arc<svn_wc::db::WcDb>,
+    rel: &svn_types::RelPath,
+    depth: Depth,
+    mut summary: UpdateSummary,
+    cancel: &CancelToken,
+) -> Result<UpdateSummary> {
+    let ext = crate::externals::process(ctx, db, rel, depth, cancel).await?;
+    summary.events.extend(ext.events);
+    summary.externals = ext.reports;
+    Ok(summary)
+}
+
 /// Updates the working copy item at `path` to `revision` (HEAD when `None`).
 ///
 /// `depth` works like `svn update --depth`: `Unknown` updates to the depths recorded in the
 /// working copy; a narrower depth limits the update (nodes outside it keep their revision, and
 /// children the server added there are recorded as `not-present`); it is never recorded and
 /// never widens the working copy. Changing the recorded depth (`--set-depth`) is not supported.
+/// Externals defined at or below `path` are processed afterwards when [`ClientCtx::externals`]
+/// is set.
 pub async fn update(
     ctx: &ClientCtx,
     session: &dyn RaSession,
@@ -33,11 +62,12 @@ pub async fn update(
     cancel: &CancelToken,
 ) -> Result<UpdateSummary> {
     let (db, rel) = open(ctx, path).await?;
-    drive_update(
+    refuse_file_external(&db, &rel)?;
+    let summary = drive_update(
         ctx,
         session,
-        db,
-        rel,
+        Arc::clone(&db),
+        rel.clone(),
         UpdateParams {
             revision,
             depth,
@@ -48,7 +78,8 @@ pub async fn update(
         },
         cancel,
     )
-    .await
+    .await?;
+    with_externals(ctx, &db, &rel, depth, summary, cancel).await
 }
 
 /// Re-points the working copy item at `path` to `url` (same repository) at `revision`.
@@ -62,11 +93,12 @@ pub async fn switch(
     cancel: &CancelToken,
 ) -> Result<UpdateSummary> {
     let (db, rel) = open(ctx, path).await?;
-    drive_update(
+    refuse_file_external(&db, &rel)?;
+    let summary = drive_update(
         ctx,
         session,
-        db,
-        rel,
+        Arc::clone(&db),
+        rel.clone(),
         UpdateParams {
             revision,
             depth,
@@ -77,5 +109,6 @@ pub async fn switch(
         },
         cancel,
     )
-    .await
+    .await?;
+    with_externals(ctx, &db, &rel, depth, summary, cancel).await
 }

@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node scripts/vitest.mjs",
     "tauri": "tauri",
-    "gen:ipc": "cargo run --locked --manifest-path src-tauri/Cargo.toml --bin gen_ipc -- src/ipc/bindings.ts",
+    "gen:ipc": "cargo run --locked --manifest-path src-tauri/Cargo.toml --features gen-ipc --bin gen_ipc -- src/ipc/bindings.ts",
     "dev:mock": "vite --mode mock",
     "lint:safety": "node scripts/lint-safety.mjs",
     "e2e": "sh e2e/run.sh",

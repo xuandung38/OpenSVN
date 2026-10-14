@@ -22,6 +22,9 @@
   Every native command is checked: a non-zero exit code aborts the script (Windows PowerShell 5.1
   does not do that by itself), and only installers produced by this run are collected.
 
+  Cargo features default to "release" (the real engine; Windows uses SSPI for Negotiate, so no
+  GSSAPI feature). Override with $env:OPENSVN_FEATURES; an empty string builds the fake engine only.
+
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\release\build-windows.ps1
 #>
@@ -78,6 +81,10 @@ if ($env:WINDOWS_SIGN_COMMAND) {
 } else {
   Write-Host "==> no WINDOWS_SIGN_COMMAND: building UNSIGNED"
 }
+$Features = if ($null -ne $env:OPENSVN_FEATURES) { $env:OPENSVN_FEATURES } else { "release" }
+$FeatureArgs = @()
+if ($Features) { $FeatureArgs = @("--features", $Features) }
+Write-Host "==> cargo features: $(if ($Features) { $Features } else { '<none, fake engine only>' })"
 if ($env:OPENSVN_UPDATER -eq "1") {
   Invoke-Checked "write-updater-config" { node (Join-Path $Root "scripts\release\write-updater-config.mjs") }
   $Config += @("--config", (Join-Path $Gen "tauri.updater.conf.json"))
@@ -88,7 +95,7 @@ try {
   try { Invoke-Checked "pnpm install" { pnpm install --frozen-lockfile } } finally { Pop-Location }
   $Started = Get-Date
   Push-Location $App
-  try { Invoke-Checked "tauri build" { pnpm tauri build --bundles msi @Config } } finally { Pop-Location }
+  try { Invoke-Checked "tauri build" { pnpm tauri build --bundles msi @FeatureArgs @Config } } finally { Pop-Location }
 } finally {
   # The sign command file is transient: never leave it behind.
   Remove-Item -Force -ErrorAction SilentlyContinue $SignPath

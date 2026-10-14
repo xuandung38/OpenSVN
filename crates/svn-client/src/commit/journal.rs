@@ -29,7 +29,7 @@
 //! (written by earlier builds, or renamed by hand) may belong to any working copy and are treated
 //! conservatively as such ([`JournalStore::may_belong_to`]).
 
-use std::fs::{self, File};
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -499,7 +499,7 @@ pub fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Makes a rename durable where the platform allows it (no-op elsewhere).
 fn sync_dir(dir: &Path) {
     #[cfg(unix)]
-    if let Ok(f) = File::open(dir) {
+    if let Ok(f) = fs::File::open(dir) {
         let _ = f.sync_all();
     }
     #[cfg(not(unix))]
