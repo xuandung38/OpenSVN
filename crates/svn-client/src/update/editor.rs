@@ -311,10 +311,18 @@ impl UpdateEditor {
                 shadow = Some(cur.op_depth);
             }
         }
-        let depth = base
+        let mut depth = base
             .depth
             .filter(|d| *d != Depth::Unknown)
             .unwrap_or(Depth::Infinity);
+        // `--set-depth`: upgrading to infinity changes the depth of every directory, upgrading
+        // to something else only that of the target (svn's `close_directory`).
+        if self.s.sticky_depth && in_target && !skipped {
+            let req = concrete(self.s.depth);
+            if req == Depth::Infinity || (wc == self.target_wc && rank(req) > rank(depth)) {
+                depth = req;
+            }
+        }
         // What the drive may touch below: the requested depth at the target, one level less
         // below an `immediates` parent, and never more than the depth already recorded.
         let requested = if wc == self.target_wc {
