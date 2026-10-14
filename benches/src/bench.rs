@@ -205,6 +205,9 @@ impl Bench<'_> {
     }
 }
 
+/// Seed of the generated repository (the same data on every run).
+const SEED: u64 = 0x05EE_D0F0_BE5A;
+
 fn text_file(rng: &mut Rng, i: usize) -> Vec<u8> {
     let lines = 20 + rng.below(60) as usize;
     let mut s = String::with_capacity(lines * 40);
@@ -231,7 +234,7 @@ fn write(path: &Path, bytes: &[u8]) -> Result<()> {
 /// Builds repository `big`: r1 = the files and binaries, r2 = `update_files` text files and the
 /// first binary changed. Returns the total bytes of r1.
 fn generate(a: &Args, svn: &Svn, apache: &Apache, scratch: &Path) -> Result<u64> {
-    let mut rng = Rng::new(0x5EED_0F_0BE5);
+    let mut rng = Rng::new(SEED);
     let repo = apache.repos_dir().join("big");
     svn.create_repo(&repo)?;
     let file_url = format!("file://{}", repo.display());
@@ -269,7 +272,7 @@ fn generate(a: &Args, svn: &Svn, apache: &Apache, scratch: &Path) -> Result<u64>
     let mut changed = 0;
     for i in (0..a.files).step_by(step).take(a.update_files) {
         let local = r2.join(format!("{i}.txt"));
-        let mut t = text_file(&mut Rng::new(0x5EED_0F_0BE5 ^ i as u64), i);
+        let mut t = text_file(&mut Rng::new(SEED ^ i as u64), i);
         t.extend_from_slice(format!("changed in r2: {}\n", rng.next_u64()).as_bytes());
         write(&local, &t)?;
         actions.push_str(&format!("put\n{}\n{}\n", local.display(), file_path(i)));
