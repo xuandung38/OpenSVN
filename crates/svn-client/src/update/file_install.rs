@@ -165,7 +165,10 @@ impl UpdateEditor {
         let flags_changed = ["svn:executable", "svn:needs-lock"]
             .iter()
             .any(|n| prop_changed(&old_pristine, &pm.new_pristine, n));
-        let disk_exists = fs::symlink_metadata(crate::wc::abs_path(&db, &wc)?).is_ok();
+        // A shadowed node's disk is not looked at: it may lie below a file (an incoming
+        // replacement of a file by a directory that the local file shadows).
+        let disk_exists =
+            !keep_working_tree && fs::symlink_metadata(crate::wc::abs_path(&db, &wc)?).is_ok();
 
         if keep_working_tree {
             action = UpdateAction::TreeConflicted;
@@ -347,7 +350,7 @@ impl UpdateEditor {
                 t.mark_file_external(&wc)?;
                 t.external_add(&wc, ext)?;
             }
-            if let Some(op_depth) = f.shadow {
+            if let Some(op_depth) = f.shadow.filter(|d| *d > 0) {
                 t.mark_base_deleted_at(&wc, NodeKind::File, op_depth)?;
             } else if obstructed {
                 t.mark_base_deleted(&wc, NodeKind::File)?;
