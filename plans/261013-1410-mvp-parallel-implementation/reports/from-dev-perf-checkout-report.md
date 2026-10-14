@@ -223,3 +223,41 @@ head (ad6b57f), this head and svn, medians:
 Harness run (`--reps 5`): checkout 8.51 s (svn) vs 8.33 s (0.98), update 1.81 s vs 1.56 s (0.86).
 No regression from the fixes is visible above the noise. Under this load the margin over svn
 is not established, unlike the quieter measurements above.
+
+## Review round 2 (PR #142 comment 6166646583)
+
+Head `d520c02` (fix `a3e0dee`, test `d520c02`, origin/main `d3eac31` merged in `893a8cf`).
+
+- **Cancel during a barrier wait.** `await_barrier` waits in 50 ms slices and checks the
+  cancellation token between them. Once it trips, the wait stops 500 ms later (`CANCEL_GRACE`)
+  and the drive commits nothing more: nothing that relies on the unfinished barrier commits,
+  and the barrier finishes on its own thread. This covers the mid-drive wait of
+  `commit_staged` and the end-of-drive drain alike.
+- Test `update_barrier_failpoints`: with a 4 s barrier, a cancellation 300 ms into the first
+  wait returns in < 1 s, both at the end of a 3-file drive and in the middle of a 2300-file
+  drive (first flush). Rows stay at the old revision; the next update finishes. Without the
+  fix: 3.7 s and 4.1 s.
+
+### Gates on 893a8cf (svn-client failpoints and DAV re-run on d520c02)
+
+| gate | result |
+|---|---|
+| fmt; clippy workspace / app real-engine / failpoints | clean, 0 warnings |
+| workspace tests, svn 1.15.0 oracle | 1431 passed, 0 failed, 22 ignored |
+| svn-wc failpoints / svn-client failpoints | 254 / 219 passed, 0 failed |
+| app real-engine / app failpoints | 487 / 493 passed, 0 failed |
+| DAV suite (HTTPS, Basic, authz) | 20 passed, 0 failed (first attempt: the standing Apache had died, connection refused; restarted) |
+| crash suite, seed 20261014 | SIGKILL 0 failed; failpoints 0 failed |
+| crash suite, seed 777123 | failpoints 0 failed; SIGKILL 1 failed (commit) |
+
+The seed 777123 failure is again the commit recovery race (code this PR does not touch): the
+kill landed while the server finished the commit, and recovery's request on the transaction got
+a 500 ("Reference to non-existent node '0.0.t2-2'", the transaction being purged). The journal
+stays unsettled for a later retry; no working copy damage. A follow-up was suggested to settle
+such journals through the log search instead of failing on a 5xx.
+
+### Benchmark on d520c02 (`--reps 3`)
+
+I/O pressure on the VM between 7 % and 27 % during the run. Checkout 8.74 s (svn) vs 8.11 s
+(0.93), update 1.64 s vs 1.77 s (1.08; best runs 1.60 s vs 1.27 s). The noise is larger than the
+differences.
