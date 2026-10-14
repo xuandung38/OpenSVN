@@ -108,15 +108,18 @@ async fn begin(
 ///
 /// A journaled name does not say whether the transaction was plain or virtual, so both are
 /// tried (virtual only when the server announces virtual transactions). Any 2xx answer is
-/// [`TxnAbort::Deleted`]; [`TxnAbort::Gone`] needs a 404 for at least one kind and no 2xx. An
-/// answer that says neither (only 400s, or another error) is an error: the caller must not
-/// guess.
+/// [`TxnAbort::Deleted`]. A 5xx or a transport failure (`Network`, `Timeout`) for either kind,
+/// without a 2xx, is [`TxnAbort::Unknown`]: the transaction may still exist, so a 404 for the
+/// other kind does not make it [`TxnAbort::Gone`]. `Gone` needs a 404 for at least one kind and
+/// no 2xx or 5xx. An answer that says neither (only 400s, or another error such as 401, 403 or
+/// a cancellation) is an error: the caller must not guess.
 pub async fn abort_txn_checked(
     wire: &RaWire,
     txn_name: &str,
     cancel: &CancelToken,
 ) -> Result<TxnAbort> {
     let mut not_found = false;
+    let mut unknown: Option<String> = None;
     let mut kinds = vec![TxnName::plain(txn_name)];
     if wire.caps().vtxn_stub.is_some() {
         kinds.push(TxnName::virtual_txn(txn_name));
@@ -126,12 +129,20 @@ pub async fn abort_txn_checked(
             Ok(DeleteAnswer::Deleted) => return Ok(TxnAbort::Deleted),
             Ok(DeleteAnswer::NotFound) => not_found = true,
             Ok(DeleteAnswer::WrongKind) => {}
+            Ok(DeleteAnswer::ServerError(why)) => {
+                unknown.get_or_insert(why);
+            }
             // No plain stub announced: only virtual transactions exist on this server.
             Err(e) if e.code == ErrorCode::ServerUnsupported && !txn.virtual_ => {}
+            Err(e) if matches!(e.code, ErrorCode::Network | ErrorCode::Timeout) => {
+                unknown.get_or_insert(e.message);
+            }
             Err(e) => return Err(e),
         }
     }
-    if not_found {
+    if let Some(why) = unknown {
+        Ok(TxnAbort::Unknown(why))
+    } else if not_found {
         Ok(TxnAbort::Gone)
     } else {
         Err(SvnError::new(

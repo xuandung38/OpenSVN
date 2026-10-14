@@ -156,7 +156,7 @@ pub(super) async fn cleanup_txn(wire: &RaWire, txn: &TxnName) -> Result<()> {
 }
 
 /// How the server answered a `DELETE` of a transaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum DeleteAnswer {
     /// 2xx: the transaction existed and is deleted.
     Deleted,
@@ -164,6 +164,9 @@ pub(super) enum DeleteAnswer {
     NotFound,
     /// 400: the name is not a transaction of the requested kind (plain or virtual).
     WrongKind,
+    /// 5xx: the server failed while answering (the transaction may or may not still exist);
+    /// the server's error message.
+    ServerError(String),
 }
 
 /// Sends a `DELETE` of `txn` and classifies the answer; any other status is an error.
@@ -180,6 +183,9 @@ pub(super) async fn delete_txn_answer(
     match resp.status().as_u16() {
         404 => Ok(DeleteAnswer::NotFound),
         400 => Ok(DeleteAnswer::WrongKind),
+        500..=599 => Ok(DeleteAnswer::ServerError(
+            crate::ops::update::error_of(resp, cancel).await.message,
+        )),
         _ => Err(crate::ops::update::error_of(resp, cancel).await),
     }
 }
