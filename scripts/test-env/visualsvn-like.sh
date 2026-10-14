@@ -275,7 +275,6 @@ LoadModule authz_svn_module     $moddir/mod_authz_svn.so
 LoadModule socache_shmcb_module $m/mod_socache_shmcb.so
 LoadModule ssl_module           $m/mod_ssl.so
 LoadModule setenvif_module      $m/mod_setenvif.so
-LoadModule logio_module         $m/mod_logio.so
 ErrorLog $VSVN_DIR/logs/error-$tag.log
 LogLevel warn auth_gssapi:debug
 # %I / %O: bytes received / sent (request and response, headers included).

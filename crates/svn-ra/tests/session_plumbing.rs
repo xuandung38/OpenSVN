@@ -390,14 +390,15 @@ async fn opening_the_repository_list_of_a_parent_path_names_the_repositories() {
         .mount(&srv)
         .await;
     let url = RepoUrl::parse(&format!("{}/svn", srv.uri())).unwrap();
-    let err = HttpRaSession::open(
+    let Err(err) = HttpRaSession::open(
         transport(Arc::new(FixedPrompter::default())),
         url,
         &CancelToken::new(),
     )
     .await
-    .err()
-    .expect("a repository list is not a repository");
+    else {
+        panic!("a repository list is not a repository");
+    };
     assert_eq!(err.code, ErrorCode::PathNotFound, "{err:?}");
     assert!(
         err.message.contains("list of repositories")
@@ -419,14 +420,15 @@ async fn a_plain_server_error_on_open_stays_a_server_error() {
         .mount(&srv)
         .await;
     let url = RepoUrl::parse(&format!("{}/svn/repo", srv.uri())).unwrap();
-    let err = HttpRaSession::open(
+    let Err(err) = HttpRaSession::open(
         transport(Arc::new(FixedPrompter::default())),
         url,
         &CancelToken::new(),
     )
     .await
-    .err()
-    .expect("server error");
+    else {
+        panic!("server error");
+    };
     assert_ne!(err.code, ErrorCode::PathNotFound, "{err:?}");
     assert!(err.message.contains("HTTP 500"), "{err:?}");
 }
