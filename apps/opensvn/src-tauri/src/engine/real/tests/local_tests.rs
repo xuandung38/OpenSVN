@@ -1365,15 +1365,17 @@ mod case_insensitive {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn request_paths_resolve_to_the_versioned_spelling() {
+    async fn request_paths_resolve_to_the_versioned_spelling_when_nothing_else_is_meant() {
         let e = env();
         let wc = e.checkout("ci-resolve").await;
         let db = open(&e, &wc);
+        // Missing versioned items (nothing on disk under either spelling): the wc.db spelling.
+        std::fs::remove_file(wc.root.join("README.md")).unwrap();
+        std::fs::remove_file(wc.root.join("src/main.rs")).unwrap();
         for (asked, versioned) in [
             ("README.MD", "README.md"),
             ("readme.md", "README.md"),
-            ("SRC/Main.RS", "src/main.rs"),
-            ("Src", "src"),
+            ("src/Main.RS", "src/main.rs"),
         ] {
             let (got, abs) = target_with(&db, asked, true).unwrap();
             assert_eq!(got.as_str(), versioned, "{asked}");
@@ -1385,6 +1387,79 @@ mod case_insensitive {
         for asked in ["new.txt", "SRC/new.txt"] {
             assert_eq!(target_with(&db, asked, true).unwrap().0.as_str(), asked);
         }
+    }
+
+    /// Linux plays a case-sensitive volume (case-sensitive APFS, a case-sensitive folder on
+    /// Windows): `README.MD` next to `README.md` is a different file and is never redirected.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_differently_spelled_name_that_is_its_own_item_is_never_redirected() {
+        let e = env();
+        let wc = e.checkout("ci-distinct").await;
+        let db = open(&e, &wc);
+        write(&wc.root, "README.md", "my edits\n");
+        // Only the versioned spelling exists: on this volume the request names nothing.
+        let err = target_with(&db, "README.MD", true).unwrap_err();
+        assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{err}");
+        let err = target_with(&db, "SRC/main.rs", true).unwrap_err();
+        assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{err}");
+        // Two different files.
+        write(&wc.root, "README.MD", "another file\n");
+        let err = target_with(&db, "README.MD", true).unwrap_err();
+        assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{err}");
+        assert!(err.message.contains("'README.md'"), "{err}");
+        // A separate file next to a missing versioned one: taken as spelled.
+        std::fs::remove_file(wc.root.join("README.md")).unwrap();
+        assert_eq!(
+            target_with(&db, "README.MD", true).unwrap().0.as_str(),
+            "README.MD"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revert_and_cleanup_never_touch_the_versioned_file_through_another_spelling() {
+        let mut e = env();
+        e.f.engine = e.f.engine.with_case_insensitive_fs(true);
+        let wc = e.checkout("ci-revert").await;
+        write(&wc.root, "README.md", "my edits\n");
+        write(&wc.root, "README.MD", "another file\n");
+        write(&wc.root, "scratch.txt", "junk\n");
+
+        let err = e
+            .engine()
+            .revert(&wc, &revert_req(&wc, &["README.MD"], Some(true)), &ctx())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{err}");
+        let read = |rel: &str| std::fs::read_to_string(wc.root.join(rel)).unwrap();
+        assert_eq!(read("README.md"), "my edits\n", "edits kept");
+        assert_eq!(read("README.MD"), "another file\n");
+
+        // Removing unversioned items keeps the name that matches a versioned file up to case.
+        e.engine()
+            .cleanup(
+                &wc,
+                &CleanupRequest {
+                    wc_id: wc.id.clone(),
+                    remove_unversioned: Some(true),
+                    remove_ignored: Some(false),
+                    vacuum_pristines: Some(false),
+                },
+                &ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(!wc.root.join("scratch.txt").exists());
+        assert_eq!(read("README.MD"), "another file\n");
+        assert_eq!(read("README.md"), "my edits\n");
+
+        // A missing versioned file asked for in another case is restored.
+        std::fs::remove_file(wc.root.join("README.MD")).unwrap();
+        std::fs::remove_file(wc.root.join("README.md")).unwrap();
+        e.engine()
+            .revert(&wc, &revert_req(&wc, &["readme.md"], Some(false)), &ctx())
+            .await
+            .unwrap();
+        assert_eq!(read("README.md"), "hello\n");
     }
 
     #[tokio::test(flavor = "multi_thread")]
