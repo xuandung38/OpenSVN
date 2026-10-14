@@ -76,6 +76,8 @@ struct Pending {
 /// * Permanently trusted certificates are served to the transport by [`AppDbTrustStore`].
 /// * A password typed at the prompt with "save" is persisted only once the server accepted it
 ///   ([`AuthPrompter::credentials_accepted`]), so a mistyped password never lands in the store.
+///   An answer typed before a sign-out of its realm is not saved, even if its response arrives
+///   after the sign-out.
 /// * A saved password the server rejected (401, reported through
 ///   [`AuthPrompter::stored_credentials_rejected`]) is marked stale in `app.sqlite` and not
 ///   offered again, in this process or after a restart, until the user saves a password for
@@ -98,6 +100,12 @@ pub struct AuthBroker {
     awaiting: Mutex<HashSet<OriginKey>>,
     /// Origins whose last typed answer the server rejected; the next prompt says so.
     typed_rejected: Mutex<HashSet<OriginKey>>,
+    /// Sign-outs per realm. A typed answer records the count when it is typed and is saved only
+    /// if no sign-out of its realm happened since (a request still in flight at sign-out must
+    /// not save the password back).
+    sign_outs: Mutex<HashMap<String, u64>>,
+    /// `sign_outs` count of the realm when the last answer for each origin was typed.
+    typed_at: Mutex<HashMap<OriginKey, u64>>,
     /// Bumped whenever cached sessions must be dropped (sign-out, certificate removed).
     invalidations: watch::Sender<u64>,
 }
@@ -171,6 +179,8 @@ impl AuthBroker {
             offered: Mutex::default(),
             awaiting: Mutex::default(),
             typed_rejected: Mutex::default(),
+            sign_outs: Mutex::default(),
+            typed_at: Mutex::default(),
             invalidations: watch::Sender::new(0),
         }
     }
@@ -194,6 +204,15 @@ impl AuthBroker {
 
     fn invalidate(&self) {
         self.invalidations.send_modify(|n| *n += 1);
+    }
+
+    fn sign_out_count(&self, realm: &str) -> u64 {
+        locked(&self.sign_outs).get(realm).copied().unwrap_or(0)
+    }
+
+    /// Whether the answer typed for `origin` was typed after the last sign-out of its realm.
+    fn typed_since_sign_out(&self, origin: &OriginKey) -> bool {
+        locked(&self.typed_at).get(origin).copied() == Some(self.sign_out_count(&origin.realm))
     }
 
     /// Records that the server rejected the saved password of `origin`: it is not offered again
@@ -313,6 +332,8 @@ impl AuthBroker {
     /// row pointing to it) and is marked stale so the secret is not offered any more. The
     /// failures are reported together at the end.
     pub fn sign_out(&self, realm: &str) -> Result<(), AppError> {
+        // First, so an answer typed before now cannot be saved by a request still in flight.
+        *locked(&self.sign_outs).entry(realm.to_owned()).or_default() += 1;
         let accounts = self.db.accounts_of_realm(realm)?;
         let mut failures = Vec::new();
         for account in accounts {
@@ -470,6 +491,8 @@ impl AuthPrompter for AuthBroker {
         // Nothing is saved yet: the server has not seen the password. `credentials_accepted`
         // saves it once a response accepted it; a rejected one is never stored.
         locked(&self.awaiting).insert(req.origin.clone());
+        let signed_out = self.sign_out_count(&req.origin.realm);
+        locked(&self.typed_at).insert(req.origin.clone(), signed_out);
         Some(Credentials {
             username,
             password,
@@ -484,6 +507,10 @@ impl AuthPrompter for AuthBroker {
         if !creds.save || creds.method != AuthMethod::Basic || creds.username.is_empty() {
             return;
         }
+        if !self.typed_since_sign_out(origin) {
+            tracing::info!(host = %origin.host, "signed out since the password was typed; not saving it");
+            return;
+        }
         let previous = self.account(origin).and_then(|a| a.username);
         // Secret first: the row (which clears the stale flag) is written only once the store
         // holds the accepted password, so a failed save cannot re-arm an old, rejected one.
@@ -491,6 +518,22 @@ impl AuthPrompter for AuthBroker {
             .save_secret(origin, &creds.username, &creds.password)
             .await
         {
+            return;
+        }
+        if !self.typed_since_sign_out(origin) {
+            // Signed out while the secret was being written: take it back out.
+            let (store, o, u) = (
+                Arc::clone(&self.secrets),
+                origin.clone(),
+                creds.username.clone(),
+            );
+            match tokio::task::spawn_blocking(move || store.delete(&o, &u)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "could not delete a password saved during sign-out")
+                }
+                Err(e) => tracing::warn!(error = %e, "credential store worker failed"),
+            }
             return;
         }
         let recorded = self.db.account_upsert(&AccountRecord {
@@ -558,6 +601,9 @@ impl AuthPrompter for AuthBroker {
     }
 
     async fn stored_credentials_rejected(&self, req: &CredentialRequest) {
+        // The password the server just rejected is the saved one, not an earlier typed answer
+        // still waiting for a response: the next prompt must not say "entered last time".
+        locked(&self.awaiting).remove(&req.origin);
         // In memory first, then one small `UPDATE` on the local database: prompt enough for a
         // call the transport does not race against cancellation.
         self.withhold_stored(&req.origin);

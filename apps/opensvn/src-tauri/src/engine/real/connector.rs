@@ -14,10 +14,14 @@
 //!   announced as `/svn/Repo`). Below such a root, URLs match with the ASCII-only case folding
 //!   `svn-protocol` uses for the same server behaviour. Folding is learned per repository, never
 //!   assumed: on a case-sensitive server `/svn/Repo` and `/svn/repo` are different repositories.
-//! * **Opens never queue behind a prompt for another repository.** Opens are serialized per
-//!   requested URL, not per server, so a sign-in prompt that waits for the user (up to minutes)
-//!   does not hold up work on other repositories of the same server; unattended requests that
-//!   would have to wait for that prompt fail with `auth-required` instead (see the transport).
+//! * **Unattended opens never queue behind a prompt.** Opens are serialized per requested URL,
+//!   not per server, so a sign-in prompt that waits for the user (up to minutes) does not hold
+//!   the connector's open gate for other repositories of the same server. Unattended requests
+//!   that would have to wait for that prompt fail with `auth-required` instead. Interactive
+//!   requests to the same origin and realm do wait for it, by design: the transport shows one
+//!   prompt per origin and every waiting request reuses its answer (see the transport). If the
+//!   prompt is cancelled or times out, only those waiting requests fail; the next interactive
+//!   one asks again.
 //! * **Background work never prompts.** With `ConnectOptions::interactive == false` the session
 //!   is [`HttpRaSession::unattended`]: saved credentials and accepted certificates are used, a
 //!   request that would need the user fails with `auth-required` instead.
