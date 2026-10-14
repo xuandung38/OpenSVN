@@ -1343,3 +1343,105 @@ mod oracle {
         }
     }
 }
+
+/// Case-insensitive file systems (macOS, Windows), simulated on any platform: a request path
+/// spelled with another case than `wc.db` acts on the versioned node, several matches are
+/// refused, and an unversioned-looking alias of a versioned file is never removed.
+mod case_insensitive {
+    use super::*;
+    use crate::engine::real::SvnConfigSource;
+    use crate::engine::real::local_util::{
+        drop_case_aliases, local_env, resolve_case, target_with, unversioned_items_as_spelled,
+    };
+
+    fn open(e: &Env, wc: &WcRef) -> svn_wc::WcDb {
+        svn_client::wc::open_containing(&e.f.engine.lock_owner(), &wc.root)
+            .unwrap()
+            .0
+    }
+
+    fn rel(p: &str) -> RelPath {
+        RelPath::new(p).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn request_paths_resolve_to_the_versioned_spelling() {
+        let e = env();
+        let wc = e.checkout("ci-resolve").await;
+        let db = open(&e, &wc);
+        for (asked, versioned) in [
+            ("README.MD", "README.md"),
+            ("readme.md", "README.md"),
+            ("SRC/Main.RS", "src/main.rs"),
+            ("Src", "src"),
+        ] {
+            let (got, abs) = target_with(&db, asked, true).unwrap();
+            assert_eq!(got.as_str(), versioned, "{asked}");
+            assert_eq!(abs, db.wcroot().join(versioned));
+            // Exact matching (case-sensitive file systems) keeps the spelling.
+            assert_eq!(target_with(&db, asked, false).unwrap().0.as_str(), asked);
+        }
+        // Unversioned paths stay as they are.
+        for asked in ["new.txt", "SRC/new.txt"] {
+            assert_eq!(target_with(&db, asked, true).unwrap().0.as_str(), asked);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn names_that_differ_only_in_case_are_ambiguous() {
+        let repo = FakeRaSession::new(URL, UUID).unwrap();
+        repo.seed(
+            "alice",
+            "case clash",
+            &[put("a.txt", "lower\n"), put("A.txt", "upper\n")],
+        )
+        .unwrap();
+        let connector = Arc::new(StaticConnector(vec![repo.clone()]));
+        let e = Env {
+            f: fixture_on(repo, connector, Arc::new(ClientRecovery)),
+            tmp: tempfile::tempdir().unwrap(),
+        };
+        let wc = e.checkout("ci-clash").await;
+        let db = open(&e, &wc);
+        // Each exact spelling is unambiguous.
+        assert_eq!(
+            resolve_case(&db, &rel("a.txt"), true).unwrap().as_str(),
+            "a.txt"
+        );
+        assert_eq!(
+            resolve_case(&db, &rel("A.txt"), true).unwrap().as_str(),
+            "A.txt"
+        );
+        let err = resolve_case(&db, &rel("a.TXT"), true).unwrap_err();
+        assert_eq!(err.code, ErrorCode::WcInvalidOperation);
+        assert!(
+            err.message.contains("'A.txt'") && err.message.contains("'a.txt'"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_alias_of_a_versioned_file_is_never_removed_as_unversioned() {
+        let e = env();
+        let wc = e.checkout("ci-alias").await;
+        let db = open(&e, &wc);
+        let env = local_env(&SvnConfigSource::default(), &db, CancelToken::new()).unwrap();
+        // On a case-insensitive file system this is the versioned README.md renamed outside svn;
+        // here it is a separate file standing in for it.
+        write(&wc.root, "Readme.MD", "my edits\n");
+        write(&wc.root, "src/Main.rs", "my edits\n");
+        write(&wc.root, "scratch.txt", "junk\n");
+        let mut items =
+            unversioned_items_as_spelled(&db, &env, &RelPath::root(), true, false).unwrap();
+        items.sort();
+        let spelled: Vec<&str> = items.iter().map(RelPath::as_str).collect();
+        assert_eq!(spelled, vec!["Readme.MD", "scratch.txt", "src/Main.rs"]);
+        drop_case_aliases(&db, &mut items).unwrap();
+        let kept: Vec<&str> = items.iter().map(RelPath::as_str).collect();
+        assert_eq!(
+            kept,
+            vec!["scratch.txt"],
+            "only the true unversioned item is removable"
+        );
+    }
+}
