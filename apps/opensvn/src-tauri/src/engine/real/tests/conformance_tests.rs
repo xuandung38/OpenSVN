@@ -89,3 +89,4 @@ scenario!(locked_unmodified_file_in_status);
 scenario!(commit_with_auto_add_remove);
 scenario!(update_ends_in_conflict);
 scenario!(mark_move_and_set_depth);
+scenario!(update_of_sub_paths);
