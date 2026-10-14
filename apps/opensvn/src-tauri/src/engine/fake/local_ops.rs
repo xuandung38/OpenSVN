@@ -45,7 +45,7 @@ impl FakeEngine {
         req: &IgnoreAddRequest,
     ) -> Result<(), SvnError> {
         let pattern = req.pattern.trim();
-        if pattern.is_empty() || pattern.contains('/') || pattern.contains('\0') {
+        if pattern.is_empty() || pattern.contains(['/', '\0', '\n', '\r']) {
             return Err(bad_arg("invalid ignore pattern"));
         }
         let dir = rel(&req.dir)?;

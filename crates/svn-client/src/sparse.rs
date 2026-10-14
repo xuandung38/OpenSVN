@@ -131,28 +131,6 @@ fn crop_children(
     Ok(())
 }
 
-/// Like svn after a crop (`svn_client__handle_externals` runs for the cropped target), forgets
-/// the externals defined at or below `rel` whose defining directory left the working copy or is
-/// no longer at depth `infinity`: svn processes externals only in fully present directories.
-/// svn also deletes the external's unmodified files; here everything on disk stays and becomes
-/// unversioned, so nothing the user may still want is removed.
-fn forget_cropped_externals(db: &WcDb, rel: &RelPath) -> Result<()> {
-    let mut gone = Vec::new();
-    for ext in db.externals_defined_at_or_below(rel)? {
-        let definer = db.read_base(&ext.def_local_relpath)?;
-        let kept = definer.is_some_and(|d| {
-            d.presence.is_present() && d.depth.unwrap_or(Depth::Infinity) == Depth::Infinity
-        });
-        if !kept {
-            gone.push(ext.local_relpath);
-        }
-    }
-    if gone.is_empty() {
-        return Ok(());
-    }
-    db.forget_externals(&gone)
-}
-
 /// Runs `f` under the working copy lock, then the work it queued, also when `f` fails or is
 /// cancelled half-way: the removals already recorded in wc.db must not wait for a later
 /// operation, by which time the user may have put new content at those paths.
@@ -228,7 +206,6 @@ pub fn crop(
         let mut removed = Vec::new();
         let depth_now = base.depth.unwrap_or(Depth::Infinity);
         crop_children(db, cancel, rel, depth_now, depth, &mut removed)?;
-        forget_cropped_externals(db, rel)?;
         Ok(removed)
     })
 }
@@ -271,7 +248,6 @@ pub fn exclude(db: &WcDb, cancel: &CancelToken, rel: &RelPath) -> Result<Vec<(Re
             let depth = base.depth.unwrap_or(Depth::Infinity);
             crop_children(db, cancel, rel, depth, Depth::Empty, &mut removed)?;
         }
-        forget_cropped_externals(db, rel)?;
         Ok(removed)
     })
 }
@@ -282,6 +258,8 @@ pub fn exclude(db: &WcDb, cancel: &CancelToken, rel: &RelPath) -> Result<Vec<(Re
 /// A narrower depth crops first (see the module documentation; locally modified items are kept
 /// and reported by nothing being removed for them), a wider one fetches what is missing. `exclude`
 /// removes the directory itself and records it as excluded, without contacting the server.
+/// Externals whose definition the crop leaves outside depth infinity are removed as after an
+/// update (local changes stay) when [`ClientCtx::externals`] is set.
 /// Only directories can change depth; a file can only be excluded. Anchor `session` at the
 /// directory itself (the HTTP layer expects the report to start with the update target).
 pub async fn set_depth(
@@ -345,10 +323,14 @@ pub async fn set_depth(
     for e in &events {
         ctx.notify(e);
     }
+    // Like svn after a crop, the externals whose definition left the working copy or no longer
+    // sits at depth infinity are removed (local changes stay).
+    let externals = crate::externals::remove_cropped(ctx, &db, &rel, cancel).await?;
     if depth == Depth::Exclude {
         return Ok(UpdateSummary {
             revision: None,
             events,
+            externals,
         });
     }
     let mut summary = drive_update(
@@ -370,5 +352,6 @@ pub async fn set_depth(
     let mut all = events;
     all.append(&mut summary.events);
     summary.events = all;
+    summary.externals.splice(0..0, externals);
     Ok(summary)
 }

@@ -265,13 +265,21 @@ impl WcRegistry {
     /// folder that is neither in the list nor usable for a new checkout. Only a working copy whose
     /// root is exactly `root` (its administrative folder is directly inside) is registered, never
     /// an enclosing one. Returns `None` when there is nothing to register.
+    ///
+    /// The folder reads run on the blocking pool, never on the async thread (the folder may be
+    /// large or on a slow network share).
     pub async fn add_unfinished(&self, root: &Path) -> Option<WorkingCopy> {
-        let has_admin_dir = std::fs::read_dir(root).is_ok_and(|entries| {
-            entries.flatten().any(|e| {
-                e.file_type().is_ok_and(|t| t.is_dir())
-                    && svn_types::is_any_admin_dir_name(&e.file_name().to_string_lossy())
+        let dir = root.to_path_buf();
+        let has_admin_dir = tokio::task::spawn_blocking(move || {
+            std::fs::read_dir(&dir).is_ok_and(|entries| {
+                entries.flatten().any(|e| {
+                    e.file_type().is_ok_and(|t| t.is_dir())
+                        && svn_types::is_any_admin_dir_name(&e.file_name().to_string_lossy())
+                })
             })
-        });
+        })
+        .await
+        .unwrap_or(false);
         if !has_admin_dir {
             return None;
         }
@@ -280,8 +288,14 @@ impl WcRegistry {
             .wc_info(root, &OpContext::detached())
             .await
             .ok()?;
-        let canonical = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        if canonical(Path::new(&info.root_path)) != canonical(root) {
+        let (found, asked) = (PathBuf::from(&info.root_path), root.to_path_buf());
+        let same_root = tokio::task::spawn_blocking(move || {
+            let canonical = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+            canonical(&found) == canonical(&asked)
+        })
+        .await
+        .unwrap_or(false);
+        if !same_root {
             return None;
         }
         match self.add_existing(&info.root_path).await {

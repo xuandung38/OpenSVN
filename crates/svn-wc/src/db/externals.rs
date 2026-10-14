@@ -1,15 +1,17 @@
 //! Read side of the `EXTERNALS` table: file/directory externals recorded for a working copy.
 //!
 //! The definitions themselves live in `svn:externals` properties; this table records the external
-//! working-copy nodes that exist because of them. Writing externals is outside the MVP, except
-//! for forgetting them ([`WcDb::forget_externals`]) when their definition leaves the working copy.
+//! working-copy nodes that exist because of them. [`WcDb::externals_definitions_under`] reads the
+//! definitions the way svn gathers them before it processes externals; the writers on
+//! [`WcTxn`] record, mark and drop externals inside the caller's transaction.
 
 use rusqlite::{Row, params};
-use svn_types::{NodeKind, RelPath, Result};
+use svn_types::{Depth, ErrorCode, NodeKind, RelPath, Result, SvnError};
 
-use super::WcDb;
-use super::nodes::{Presence, corrupt, rel};
-use super::sql_err;
+use super::nodes::{Presence, corrupt, decode_props, kind_word, parent_text, rel};
+use super::ops::ensure_repository;
+use super::txn::WcTxn;
+use super::{WcDb, sql_err};
 
 /// One `EXTERNALS` row joined with its repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,64 +103,49 @@ impl WcDb {
         )
     }
 
-    /// Externals whose defining directory is `path` or lies below it, sorted by path.
-    pub fn externals_defined_at_or_below(&self, path: &RelPath) -> Result<Vec<External>> {
-        self.externals_where(
-            &format!(
-                "(e.def_local_relpath = ?2 OR {})",
-                super::nodes::strict_descendant("e.def_local_relpath", "?2")
-            ),
-            path,
-        )
-    }
-
-    /// Forgets the externals at `paths`: their `EXTERNALS` rows and, for a file external, its
-    /// BASE row and actual properties. Nothing on disk is touched, so what an external left
-    /// there becomes unversioned, as after svn removes an external whose definition is gone.
-    /// A file external with local operations on it (rows above BASE) is left as it is.
-    pub fn forget_externals(&self, paths: &[RelPath]) -> Result<()> {
-        self.with_write(|c| {
-            for p in paths {
-                let worked: bool = c
-                    .query_row(
-                        "SELECT EXISTS (SELECT 1 FROM nodes WHERE wc_id = ?1 \
-                         AND local_relpath = ?2 AND op_depth > 0)",
-                        params![self.wc_id, p.as_str()],
-                        |r| r.get(0),
-                    )
-                    .map_err(sql_err)?;
-                let file_external = c
-                    .execute(
-                        "DELETE FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
-                         AND op_depth = 0 AND file_external IS NOT NULL AND NOT ?3",
-                        params![self.wc_id, p.as_str(), worked],
-                    )
-                    .map_err(sql_err)?
-                    > 0;
-                if file_external {
-                    c.execute(
-                        "DELETE FROM actual_node WHERE wc_id = ?1 AND local_relpath = ?2",
-                        params![self.wc_id, p.as_str()],
-                    )
-                    .map_err(sql_err)?;
-                }
-                let is_file_node: bool = c
-                    .query_row(
-                        "SELECT EXISTS (SELECT 1 FROM nodes WHERE wc_id = ?1 \
-                         AND local_relpath = ?2 AND file_external IS NOT NULL)",
-                        params![self.wc_id, p.as_str()],
-                        |r| r.get(0),
-                    )
-                    .map_err(sql_err)?;
-                if !is_file_node {
-                    c.execute(
-                        "DELETE FROM externals WHERE wc_id = ?1 AND local_relpath = ?2",
-                        params![self.wc_id, p.as_str()],
-                    )
-                    .map_err(sql_err)?;
-                }
+    /// The `svn:externals` values of the versioned directories at or below `path`, with their
+    /// recorded depth, sorted by path. Like svn's `svn_wc__externals_gather_definitions`, the
+    /// local (ACTUAL) value wins over the committed one, and only present directories
+    /// (`normal` or `incomplete` in their topmost layer) count.
+    pub fn externals_definitions_under(
+        &self,
+        path: &RelPath,
+    ) -> Result<Vec<(RelPath, Vec<u8>, Depth)>> {
+        self.with_read(|c| {
+            let sql = format!(
+                "SELECT n.local_relpath, \
+                   IFNULL((SELECT a.properties FROM actual_node a WHERE a.wc_id = n.wc_id \
+                     AND a.local_relpath = n.local_relpath), n.properties), n.depth \
+                 FROM nodes n WHERE n.wc_id = ?1 \
+                   AND (n.local_relpath = ?2 OR {}) \
+                   AND n.op_depth = (SELECT MAX(op_depth) FROM nodes m WHERE m.wc_id = n.wc_id \
+                     AND m.local_relpath = n.local_relpath) \
+                   AND n.kind = 'dir' AND n.presence IN ('normal', 'incomplete') \
+                 ORDER BY n.local_relpath",
+                super::nodes::strict_descendant("n.local_relpath", "?2")
+            );
+            let mut stmt = c.prepare(&sql).map_err(sql_err)?;
+            let mut rows = stmt
+                .query(params![self.wc_id, path.as_str()])
+                .map_err(sql_err)?;
+            let mut out = Vec::new();
+            while let Some(r) = rows.next().map_err(sql_err)? {
+                let blob: Option<Vec<u8>> = r.get(1).map_err(sql_err)?;
+                let props = decode_props(blob.as_deref().unwrap_or_default())?;
+                let Some((_, value)) = props.into_iter().find(|(k, _)| k == b"svn:externals")
+                else {
+                    continue;
+                };
+                let depth: Option<String> = r.get(2).map_err(sql_err)?;
+                let depth = match depth.as_deref() {
+                    Some("empty") => Depth::Empty,
+                    Some("files") => Depth::Files,
+                    Some("immediates") => Depth::Immediates,
+                    _ => Depth::Infinity,
+                };
+                out.push((rel(r.get(0).map_err(sql_err)?)?, value, depth));
             }
-            Ok(())
+            Ok(out)
         })
     }
 
@@ -178,5 +165,91 @@ impl WcDb {
             }
             Ok(out)
         })
+    }
+}
+
+/// An `EXTERNALS` row to record (see [`WcTxn::external_add`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewExternal {
+    /// File or directory.
+    pub kind: NodeKind,
+    /// Root URL of the external's repository (as wc.db stores it, no trailing slash).
+    pub repos_root: String,
+    /// UUID of the external's repository.
+    pub repos_uuid: String,
+    /// Directory whose `svn:externals` property defines the external.
+    pub def_local_relpath: RelPath,
+    /// Repository relative path of the definition's URL.
+    pub def_repos_relpath: String,
+    /// Peg revision when the definition pins one.
+    pub def_operational_revision: Option<u64>,
+    /// Operative revision when the definition pins one.
+    pub def_revision: Option<u64>,
+}
+
+impl WcTxn<'_> {
+    /// Records (or replaces) the external at `path`, as `svn_wc__external_register` and
+    /// `svn_wc__db_external_add_file` write it: presence `normal`, the definition's location
+    /// and its pinned revisions as decimal text.
+    pub fn external_add(&self, path: &RelPath, ext: &NewExternal) -> Result<()> {
+        let parent = parent_text(path).ok_or_else(|| {
+            SvnError::new(
+                ErrorCode::Internal,
+                "the working copy root cannot be an external of itself",
+            )
+        })?;
+        let repos_id = ensure_repository(self.conn(), &ext.repos_root, &ext.repos_uuid)?;
+        self.conn()
+            .execute(
+                "INSERT OR REPLACE INTO externals (wc_id, local_relpath, parent_relpath, \
+                 repos_id, presence, kind, def_local_relpath, def_repos_relpath, \
+                 def_operational_revision, def_revision) \
+                 VALUES (?1, ?2, ?3, ?4, 'normal', ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    self.wc_id(),
+                    path.as_str(),
+                    parent,
+                    repos_id,
+                    kind_word(ext.kind),
+                    ext.def_local_relpath.as_str(),
+                    ext.def_repos_relpath,
+                    ext.def_operational_revision.map(|r| r.to_string()),
+                    ext.def_revision.map(|r| r.to_string()),
+                ],
+            )
+            .map_err(sql_err)?;
+        Ok(())
+    }
+
+    /// Drops the `EXTERNALS` row of `path` (nothing else).
+    pub fn external_remove(&self, path: &RelPath) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM externals WHERE wc_id = ?1 AND local_relpath = ?2",
+                params![self.wc_id(), path.as_str()],
+            )
+            .map_err(sql_err)?;
+        Ok(())
+    }
+
+    /// Marks the BASE file `path` as a file external, the way svn records one: `file_external`
+    /// set and an empty inherited-properties cache (a file external is an update root).
+    pub fn mark_file_external(&self, path: &RelPath) -> Result<()> {
+        let n = self
+            .conn()
+            .execute(
+                "UPDATE nodes SET file_external = 1, \
+                   inherited_props = IFNULL(inherited_props, CAST('()' AS BLOB)) \
+                 WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = 0 AND kind = 'file'",
+                params![self.wc_id(), path.as_str()],
+            )
+            .map_err(sql_err)?;
+        if n == 0 {
+            return Err(SvnError::new(
+                ErrorCode::Internal,
+                format!("'{path}' has no BASE file to mark as a file external"),
+            ));
+        }
+        Ok(())
     }
 }
