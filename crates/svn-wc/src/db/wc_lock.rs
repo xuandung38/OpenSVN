@@ -365,9 +365,9 @@ impl WcDb {
     /// Only regular files whose name starts with one of [`ENGINE_TMP_PREFIXES`] are removed:
     /// every one of them is a temp file this engine creates with a random suffix and then
     /// renames away, queues for removal, or removes itself. So are the files of the `wc.db`
-    /// creation (`wc.db.creating*`), which a working copy that has a `wc.db` no longer needs. Lock markers
-    /// (`opensvn-lock-*`), svn's own temp files, directories, symlinks and anything else are
-    /// left alone. Runs only while this handle holds the write lock on the whole working copy
+    /// creation (`wc.db.creating*`), which a working copy that has a `wc.db` no longer needs.
+    /// Lock markers (`opensvn-lock-*`), svn's own temp files, directories, symlinks and anything
+    /// else are left alone. Runs only while this handle holds the write lock on the whole working copy
     /// and the work queue is empty, so no live operation (of this or another engine process)
     /// can still need one of the files and no queued work item can name one.
     pub fn remove_stale_tmp_files(&self) -> Result<usize> {
