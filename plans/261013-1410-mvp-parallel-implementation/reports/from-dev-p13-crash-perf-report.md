@@ -129,7 +129,7 @@ as warnings and resolves them with real `svn cleanup` before verifying.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: clean.
 - `cargo clippy -p opensvn-crash --features failpoints --all-targets -- -D warnings`: clean.
 - `cargo clippy -p opensvn --features real-engine --all-targets -- -D warnings`: clean.
-- `cargo test --workspace --locked`: 1293 passed, 0 failed, 22 ignored. The crash suites are
+- `cargo test --workspace --locked`: 1301 passed, 0 failed, 22 ignored. The crash suites are
   among the ignored tests; they need Apache and run in the nightly workflow.
-- `cargo test -p opensvn --features opensvn/real-engine`: 422 passed, 0 failed.
+- `cargo test -p opensvn --features opensvn/real-engine`: 452 passed, 0 failed. These numbers are from the head after merging origin/main (e879ece). A smoke run of the crash suite on that head gives the same picture: only #119 failures.
 - `actionlint .github/workflows/nightly.yml`: clean.
