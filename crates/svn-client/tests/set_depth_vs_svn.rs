@@ -243,3 +243,151 @@ async fn refusals() {
         assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{target}: {err}");
     }
 }
+
+/// The status columns svn prints for each of `paths` (relative to `wc`); `None` when it prints
+/// nothing for the path.
+fn svn_status_of(repo: &Repo, wc: &Path, paths: &[&str]) -> Vec<Option<String>> {
+    let out = repo.svn(wc, &["status", "--ignore-externals"]);
+    paths
+        .iter()
+        .map(|p| {
+            out.lines()
+                .find(|l| l.get(8..).is_some_and(|rest| rest == *p))
+                .map(|l| l[..7].to_owned())
+        })
+        .collect()
+}
+
+/// Column `i` of a status line (`X` in column 0 for a directory external, in column 4 for a
+/// file external).
+fn col(status: &Option<String>, i: usize) -> Option<char> {
+    status.as_deref().and_then(|s| s.chars().nth(i))
+}
+
+/// Review probe for #116: `A` holds a nested working copy with local edits and an unversioned
+/// file, a directory external with a local edit, an unmodified directory external, a modified
+/// file external, an unmodified one in a subfolder and an unversioned deep tree. `svn update
+/// --set-depth` on `A` (exclude falls back to a crop because of the local changes) keeps every
+/// local change and the nested and external `wc.db`s, and removes the externals whose
+/// definition is no longer processed, like svn: what is left shows as `?`, not `X`.
+#[tokio::test(flavor = "multi_thread")]
+async fn crop_keeps_nested_working_copies_and_removes_externals_like_svn() {
+    let Some(oracle) = oracle() else { return };
+    let repo = Repo::new(&oracle);
+    let seed = build(&repo);
+    repo.svn(&seed, &["update", "-q"]);
+    repo.svn(
+        &seed,
+        &[
+            "propset",
+            "-q",
+            "svn:externals",
+            "^/A/Y XD\n^/A/Y XU\n^/top.txt fe\n",
+            "A",
+        ],
+    );
+    repo.svn(
+        &seed,
+        &["propset", "-q", "svn:externals", "^/top.txt fe3\n", "A/X2"],
+    );
+    repo.svn(&seed, &["commit", "-q", "-m", "r3"]);
+    let fake = repo.fake(None);
+    let opener = FakeOpener::new(vec![fake.clone()]);
+    let cancel = CancelToken::new();
+
+    for depth in [Depth::Empty, Depth::Files, Depth::Exclude] {
+        let name = word(depth);
+        let theirs = repo.checkout(&format!("svn-{name}"));
+        let sb = Sandbox::new();
+        let ours = sb.path("wc");
+        checkout(
+            &ext_ctx(opener.clone()),
+            &fake,
+            &ours,
+            None,
+            Depth::Infinity,
+            false,
+            &cancel,
+        )
+        .await
+        .expect("checkout");
+        let nested_url =
+            svn_types::RepoUrl::parse(&format!("{}/A/Y", common::ROOT_URL)).expect("url");
+        checkout(
+            &ctx(),
+            &fake.at(&nested_url).expect("at A/Y"),
+            &ours.join("A/nested"),
+            None,
+            Depth::Infinity,
+            false,
+            &cancel,
+        )
+        .await
+        .expect("nested checkout");
+        repo.svn(
+            &theirs,
+            &["checkout", "-q", &format!("{}/A/Y", repo.url), "A/nested"],
+        );
+        for wc in [&theirs, &ours] {
+            assert!(wc.join("A/XD/.svn/wc.db").exists(), "externals fetched");
+            write(&wc.join("A/XD/y"), "y\nlocal\n");
+            write(&wc.join("A/fe"), "top\nr2\nlocal\n");
+            write(&wc.join("A/nested/y"), "y\nnested\n");
+            write(&wc.join("A/nested/unv"), "unversioned\n");
+            write(&wc.join("A/U/v/w"), "deep\n");
+        }
+        let paths = ["A/XD", "A/XU", "A/fe", "A/X2/fe3"];
+        let before = svn_status_of(&repo, &ours, &paths);
+        assert_eq!(before, svn_status_of(&repo, &theirs, &paths), "{name}");
+        assert_eq!(col(&before[0], 0), Some('X'), "{before:?}");
+        assert_eq!(col(&before[2], 4), Some('X'), "{before:?}");
+
+        repo.svn(&theirs, &["update", "-q", "--set-depth", name, "A"]);
+        repo.svn(&theirs, &["cleanup"]);
+        let sum = set_depth(
+            &ext_ctx(opener.clone()),
+            &fake,
+            &ours.join("A"),
+            None,
+            depth,
+            &cancel,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(sum.externals.len(), 4, "{name}: {:?}", sum.externals);
+
+        // Every local change is still there.
+        assert_eq!(read(&ours.join("A/XD/y")), "y\nlocal\n", "{name}");
+        assert!(ours.join("A/XD/.svn/wc.db").exists(), "{name}");
+        assert_eq!(read(&ours.join("A/fe")), "top\nr2\nlocal\n", "{name}");
+        assert_eq!(read(&ours.join("A/nested/y")), "y\nnested\n", "{name}");
+        assert_eq!(read(&ours.join("A/nested/unv")), "unversioned\n", "{name}");
+        assert!(ours.join("A/nested/.svn/wc.db").exists(), "{name}");
+        assert_eq!(read(&ours.join("A/U/v/w")), "deep\n", "{name}");
+        assert_eq!(
+            repo.svn(&ours.join("A/nested"), &["status"]),
+            repo.svn(&theirs.join("A/nested"), &["status"]),
+            "{name}: the nested working copy is untouched"
+        );
+
+        // As in svn: the modified directory external stays as an unregistered working copy,
+        // the unmodified one and the unmodified file external are gone.
+        let ours_st = svn_status_of(&repo, &ours, &paths);
+        let theirs_st = svn_status_of(&repo, &theirs, &paths);
+        assert_eq!(col(&ours_st[0], 0), Some('?'), "{name}: {ours_st:?}");
+        assert_eq!(ours_st[0], theirs_st[0], "{name}");
+        assert_eq!(ours_st[1], theirs_st[1], "{name}: {ours_st:?}");
+        assert!(!ours.join("A/XU").exists(), "{name}");
+        assert_eq!(ours_st[3], theirs_st[3], "{name}: {ours_st:?}");
+        assert!(!ours.join("A/X2/fe3").exists(), "{name}");
+        // svn deletes the modified file external; this client keeps it, unversioned.
+        assert_eq!(col(&ours_st[2], 0), Some('?'), "{name}: {ours_st:?}");
+        let db = open_db(&ours);
+        assert!(
+            db.externals_under(&rp("")).expect("externals").is_empty(),
+            "{name}"
+        );
+        // svn keeps working with the result.
+        repo.svn(&ours, &["cleanup"]);
+    }
+}
