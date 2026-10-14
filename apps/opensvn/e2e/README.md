@@ -13,7 +13,7 @@ Apache + mod_dav_svn over HTTPS with Basic auth. It covers the MVP flows of
 | 10.3 update with a conflict | conflict banner → resolver → "Mine" → banner gone, marker files removed |
 | 10.4 needs-lock file | read-only file → Lock… → writable → Unlock… → read-only → lock → commit releases the lock |
 | 10.4 lock held elsewhere | `todo` until #127: the server refusal never reaches the dialog |
-| 10.5 switch | Location → Switch… → branch URL; local change carried over, toolbar updates |
+| 10.5 switch | Branch ▾ → feature-x → "Carry changes and switch"; local change carried over, toolbar shows the branch; Switch… by URL back to trunk |
 | history and blame | History tab lists the revisions; Browse → file → Blame attributes lines |
 
 Every test gets a fresh scratch repository (`e2e-<test>-<pid>-<n>`) and a fresh app profile
