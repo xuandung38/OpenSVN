@@ -81,6 +81,10 @@ dunce = "=1.0.5"
 # Native file picker and confirmation dialogs for program settings (no JS plugin is registered).
 rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }
 
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW` / `ELOOP` for opening working files without following a swapped-in symlink.
+libc = "=0.2.190"
+
 [features]
 # Compiles in `engine::real::RealEngine`, the `EngineFacade` backed by the Subversion crates, and
 # makes it the app's engine (`OPENSVN_ENGINE=fake` still selects the demo engine). Not a default

@@ -578,6 +578,21 @@ async fn diff_paths_never_escape_the_working_copy() {
         assert_ne!(err.code, ErrorCode::Cancelled, "{path}");
     }
 
+    // Spellings that some file system resolves to the administrative folder are refused even
+    // where they are distinct names (here on disk), so their content is never shown.
+    for alias in [".svn.", ".svn ", "SVN~1", "_svn", ".SVN"] {
+        let dir = rw.root.join("src").join(alias);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("wc.db"), b"admin\n").unwrap();
+        let path = format!("src/{alias}/wc.db");
+        let err = real
+            .engine()
+            .diff_wc(&rw, &path, None, DiffOptions::default(), &ctx())
+            .await
+            .expect_err(&path);
+        assert_eq!(err.code, ErrorCode::PathNotFound, "{path}");
+    }
+
     #[cfg(unix)]
     {
         // A symlinked folder pointing outside is not followed.

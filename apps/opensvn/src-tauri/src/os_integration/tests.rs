@@ -357,3 +357,31 @@ fn unconfigured_editor_and_terminal_point_to_settings() {
         assert_eq!(err.actions, Some(vec![ErrorAction::OpenSettings]));
     }
 }
+
+/// A versioned symlink (`svn:special`) may point anywhere: neither a link as the last component
+/// nor one in the middle of the path reaches the editor or the terminal, also when it points
+/// inside the working copy (same rule as reveal).
+#[cfg(unix)]
+#[test]
+fn editor_and_terminal_refuse_symlinks_inside_the_working_copy() {
+    use std::os::unix::fs::symlink;
+    let d = wc();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.txt"), b"s").unwrap();
+    symlink(outside.path().join("secret.txt"), d.path().join("notes.txt")).unwrap();
+    symlink(outside.path(), d.path().join("docs")).unwrap();
+    symlink("src", d.path().join("alias")).unwrap();
+    let r = Recorder::default();
+    let editor = tool("/usr/bin/code", &[]);
+    let terminal = tool("/usr/bin/term", &[]);
+    for rel in ["notes.txt", "docs", "docs/secret.txt", "alias", "alias/main.rs"] {
+        for with in [OpenWith::Editor, OpenWith::Terminal] {
+            let err = open_external(&r, d.path(), rel, with, Some(&editor), Some(&terminal))
+                .unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidArgument, "{rel} {with:?}");
+            assert!(err.message.contains("symbolic link"), "{rel}: {}", err.message);
+            assert_eq!(err.path.as_deref(), Some(rel));
+        }
+    }
+    assert!(r.calls.lock().unwrap().is_empty(), "nothing was launched");
+}
