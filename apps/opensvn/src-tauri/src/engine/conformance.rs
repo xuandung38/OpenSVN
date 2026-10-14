@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use opensvn_ipc::{
-    CleanupRequest, CommitRequest, CopyLocationRequest, Depth, EntryKind, FileStatus,
+    ChangeAction, CleanupRequest, CommitRequest, CopyLocationRequest, Depth, EntryKind, FileStatus,
     IgnoreAddRequest, IgnoreScope, Layout, LogGetRequest, LogTarget, NodeStatus, ResolveChoice,
     ResolveRequest, Rev, RevertRequest, UpdateRequest, WcFormat, WcId,
 };
@@ -36,6 +36,9 @@ pub trait Harness {
     fn work_dir(&self) -> PathBuf;
     /// Creates or overwrites a file below a working copy root.
     fn write_file(&self, root: &Path, rel: &str, content: &str) -> Result<(), SvnError>;
+    /// Deletes a file below a working copy root without telling the working copy (it becomes
+    /// missing).
+    fn remove_file(&self, root: &Path, rel: &str) -> Result<(), SvnError>;
     /// Real, empty, writable directory for files the engine writes outside a working copy.
     fn scratch_dir(&self) -> PathBuf;
     /// Leaves the lock situation of a crashed or foreign process on `dir` of a working copy,
@@ -581,9 +584,6 @@ pub async fn working_copy_metadata_operations(h: &dyn Harness) {
     let st = status(h, &wc).await;
     assert_eq!(find(&st, "GUIDE.md").unwrap().text, NodeStatus::Added);
     assert_eq!(find(&st, "README.md").unwrap().text, NodeStatus::Deleted);
-    e.mark_move(&wc, "README.md", "GUIDE.md", &ctx())
-        .await
-        .expect("mark_move");
 
     e.cleanup(
         &wc,
@@ -598,13 +598,26 @@ pub async fn working_copy_metadata_operations(h: &dyn Harness) {
     .await
     .expect("cleanup");
 
+    e.upgrade_format(&wc, 31, &ctx())
+        .await
+        .expect("upgrade_format to the current format");
+}
+
+/// Marking a move made outside the app, and changing the depth of a folder.
+pub async fn mark_move_and_set_depth(h: &dyn Harness) {
+    let e = h.engine();
+    let (wc, _) = checkout(h, "mark-move", None).await;
+    e.move_path(&wc, "README.md", "GUIDE.md", &ctx())
+        .await
+        .expect("move");
+    e.mark_move(&wc, "README.md", "GUIDE.md", &ctx())
+        .await
+        .expect("mark_move");
+
     let (wc2, _) = checkout(h, "depth", None).await;
     e.set_depth(&wc2, "src", Depth::Empty, &ctx())
         .await
         .expect("set_depth");
-    e.upgrade_format(&wc2, 31, &ctx())
-        .await
-        .expect("upgrade_format to the current format");
 }
 
 /// Switch moves a working copy to another URL of the same repository.
@@ -717,6 +730,340 @@ pub async fn open_recovers_dead_locks_and_reports_foreign_ones(h: &dyn Harness) 
     assert_eq!(err.code, ErrorCode::NotAWorkingCopy);
 }
 
+/// A locked file without local changes is listed in status. Committing another file keeps the
+/// lock; committing the locked file releases it.
+pub async fn locked_unmodified_file_in_status(h: &dyn Harness) {
+    let e = h.engine();
+    let (wc, _) = checkout(h, "locked-clean", None).await;
+    let scope = LockScope::Wc {
+        wc: wc.clone(),
+        paths: vec!["README.md".into()],
+    };
+    e.lock(&scope, Some("hold"), false, &ctx())
+        .await
+        .expect("lock");
+    let lock_of = |st: &[FileStatus]| find(st, "README.md").and_then(|s| s.lock.clone());
+    for query in [
+        ALL,
+        StatusQuery {
+            include_ignored: false,
+            include_unversioned: false,
+        },
+    ] {
+        let st = e.status(&wc, query, &ctx()).await.expect("status");
+        let readme = find(&st, "README.md").expect("locked unmodified file is listed");
+        assert_eq!(readme.text, NodeStatus::Normal, "{readme:?}");
+        let lock = readme.lock.clone().expect("lock in status");
+        assert!(lock.mine);
+        assert_eq!(lock.comment.as_deref(), Some("hold"));
+        assert!(lock.token.is_none(), "lock tokens never leave the engine");
+        assert_eq!(st.len(), 1, "nothing else is listed: {st:?}");
+    }
+
+    let commit = |path: &str| CommitRequest {
+        wc_id: wc.id.clone(),
+        paths: vec![path.into()],
+        message: format!("change {path}"),
+        keep_locks: false,
+        auto_add_remove: false,
+    };
+    h.write_file(&wc.root, "src/main.rs", "fn main() { locked(); }\n")
+        .unwrap();
+    e.commit(&wc, &commit("src/main.rs"), &ctx())
+        .await
+        .expect("commit another file");
+    let st = status(h, &wc).await;
+    assert!(
+        lock_of(&st).is_some_and(|l| l.mine),
+        "a commit of another file keeps the lock: {st:?}"
+    );
+
+    h.write_file(&wc.root, "README.md", "locked change\n")
+        .unwrap();
+    e.commit(&wc, &commit("README.md"), &ctx())
+        .await
+        .expect("commit the locked file");
+    assert!(
+        status(h, &wc).await.is_empty(),
+        "committing the locked file releases its lock"
+    );
+}
+
+/// Commit with `auto_add_remove` adds selected unversioned files and deletes selected missing
+/// ones in the same revision.
+pub async fn commit_with_auto_add_remove(h: &dyn Harness) {
+    let e = h.engine();
+    let url = h.repo_url();
+    let head = e.repo_info(&url, &ctx()).await.expect("info").youngest_rev;
+    let (wc, _) = checkout(h, "auto-add-remove", None).await;
+    h.write_file(&wc.root, "new.txt", "new\n").expect("write");
+    h.remove_file(&wc.root, "README.md").expect("remove");
+    let st = status(h, &wc).await;
+    assert_eq!(find(&st, "new.txt").unwrap().text, NodeStatus::Unversioned);
+    assert_eq!(find(&st, "README.md").unwrap().text, NodeStatus::Missing);
+
+    let rev = e
+        .commit(
+            &wc,
+            &CommitRequest {
+                wc_id: wc.id.clone(),
+                paths: vec!["new.txt".into(), "README.md".into()],
+                message: "Add new, drop readme".into(),
+                keep_locks: false,
+                auto_add_remove: true,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("commit");
+    assert_eq!(rev.0, head.0 + 1);
+    assert!(status(h, &wc).await.is_empty(), "nothing left to commit");
+
+    let names: Vec<_> = e
+        .repo_list(&format!("{url}/trunk"), None, &ctx())
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|x| x.name)
+        .collect();
+    assert!(names.contains(&"new.txt".to_owned()), "{names:?}");
+    assert!(!names.contains(&"README.md".to_owned()), "{names:?}");
+    assert_eq!(
+        e.repo_cat(&format!("{url}/trunk/new.txt"), None, &ctx())
+            .await
+            .expect("cat")
+            .content,
+        "new\n"
+    );
+
+    let log = e
+        .log(
+            &LogScope::Url(format!("{url}/trunk")),
+            &LogGetRequest {
+                target: LogTarget::Url {
+                    url: format!("{url}/trunk"),
+                },
+                from_rev: None,
+                to_rev: None,
+                limit: 1,
+                stop_on_copy: None,
+                with_paths: true,
+                filter: None,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("log");
+    let mut changed: Vec<_> = log.entries[0]
+        .changed_paths
+        .clone()
+        .expect("changed paths")
+        .into_iter()
+        .map(|c| (c.path, c.action))
+        .collect();
+    changed.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        changed,
+        vec![
+            ("/trunk/README.md".to_owned(), ChangeAction::D),
+            ("/trunk/new.txt".to_owned(), ChangeAction::A),
+        ]
+    );
+}
+
+/// `svn update PATH` on a folder, a file inside a folder and a top-level file of a working copy
+/// whose session is anchored at its root: only the named paths move to the new revision.
+pub async fn update_of_sub_paths(h: &dyn Harness) {
+    let e = h.engine();
+    let (wc1, before) = checkout(h, "subpath-1", None).await;
+    let (wc2, _) = checkout(h, "subpath-2", None).await;
+    // Working file content through the engine (the fake engine keeps no files on disk).
+    let read = |wc: &WcRef, rel: &str| {
+        let (wc, rel) = (wc.clone(), rel.to_owned());
+        async move {
+            e.diff_wc(&wc, &rel, None, DiffOptions::default(), &ctx())
+                .await
+                .unwrap_or_else(|err| panic!("diff {rel}: {err}"))
+                .right
+                .unwrap_or_else(|| panic!("{rel} has no working content"))
+                .content
+        }
+    };
+    let commit = |paths: &[&str], message: &str| CommitRequest {
+        wc_id: wc1.id.clone(),
+        paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+        message: message.into(),
+        keep_locks: false,
+        auto_add_remove: true,
+    };
+    let update = |paths: &[&str]| UpdateRequest {
+        wc_id: wc2.id.clone(),
+        paths: Some(paths.iter().map(|p| (*p).to_owned()).collect()),
+        rev: None,
+        depth: None,
+    };
+
+    h.write_file(&wc1.root, "README.md", "hello again\n")
+        .expect("write");
+    h.write_file(&wc1.root, "src/main.rs", "fn main() { run(); }\n")
+        .expect("write");
+    h.write_file(&wc1.root, "src/lib.rs", "pub fn run() {}\n")
+        .expect("write");
+    let r2 = e
+        .commit(
+            &wc1,
+            &commit(&["README.md", "src/main.rs", "src/lib.rs"], "r2"),
+            &ctx(),
+        )
+        .await
+        .expect("commit r2");
+
+    // A folder.
+    let reached = e
+        .update(&wc2, &update(&["src"]), &ctx())
+        .await
+        .expect("update src");
+    assert_eq!(reached, r2);
+    assert_eq!(read(&wc2, "src/main.rs").await, "fn main() { run(); }\n");
+    assert_eq!(read(&wc2, "src/lib.rs").await, "pub fn run() {}\n");
+    assert_eq!(
+        read(&wc2, "README.md").await,
+        "hello\n",
+        "outside the path stays"
+    );
+    let info = e.wc_info(&wc2.root, &ctx()).await.expect("info");
+    assert_eq!(
+        info.rev_range,
+        Some((before.base_rev, r2)),
+        "mixed revisions"
+    );
+
+    // A file inside a folder, then a top-level file.
+    h.write_file(&wc1.root, "src/main.rs", "fn main() { run(); run(); }\n")
+        .expect("write");
+    let r3 = e
+        .commit(&wc1, &commit(&["src/main.rs"], "r3"), &ctx())
+        .await
+        .expect("commit r3");
+    let reached = e
+        .update(&wc2, &update(&["src/main.rs"]), &ctx())
+        .await
+        .expect("update src/main.rs");
+    assert_eq!(reached, r3);
+    assert_eq!(
+        read(&wc2, "src/main.rs").await,
+        "fn main() { run(); run(); }\n"
+    );
+    e.update(&wc2, &update(&["README.md"]), &ctx())
+        .await
+        .expect("update README.md");
+    assert_eq!(read(&wc2, "README.md").await, "hello again\n");
+    assert!(status(h, &wc2).await.is_empty(), "nothing is left modified");
+}
+
+/// An update that merges an incoming change into a locally modified file conflicts: the update
+/// itself succeeds and reaches the target revision, other incoming changes are applied, and the
+/// conflicted file can be resolved to the local version and committed.
+pub async fn update_ends_in_conflict(h: &dyn Harness) {
+    let e = h.engine();
+    let url = h.repo_url();
+    let (a, _) = checkout(h, "update-conflict-a", None).await;
+    let (b, _) = checkout(h, "update-conflict-b", None).await;
+    h.write_file(&a.root, "README.md", "hello from a\n")
+        .unwrap();
+    h.write_file(&a.root, "src/main.rs", "fn main() { a(); }\n")
+        .unwrap();
+    let theirs = e
+        .commit(
+            &a,
+            &CommitRequest {
+                wc_id: a.id.clone(),
+                paths: vec!["README.md".into(), "src/main.rs".into()],
+                message: "from a".into(),
+                keep_locks: false,
+                auto_add_remove: false,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("commit a");
+
+    h.write_file(&b.root, "README.md", "hello from b\n")
+        .unwrap();
+    let reached = e
+        .update(
+            &b,
+            &UpdateRequest {
+                wc_id: b.id.clone(),
+                paths: None,
+                rev: None,
+                depth: None,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("an update that conflicts still succeeds");
+    assert_eq!(reached, theirs);
+    let info = e.wc_info(&b.root, &ctx()).await.expect("info");
+    assert_eq!(info.base_rev, theirs);
+    assert!(info.rev_range.is_none(), "{:?}", info.rev_range);
+
+    let st = status(h, &b).await;
+    assert_eq!(
+        find(&st, "README.md").expect("conflicted").text,
+        NodeStatus::Conflicted
+    );
+    assert!(
+        find(&st, "src/main.rs").is_none(),
+        "the other incoming change merged cleanly: {st:?}"
+    );
+    let main = e
+        .diff_wc(&b, "src/main.rs", None, DiffOptions::default(), &ctx())
+        .await
+        .expect("diff");
+    assert_eq!(main.right.expect("right").content, "fn main() { a(); }\n");
+
+    e.resolve(
+        &b,
+        &ResolveRequest {
+            wc_id: b.id.clone(),
+            path: "README.md".into(),
+            choice: ResolveChoice::Mine,
+        },
+        &ctx(),
+    )
+    .await
+    .expect("resolve");
+    let st = status(h, &b).await;
+    assert_eq!(
+        find(&st, "README.md").expect("still modified").text,
+        NodeStatus::Modified,
+        "{st:?}"
+    );
+    let rev = e
+        .commit(
+            &b,
+            &CommitRequest {
+                wc_id: b.id.clone(),
+                paths: vec!["README.md".into()],
+                message: "keep b".into(),
+                keep_locks: false,
+                auto_add_remove: false,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("commit after resolving");
+    assert_eq!(rev.0, theirs.0 + 1);
+    assert_eq!(
+        e.repo_cat(&format!("{url}/trunk/README.md"), None, &ctx())
+            .await
+            .expect("cat")
+            .content,
+        "hello from b\n"
+    );
+}
+
 /// Runs every scenario against fresh harnesses from `make`.
 pub async fn run_all<H: Harness>(make: impl Fn() -> H) {
     repository_reads(&make()).await;
@@ -727,7 +1074,12 @@ pub async fn run_all<H: Harness>(make: impl Fn() -> H) {
     remote_edit_and_copy(&make()).await;
     cancellation_and_errors(&make()).await;
     working_copy_metadata_operations(&make()).await;
+    mark_move_and_set_depth(&make()).await;
     switch_to_a_branch(&make()).await;
     repository_content_tools(&make()).await;
     open_recovers_dead_locks_and_reports_foreign_ones(&make()).await;
+    locked_unmodified_file_in_status(&make()).await;
+    commit_with_auto_add_remove(&make()).await;
+    update_ends_in_conflict(&make()).await;
+    update_of_sub_paths(&make()).await;
 }

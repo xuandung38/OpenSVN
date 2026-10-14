@@ -40,6 +40,11 @@ pub struct UpdateRequest {
 }
 
 /// Builds the working-copy report. Runs synchronously on the driver task.
+///
+/// Report paths are relative to the session URL, like [`UpdateRequest::target`]: the first
+/// `set_path` describes the target itself and every other path lies below it. A session
+/// translates them to the wire form (svn's target-relative paths, anchored at the target's
+/// parent).
 pub type ReportFn = Box<dyn FnOnce(&mut dyn Reporter) -> Result<()> + Send>;
 
 /// Result of `get_file`.
@@ -109,6 +114,14 @@ pub trait RaSession: Send + Sync {
     fn uuid(&self) -> &str;
     /// URL this session is rooted at.
     fn session_url(&self) -> &RepoUrl;
+
+    /// User name this session authenticates as, when known (the Basic user name the server
+    /// last accepted). `None` before authentication, for anonymous access and for mechanisms
+    /// that do not reveal a name (Negotiate). Commits journal it so that recovery can match
+    /// the server's `svn:author`; a wrong guess only makes recovery ask the user.
+    fn authenticated_user(&self) -> Option<String> {
+        None
+    }
 
     /// Authenticates (prompting through `AuthPrompter` if needed). Call BEFORE taking the
     /// working-copy lock so no prompt happens while a lock is held.

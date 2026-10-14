@@ -10,10 +10,12 @@
 //!   changelists) run through `svn-client` (`local`, `local_util`); marking an external move and
 //!   changing the format are refused with a user-facing error until `svn-client` supports them.
 //! * Checkout, update, switch and depth changes run through `svn-client` (`sync`).
-//! * The operations not wired yet (commit) fail with
-//!   [`ErrorCode::Internal`] carrying a `not wired` message. Each one delegates to a `do_*` method
-//!   in its own file (`wc_status`, `sync`, `commit`, `local`), so wiring one area later touches
-//!   only that file.
+//! * Commit runs through `svn-client` (`commit`), with auto add/remove of the selection and the
+//!   commit journal below `<state_dir>/commit-journals/`; copying a working copy to a URL is
+//!   refused with a user-facing error until `svn-client` supports it.
+//!
+//! Each working copy area delegates to `do_*` methods in its own file (`wc_status`, `sync`,
+//! `commit`, `local`).
 //!
 //! Repositories are reached through a [`SessionConnector`], so the same engine runs against the
 //! HTTP transport in the app and against the in-memory repository in tests.
@@ -270,14 +272,6 @@ fn path_below_root(session: &dyn RaSession, url: &RepoUrl) -> EngineResult<RelPa
             )
         })?;
     RelPath::new(&percent_decode(rest.trim_matches('/')))
-}
-
-/// Error of an operation that waits for the working copy layer.
-fn not_wired(op: &str) -> SvnError {
-    SvnError::new(
-        ErrorCode::Internal,
-        format!("not wired: {op} needs the svn-client working copy operations"),
-    )
 }
 
 #[async_trait]

@@ -64,6 +64,12 @@ pub(super) struct EventBridge<'a> {
     pending: Vec<PendingClose>,
     root_closed: bool,
     cancel: CancelToken,
+    /// Where the server's edit root lies below the session root (the parent of a nested update
+    /// target). The editor sees session-relative paths: the root and the directories down to
+    /// `prefix` are opened and closed around the server's drive.
+    prefix: RelPath,
+    /// Directories opened for `prefix` above the server's root, outermost first.
+    outer: Vec<DirId>,
 }
 
 impl<'a> EventBridge<'a> {
@@ -83,7 +89,48 @@ impl<'a> EventBridge<'a> {
             pending: Vec::new(),
             root_closed: false,
             cancel: cancel.clone(),
+            prefix: RelPath::root(),
+            outer: Vec::new(),
         }
+    }
+
+    /// The server's edit is rooted at `prefix` below the session root.
+    pub(super) fn rooted_at(mut self, prefix: RelPath) -> Self {
+        self.prefix = prefix;
+        self
+    }
+
+    /// Session-relative form of a path the server sent relative to its edit root.
+    fn rebase(&self, event: &mut UpdateEvent) -> Result<()> {
+        use UpdateEvent as E;
+        if self.prefix.is_root() {
+            return Ok(());
+        }
+        let path = match event {
+            E::OpenDir { path, .. }
+            | E::AddDir { path, .. }
+            | E::OpenFile { path, .. }
+            | E::AddFile { path, .. }
+            | E::DeleteEntry { path, .. }
+            | E::AbsentDir { path }
+            | E::AbsentFile { path }
+            | E::SetProp { path, .. }
+            | E::RemoveProp { path, .. }
+            | E::FetchProps { path, .. }
+            | E::FetchFile { path, .. }
+            | E::TxDeltaStart { path, .. }
+            | E::TxDeltaChunk { path, .. }
+            | E::TxDeltaEnd { path }
+            | E::CloseFile { path, .. }
+            | E::CloseDir { path } => path,
+            _ => return Ok(()),
+        };
+        *path = if path.is_root() {
+            self.prefix.clone()
+        } else {
+            RelPath::new(&format!("{}/{}", self.prefix, path))?
+        };
+        Ok(())
     }
 
     fn top_dir(&self) -> Result<DirId> {
@@ -109,14 +156,32 @@ impl<'a> EventBridge<'a> {
     }
 
     /// Handles one event.
-    pub(super) async fn handle(&mut self, event: UpdateEvent) -> Result<()> {
+    pub(super) async fn handle(&mut self, mut event: UpdateEvent) -> Result<()> {
         use UpdateEvent as E;
+        self.rebase(&mut event)?;
         match event {
             E::ReportStart { .. } => Ok(()),
             E::TargetRevision(rev) => self.editor.set_target_revision(rev).await,
             E::OpenDir { path, base_rev, .. } => {
                 let id = if self.stack.is_empty() {
-                    self.editor.open_root(base_rev).await?
+                    if self.root_closed {
+                        return Err(corrupt("update entry after the root was closed"));
+                    }
+                    let mut id = self.editor.open_root(base_rev).await?;
+                    let mut at = String::new();
+                    for c in self.prefix.components() {
+                        self.outer.push(id);
+                        at = if at.is_empty() {
+                            c.to_owned()
+                        } else {
+                            format!("{at}/{c}")
+                        };
+                        id = self
+                            .editor
+                            .open_directory(&RelPath::new(&at)?, id, base_rev)
+                            .await?;
+                    }
+                    id
                 } else {
                     let parent = self.top_dir()?;
                     self.editor.open_directory(&path, parent, base_rev).await?
@@ -344,6 +409,9 @@ impl<'a> EventBridge<'a> {
         }
         self.editor.close_directory(id).await?;
         if self.stack.is_empty() {
+            while let Some(outer) = self.outer.pop() {
+                self.editor.close_directory(outer).await?;
+            }
             self.root_closed = true;
         }
         Ok(())

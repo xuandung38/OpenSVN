@@ -61,6 +61,9 @@ pub struct RecoveryReport {
 pub struct WcCommitRecovery {
     /// Journals whose commit was merged and is now folded into the working copy.
     pub finalized: Vec<String>,
+    /// Revision each finalized journal's commit became, by journal id (same order as
+    /// `finalized`).
+    pub finalized_revisions: Vec<(String, u64)>,
     /// Journals of commits that certainly did not happen; dropped (their transaction deleted).
     pub aborted: Vec<String>,
     /// Journals whose commit may or may not exist and that the log did not settle; kept.
@@ -101,7 +104,7 @@ pub async fn recover_commits(
         )
         .await;
         match outcome {
-            Ok(Outcome::Finalized) => report.finalized.push(id),
+            Ok(Outcome::Finalized(_)) => report.finalized.push(id),
             Ok(Outcome::Aborted) => report.aborted.push(id),
             Ok(Outcome::NeedsUser(e)) => report.needs_user.push((id, e)),
             Err(e) => report.failed.push((id, e)),
@@ -154,7 +157,10 @@ pub async fn recover_wc_commits(
         };
         let id = data.id.clone();
         match process(&store, data, Wc::Given(db), ra, cancel, &mut authenticated).await {
-            Ok(Outcome::Finalized) => report.finalized.push(id),
+            Ok(Outcome::Finalized(rev)) => {
+                report.finalized_revisions.push((id.clone(), rev));
+                report.finalized.push(id);
+            }
             Ok(Outcome::Aborted) => report.aborted.push(id),
             Ok(Outcome::NeedsUser(e)) => report.needs_user.push((id, e)),
             Err(e) => report.failed.push((id, e)),
@@ -263,7 +269,8 @@ enum Wc<'a> {
 }
 
 enum Outcome {
-    Finalized,
+    /// Folded into the working copy; the revision the commit became.
+    Finalized(u64),
     Aborted,
     NeedsUser(SvnError),
 }
@@ -309,9 +316,9 @@ async fn process(
     cancel: &CancelToken,
     authenticated: &mut bool,
 ) -> Result<Outcome> {
-    if data.merged.is_some() {
+    if let Some(rev) = data.merged.as_ref().map(|m| m.revision) {
         finalize_journal(store, &data, wc, cancel)?;
-        return Ok(Outcome::Finalized);
+        return Ok(Outcome::Finalized(rev));
     }
     if data.outcome_unknown() {
         let ra = ra.ok_or_else(|| needs_session(&data))?;
@@ -322,10 +329,11 @@ async fn process(
                 Ok(Outcome::Aborted)
             }
             Reconciled::Committed(merge) => {
+                let rev = merge.revision;
                 data.merged = Some(merge);
                 store.write(&data)?;
                 finalize_journal(store, &data, wc, cancel)?;
-                Ok(Outcome::Finalized)
+                Ok(Outcome::Finalized(rev))
             }
             Reconciled::NoMatch(why)
             | Reconciled::Ambiguous(why)

@@ -270,6 +270,9 @@ impl RaSession for ScriptedSession {
     fn session_url(&self) -> &RepoUrl {
         self.inner.session_url()
     }
+    fn authenticated_user(&self) -> Option<String> {
+        self.inner.authenticated_user()
+    }
     async fn ensure_authenticated(&self, cancel: &CancelToken) -> Result<(), SvnError> {
         self.calls.lock().unwrap().push("auth");
         self.inner.ensure_authenticated(cancel).await
@@ -486,4 +489,71 @@ pub(super) async fn client_commit(
         &svn_client::commit::CommitOptions::new(message),
     )
     .await
+}
+
+/// Serves the in-memory repository like the HTTP connector: anchored at the requested URL for
+/// [`Anchor::Url`](crate::engine::real::Anchor::Url) (`FakeRaSession::at`), at the root
+/// otherwise. Records the interactivity of every connection; unattended connections fail while
+/// `offline_unattended` is set (no session for background recovery).
+pub(super) struct AnchoredConnector {
+    pub(super) repo: FakeRaSession,
+    pub(super) offline_unattended: std::sync::atomic::AtomicBool,
+    pub(super) connects: std::sync::Mutex<Vec<bool>>,
+}
+
+impl AnchoredConnector {
+    pub(super) fn new(repo: FakeRaSession) -> Self {
+        Self {
+            repo,
+            offline_unattended: std::sync::atomic::AtomicBool::new(false),
+            connects: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(super) fn connects(&self) -> Vec<bool> {
+        self.connects.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl SessionConnector for AnchoredConnector {
+    async fn connect(
+        &self,
+        url: &RepoUrl,
+        cancel: &CancelToken,
+    ) -> Result<Arc<dyn RaSession>, SvnError> {
+        self.connect_with(
+            url,
+            &ConnectOptions {
+                anchor: crate::engine::real::Anchor::Root,
+                interactive: true,
+            },
+            cancel,
+        )
+        .await
+    }
+
+    async fn connect_with(
+        &self,
+        url: &RepoUrl,
+        options: &ConnectOptions,
+        cancel: &CancelToken,
+    ) -> Result<Arc<dyn RaSession>, SvnError> {
+        cancel.check()?;
+        self.connects.lock().unwrap().push(options.interactive);
+        if !options.interactive
+            && self
+                .offline_unattended
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(SvnError::new(
+                ErrorCode::Network,
+                format!("cannot connect to {url}"),
+            ));
+        }
+        Ok(match options.anchor {
+            crate::engine::real::Anchor::Root => Arc::new(self.repo.clone()),
+            crate::engine::real::Anchor::Url => Arc::new(self.repo.at(url)?),
+        })
+    }
 }

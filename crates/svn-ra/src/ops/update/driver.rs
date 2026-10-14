@@ -22,6 +22,34 @@ struct CollectingReporter {
     builder: UpdateReportBuilder,
     finished: bool,
     aborted: bool,
+    /// The update target: the caller reports session-relative paths, the wire wants them
+    /// relative to the target (`""` is the target itself), like svn's reporter.
+    target: RelPath,
+}
+
+impl CollectingReporter {
+    fn wire_path(&self, path: &RelPath) -> Result<RelPath> {
+        if self.target.is_root() {
+            return Ok(path.clone());
+        }
+        if path == &self.target {
+            return Ok(RelPath::root());
+        }
+        path.as_str()
+            .strip_prefix(self.target.as_str())
+            .and_then(|rest| rest.strip_prefix('/'))
+            .map(RelPath::new)
+            .transpose()?
+            .ok_or_else(|| {
+                SvnError::new(
+                    ErrorCode::Internal,
+                    format!(
+                        "report path {path} lies outside the update target {}",
+                        self.target
+                    ),
+                )
+            })
+    }
 }
 
 impl Reporter for CollectingReporter {
@@ -33,13 +61,15 @@ impl Reporter for CollectingReporter {
         start_empty: bool,
         lock_token: Option<&str>,
     ) -> Result<()> {
+        let path = self.wire_path(path)?;
         self.builder
-            .set_path(path, rev, depth, start_empty, lock_token);
+            .set_path(&path, rev, depth, start_empty, lock_token);
         Ok(())
     }
 
     fn delete_path(&mut self, path: &RelPath) -> Result<()> {
-        self.builder.delete_path(path);
+        let path = self.wire_path(path)?;
+        self.builder.delete_path(&path);
         Ok(())
     }
 
@@ -53,8 +83,9 @@ impl Reporter for CollectingReporter {
         lock_token: Option<&str>,
     ) -> Result<()> {
         let link = self.wire.repo_path_of_url(url.as_url().as_str())?;
+        let path = self.wire_path(path)?;
         self.builder
-            .link_path(path, &link, rev, depth, start_empty, lock_token);
+            .link_path(&path, &link, rev, depth, start_empty, lock_token);
         Ok(())
     }
 
@@ -73,6 +104,7 @@ impl Reporter for CollectingReporter {
 async fn collect_report(
     wire: &RaWire,
     opts: UpdateRequestOptions,
+    target: RelPath,
     report: ReportFn,
 ) -> Result<UpdateReportBuilder> {
     let wire = wire.clone();
@@ -82,6 +114,7 @@ async fn collect_report(
             builder: UpdateReportBuilder::new(opts),
             finished: false,
             aborted: false,
+            target,
         };
         report(&mut reporter)?;
         if reporter.aborted {
@@ -118,7 +151,10 @@ fn request_options(wire: &RaWire, req: &UpdateRequest) -> Result<UpdateRequestOp
             ));
         }
     }
-    let mut opts = UpdateRequestOptions::new(mode, wire.session_rel().clone());
+    // Like svn, the edit is anchored at the target's parent and names the target by its last
+    // component, so a nested target (`a/b/c`) works on a session anchored above it.
+    let (anchor, name) = split_target(&req.target);
+    let mut opts = UpdateRequestOptions::new(mode, wire.repo_path(&anchor)?);
     opts.target_revision = req.revision;
     opts.depth = req.depth;
     opts.ignore_ancestry = req.ignore_ancestry;
@@ -127,19 +163,16 @@ fn request_options(wire: &RaWire, req: &UpdateRequest) -> Result<UpdateRequestOp
     if let UpdateMode::Switch(url) = &req.mode {
         opts.dst = Some(wire.repo_path_of_url(url.as_url().as_str())?);
     }
-    if !req.target.is_root() {
-        if req.target.components().count() != 1 {
-            return Err(SvnError::new(
-                ErrorCode::Internal,
-                format!(
-                    "update target {} is not a single path component",
-                    req.target
-                ),
-            ));
-        }
-        opts.update_target = Some(req.target.as_str().to_owned());
-    }
+    opts.update_target = name;
     Ok(opts)
+}
+
+/// `(anchor, last component)` of a session-relative update target; the root is its own anchor.
+fn split_target(target: &RelPath) -> (RelPath, Option<String>) {
+    match (target.parent(), target.file_name()) {
+        (Some(parent), Some(name)) if !target.is_root() => (parent, Some(name.to_owned())),
+        _ => (RelPath::root(), None),
+    }
 }
 
 async fn drive(
@@ -153,12 +186,13 @@ async fn drive(
     let opts = request_options(wire, &req)?;
     let send_text = opts.text_deltas;
     let skelta = matches!(opts.mode, WireMode::Skelta { .. });
-    let builder = collect_report(wire, opts, report).await?;
+    let builder = collect_report(wire, opts, req.target.clone(), report).await?;
     let request = builder.build(wire.urls())?;
     let resp = wire.send_ok(request, cancel).await?;
     let mut resp = resp;
     let scheduler = skelta.then(|| FetchScheduler::new(wire, cancel));
-    let mut bridge = EventBridge::new(editor, wire, scheduler, send_text, cancel);
+    let mut bridge = EventBridge::new(editor, wire, scheduler, send_text, cancel)
+        .rooted_at(split_target(&req.target).0);
     let mut parser = UpdateParser::new(wire.urls().clone());
     while let Some(chunk) = resp.chunk().await? {
         for event in parser.feed(&chunk)? {

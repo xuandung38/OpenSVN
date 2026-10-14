@@ -28,6 +28,16 @@ pub(super) fn open_db(path: &Path) -> EngineResult<WcDb> {
     WcDb::open(&root)
 }
 
+/// Opens the working copy containing `path` under its canonical root path, the spelling
+/// `svn_client::wc::open_containing` gives: commit journals are keyed by `WcDb::wcroot()`, so
+/// commit and crash recovery must open a working copy the same way whatever path (symlink,
+/// different case, `\\?\` prefix) the caller registered it under.
+pub(super) fn open_db_canonical(path: &Path) -> EngineResult<WcDb> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|e| SvnError::from_io(format!("cannot resolve '{}'", path.display()), &e))?;
+    open_db(&canonical)
+}
+
 fn revision(v: i64) -> EngineResult<u64> {
     u64::try_from(v).map_err(|_| SvnError::new(ErrorCode::Corrupt, "wc.db: negative revision"))
 }
