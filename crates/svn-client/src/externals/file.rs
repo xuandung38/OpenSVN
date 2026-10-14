@@ -313,6 +313,7 @@ fn apply(
         target: name.clone(),
         switch_relpath: Some(p.wanted.clone()),
         depth: Depth::Infinity,
+        sticky_depth: false,
         allow_unversioned_obstructions: false,
         repos_root: p.repos_root.clone(),
         uuid: p.uuid.clone(),

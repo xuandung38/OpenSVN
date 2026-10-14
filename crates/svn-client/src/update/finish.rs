@@ -255,11 +255,18 @@ impl UpdateEditor {
         };
         let skipped = self.skipped.clone();
         let depth = self.s.depth;
+        let sticky = self.s.sticky_depth;
         db.with_txn(|t| {
             if let Some((old, new)) = &relocation {
                 t.relocate_subtree(&target, old, new)?;
             }
-            t.bump_revisions_post_update(&target, rev, depth, &skipped)
+            t.bump_revisions_post_update(&target, rev, depth, &skipped)?;
+            if sticky {
+                // Directories the server had nothing to send for were never opened; they get
+                // their new depth here (svn's server opens them on a depth upgrade).
+                t.record_sticky_depth(&target, depth, &skipped)?;
+            }
+            Ok(())
         })
         .map_err(|e: SvnError| e)?;
         self.mark_finished();

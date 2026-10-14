@@ -42,6 +42,7 @@ import { ipc, unwrap } from "../ipc/client";
 import { useOperations, useStatus, useWcEntries, useWorkingCopies } from "../ipc/queries";
 import { useT } from "../lib/i18n/i18n";
 import { applyTheme, readTheme, type ThemeChoice } from "../lib/theme";
+import { DemoEngineBanner } from "./demo-engine-banner";
 import { shellStrings } from "./shell-strings";
 
 type View = "changes" | RemoteView;
@@ -219,7 +220,12 @@ function ShellBody({
             }
           />
         }
-        banner={<WcBanners />}
+        banner={
+          <>
+            <DemoEngineBanner />
+            <WcBanners />
+          </>
+        }
         sidebar={showSidebar ? <WcSidebar /> : undefined}
         main={
           loaded && workingCopies.length === 0 ? (

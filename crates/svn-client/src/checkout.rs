@@ -78,6 +78,7 @@ pub async fn checkout(
             kind: UpdateKind::Update,
             allow_unversioned_obstructions,
             ignore_ancestry: false,
+            sticky_depth: false,
         },
         cancel,
     )
