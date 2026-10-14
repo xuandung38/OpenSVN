@@ -268,6 +268,10 @@ test("Shift+F10 opens the actions of the active row: reveal and copy URL", async
 });
 
 test("footer and File menu events open checkout and add existing; a menu/key echo is ignored in either order", async () => {
+  // Wall-clock time is frozen throughout: the echo filter compares Date.now() of a key press and a
+  // menu event, so on a fast machine the menu event right after opening the picker by keyboard
+  // would otherwise count as that key's echo.
+  const now = vi.spyOn(Date, "now").mockReturnValue(100_000);
   await openPicker();
   await user().click(screen.getByRole("button", { name: "Checkout repository…" }));
   expect(
@@ -275,6 +279,7 @@ test("footer and File menu events open checkout and add existing; a menu/key ech
   ).toBeTruthy();
   await closeCheckout();
 
+  now.mockReturnValue(500_000);
   await act(async () => mockEmit("menu://file.switch-repo"));
   expect(await screen.findByRole("combobox", { name: "Filter repositories" })).toBeTruthy();
   await user().keyboard("{Escape}");
@@ -287,7 +292,7 @@ test("footer and File menu events open checkout and add existing; a menu/key ech
 
   // Mod+O and the native accelerator's echo: the folder dialog is shown once.
   // Wall-clock time is frozen so a slow machine cannot stretch the key-to-echo gap.
-  const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+  now.mockReturnValue(1_000_000);
   await user().keyboard("{Control>}o{/Control}");
   await act(async () => mockEmit("menu://file.add-wc"));
   await waitFor(() => expect(calls("pathPick")).toBe(1));

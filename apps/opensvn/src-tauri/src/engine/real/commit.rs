@@ -5,9 +5,11 @@
 //!
 //! 1. A session is opened at the working copy URL ([`ConnectOptions::at_url`]: the connector
 //!    reparents its cached root session there) and authenticates before any working copy lock
-//!    is taken. Like `svn commit`, the commit is driven relative to that URL
-//!    (`CommitOptions::session_prefix`), so a user whose path-based authorization only covers
-//!    the working copy's subtree (no access to the repository root) can commit.
+//!    is taken. The commit is driven relative to that URL (`CommitOptions::session_prefix`), so
+//!    a user whose path-based authorization only covers the working copy's subtree (no access
+//!    to the repository root) can commit. When a change lies outside it (below a switched
+//!    subtree), the session moves to the common ancestor of the changes, as `svn commit` does
+//!    (`svn_client::commit::commit_anchor`).
 //! 2. The registered root is opened with `svn_client::wc::open_containing`, which gives the
 //!    canonical root spelling crash recovery uses too, so the commit journal is found again on
 //!    the next open whatever path the working copy was registered under.
@@ -46,15 +48,12 @@ use svn_wc::WcDb;
 use super::local_util::{self, LocalEnv};
 use super::wc_read::{self, blocking};
 use super::{ConnectOptions, RealEngine};
-use crate::engine::context::{OpContext, ProgressUpdate};
+use crate::engine::context::{OpContext, PHASE_NEEDS_CLEANUP, ProgressReporter, ProgressUpdate};
 use crate::engine::facade::{EngineResult, WcRef};
 use crate::engine::text::percent_decode;
 
 /// Progress phase of a commit.
 pub(super) const PHASE_COMMIT: &str = "commit";
-/// Progress phase reported when the commit went through but the working copy needs cleanup
-/// (`current_path` carries the reason).
-pub(super) const PHASE_NEEDS_CLEANUP: &str = "needs-cleanup";
 
 /// Repository path of the session URL below the repository root (`""` at the root), decoded.
 fn session_prefix(session: &dyn RaSession) -> EngineResult<String> {
@@ -93,7 +92,12 @@ fn push_unique(list: &mut Vec<RelPath>, rel: RelPath) {
 ///
 /// Fails with `conflict-blocks-commit` before changing anything when a selected item is in
 /// conflict, as the commit would.
-fn auto_add_remove(db: &WcDb, env: &LocalEnv, rels: &[RelPath]) -> EngineResult<Vec<RelPath>> {
+fn auto_add_remove(
+    db: &WcDb,
+    env: &LocalEnv,
+    rels: &[RelPath],
+    progress: &ProgressReporter,
+) -> EngineResult<Vec<RelPath>> {
     let markers = local_util::conflict_markers(db)?;
     let mut add: Vec<RelPath> = Vec::new();
     let mut delete: Vec<RelPath> = Vec::new();
@@ -176,9 +180,7 @@ fn auto_add_remove(db: &WcDb, env: &LocalEnv, rels: &[RelPath]) -> EngineResult<
     // Nested working copies found while recursing are skipped (svn's W150002) and stay
     // unversioned: their content belongs to another repository location.
     let outcome = client_local::add_reporting(db, &env.cancel, &abs(&add)?, &opts, &env.add)?;
-    for w in &outcome.warnings {
-        tracing::warn!(warning = %w, "auto-add skipped a nested working copy");
-    }
+    super::progress::report_skipped_nested_wcs(progress, &outcome.warnings);
     let added = outcome.added;
     // Parents added on the way are new directories outside the selection: the commit must
     // include them, or the server is asked to add an item into a directory it does not have.
@@ -220,18 +222,19 @@ impl RealEngine {
         ctx.check()?;
         let info = wc_read::wc_info(&wc.root, ctx).await?;
         let url = RepoUrl::parse(&info.url)?;
-        let session = self
+        let mut session = self
             .connector
             .connect_with(&url, &ConnectOptions::at_url(ctx), &ctx.cancel)
             .await?;
         // Any prompt happens now, before the working copy is locked.
         session.ensure_authenticated(&ctx.cancel).await?;
-        let prefix = session_prefix(session.as_ref())?;
+        let mut prefix = session_prefix(session.as_ref())?;
         let author = session.authenticated_user();
 
         let client = self.client_ctx(ctx);
         let config = self.svn_config.clone();
         let (root, paths, auto) = (wc.root.clone(), req.paths.clone(), req.auto_add_remove);
+        let progress = ctx.progress.clone();
         let cancel = ctx.cancel.clone();
         let (db, targets) = blocking(move || {
             let db = local_util::open_wc_root(&client, &root)?;
@@ -242,7 +245,7 @@ impl RealEngine {
             }
             if auto && !rels.is_empty() {
                 let parents = client_local::lock::with_wc_lock(&db, &env.cancel, || {
-                    auto_add_remove(&db, &env, &rels)
+                    auto_add_remove(&db, &env, &rels, &progress)
                 })?;
                 for p in parents {
                     push_unique(&mut rels, p);
@@ -267,18 +270,49 @@ impl RealEngine {
             return Err(nothing_to_commit());
         }
 
+        let mut opts = CommitOptions {
+            depth: Depth::Infinity,
+            keep_locks: req.keep_locks,
+            session_prefix: prefix.clone(),
+            author: author.clone(),
+            ..CommitOptions::new(req.message.clone())
+        };
+        // Like `svn commit`, the session is anchored at the common ancestor of the changes: a
+        // change below a switched subtree lies outside the working copy URL.
+        let anchor = {
+            let (db, targets, opts, within) = (
+                Arc::clone(&db),
+                targets.clone(),
+                opts.clone(),
+                prefix.clone(),
+            );
+            blocking(move || svn_client::commit::commit_anchor(&db, &targets, &opts, &within))
+                .await?
+        };
+        if let Some(anchor) = anchor.filter(|a| *a != prefix) {
+            let root = RepoUrl::parse(&info.repo_root_url)?;
+            let at = if anchor.is_empty() {
+                root
+            } else {
+                root.join(&RelPath::new(&anchor)?)?
+            };
+            session = self
+                .connector
+                .connect_with(&at, &ConnectOptions::at_url(ctx), &ctx.cancel)
+                .await?;
+            session.ensure_authenticated(&ctx.cancel).await?;
+            prefix = session_prefix(session.as_ref())?;
+            opts.session_prefix.clone_from(&prefix);
+            if opts.author.is_none() {
+                opts.author = session.authenticated_user();
+            }
+        }
+
         ctx.progress.report(ProgressUpdate {
             phase: PHASE_COMMIT.to_owned(),
             total: Some(targets.len() as u64),
             ..ProgressUpdate::default()
         });
-        let opts = CommitOptions {
-            depth: Depth::Infinity,
-            keep_locks: req.keep_locks,
-            session_prefix: prefix,
-            author,
-            ..CommitOptions::new(req.message.clone())
-        };
         let state_dir = self.commit_journal_dir();
         let result = svn_client::commit::commit(
             &db,

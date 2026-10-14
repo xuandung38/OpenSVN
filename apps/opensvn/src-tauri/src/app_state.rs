@@ -91,7 +91,9 @@ pub(crate) fn build_real_engine(
 
 /// Points the engine at svn's per-user configuration directory while `wc.readSubversionConfig`
 /// is on (built-in defaults while it is off), now and after every change of the setting. The
-/// follower stops when the engine or the settings service is dropped.
+/// follower holds only a weak reference to the engine: it stops when the settings service is
+/// dropped, or at the first settings change after the engine was dropped (until then it just
+/// waits, holding nothing but the settings receiver).
 #[cfg(feature = "real-engine")]
 fn follow_subversion_config_setting(
     engine: &Arc<crate::engine::real::RealEngine>,

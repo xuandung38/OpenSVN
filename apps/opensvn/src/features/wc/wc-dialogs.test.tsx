@@ -35,7 +35,7 @@ beforeEach(() => {
   mockCalls.length = 0;
   setMockOpDuration(40);
   setMockProgressTotal(100);
-  setMockEngineCapabilities({ externals: true });
+  setMockEngineCapabilities({ externals: true, demo: false });
 });
 
 const option = (name: RegExp) => screen.findByRole("option", { name });
@@ -198,7 +198,7 @@ test("checkout: no externals option; an engine that fetches them shows no note",
 });
 
 test("checkout: an engine without externals says they are not fetched and links the issue", async () => {
-  setMockEngineCapabilities({ externals: false });
+  setMockEngineCapabilities({ externals: false, demo: false });
   renderApp(<AppShell />);
   await option(/renderer\.ts/);
   await user().keyboard("{Control>}{Shift>}o{/Shift}{/Control}");
@@ -436,4 +436,59 @@ test("activity: a failed operation is toasted with the backend message", async (
     });
   });
   expect(await screen.findAllByText("Update failed: Connection reset")).toBeTruthy();
+});
+
+test("demo engine: a release build running the demo engine says so, permanently", async () => {
+  setMockEngineCapabilities({ externals: true, demo: true });
+  renderApp(<AppShell />);
+  await option(/renderer\.ts/);
+  expect(await screen.findByText("Demo engine — not connected to real servers")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
+});
+
+test("demo engine: no banner for a real engine", async () => {
+  renderApp(<AppShell />);
+  await option(/renderer\.ts/);
+  await waitFor(() => expect(lastCall("engineCapabilities")).toBeTruthy());
+  expect(screen.queryByText("Demo engine — not connected to real servers")).toBeNull();
+});
+
+test("commit: a needs-cleanup notice shows the working copy's cleanup banner", async () => {
+  renderApp(<AppShell />);
+  await option(/renderer\.ts/);
+  await act(async () => {
+    mockEmit("op://started", { opId: "c1", kind: "commit", wcId: "wc-main", title: "Commit" });
+    mockEmit("op://progress", {
+      opId: "c1",
+      phase: "needs-cleanup",
+      current: null,
+      total: null,
+      bytesDone: null,
+      bytesTotal: null,
+      currentPath: "src/app.ts is in use",
+    });
+  });
+  expect(await screen.findByRole("button", { name: "Run cleanup" })).toBeTruthy();
+});
+
+test("add: a skipped nested working copy is shown to the user, not only logged", async () => {
+  renderApp(<AppShell />);
+  await option(/renderer\.ts/);
+  await act(async () => {
+    mockEmit("op://started", { opId: "a1", kind: "add", wcId: "wc-main", title: "Add" });
+    mockEmit("op://progress", {
+      opId: "a1",
+      phase: "nested-wc-skipped",
+      current: null,
+      total: null,
+      bytesDone: null,
+      bytesTotal: null,
+      currentPath: "'vendor/lib' is a nested working copy",
+    });
+  });
+  expect(
+    await screen.findByText(
+      "Skipped a nested working copy, which stays unversioned: 'vendor/lib' is a nested working copy",
+    ),
+  ).toBeTruthy();
 });

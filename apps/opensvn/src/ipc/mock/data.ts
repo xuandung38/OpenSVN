@@ -70,7 +70,7 @@ export const mockStatus: FileStatus[] = [
       owner: "you",
       comment: null,
       createdAt: "2026-10-13T08:00:00Z",
-      token: "t1",
+      token: null,
       mine: true,
     },
   }),
