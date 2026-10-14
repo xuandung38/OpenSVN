@@ -169,35 +169,39 @@ async fn incoming_delete_keeps_no_copy_of_a_file_external_like_svn() {
     let repo = Repo::new(&oracle);
     build(&repo);
     let sb = Sandbox::new();
-    let (theirs, ours) = prepare(&repo, &sb, "fext", 2, |wc| {
-        write(&wc.join("d/x.txt"), "x\nedited\n");
-    })
-    .await;
     let fext_row = |wc: &Path| {
         let db = WcDb::open(wc).expect("open");
         db.read_base(&rp("d/fext"))
             .expect("read")
             .map(|n| n.file_external)
     };
-    assert_eq!(fext_row(&theirs), Some(true), "svn: no file external");
-    assert_eq!(fext_row(&ours), Some(true), "ours: no file external");
+    // The second case also edits the file external: the edit must stay on disk.
+    for edit_fext in [false, true] {
+        let name = if edit_fext { "fext-edited" } else { "fext" };
+        let (theirs, ours) = prepare(&repo, &sb, name, 2, |wc| {
+            write(&wc.join("d/x.txt"), "x\nedited\n");
+            if edit_fext {
+                write(&wc.join("d/fext"), "k\nmine\n");
+            }
+        })
+        .await;
+        assert_eq!(fext_row(&theirs), Some(true), "svn: no file external");
+        assert_eq!(fext_row(&ours), Some(true), "ours: no file external");
 
-    // svn's externals pass then fails on the unversioned file left at `d/fext`; only the
-    // update of the delete itself is compared.
-    let _ = svn_update(&repo, &theirs, 3);
-    let _ = our_update(&repo, &ours, 3).await;
-    assert_same(
-        &oracle,
-        &theirs,
-        &ours,
-        "file external below a kept directory",
-    );
-    assert!(
-        !nodes_snapshot(&ours)
-            .iter()
-            .any(|r| r.starts_with("d/fext|")),
-        "the file external was copied"
-    );
+        // svn's externals pass then fails on the unversioned file left at `d/fext`; only the
+        // update of the delete itself is compared.
+        let _ = svn_update(&repo, &theirs, 3);
+        let _ = our_update(&repo, &ours, 3).await;
+        assert_same(&oracle, &theirs, &ours, name);
+        assert!(
+            !nodes_snapshot(&ours)
+                .iter()
+                .any(|r| r.starts_with("d/fext|")),
+            "{name}: the file external was copied"
+        );
+        let want = if edit_fext { "k\nmine\n" } else { "k\n" };
+        assert_eq!(read(&ours.join("d/fext")), want, "{name}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
