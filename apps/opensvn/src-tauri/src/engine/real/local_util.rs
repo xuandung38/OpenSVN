@@ -82,6 +82,9 @@ pub(super) struct LocalEnv {
     pub(super) add: AddConfig,
     /// Cancellation of the call.
     pub(super) cancel: CancelToken,
+    /// Request paths are matched against `wc.db` ignoring case ([`CASE_INSENSITIVE_FS`] unless
+    /// the engine overrides it).
+    pub(super) case_insensitive: bool,
 }
 
 impl LocalEnv {
@@ -104,7 +107,11 @@ pub(super) fn local_env(
             add.global_ignores.push(p);
         }
     }
-    Ok(LocalEnv { add, cancel })
+    Ok(LocalEnv {
+        add,
+        cancel,
+        case_insensitive: CASE_INSENSITIVE_FS,
+    })
 }
 
 /// Opens the working copy registered at `root` for an `svn-client` operation (registering the
@@ -133,11 +140,201 @@ pub(super) fn open_wc_root(client: &ClientCtx, root: &Path) -> EngineResult<WcDb
 ///
 /// Also refuses a path that belongs to another working copy (see [`ensure_own_path`]): an
 /// external, a separate checkout nested inside this one, or anything inside either.
+///
+/// On case-insensitive file systems a path that `wc.db` does not know is first resolved to the
+/// versioned spelling ([`resolve_case`]), so `README.MD` acts on the versioned `README.md` instead
+/// of being treated as unversioned (and deleted by a revert or cleanup that removes unversioned
+/// items).
 pub(super) fn target(db: &WcDb, path: &str) -> EngineResult<(RelPath, PathBuf)> {
+    target_with(db, path, CASE_INSENSITIVE_FS)
+}
+
+/// [`target`] with the case rule of `env` ([`LocalEnv::case_insensitive`]).
+pub(super) fn target_in(db: &WcDb, env: &LocalEnv, path: &str) -> EngineResult<(RelPath, PathBuf)> {
+    target_with(db, path, env.case_insensitive)
+}
+
+/// [`target_in`] for each of `paths`; fails on the first bad one before anything is changed.
+pub(super) fn targets_in(
+    db: &WcDb,
+    env: &LocalEnv,
+    paths: &[String],
+) -> EngineResult<Vec<PathBuf>> {
+    paths
+        .iter()
+        .map(|p| target_in(db, env, p).map(|(_, abs)| abs))
+        .collect()
+}
+
+/// [`target`], matching `wc.db` ignoring case when `case_insensitive`.
+pub(super) fn target_with(
+    db: &WcDb,
+    path: &str,
+    case_insensitive: bool,
+) -> EngineResult<(RelPath, PathBuf)> {
     let rel = RelPath::new(path).map_err(|e| unsafe_request_path(path, &e))?;
+    let rel = resolve_case(db, &rel, case_insensitive)?;
     let abs = safe_join(db.wcroot(), &rel).map_err(|e| unsafe_request_path(path, &e))?;
     ensure_own_path(db, &rel)?;
     Ok((rel, abs))
+}
+
+/// [`target`] for a path that is about to be created (the destination of a move): taken as
+/// spelled, so a rename that only changes case stays possible.
+pub(super) fn new_target(db: &WcDb, path: &str) -> EngineResult<(RelPath, PathBuf)> {
+    target_with(db, path, false)
+}
+
+/// Whether the platform's usual file systems ignore case in names (APFS/HFS+ by default, NTFS),
+/// so `README.MD` and `README.md` may be the same file. Case-sensitive volumes and folders exist
+/// on these platforms too (case-sensitive APFS, per-folder case sensitivity on Windows), so the
+/// switch to the `wc.db` spelling is only made after the disk confirms that both names are one
+/// item ([`resolve_case`]).
+pub(super) const CASE_INSENSITIVE_FS: bool = cfg!(any(target_os = "macos", windows));
+
+/// A name folded for comparison the way case-insensitive file systems compare names: Unicode
+/// NFC (APFS and HFS+ also ignore normalization), then full upper-then-lower case folding.
+fn fold_name(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    name.nfc()
+        .flat_map(char::to_uppercase)
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Paths in `wc.db` (any layer, any presence) spelled like `rel` up to case and normalization,
+/// `rel` itself included when it is there. Matched component by component, so a request that
+/// differs from `wc.db` in a parent folder's case is found too.
+pub(super) fn case_variants(db: &WcDb, rel: &RelPath) -> EngineResult<Vec<RelPath>> {
+    let mut frontier = vec![RelPath::root()];
+    for component in rel.components() {
+        let want = fold_name(component);
+        let mut next = Vec::new();
+        for parent in &frontier {
+            for child in db.children(parent)? {
+                if child.file_name().is_some_and(|n| fold_name(n) == want) {
+                    next.push(child);
+                }
+            }
+        }
+        if next.is_empty() {
+            return Ok(Vec::new());
+        }
+        frontier = next;
+    }
+    frontier.sort();
+    frontier.dedup();
+    Ok(frontier)
+}
+
+/// Resolves `rel` to its spelling in `wc.db` when `case_insensitive` and `wc.db` has no row for
+/// it as spelled. Several versioned names that match up to case (`README.md` and `Readme.md`, as
+/// a repository made on a case-sensitive system can have) are refused as ambiguous; none leaves
+/// `rel` as it is (an unversioned path). One match `versioned` is used only when the disk shows
+/// that nothing else can be meant ([`spelling_on_disk`]):
+///
+/// * neither name is on disk (a missing versioned item): `versioned`;
+/// * both are, and they are the same item: `versioned`;
+/// * only `rel` is: a separate item next to a missing versioned one, taken as spelled;
+/// * anything else (two different items, or only the versioned one on a case-sensitive volume):
+///   refused, so a request for one file never reverts, deletes or changes the other.
+pub(super) fn resolve_case(
+    db: &WcDb,
+    rel: &RelPath,
+    case_insensitive: bool,
+) -> EngineResult<RelPath> {
+    if !case_insensitive || rel.is_root() || db.read_node(rel)?.is_some() {
+        return Ok(rel.clone());
+    }
+    let mut found = case_variants(db, rel)?;
+    let versioned = match found.len() {
+        0 => return Ok(rel.clone()),
+        1 => found.remove(0),
+        _ => {
+            let names: Vec<String> = found.iter().map(|p| format!("'{p}'")).collect();
+            return Err(invalid(format!(
+                "'{rel}' matches several versioned items that differ only in case ({}); this \
+                 file system cannot tell them apart, so nothing was changed",
+                names.join(", ")
+            )));
+        }
+    };
+    match spelling_on_disk(db.wcroot(), rel, &versioned) {
+        Spelling::Versioned => Ok(versioned),
+        Spelling::AsAsked => Ok(rel.clone()),
+        Spelling::Unclear => Err(invalid(format!(
+            "'{rel}' is spelled differently from the versioned '{versioned}', and the disk does \
+             not show them to be the same item; nothing was changed. Use the name exactly as \
+             the working copy lists it"
+        ))),
+    }
+}
+
+/// Which spelling a request means, judged from the disk.
+#[derive(Debug, PartialEq, Eq)]
+enum Spelling {
+    /// The `wc.db` spelling: both names are one item, or neither exists.
+    Versioned,
+    /// The name as asked: a separate item, and the versioned one is not on disk.
+    AsAsked,
+    /// Two different items, or it cannot be told: refuse.
+    Unclear,
+}
+
+/// Compares the item at `asked` with the one at `versioned` (both below `wcroot`, equal up to
+/// case and normalization).
+fn spelling_on_disk(wcroot: &Path, asked: &RelPath, versioned: &RelPath) -> Spelling {
+    let stat = |rel: &RelPath| match safe_join(wcroot, rel) {
+        Ok(abs) => match abs.symlink_metadata() {
+            Ok(md) => Ok(Some(md)),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(()),
+        },
+        Err(_) => Err(()),
+    };
+    match (stat(asked), stat(versioned)) {
+        (Ok(None), Ok(None)) => Spelling::Versioned,
+        (Ok(Some(a)), Ok(Some(v))) if same_item(wcroot, asked, versioned, &a, &v) => {
+            Spelling::Versioned
+        }
+        (Ok(Some(_)), Ok(None)) => Spelling::AsAsked,
+        _ => Spelling::Unclear,
+    }
+}
+
+/// Whether `asked` and `versioned`, which both exist, are the same item: no folder on the way
+/// lists the asked spelling of a component as an entry of its own (a case-insensitive folder
+/// lists only the stored name), and on Unix both resolve to the same inode.
+fn same_item(
+    wcroot: &Path,
+    asked: &RelPath,
+    versioned: &RelPath,
+    asked_md: &fs::Metadata,
+    versioned_md: &fs::Metadata,
+) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if asked_md.dev() != versioned_md.dev() || asked_md.ino() != versioned_md.ino() {
+            return false;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (asked_md, versioned_md);
+    let mut dir = wcroot.to_path_buf();
+    for (a, v) in asked.components().zip(versioned.components()) {
+        if a != v {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                return false;
+            };
+            let listed = entries.flatten().any(|e| e.file_name().to_str() == Some(a));
+            if listed {
+                return false;
+            }
+        }
+        dir.push(v);
+    }
+    true
 }
 
 /// Fails when `rel`, which this working copy's database does not know, belongs to another
@@ -178,14 +375,6 @@ pub(super) fn ensure_own_path(db: &WcDb, rel: &RelPath) -> EngineResult<()> {
         )));
     }
     Ok(())
-}
-
-/// [`target`] for each of `paths`; fails on the first bad one before anything is changed.
-pub(super) fn targets(db: &WcDb, paths: &[String]) -> EngineResult<Vec<PathBuf>> {
-    paths
-        .iter()
-        .map(|p| target(db, p).map(|(_, abs)| abs))
-        .collect()
 }
 
 fn unsafe_request_path(path: &str, cause: &SvnError) -> SvnError {
@@ -253,7 +442,40 @@ pub(super) fn checked_ignore_pattern(pattern: &str) -> EngineResult<&str> {
 /// out inside this one. A `rel` inside an external or a nested checkout is refused with an error
 /// ([`ensure_own_path`]). svn's own `cleanup --remove-unversioned` deletes such a nested checkout;
 /// the app deliberately keeps it, since it may hold local edits nothing else knows about.
+///
+/// On case-insensitive file systems an item whose name matches a versioned node up to case is
+/// never returned: it is that node's file under another spelling (renamed outside svn), and
+/// removing it would delete versioned data.
 pub(super) fn unversioned_items(
+    db: &WcDb,
+    env: &LocalEnv,
+    rel: &RelPath,
+    unversioned: bool,
+    ignored: bool,
+) -> EngineResult<Vec<RelPath>> {
+    let mut items = unversioned_items_as_spelled(db, env, rel, unversioned, ignored)?;
+    if env.case_insensitive {
+        drop_case_aliases(db, &mut items)?;
+    }
+    Ok(items)
+}
+
+/// Removes from `items` every path that matches a versioned node up to case.
+pub(super) fn drop_case_aliases(db: &WcDb, items: &mut Vec<RelPath>) -> EngineResult<()> {
+    let mut kept = Vec::with_capacity(items.len());
+    for item in items.drain(..) {
+        if case_variants(db, &item)?.is_empty() {
+            kept.push(item);
+        } else {
+            tracing::warn!(path = %item, "kept: same name as a versioned item up to case");
+        }
+    }
+    *items = kept;
+    Ok(())
+}
+
+/// [`unversioned_items`] comparing names exactly as spelled.
+pub(super) fn unversioned_items_as_spelled(
     db: &WcDb,
     env: &LocalEnv,
     rel: &RelPath,

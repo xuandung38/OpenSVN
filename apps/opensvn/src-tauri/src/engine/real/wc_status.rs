@@ -16,7 +16,9 @@
 //! * An unversioned file (status lists them, conflict marker files included) is diffed as a
 //!   one-sided addition of the bytes on disk, under the same cap and binary rules. The path must
 //!   stay inside the working copy: no `..`, no absolute path, no `.svn` component and no symlinked
-//!   parent folder; a symlink itself is shown as its `link <target>` text, never followed.
+//!   parent folder; a symlink itself is shown as its `link <target>` text, never followed. Files
+//!   are opened without following a symlink and the open handle must still be the regular file
+//!   that was checked.
 //! * `status_remote` runs `svn_client::status_remote` on a session anchored at the working copy
 //!   URL (with the interactivity of the call) and counts the revisions the working copy lacks,
 //!   capped at [`INCOMING_CAP`].
@@ -132,15 +134,78 @@ fn capped(data: Vec<u8>, limit: usize) -> Content {
 }
 
 /// What is on disk at `abs`, without following a symlink: `None` when nothing is there or a
-/// directory obstructs it (no file to show), else whether it is a symlink.
-fn file_on_disk(abs: &Path, rel: &RelPath) -> EngineResult<Option<bool>> {
+/// directory obstructs it (no file to show), else its metadata (a symlink or a regular file).
+fn file_on_disk(abs: &Path, rel: &RelPath) -> EngineResult<Option<fs::Metadata>> {
     match fs::symlink_metadata(abs) {
-        Ok(md) if md.file_type().is_symlink() => Ok(Some(true)),
-        Ok(md) if md.file_type().is_file() => Ok(Some(false)),
+        Ok(md) if md.file_type().is_symlink() || md.file_type().is_file() => Ok(Some(md)),
         Ok(_) => Ok(None),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(SvnError::from_io(format!("cannot stat '{rel}'"), &e)),
     }
+}
+
+/// Opens the regular file at `abs` that `seen` (its `symlink_metadata`) described, without
+/// following a symlink in the last component (`O_NOFOLLOW`, `FILE_FLAG_OPEN_REPARSE_POINT`), and
+/// checks that the handle is still that regular file. A file swapped for a symlink, a FIFO or
+/// another file between the check and the open is refused instead of read.
+fn open_seen_file(abs: &Path, seen: &fs::Metadata, rel: &RelPath) -> EngineResult<File> {
+    let changed = || {
+        SvnError::new(
+            ErrorCode::WcInvalidOperation,
+            format!("'{rel}' changed on disk while it was being read; refresh and try again"),
+        )
+    };
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Non-blocking so a FIFO put in place of the file cannot hang the open.
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        /// `FILE_FLAG_OPEN_REPARSE_POINT`: open a reparse point itself, not its target.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = match opts.open(abs) {
+        Ok(f) => f,
+        // ELOOP: the last component is a symlink now.
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(changed()),
+        Err(e) => return Err(SvnError::from_io(format!("cannot open '{rel}'"), &e)),
+    };
+    let md = file
+        .metadata()
+        .map_err(|e| SvnError::from_io(format!("cannot stat '{rel}'"), &e))?;
+    if !md.file_type().is_file() || !same_file(&md, seen) {
+        return Err(changed());
+    }
+    Ok(file)
+}
+
+/// Whether two metadata of regular files describe the same file.
+#[cfg(unix)]
+fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+/// Whether two metadata of regular files describe the same file (the handle is not a reparse
+/// point; file ids are not available on stable Rust).
+#[cfg(windows)]
+fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    /// `FILE_ATTRIBUTE_REPARSE_POINT`.
+    const REPARSE_POINT: u32 = 0x400;
+    a.file_attributes() & REPARSE_POINT == 0 && b.file_attributes() & REPARSE_POINT == 0
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file(_: &fs::Metadata, _: &fs::Metadata) -> bool {
+    true
 }
 
 /// Working file of `rel` converted to repository-normal form. The file is streamed through the
@@ -148,15 +213,14 @@ fn file_on_disk(abs: &Path, rel: &RelPath) -> EngineResult<Option<bool>> {
 /// (a log being written) cannot push the read past the cap.
 fn working_text(db: &WcDb, rel: &RelPath, limit: usize) -> EngineResult<Content> {
     let abs = svn_client::wc::abs_path(db, rel)?;
-    let Some(is_link) = file_on_disk(&abs, rel)? else {
+    let Some(seen) = file_on_disk(&abs, rel)? else {
         return Ok(Content::Absent);
     };
     let info = translate_info(&db.actual_props(rel)?);
-    if is_link {
+    if seen.file_type().is_symlink() {
         return Ok(capped(special::read_repo_normal(&abs)?, limit));
     }
-    let file =
-        File::open(&abs).map_err(|e| SvnError::from_io(format!("cannot open '{rel}'"), &e))?;
+    let file = open_seen_file(&abs, &seen, rel)?;
     if info.special {
         // `svn:special` on a regular file: its raw content, like `special::read_repo_normal`.
         return read_limited(file, limit, "the working file");
@@ -180,7 +244,8 @@ fn working_text(db: &WcDb, rel: &RelPath, limit: usize) -> EngineResult<Content>
 /// administrative area, never through a symlinked parent folder (which could lead outside).
 fn unversioned_path(wcroot: &Path, rel: &RelPath) -> EngineResult<std::path::PathBuf> {
     let parts: Vec<&str> = rel.as_str().split('/').filter(|p| !p.is_empty()).collect();
-    if parts.is_empty() || parts.iter().any(|p| p.eq_ignore_ascii_case(".svn")) {
+    // Any spelling that can resolve to an administrative folder (`.svn.`, `SVN~1`, `_svn`, …).
+    if parts.is_empty() || parts.iter().any(|p| svn_types::is_any_admin_dir_name(p)) {
         return Err(not_versioned(rel));
     }
     let mut dir = wcroot.to_path_buf();
@@ -216,8 +281,7 @@ fn read_unversioned(db: &WcDb, rel: &RelPath, limit: usize) -> EngineResult<Loca
             capped(special::read_repo_normal(&abs)?, limit),
         )
     } else if md.file_type().is_file() {
-        let file =
-            File::open(&abs).map_err(|e| SvnError::from_io(format!("cannot open '{rel}'"), &e))?;
+        let file = open_seen_file(&abs, &md, rel)?;
         (NodeKind::File, read_limited(file, limit, "the file")?)
     } else if md.file_type().is_dir() {
         (NodeKind::Dir, Content::Absent)
@@ -568,5 +632,43 @@ impl RealEngine {
             incoming,
             latest_rev: Rev(latest.0),
         })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod open_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn a_file_swapped_after_the_check_is_not_read() {
+        let d = tempfile::tempdir().unwrap();
+        let rel = RelPath::new("a.txt").unwrap();
+        let abs = d.path().join("a.txt");
+        let outside = d.path().join("outside.txt");
+        fs::write(&outside, b"secret").unwrap();
+        fs::write(&abs, b"mine").unwrap();
+        let seen = fs::symlink_metadata(&abs).unwrap();
+        let mut ok = String::new();
+        open_seen_file(&abs, &seen, &rel)
+            .unwrap()
+            .read_to_string(&mut ok)
+            .unwrap();
+        assert_eq!(ok, "mine");
+
+        // Replaced by a symlink: the open does not follow it. The original file stays on disk
+        // so its inode cannot be reused by the replacement below.
+        fs::rename(&abs, d.path().join("kept.txt")).unwrap();
+        std::os::unix::fs::symlink(&outside, &abs).unwrap();
+        let err = open_seen_file(&abs, &seen, &rel).unwrap_err();
+        assert_eq!(err.code, ErrorCode::WcInvalidOperation);
+
+        // Replaced by another regular file: the handle is not the one that was checked.
+        fs::remove_file(&abs).unwrap();
+        fs::write(d.path().join("b.txt"), b"other").unwrap();
+        fs::rename(d.path().join("b.txt"), &abs).unwrap();
+        let err = open_seen_file(&abs, &seen, &rel).unwrap_err();
+        assert_eq!(err.code, ErrorCode::WcInvalidOperation);
     }
 }
