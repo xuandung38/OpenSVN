@@ -36,6 +36,14 @@ export const branchStrings = defineStrings({
     nameChars: 'A name cannot contain control characters or : * ? " < > |',
     branch: "branch",
     tag: "tag",
+    switchTo: "Switch to",
+    branchesLoading: "Loading branches…",
+    branchesFailed: "Could not list the branches. Use Switch… to enter a URL.",
+    noOtherBranches: "No other branches or tags.",
+    carryChanges:
+      "{count} local change(s) will be carried over to {name}. Conflicts are possible if the same files changed there.",
+    carryAndSwitch: "Carry changes and switch",
+    cancel: "Cancel",
   },
   vi: {
     newBranch: "Branch mới",
@@ -70,5 +78,13 @@ export const branchStrings = defineStrings({
     nameChars: 'Tên không được chứa ký tự điều khiển hoặc : * ? " < > |',
     branch: "branch",
     tag: "tag",
+    switchTo: "Chuyển sang",
+    branchesLoading: "Đang tải danh sách branch…",
+    branchesFailed: "Không lấy được danh sách branch. Dùng Switch… để nhập URL.",
+    noOtherBranches: "Không có branch hay tag nào khác.",
+    carryChanges:
+      "{count} thay đổi local được mang sang {name}. Có thể xảy ra xung đột nếu cùng file đã đổi ở đó.",
+    carryAndSwitch: "Mang thay đổi theo và chuyển",
+    cancel: "Hủy",
   },
 });

@@ -653,6 +653,86 @@ pub async fn switch_to_a_branch(h: &dyn Harness) {
     assert!(status(h, &wc).await.is_empty());
 }
 
+/// The trunk/branches/tags layout around a working copy URL is found through the engine, follows a
+/// switch, and lists the branches to switch to. A location outside the layout has no branch.
+pub async fn branch_detection_follows_a_switch(h: &dyn Harness) {
+    use opensvn_ipc::BranchKind;
+
+    use crate::layout::{EngineDirs, branch_from_url, detect};
+
+    let e = h.engine();
+    let url = h.repo_url();
+    for to in ["branches/feature-y", "lib-copy"] {
+        e.copy_location(
+            &CopyLocationRequest {
+                from_url: format!("{url}/trunk"),
+                from_rev: None,
+                to_url: format!("{url}/{to}"),
+                message: format!("Copy to {to}"),
+                switch_wc_id: None,
+                from_wc: None,
+            },
+            None,
+            &ctx(),
+        )
+        .await
+        .expect("copy");
+    }
+    let (wc, info) = checkout(h, "branch-detect", None).await;
+    let lister = EngineDirs(e);
+    let found = detect(&lister, &info.repo_root_url, &info.url)
+        .await
+        .expect("detect");
+    assert!(found.found);
+    let current = found.current.expect("trunk is a branch");
+    // The offline derivation used for the toolbar agrees with the server-side detection.
+    assert_eq!(
+        branch_from_url(&info.repo_root_url, &info.url, None),
+        Some(current.clone())
+    );
+    assert_eq!(
+        (current.kind, current.name.as_str()),
+        (BranchKind::Trunk, "trunk")
+    );
+
+    let nodes = e
+        .branches_list(&info.repo_root_url, &Layout::Auto, &ctx())
+        .await
+        .expect("branches");
+    let target = nodes
+        .iter()
+        .find(|n| n.kind == BranchKind::Branch && n.name == "feature-y")
+        .expect("listed branch");
+    e.switch(&wc, &target.url, None, &ctx())
+        .await
+        .expect("switch");
+    let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
+    let current = detect(&lister, &info.repo_root_url, &info.url)
+        .await
+        .expect("detect")
+        .current
+        .expect("branch after switch");
+    assert_eq!(
+        branch_from_url(&info.repo_root_url, &info.url, None),
+        Some(current.clone())
+    );
+    assert_eq!(
+        (current.kind, current.name.as_str()),
+        (BranchKind::Branch, "feature-y")
+    );
+    assert_eq!(current.url, target.url);
+
+    e.switch(&wc, &format!("{url}/lib-copy"), None, &ctx())
+        .await
+        .expect("switch outside the layout");
+    let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
+    let outside = detect(&lister, &info.repo_root_url, &info.url)
+        .await
+        .expect("detect");
+    assert!(outside.current.is_none(), "{:?}", outside.current);
+    assert_eq!(branch_from_url(&info.repo_root_url, &info.url, None), None);
+}
+
 /// Downloads, revision diffs and blame.
 pub async fn repository_content_tools(h: &dyn Harness) {
     let e = h.engine();
@@ -1227,6 +1307,7 @@ pub async fn run_all<H: Harness>(make: impl Fn() -> H) {
     working_copy_metadata_operations(&make()).await;
     mark_move_and_set_depth(&make()).await;
     switch_to_a_branch(&make()).await;
+    branch_detection_follows_a_switch(&make()).await;
     repository_content_tools(&make()).await;
     open_recovers_dead_locks_and_reports_foreign_ones(&make()).await;
     locked_unmodified_file_in_status(&make()).await;
