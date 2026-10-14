@@ -850,3 +850,104 @@ fn copy_of_a_single_mixed_revision_file_needs_no_layering() {
         },
     );
 }
+
+/// Marks `rel` incomplete in BASE, as an interrupted checkout or update leaves it.
+fn mark_incomplete(wc: &Path, rel: &str) {
+    WcDb::open(wc)
+        .expect("open")
+        .with_write(|tx| {
+            tx.execute(
+                "UPDATE nodes SET presence = 'incomplete' \
+                 WHERE local_relpath = ?1 AND op_depth = 0",
+                [rel],
+            )
+            .map(|_| ())
+            .map_err(svn_wc::db::sql_err)
+        })
+        .expect("mark incomplete");
+}
+
+/// svn 1.15 commits an item added into a folder recorded as incomplete and leaves the folder
+/// incomplete at its old revision (only an update completes it); our commit does the same.
+#[test]
+fn commit_into_an_incomplete_folder_leaves_it_incomplete_like_svn() {
+    if skip_without_svn_1_15() {
+        return;
+    }
+    let fx = fixture();
+    let a = checkout(&fx.base, &fx.url, "svn-side", &[]);
+    let b = checkout(&fx.base, &fx.url, "our-side", &[]);
+    for wc in [&a, &b] {
+        mark_incomplete(wc, "e");
+        write(wc, "e/new.txt", "new\n");
+    }
+    svn(&a, &["add", "-q", "e/new.txt"]);
+    {
+        let db = WcDb::open(&b).expect("open");
+        db.op_add(&rp("e/new.txt"), NodeKind::File, None, &[])
+            .expect("add");
+    }
+    svn(&a, &["commit", "-q", "-m", "into incomplete"]);
+
+    let conn = open_ro(&a);
+    let (date, author, ck): (i64, String, String) = conn
+        .query_row(
+            "SELECT changed_date, changed_author, checksum FROM nodes \
+             WHERE local_relpath = 'e/new.txt'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("new base");
+    let (size, md5): (i64, String) = conn
+        .query_row(
+            "SELECT size, md5_checksum FROM pristine WHERE checksum = ?1",
+            [&ck],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("pristine");
+    let e_row: (String, i64) = conn
+        .query_row(
+            "SELECT presence, revision FROM nodes WHERE local_relpath = 'e' AND op_depth = 0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("e base");
+    drop(conn);
+    assert_eq!(
+        e_row,
+        ("incomplete".to_owned(), 1),
+        "svn completed the folder"
+    );
+
+    let db = WcDb::open(&b).expect("open");
+    db.with_write(|tx| {
+        tx.execute(
+            "INSERT OR IGNORE INTO pristine (checksum, size, refcount, md5_checksum) \
+             VALUES (?1, ?2, 0, ?3)",
+            (&ck, size, &md5),
+        )
+        .map(|_| ())
+        .map_err(svn_wc::db::sql_err)
+    })
+    .expect("pristine row");
+    let info = CommitInfo {
+        new_rev: 2,
+        date: Some(date),
+        author: Some(author),
+        checksum: Some(ck),
+        ..CommitInfo::default()
+    };
+    db.commit_node(&rp("e/new.txt"), &info, &[])
+        .expect("commit");
+    drop(db);
+    let norm = |rows: Vec<String>| {
+        rows.into_iter()
+            .map(|r| r.replace("ts=true", "ts=false"))
+            .collect::<Vec<_>>()
+    };
+    assert_rows_equal(
+        "commit-into-incomplete",
+        &norm(dump_rows(&a)),
+        &norm(dump_rows(&b)),
+    );
+}

@@ -8,6 +8,7 @@ use svn_types::{Depth, ErrorCode, NodeKind, PropChange, RelPath, Result, SvnErro
 use svn_wc::WcDb;
 use svn_wc::pristine::Sha1Digest;
 
+use crate::local::delete::{cannot_delete_external, external_definer};
 use crate::local::paths::{abs_of, depth_of};
 use crate::local::state::{
     NodeInfo, Schedule, live_children, node_info, props_modified, text_modified,
@@ -212,6 +213,15 @@ impl Collector<'_> {
             if !member {
                 return Ok(());
             }
+        }
+        // An external is never deleted (nor replaced) by a commit: its BASE location is the
+        // external's source, so the commit would delete that from the repository. `delete`
+        // refuses to schedule it; this guards rows written by anything else.
+        if info.op_root
+            && matches!(info.schedule, Schedule::Deleted | Schedule::Replaced)
+            && let Some(def) = external_definer(db, rel)?
+        {
+            return Err(cannot_delete_external(db, rel, &def));
         }
         self.gather_locks(info)?;
         let (action, copy_from, base_rev, needs_text) = match info.schedule {
