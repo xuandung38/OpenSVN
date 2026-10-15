@@ -5,9 +5,10 @@
 //! killed before the rename leaves a `.svn` *skeleton* that no client takes for a working copy:
 //! `tmp` holding the creation lock file `wc.db.creating.lock` and maybe the half-built database
 //! and its journal, and maybe an empty `pristine`; or, killed between the `mkdir` of `.svn` and
-//! the lock file, an empty `.svn` or a `.svn` holding only an empty `tmp`. The next [`WcDb::create`] takes the skeleton over in place,
-//! unless its creator still holds the lock. A process killed after the rename
-//! leaves a regular working copy whose root is `incomplete`, which an update finishes.
+//! the lock file, an empty `.svn` or a `.svn` holding only an empty `tmp`. The next
+//! [`WcDb::create`] takes the skeleton over in place, unless its creator still holds the lock. A
+//! process killed after the rename leaves a regular working copy whose root is `incomplete`,
+//! which an update finishes.
 //!
 //! Earlier versions created `wc.db` in place, so a kill in the first milliseconds left an empty
 //! or schema-less `.svn/wc.db` (plus `tmp` and `pristine`). [`WcDb::open`] reports such a file as
@@ -19,13 +20,12 @@
 //! the lock it never deletes anything. An empty `.svn` holds nothing to lose: a caller that finds
 //! one makes `tmp` in it with the same exclusive `mkdir`, and of two callers only the one whose
 //! `mkdir` succeeds goes on (the other reports the area busy). Another caller takes a skeleton
-//! over only when it holds
-//! that same lock (checked to still be the file at that path) and the skeleton, inspected again
-//! under the lock, holds nothing but the names above. It then deletes only those files, one by
-//! one, never a directory, and reuses `tmp` and `pristine`. The lock file itself is deleted only
-//! by its holder: after the database is in place, or with the whole `.svn` when the creation
-//! fails. Anything else in `.svn` (user files, svn's own files, a complete or unreadable
-//! `wc.db`) makes the area foreign: it is rejected and never touched.
+//! over only when it holds that same lock (checked to still be the file at that path) and the
+//! skeleton, inspected again under the lock, holds nothing but the names above. It then deletes
+//! only those files, one by one, never a directory, and reuses `tmp` and `pristine`. The lock
+//! file itself is deleted only by its holder: after the database is in place, or with the whole
+//! `.svn` when the creation fails. Anything else in `.svn` (user files, svn's own files, a
+//! complete or unreadable `wc.db`) makes the area foreign: it is rejected and never touched.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -262,10 +262,10 @@ impl WcDb {
     /// `.svn/{wc.db,format,entries,tmp,pristine}` plus the REPOSITORY, WCROOT and root BASE rows
     /// exactly as `svn_wc__db_init` inserts them.
     ///
-    /// An existing `.svn` is rejected without being touched, except the verified skeleton of an
-    /// interrupted creation whose creator is gone, which is taken over (see the module
-    /// documentation for the ownership rules). On failure, the caller that holds the creation
-    /// lock removes `.svn` again.
+    /// An existing `.svn` is rejected without being touched, except an empty one, one holding only
+    /// an empty `tmp`, or the verified skeleton of an interrupted creation whose creator is gone,
+    /// which is taken over (see the module documentation for the ownership rules). On failure,
+    /// the caller that holds the creation lock removes `.svn` again.
     pub fn create(wcroot: &Path, new: &NewWc) -> Result<WcDb> {
         let adm = wcroot.join(ADM_DIR);
         let tmp = adm.join("tmp");
