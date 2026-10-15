@@ -406,6 +406,156 @@ async fn opening_the_repository_list_of_a_parent_path_names_the_repositories() {
         "{}",
         err.message
     );
+    let urls: Vec<(&str, String)> = err
+        .parent_repositories()
+        .expect("the repositories ride on the error")
+        .iter()
+        .map(|r| (r.name.as_str(), r.url.clone()))
+        .collect();
+    assert_eq!(
+        urls,
+        [
+            ("Dự án", format!("{}/svn/D%E1%BB%B1%20%C3%A1n", srv.uri())),
+            ("MyRepo", format!("{}/svn/MyRepo", srv.uri())),
+        ]
+    );
+}
+
+/// Apache's `SVNParentPath` HTML listing (`SVNListParentPath On`, no `SVNIndexXSLT`).
+const PARENT_HTML: &str = r#"<html><head><title>Collection of Repositories</title></head>
+<body>
+ <h2>Collection of Repositories</h2>
+ <ul>
+  <li><a href="D%c6%b0%cc%a3%20a%cc%81n%20m%e1%bb%9bi/">Dự án mới/</a></li>
+  <li><a href="My%20Project/">My Project/</a></li>
+ </ul>
+ <hr noshade><em>Powered by <a href="http://subversion.apache.org/">Apache Subversion</a></em>
+</body></html>"#;
+
+#[tokio::test]
+async fn the_repository_list_behind_basic_auth_is_read_with_the_same_sign_in() {
+    let ca = TestCa::new();
+    let handler: Arc<common::Handler> = Arc::new(|seen: &common::Seen| {
+        if seen.header("authorization").as_deref() != Some(basic("alice", "pw").as_str()) {
+            return Reply::unauthorized("VisualSVN Server");
+        }
+        match (seen.method.as_str(), seen.path.as_str()) {
+            ("GET", "/svn/") => Reply::ok(PARENT_HTML),
+            _ => Reply::status(500).header("content-type", "text/html; charset=iso-8859-1"),
+        }
+    });
+    let srv = TlsServer::start(&ca.leaf(&["localhost"], false), handler).await;
+    let prompter = ScriptedPrompter::with_credentials("alice", "pw");
+    let t = transport_trusting(&ca, prompter.clone(), |_| {});
+    let url = RepoUrl::parse(srv.url("/svn").as_str()).unwrap();
+    let Err(err) = HttpRaSession::open(t, url, &CancelToken::new()).await else {
+        panic!("a repository list is not a repository");
+    };
+    assert_eq!(err.code, ErrorCode::PathNotFound, "{err:?}");
+    let repos = err.parent_repositories().expect("repositories");
+    let base = srv.url("/svn").as_str().trim_end_matches('/').to_owned();
+    let got: Vec<(&str, String)> = repos
+        .iter()
+        .map(|r| (r.name.as_str(), r.url.clone()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            // Decomposed Vietnamese (as macOS writes it) stays as the server spelled it.
+            (
+                "Dư\u{323} a\u{301}n mới",
+                format!("{base}/D%C6%B0%CC%A3%20a%CC%81n%20m%E1%BB%9Bi")
+            ),
+            ("My Project", format!("{base}/My%20Project")),
+        ]
+    );
+    assert_eq!(
+        prompter.credential_prompts(),
+        1,
+        "one sign-in serves the OPTIONS and the listing"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_sign_in_on_a_repository_list_stays_auth_required() {
+    let srv = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(
+            ResponseTemplate::new(401).insert_header("WWW-Authenticate", "Basic realm=\"SVN\""),
+        )
+        .mount(&srv)
+        .await;
+    let url = RepoUrl::parse(&format!("{}/svn", srv.uri())).unwrap();
+    let Err(err) = HttpRaSession::open(
+        transport(Arc::new(ScriptedPrompter::default())),
+        url,
+        &CancelToken::new(),
+    )
+    .await
+    else {
+        panic!("no credentials");
+    };
+    assert_eq!(err.code, ErrorCode::AuthRequired, "{err:?}");
+    assert!(err.parent_repositories().is_none());
+}
+
+#[tokio::test]
+async fn a_listing_that_needs_a_refused_sign_in_reports_the_sign_in() {
+    // OPTIONS answers the bare 500 without asking; only the listing asks for a sign-in.
+    let srv = MockServer::start().await;
+    Mock::given(method("OPTIONS"))
+        .respond_with(parent_path_options_500())
+        .mount(&srv)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(401).insert_header("WWW-Authenticate", "Basic realm=\"SVN\""),
+        )
+        .mount(&srv)
+        .await;
+    let url = RepoUrl::parse(&format!("{}/svn", srv.uri())).unwrap();
+    let Err(err) = HttpRaSession::open(
+        transport(Arc::new(ScriptedPrompter::default())),
+        url,
+        &CancelToken::new(),
+    )
+    .await
+    else {
+        panic!("no credentials");
+    };
+    assert_eq!(err.code, ErrorCode::AuthRequired, "{err:?}");
+    assert!(err.parent_repositories().is_none());
+}
+
+#[tokio::test]
+async fn cancelling_while_the_listing_is_read_reports_the_cancel() {
+    let srv = MockServer::start().await;
+    Mock::given(method("OPTIONS"))
+        .respond_with(parent_path_options_500())
+        .mount(&srv)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(PARENT_HTML)
+                .set_delay(std::time::Duration::from_secs(30)),
+        )
+        .mount(&srv)
+        .await;
+    let url = RepoUrl::parse(&format!("{}/svn", srv.uri())).unwrap();
+    let cancel = CancelToken::new();
+    let later = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        later.cancel();
+    });
+    let Err(err) =
+        HttpRaSession::open(transport(Arc::new(FixedPrompter::default())), url, &cancel).await
+    else {
+        panic!("cancelled");
+    };
+    assert_eq!(err.code, ErrorCode::Cancelled, "{err:?}");
+    assert!(err.parent_repositories().is_none());
 }
 
 #[tokio::test]

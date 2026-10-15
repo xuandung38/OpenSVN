@@ -229,6 +229,12 @@ export type AppError = {
 	 *  server reports them now. `None` when the engine could not ask (or for other codes).
 	 */
 	lockConflicts?: LockConflict[] | null,
+	/**
+	 *  For `path-not-found` on a server URL that is the repository list of an `SVNParentPath`
+	 *  location (VisualSVN Server's `https://host/svn/`): the repositories it lists, so the UI
+	 *  can offer them. `None` for any other error.
+	 */
+	repositories?: ParentRepo[] | null,
 };
 
 /**  Authentication scheme the server offers. */
@@ -726,6 +732,14 @@ export type OperationKind = "checkout" | "update" | "switch" | "commit" | "rever
 "copy" | 
 /**  Download of a repository file to disk (`repo_save`). */
 "save";
+
+/**  A repository listed by an `SVNParentPath` location. */
+export type ParentRepo = {
+	/**  Name for display. */
+	name: string,
+	/**  Repository URL, percent-encoded. */
+	url: string,
+};
 
 /**  What happened to one path, as `svn` prints it in the first column (`A`, `U`, `D`, ...). */
 export type PathAction = 

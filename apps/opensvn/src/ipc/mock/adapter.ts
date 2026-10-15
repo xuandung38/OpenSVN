@@ -20,6 +20,8 @@ import { mockSettings } from "./data";
 import {
   MOCK_REPO_ROOT,
   MOCK_REPO_UUID,
+  MOCK_SERVER_REPOS,
+  MOCK_SERVER_URL,
   MOCK_YOUNGEST,
   mockBlame,
   mockBranches,
@@ -60,6 +62,22 @@ const errCode = (code: AppError["code"], message: string, detail: string | null 
       path: null,
       retryable: false,
       actions: null,
+    } satisfies AppError,
+  });
+
+/** The backend's answer for a server URL that lists repositories instead of being one. */
+const isServerUrl = (url: string) => url.replace(/\/+$/, "") === MOCK_SERVER_URL;
+const serverListError = () =>
+  Promise.resolve({
+    status: "error" as const,
+    error: {
+      code: "path-not-found",
+      message: `${MOCK_SERVER_URL} is the list of repositories on this server, not a repository; add a repository name to the URL`,
+      detail: null,
+      path: null,
+      retryable: false,
+      actions: null,
+      repositories: MOCK_SERVER_REPOS,
     } satisfies AppError,
   });
 
@@ -224,14 +242,17 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     });
   },
   repoInfo: (url: string) =>
-    ok({
-      repoRootUrl: MOCK_REPO_ROOT,
-      repoUuid: MOCK_REPO_UUID,
-      youngestRev: MOCK_YOUNGEST,
-      kind: "dir" as const,
-      url,
-    }),
+    isServerUrl(url)
+      ? serverListError()
+      : ok({
+          repoRootUrl: MOCK_REPO_ROOT,
+          repoUuid: MOCK_REPO_UUID,
+          youngestRev: MOCK_YOUNGEST,
+          kind: "dir" as const,
+          url,
+        }),
   repoList: (url: string) => {
+    if (isServerUrl(url)) return serverListError();
     const list = mockList(url);
     return list ? ok(list) : errCode("path-not-found", `Path not found: ${url}`);
   },

@@ -1226,3 +1226,349 @@ async fn update_cut_at_the_same_offset_stops_after_two_stalled_resumes() {
     );
     assert_no_prompt();
 }
+
+/// The request lines the proxy logged with `--log-requests`, as `(method, uri)`.
+fn requests(proxy: &FlakyProxy) -> Vec<(String, String)> {
+    std::fs::read_to_string(&proxy.log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(": request ").map(|(_, r)| r))
+        .filter_map(|r| r.split_once(' '))
+        .map(|(m, u)| (m.to_owned(), u.to_owned()))
+        .collect()
+}
+
+const WRITE_METHODS: [&str; 11] = [
+    "MKACTIVITY",
+    "POST",
+    "CHECKOUT",
+    "PUT",
+    "PROPPATCH",
+    "MKCOL",
+    "COPY",
+    "DELETE",
+    "MERGE",
+    "LOCK",
+    "UNLOCK",
+];
+
+/// A proxy that silently drops connections idle for 1.5 s (and resets them under the next
+/// request, which it does not forward), with pauses longer than that between operations: the
+/// commit, lock, unlock and copy succeed, every write is sent once, and the stale connections
+/// only ever meet reads (which are sent again on a new connection).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
+async fn writes_after_a_pause_survive_a_proxy_that_dropped_the_idle_connection() {
+    let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
+        eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
+        return;
+    };
+    let Host::Local { base, .. } = &host else {
+        unreachable!()
+    };
+    let h = harness(&host, "stale");
+    let e = h.engine();
+    let Some(proxy) = FlakyProxy::start(
+        base,
+        &["--stale-after", "1.5", "--log-requests"],
+        h.scratch_dir().join("proxy.log"),
+    ) else {
+        eprintln!("SKIPPED: no server certificate next to the CA for the flaky proxy");
+        return;
+    };
+    let url = format!("{}/{}", proxy.url(base), h.scratch.name);
+    let pause = || tokio::time::sleep(std::time::Duration::from_secs(2));
+    let info = e
+        .checkout(
+            &CheckoutPlan {
+                url: format!("{url}/trunk"),
+                path: h.work_dir().join("wc"),
+                rev: None,
+                depth: Depth::Infinity,
+                sparse: None,
+                format: WcFormat::V31,
+                store_pristine: true,
+                ignore_externals: false,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("checkout");
+    let wc = WcRef {
+        id: WcId("wc".to_owned()),
+        root: PathBuf::from(info.root_path),
+    };
+    pause().await;
+    h.write_file(&wc.root, "README.md", "after a pause\n")
+        .unwrap();
+    e.commit(
+        &wc,
+        &CommitRequest {
+            wc_id: wc.id.clone(),
+            paths: vec!["README.md".into()],
+            message: "after a pause".into(),
+            keep_locks: false,
+            auto_add_remove: true,
+        },
+        &ctx(),
+    )
+    .await
+    .expect("commit after a pause");
+    pause().await;
+    let scope = opensvn_lib::engine::LockScope::Wc {
+        wc: wc.clone(),
+        paths: vec!["README.md".into()],
+    };
+    e.lock(&scope, Some("after a pause"), false, &ctx())
+        .await
+        .expect("lock after a pause");
+    pause().await;
+    e.unlock(&scope, false, &ctx())
+        .await
+        .expect("unlock after a pause");
+    pause().await;
+    e.copy_location(
+        &CopyLocationRequest {
+            from_url: format!("{url}/trunk"),
+            from_rev: None,
+            to_url: format!("{url}/branches/after-a-pause"),
+            message: "copy after a pause".into(),
+            switch_wc_id: None,
+            from_wc: None,
+        },
+        None,
+        &ctx(),
+    )
+    .await
+    .expect("copy after a pause");
+
+    let log = std::fs::read_to_string(&proxy.log).unwrap_or_default();
+    let resets: Vec<&str> = log.lines().filter(|l| l.contains("idle")).collect();
+    assert!(
+        !resets.is_empty(),
+        "the proxy dropped no connection:\n{log}"
+    );
+    for r in &resets {
+        assert!(
+            !WRITE_METHODS.iter().any(|m| r.contains(&format!("({m})"))),
+            "a write met a dropped connection: {r}"
+        );
+    }
+    let count = |m: &str| requests(&proxy).iter().filter(|(x, _)| x == m).count();
+    // One commit and one copy (HTTP v2: POST, then MERGE), one lock, one unlock.
+    assert_eq!(count("MERGE"), 2, "{log}");
+    assert_eq!(count("LOCK"), 1, "{log}");
+    assert_eq!(count("UNLOCK"), 1, "{log}");
+    assert_eq!(count("PUT"), 1, "{log}");
+    assert_no_prompt();
+}
+
+/// A proxy that closes every reused connection under its next request: a write that goes out
+/// on such a connection fails, but is never sent a second time.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
+async fn a_write_the_proxy_cuts_is_never_sent_again() {
+    let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
+        eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
+        return;
+    };
+    let Host::Local { base, .. } = &host else {
+        unreachable!()
+    };
+    let h = harness(&host, "cutwrite");
+    let e = h.engine();
+    let Some(proxy) = FlakyProxy::start(
+        base,
+        &["--close-after", "1", "--log-requests"],
+        h.scratch_dir().join("proxy.log"),
+    ) else {
+        eprintln!("SKIPPED: no server certificate next to the CA for the flaky proxy");
+        return;
+    };
+    let url = format!("{}/{}", proxy.url(base), h.scratch.name);
+    let info = e
+        .checkout(
+            &CheckoutPlan {
+                url: format!("{url}/trunk"),
+                path: h.work_dir().join("wc"),
+                rev: None,
+                depth: Depth::Infinity,
+                sparse: None,
+                format: WcFormat::V31,
+                store_pristine: true,
+                ignore_externals: false,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("checkout (reads are sent again)");
+    let wc = WcRef {
+        id: WcId("wc".to_owned()),
+        root: PathBuf::from(info.root_path),
+    };
+    for f in ["README.md", "src/main.rs"] {
+        h.write_file(&wc.root, f, "changed\n").unwrap();
+    }
+    // Two PUTs back to back: the second one reuses the connection of the first.
+    let outcome = e
+        .commit(
+            &wc,
+            &CommitRequest {
+                wc_id: wc.id.clone(),
+                paths: vec!["README.md".into(), "src/main.rs".into()],
+                message: "cut".into(),
+                keep_locks: false,
+                auto_add_remove: true,
+            },
+            &ctx(),
+        )
+        .await;
+    let log = std::fs::read_to_string(&proxy.log).unwrap_or_default();
+    let cut_writes: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("closing before request"))
+        .filter(|l| WRITE_METHODS.iter().any(|m| l.contains(&format!("({m},"))))
+        .collect();
+    assert!(
+        !cut_writes.is_empty(),
+        "the proxy cut no write ({outcome:?}):\n{log}"
+    );
+    let err = outcome.expect_err("a commit whose write was cut fails");
+    assert!(
+        err.code == ErrorCode::CommitOutcomeUnknown || err.connection_failure().is_some(),
+        "{err:?}"
+    );
+    let mut writes: Vec<_> = requests(&proxy)
+        .into_iter()
+        .filter(|(m, _)| WRITE_METHODS.contains(&m.as_str()))
+        .collect();
+    let all = writes.len();
+    writes.sort();
+    writes.dedup();
+    assert_eq!(writes.len(), all, "a write was sent twice:\n{log}");
+    assert_no_prompt();
+}
+
+struct NoJournal;
+
+impl svn_ra_api::CommitObserver for NoJournal {
+    fn on_txn_created(&self, _txn: &str) -> svn_types::Result<()> {
+        Ok(())
+    }
+    fn on_merged(&self, _info: &svn_ra_api::CommitInfo) -> svn_types::Result<()> {
+        Ok(())
+    }
+}
+
+/// A pause between two writes of one operation (two files of a commit, the commit's MERGE, a
+/// lock and its unlock) longer than a proxy keeps idle connections: every write still reaches
+/// the server once. Over a session, so no read comes first to flush the dropped connections
+/// out of the pool, as the engine's operations do.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
+async fn writes_of_one_commit_survive_a_pause_longer_than_the_proxy_keeps_idle_connections() {
+    use md5::{Digest as _, Md5};
+    use opensvn_lib::engine::real::SessionConnector as _;
+    use svn_types::{Checksum, RepoUrl, Revnum};
+
+    let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
+        eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
+        return;
+    };
+    let Host::Local { base, .. } = &host else {
+        unreachable!()
+    };
+    let h = harness(&host, "pausedcommit");
+    let Some(proxy) = FlakyProxy::start(
+        base,
+        &["--stale-after", "1.5", "--log-requests"],
+        h.scratch_dir().join("proxy.log"),
+    ) else {
+        eprintln!("SKIPPED: no server certificate next to the CA for the flaky proxy");
+        return;
+    };
+    let url = format!("{}/{}", proxy.url(base), h.scratch.name);
+    let cancel = svn_types::CancelToken::new();
+    let session = connector()
+        .connect_with(
+            &RepoUrl::parse(&url).unwrap(),
+            &opensvn_lib::engine::real::ConnectOptions::at_url(&ctx()),
+            &cancel,
+        )
+        .await
+        .expect("session");
+    let pause = || tokio::time::sleep(std::time::Duration::from_secs(2));
+    let p = |s: &str| RelPath::new(s).unwrap();
+    let dir = h.scratch_dir();
+    let source = |name: &str, text: &[u8]| {
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        let md5: [u8; 16] = Md5::digest(text).into();
+        (
+            svn_ra_api::ReplayableSource {
+                path,
+                translated: true,
+                size: Some(text.len() as u64),
+            },
+            Checksum::Md5(md5),
+        )
+    };
+
+    let mut ed = session
+        .commit_editor("paused", &[], &[], false, Arc::new(NoJournal), &cancel)
+        .await
+        .expect("commit editor");
+    let root = ed.open_root(Some(Revnum(1))).await.unwrap();
+    let trunk = ed
+        .open_directory(&p("trunk"), root, Some(Revnum(1)))
+        .await
+        .unwrap();
+    for name in ["one.txt", "two.txt"] {
+        let (src, md5) = source(name, format!("{name}\n").as_bytes());
+        let f = ed
+            .add_file(&p(&format!("trunk/{name}")), trunk, None)
+            .await
+            .unwrap();
+        ed.apply_text(f, None, src, None, md5).await.unwrap();
+        ed.close_file(f)
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        pause().await;
+    }
+    ed.close_directory(trunk).await.unwrap();
+    ed.close_directory(root).await.unwrap();
+    let info = ed
+        .close_edit()
+        .await
+        .expect("the second PUT and the MERGE after pauses");
+    assert_eq!(info.revision, Revnum(2));
+    pause().await;
+    let lock = session
+        .lock(&p("trunk/one.txt"), Some("paused"), false, None, &cancel)
+        .await
+        .expect("LOCK after a pause");
+    pause().await;
+    session
+        .unlock(&p("trunk/one.txt"), Some(&lock.token), false, &cancel)
+        .await
+        .expect("UNLOCK after a pause");
+
+    let log = std::fs::read_to_string(&proxy.log).unwrap_or_default();
+    for l in log.lines().filter(|l| l.contains("idle")) {
+        assert!(
+            !WRITE_METHODS.iter().any(|m| l.contains(&format!("({m})"))),
+            "a write met a dropped connection: {l}"
+        );
+    }
+    let count = |m: &str| requests(&proxy).iter().filter(|(x, _)| x == m).count();
+    for (m, n) in [
+        ("POST", 1),
+        ("PUT", 2),
+        ("MERGE", 1),
+        ("LOCK", 1),
+        ("UNLOCK", 1),
+    ] {
+        assert_eq!(count(m), n, "{m}:\n{log}");
+    }
+    assert_no_prompt();
+}
