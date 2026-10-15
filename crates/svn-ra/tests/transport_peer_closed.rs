@@ -41,6 +41,19 @@ enum Act {
     Stall,
 }
 
+/// When the server ends a kept-alive connection under the next request.
+#[derive(Debug, Clone, Copy)]
+enum Reuse {
+    /// Never.
+    Keep,
+    /// Every request after the first one of a connection.
+    Close,
+    /// A request on a connection idle for longer than this: a proxy, firewall or NAT that
+    /// dropped the idle connection without telling the client, which only learns it once the
+    /// next request went out.
+    CloseIfIdle(Duration),
+}
+
 /// Raw HTTPS server that answers each request with the next scripted [`Act`] (`Ok("ok")` once
 /// the script is used up) and records the method of every request it read.
 struct RawServer {
@@ -58,20 +71,25 @@ impl RawServer {
     /// closing that connection without `close_notify` (a server that ends keep-alive
     /// connections under the next request).
     async fn start_with(ca: &TestCa, script: Vec<Act>, close_reused: bool) -> Self {
-        let leaf = ca.leaf(&["localhost"], false);
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let mut config = rustls::ServerConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![leaf.cert_der.clone()],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf.key_der.clone())),
-            )
-            .unwrap();
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
-        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let reuse = if close_reused {
+            Reuse::Close
+        } else {
+            Reuse::Keep
+        };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        Self::serve(ca, script, reuse, listener)
+    }
+
+    fn serve(ca: &TestCa, script: Vec<Act>, reuse: Reuse, listener: TcpListener) -> Self {
+        Self::serve_with(acceptor(ca), script, reuse, listener)
+    }
+
+    fn serve_with(
+        acceptor: TlsAcceptor,
+        script: Vec<Act>,
+        reuse: Reuse,
+        listener: TcpListener,
+    ) -> Self {
         let addr = listener.local_addr().unwrap();
         let script = Arc::new(Mutex::new(VecDeque::from(script)));
         let seen: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -89,7 +107,7 @@ impl RawServer {
                     let Ok(tls) = acceptor.accept(tcp).await else {
                         return;
                     };
-                    serve_connection(tls, &script, &seen, close_reused).await;
+                    serve_connection(tls, &script, &seen, reuse).await;
                 });
             }
         });
@@ -111,6 +129,23 @@ impl RawServer {
     fn connections(&self) -> usize {
         *self.connections.lock().unwrap()
     }
+}
+
+/// TLS acceptor with a `localhost` certificate signed by `ca`.
+fn acceptor(ca: &TestCa) -> TlsAcceptor {
+    let leaf = ca.leaf(&["localhost"], false);
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![leaf.cert_der.clone()],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf.key_der.clone())),
+        )
+        .unwrap();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    TlsAcceptor::from(Arc::new(config))
 }
 
 /// Reads one request (headers plus a `Content-Length` body); `None` at end of stream.
@@ -148,16 +183,23 @@ async fn serve_connection(
     mut tls: TlsStream<TcpStream>,
     script: &Mutex<VecDeque<Act>>,
     seen: &Mutex<Vec<String>>,
-    close_reused: bool,
+    reuse: Reuse,
 ) {
     let mut served = 0usize;
+    let mut idle_since = Instant::now();
     loop {
         let Some(method) = read_request(&mut tls).await else {
             return;
         };
         seen.lock().unwrap().push(method);
         served += 1;
-        if close_reused && served > 1 {
+        let close = served > 1
+            && match reuse {
+                Reuse::Keep => false,
+                Reuse::Close => true,
+                Reuse::CloseIfIdle(after) => idle_since.elapsed() > after,
+            };
+        if close {
             return unclean_close(tls).await;
         }
         let act = script
@@ -174,6 +216,7 @@ async fn serve_connection(
                 if tls.write_all(resp.as_bytes()).await.is_err() {
                     return;
                 }
+                idle_since = Instant::now();
             }
             Act::OkThenUncleanClose(body) => {
                 let resp = format!(
@@ -349,20 +392,7 @@ async fn the_retry_after_a_broken_pooled_connection_does_not_reuse_another_stale
 async fn writes_are_never_sent_twice() {
     // Every svn write method: commit (MKACTIVITY, POST txn, CHECKOUT, PUT, PROPPATCH, MKCOL,
     // COPY, DELETE, MERGE) and locks (LOCK, UNLOCK).
-    let writes = [
-        "MKACTIVITY",
-        "POST",
-        "CHECKOUT",
-        "PUT",
-        "PROPPATCH",
-        "MKCOL",
-        "COPY",
-        "DELETE",
-        "MERGE",
-        "LOCK",
-        "UNLOCK",
-    ];
-    for m in writes {
+    for m in WRITES {
         assert!(!is_idempotent(&Method::from_bytes(m.as_bytes()).unwrap()));
         for (broken, failure) in [
             // Closed under the request without close_notify, as Apache on Windows does.
@@ -390,6 +420,104 @@ async fn writes_are_never_sent_twice() {
             assert_eq!(server.seen(), ["GET", m], "{m} {broken:?}");
         }
     }
+}
+
+/// Every svn write method.
+const WRITES: [&str; 11] = [
+    "MKACTIVITY",
+    "POST",
+    "CHECKOUT",
+    "PUT",
+    "PROPPATCH",
+    "MKCOL",
+    "COPY",
+    "DELETE",
+    "MERGE",
+    "LOCK",
+    "UNLOCK",
+];
+
+#[tokio::test]
+async fn a_write_after_a_pause_does_not_go_out_on_a_connection_dropped_while_idle() {
+    for m in WRITES {
+        let ca = TestCa::new();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // A proxy that forgets connections idle for 400 ms (and closes them under the next
+        // request); the client reuses a connection for a write after at most 200 ms.
+        let server = RawServer::serve(
+            &ca,
+            Vec::new(),
+            Reuse::CloseIfIdle(Duration::from_millis(400)),
+            listener,
+        );
+        let t = transport(&ca, |c| {
+            c.write_reuse_window = Duration::from_millis(200);
+            c.retry.delays = vec![Duration::ZERO; 3];
+        });
+        assert_eq!(body_of(&t, m, &server.url("/1")).await.unwrap(), "ok");
+        assert_eq!(body_of(&t, m, &server.url("/2")).await.unwrap(), "ok");
+        assert_eq!(
+            server.connections(),
+            1,
+            "{m}: back-to-back writes share a connection"
+        );
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(
+            body_of(&t, m, &server.url("/3")).await.unwrap(),
+            "ok",
+            "{m} after a pause"
+        );
+        assert_eq!(server.seen(), [m, m, m], "{m}: every write sent once");
+        assert_eq!(server.connections(), 2, "{m}");
+    }
+}
+
+#[tokio::test]
+async fn reads_keep_their_pool_when_writes_open_new_connections() {
+    let ca = TestCa::new();
+    let server = RawServer::start(&ca, Vec::new()).await;
+    let t = transport(&ca, |c| c.write_reuse_window = Duration::from_millis(100));
+    assert_eq!(body_of(&t, "GET", &server.url("/r1")).await.unwrap(), "ok");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(body_of(&t, "PUT", &server.url("/w")).await.unwrap(), "ok");
+    // The read connection is still pooled (idle 300 ms < 4 s); the write did not take it.
+    assert_eq!(body_of(&t, "GET", &server.url("/r2")).await.unwrap(), "ok");
+    assert_eq!(server.connections(), 2);
+}
+
+#[tokio::test]
+async fn a_zero_write_window_sends_every_write_on_a_new_connection() {
+    let ca = TestCa::new();
+    let server = RawServer::start(&ca, Vec::new()).await;
+    let t = transport(&ca, |c| c.write_reuse_window = Duration::ZERO);
+    for path in ["/1", "/2", "/3"] {
+        assert_eq!(body_of(&t, "PUT", &server.url(path)).await.unwrap(), "ok");
+    }
+    assert_eq!(server.connections(), 3);
+}
+
+#[tokio::test]
+async fn a_write_whose_connection_could_not_be_opened_is_sent_once_it_can() {
+    let ca = TestCa::new();
+    // Nothing listens on the port for the first ~300 ms: the connection is refused, so nothing
+    // of the request left the client and it may be sent again.
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    let url = format!("https://localhost:{port}/w");
+    let t = transport(&ca, |c| {
+        c.retry.delays = vec![Duration::from_millis(200); 3]
+    });
+    let acceptor = acceptor(&ca);
+    let server = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+        RawServer::serve_with(acceptor, Vec::new(), Reuse::Keep, listener)
+    });
+    assert_eq!(body_of(&t, "MERGE", &url).await.unwrap(), "ok");
+    let server = server.await.unwrap();
+    assert_eq!(server.seen(), ["MERGE"]);
 }
 
 #[tokio::test]

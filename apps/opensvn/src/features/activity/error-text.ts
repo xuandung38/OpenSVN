@@ -34,12 +34,26 @@ const TRANSPORT: ReadonlyArray<[RegExp, ActivityKey]> = [
   ],
 ];
 
+/**
+ * Writes cut off after they were sent, recognised by the backend's own sentence: never sent
+ * again, so the user must refresh before trying again. Checked before the transport chain,
+ * whose "connection closed" would read as a plain retryable failure.
+ */
+const UNSURE: ReadonlyArray<[RegExp, ActivityKey]> = [
+  [/the commit may or may not have been applied/i, "errCommitUnsure"],
+  [/may or may not\s+have reached the server/i, "errWriteUnsure"],
+];
+
 /** Codes whose message may be a raw transport chain. */
 const TRANSPORT_CODES: ReadonlySet<AppError["code"]> = new Set(["network", "timeout"]);
 
 /** Maps an operation error to a short localised text, keeping the raw text as the detail. */
 export function errorText(error: Pick<AppError, "code" | "message" | "detail">): ErrorText {
   const raw = [error.message, error.detail].filter(Boolean).join("\n");
+  const unsure = UNSURE.find(([re]) => re.test(error.message));
+  if (unsure) {
+    return { key: unsure[1], message: error.message, detail: `${raw}\n(${error.code})` };
+  }
   const looksTransport =
     TRANSPORT_CODES.has(error.code) || /http request failed|error sending request/i.test(raw);
   if (looksTransport) {

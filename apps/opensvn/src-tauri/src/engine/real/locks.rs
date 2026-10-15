@@ -39,7 +39,8 @@ impl RealEngine {
                     let (session, path) = self.locate(url, ctx).await?;
                     session
                         .lock(&path, comment, steal, None, &ctx.cancel)
-                        .await?;
+                        .await
+                        .map_err(|e| outcome_unknown(e, "lock"))?;
                 }
                 Ok(())
             }
@@ -62,7 +63,8 @@ impl RealEngine {
                                 Some(Revnum(loc.revision)),
                                 &ctx.cancel,
                             )
-                            .await?;
+                            .await
+                            .map_err(|e| outcome_unknown(e, "lock"))?;
                         if let Err(e) = record_lock(&held.db, &wc.root, &loc, &lock, rel).await {
                             // The server lock exists but the working copy cannot remember its
                             // token: give it back instead of leaving one nobody can release.
@@ -89,7 +91,10 @@ impl RealEngine {
             LockScope::Urls(urls) => {
                 for url in urls {
                     let (session, path) = self.locate(url, ctx).await?;
-                    session.unlock(&path, None, break_lock, &ctx.cancel).await?;
+                    session
+                        .unlock(&path, None, break_lock, &ctx.cancel)
+                        .await
+                        .map_err(|e| outcome_unknown(e, "unlock"))?;
                 }
                 Ok(())
             }
@@ -113,7 +118,8 @@ impl RealEngine {
                         };
                         session
                             .unlock(&path, token.as_deref(), break_lock, &ctx.cancel)
-                            .await?;
+                            .await
+                            .map_err(|e| outcome_unknown(e, "unlock"))?;
                         forget_lock(&held.db, &wc.root, &loc, rel).await
                     }
                     .await;
@@ -123,6 +129,23 @@ impl RealEngine {
             }
         }
     }
+}
+
+/// A lock or unlock whose connection broke: the request is never sent again, and the server may
+/// or may not have carried it out, so the user refreshes before trying again. Other errors are
+/// returned as they are.
+fn outcome_unknown(e: SvnError, what: &str) -> SvnError {
+    if e.connection_failure().is_none() {
+        return e;
+    }
+    SvnError::new(
+        ErrorCode::WriteOutcomeUnknown,
+        format!(
+            "the connection broke while the {what} request was being sent; it may or may not \
+             have reached the server. Refresh the lock state before trying again"
+        ),
+    )
+    .with_child(e)
 }
 
 impl RealEngine {
@@ -352,5 +375,43 @@ async fn release_quietly(session: &dyn RaSession, path: &RelPath, token: &str) {
     let cancel = svn_types::CancelToken::new();
     if let Err(e) = session.unlock(path, Some(token), false, &cancel).await {
         tracing::warn!(%path, error = %e, "could not release a lock that was not recorded");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use opensvn_ipc::AppError;
+    use svn_types::{ConnectionFailure, ErrorCode, SvnError};
+
+    use super::outcome_unknown;
+
+    #[test]
+    fn a_lock_cut_by_the_connection_is_not_offered_again() {
+        let cut = SvnError::new(ErrorCode::Network, "HTTP request failed: reset by peer")
+            .with_connection(ConnectionFailure::ConnectionReset);
+        let e = outcome_unknown(cut, "lock");
+        assert_eq!(e.code, ErrorCode::WriteOutcomeUnknown);
+        assert!(
+            e.message.contains("may or may not have reached the server"),
+            "{e:?}"
+        );
+        assert_eq!(
+            e.connection_failure(),
+            Some(ConnectionFailure::ConnectionReset)
+        );
+        let app = AppError::from(&e);
+        assert!(!app.retryable);
+        assert!(app.actions.is_none());
+    }
+
+    #[test]
+    fn other_lock_errors_are_returned_as_they_are() {
+        for e in [
+            SvnError::new(ErrorCode::LockedByOther, "locked by bob"),
+            SvnError::new(ErrorCode::Network, "connection refused"),
+        ] {
+            let code = e.code;
+            assert_eq!(outcome_unknown(e, "unlock").code, code);
+        }
     }
 }
