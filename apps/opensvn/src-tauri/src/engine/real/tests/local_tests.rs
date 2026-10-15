@@ -894,7 +894,8 @@ async fn props_get_lists_values_kinds_and_binary_values() {
         .props_get(&wc, &paths(&["README.md", "src", ""]), &ctx())
         .await
         .expect("props_get");
-    let summary: Vec<(String, opensvn_ipc::FileKind, Vec<(String, String, bool)>)> = items
+    type Row = (String, opensvn_ipc::FileKind, Vec<(String, String, bool)>);
+    let summary: Vec<Row> = items
         .into_iter()
         .map(|i| {
             (
