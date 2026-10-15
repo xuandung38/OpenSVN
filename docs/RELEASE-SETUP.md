@@ -61,6 +61,30 @@ This publish token is not the token clients use. Clients get a second fine-grain
 **Contents: Read-only** on `OpenSVN-releases`, provisioned into each machine's OS keychain
 (`updater/github-token`); see `packaging/updater/README.md` and `docs/deployment-guide.md`.
 
+- [ ] Create the client read token the same way: name `opensvn-updater-read`, **Only select
+      repositories** → `OpenSVN-releases`, **Contents: Read-only**, nothing else.
+- [ ] Check its scope before handing it to any machine:
+
+  ```sh
+  read -rs OPENSVN_UPDATER_TOKEN && export OPENSVN_UPDATER_TOKEN   # paste, Enter; not echoed
+  scripts/release/check-token-scope.sh
+  unset OPENSVN_UPDATER_TOKEN
+  ```
+
+  The script never prints the token and passes it to `curl`/`git` without putting it on a command
+  line. It checks five things and ends with `RESULT: PASS` (exit 0) or `RESULT: FAIL` (exit 1):
+
+  | Check | Wanted |
+  |---|---|
+  | `GET repos/xuandung38/OpenSVN-releases` | 200 |
+  | `GET repos/xuandung38/OpenSVN-releases/contents/latest.json` | 200; 404 is accepted with a note while no stable release exists yet |
+  | `GET repos/xuandung38/OpenSVN` | 404 |
+  | `git ls-remote https://github.com/xuandung38/OpenSVN.git` | fails (the same command on `OpenSVN-releases` must work, as a control) |
+  | `PUT repos/xuandung38/OpenSVN-releases/contents/…` | 403 |
+
+  The write probe targets a branch that does not exist, so even a token that can write gets an
+  error instead of a commit. Run it again after every token rotation.
+
 ## 3. Updater signing key (minisign)
 
 On a trusted machine, from the repository root:
@@ -131,20 +155,135 @@ The build then checks `Get-AuthenticodeSignature` is `Valid` on the MSI and the 
 
 - [ ] Approve `build`, then `publish` in the run (**Actions → release → Review deployments**).
 - [ ] Verify: release `v0.1.0` in `OpenSVN-releases` with the installers, `.sig` files and
-      `SHA256SUMS-*.txt`; `latest.json` on its `main` announces `0.1.0` and lists `darwin-*`,
+      `SHA256SUMS-*.txt`; the release notes list the commits since the previous stable tag,
+      grouped into Features / Bug fixes / Performance / Other changes; `latest.json` on its `main` announces `0.1.0` and lists `darwin-*`,
       `windows-x86_64*` and `linux-x86_64*` with `https://api.github.com/.../releases/assets/<id>`
       URLs.
-- [ ] From the next version on, test N-1 → N on a machine that has the previous build and a read
-      token in its keychain before announcing.
+- [ ] From the next version on, run §7 (signatures) and §8 (N-1 → N) before announcing.
 
 A published version is never overwritten: re-running a tag that already has a release (or a draft
 left by a failed run) stops with an error. Delete the leftover draft in `OpenSVN-releases`, or bump
 the version. `latest.json` never moves backwards.
 
+## 7. Confirm the signatures (manual, per release)
+
+Do this on the downloaded files from `OpenSVN-releases`, not on the build output, so you check
+what users get. First compare every file with `SHA256SUMS-<os>.txt` of the same release
+(`shasum -a 256 -c SHA256SUMS-macos.txt` on macOS, `Get-FileHash <file> -Algorithm SHA256` on
+Windows).
+
+**macOS** (Developer ID + notarization configured):
+
+- [ ] Mount the DMG, copy `OpenSVN.app` to `/Applications`, then:
+
+  ```sh
+  codesign --verify --deep --strict --verbose=2 /Applications/OpenSVN.app
+  # wanted: "valid on disk" and "satisfies its Designated Requirement"
+  codesign -dvv /Applications/OpenSVN.app 2>&1 | grep -E 'Identifier|Authority|TeamIdentifier|Timestamp'
+  # wanted: Identifier=com.opensvn.desktop, Authority=Developer ID Application: <you> (<TEAMID>),
+  #         the Apple chain below it, a secure Timestamp, TeamIdentifier=<TEAMID>
+  spctl --assess --type execute --verbose=4 /Applications/OpenSVN.app
+  # wanted: "accepted", "source=Notarized Developer ID"
+  xcrun stapler validate /Applications/OpenSVN.app
+  # wanted: "The validate action worked!"
+  spctl --assess --type open --context context:primary-signature --verbose=4 OpenSVN_<version>_universal.dmg
+  ```
+
+- [ ] Double-click the app from Finder on a machine that never ran it: no "unidentified
+      developer" or "cannot check for malicious software" dialog, only the normal first-launch
+      confirmation.
+- [ ] Without Apple secrets, `codesign -dvv` shows `Signature=adhoc` and `spctl` rejects it: that
+      is the expected unsigned build, not a failure of this check.
+
+**Windows** (Authenticode configured), in PowerShell:
+
+- [ ] For the MSI and the NSIS setup:
+
+  ```powershell
+  Get-AuthenticodeSignature .\OpenSVN_<version>_x64_en-US.msi, .\OpenSVN_<version>_x64-setup.exe |
+    Format-List Path, Status, StatusMessage, SignerCertificate, TimeStamperCertificate
+  # wanted: Status = Valid, SignerCertificate.Subject = your certificate,
+  #         TimeStamperCertificate not empty (the signature outlives the certificate)
+  ```
+
+- [ ] After installing, the same for the installed executable (Start menu shortcut → **Open file
+      location**; NSIS installs per user under `%LOCALAPPDATA%`, the MSI under
+      `C:\Program Files\`): `Get-AuthenticodeSignature <path to OpenSVN.exe>`. Wanted: `Valid`.
+- [ ] Right-click the setup → **Properties → Digital Signatures**: one entry, your name,
+      SHA256, with a timestamp. Running the downloaded setup shows your name as publisher, not
+      "Unknown publisher" (SmartScreen reputation for a new certificate can still warn for a while).
+
+**Updater signatures** (every OS): `latest.json` on `main` of `OpenSVN-releases` has a non-empty
+`signature` for each platform, equal to the content of the matching `.sig` asset. The app checks
+them itself; §8 is the end-to-end proof.
+
+## 8. Verify the N-1 → N auto-update (manual, macOS and Windows)
+
+Needs two published stable versions (N-1 and N, signed with the same updater key) and the read
+token from §2. Run it on one macOS and one Windows machine that you can reset. The app has the
+updater commands (`updater_token_set`, `update_check`, `update_install`); if the Settings screen
+for them is not in N-1 yet, provision the token with the keychain commands in
+`docs/deployment-guide.md` ("Provisioning the update token") and test from the first version that
+ships the screen.
+
+Prepare, once per machine:
+
+- [ ] Uninstall any OpenSVN, then install **N-1** from its release (macOS: DMG → `/Applications`;
+      Windows: run the **NSIS setup** for one pass and the **MSI** for a second pass, since each
+      updates through its own artifact).
+- [ ] Launch N-1, open About and note the version. Add a working copy, make one local change and
+      save one server password, so you can check that data and keychain entries survive.
+- [ ] Store the read token through Settings (or the keychain command). The token status reads
+      "set"; the token itself is never shown again.
+
+Update:
+
+- [ ] Check for updates. Wanted: "version N available" with the notes of release N (the grouped
+      list from `--notes-from-git`).
+- [ ] Install. macOS: the app downloads the `.app.tar.gz`, replaces `/Applications/OpenSVN.app`
+      and restarts. Windows: the app downloads the MSI or setup matching how it was installed, runs
+      it (UAC prompt for the MSI) and restarts.
+- [ ] About shows **N**. Check for updates again: "up to date".
+- [ ] The working copy is still listed with its local change, the saved password still works
+      (no new login prompt), settings are unchanged.
+- [ ] macOS: run the §7 `codesign`/`spctl` commands on the updated `/Applications/OpenSVN.app`;
+      Windows: `Get-AuthenticodeSignature` on the installed `OpenSVN.exe`. Both still `Valid`
+      / `accepted`.
+
+Negative checks (one machine is enough):
+
+- [ ] Clear the token: the check reports updates as not configured and makes no network request.
+- [ ] Store a token without access (or an expired one): the check fails with a clear error, the
+      app keeps running N-1.
+- [ ] Offline: the check fails cleanly and can be retried.
+
+Record the OS versions, N-1, N and the results in the release issue.
+
+## Decision needed: bundle identifier
+
+The phase-14 plan names the bundle identifier `vn.opensvn.app`; the code ships
+`com.opensvn.desktop` (`tauri.conf.json`, `tauri.bundle.conf.json`, `db/data_dir.rs`). This
+branch keeps `com.opensvn.desktop`. Settle it **before the first public release**, because after
+it any change breaks installed clients:
+
+- **Updates.** The updater replaces the installed app in place, so N would start with a new
+  identity next to N-1's leftovers: macOS ties the designated requirement, notarization ticket,
+  Gatekeeper and privacy (TCC) approvals to the identifier, and Windows keeps the WebView2 profile
+  under `%LOCALAPPDATA%\<id>`. Every machine would behave like a fresh install that still has an
+  old one half-registered.
+- **Keychain and data.** The app data directory (`~/Library/Application Support/<id>`,
+  `%APPDATA%\<id>`, `~/.local/share/<id>`) is named after it, so the working copy list, settings
+  and trusted certificates would look empty. macOS keychain access is granted per signed
+  identifier, so saved passwords and the updater token would prompt again or be unreadable.
+
+Changing it later needs a migration release (copy the data directory, re-provision keychain
+entries) on every OS. Owner: confirm `com.opensvn.desktop` (no work) or switch now, before any
+user installs a published build.
+
 ## Local checks (no credentials)
 
 ```sh
-node --test scripts/release/release-scripts.test.mjs   # manifest, publish order, secret isolation
+node --test scripts/release/release-scripts.test.mjs   # manifest, publish order, notes, token check, secret isolation
 scripts/release/test-updater-local.sh                  # real updater plugin, throw-away key
 actionlint .github/workflows/release.yml
 ```
