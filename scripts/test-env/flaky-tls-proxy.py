@@ -69,6 +69,10 @@ class Outage:
                 self.until = time.monotonic() + self.args.outage_for
                 self.done = True
                 log(f"network down for {self.args.outage_for:.0f}s after {self.bytes} bytes")
+                # Said when the outage ends, whether or not a client is trying at that moment.
+                timer = threading.Timer(self.args.outage_for + 0.1, self.down)
+                timer.daemon = True
+                timer.start()
 
     def down(self):
         if self.args.outage_file:

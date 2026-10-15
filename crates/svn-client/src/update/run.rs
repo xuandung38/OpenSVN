@@ -380,9 +380,11 @@ pub async fn drive_update(
         if let Some(wait) = ctx.network_wait.as_ref()
             && outages < MAX_OUTAGES
         {
+            super::editor::failpoint!("update.before_network_wait");
             match crate::netwait::wait_for_network(session, wait, cancel).await? {
                 crate::netwait::NetworkOutcome::Reachable => {}
                 crate::netwait::NetworkOutcome::Restored => {
+                    super::editor::failpoint!("update.after_network_restored");
                     outages += 1;
                     outage_resumes += 1;
                     reconnects += 1;
