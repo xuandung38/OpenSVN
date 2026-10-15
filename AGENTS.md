@@ -75,6 +75,7 @@ Build bộ cài:
 | Tree-conflict và thay file↔thư mục khớp svn 1.15 | #162, #165 |
 | Obstruction trong status, WcBusy, symlink | #147, #152 |
 | Fuzz hằng đêm (svn-protocol, svn-delta), proptest update so với svn 1.15, độ trễ watcher (~460 ms với 10k file), kiểm tra accessibility bằng axe (en/vi) | #168 |
+| `LogProgress::accept` chịu được entry merge lồng (`-g`): entry con không còn kéo lệch `last`, không bị bỏ hay lặp khi tải tiếp | #164 (follow-up) |
 | Mất mạng lâu khi checkout/update: chờ mạng (`network.reconnectWaitMin`, mặc định 10 phút) rồi tải tiếp đúng revision; "Tiếp tục checkout" sau khi hủy, đóng app hoặc crash (journal checkout); phát hiện ngủ/thức bằng đồng hồ boot, không theo giờ hệ thống | #172 |
 
 Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #144, #145, #146.
@@ -94,7 +95,7 @@ Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: xem/dif
 
 Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo, để không trùng.
 
-1. **Bộ đếm "server cứ cắt đúng một chỗ" (#164, follow-up).** `LogProgress::accept` đang giả định revision tăng đơn điệu, nên sẽ gãy khi log có `-g` hoặc revprops có entry merge lồng. Cần sửa và thêm test.
+1. **Nối `-g` qua `svn-ra-api::LogRequest` (#164, follow-up).** `LogProgress::accept` giờ chịu được entry merge lồng, nhưng `LogRequest` (`crates/svn-ra-api/src/session.rs:68-81`) chưa có field cho `include_merged_revisions` hay chọn revprop, và `log.rs` vẫn gán cứng `include_merged_revisions: false`. Thêm field, nối qua `log_request`/`WireLogRequest`, cập nhật IPC nếu UI cần hiện entry merge.
 2. **Lock bị lỗi connect báo `WriteOutcomeUnknown` (#166, follow-up).** Lỗi connect nghĩa là yêu cầu chưa được gửi, nên phải báo lỗi mạng thường. Sửa nhỏ ở `outcome_unknown` trong `apps/opensvn/src-tauri/src/engine/real/locks.rs` (có thể cần `svn-ra` phân biệt lỗi connect).
 3. **Hiệu năng macOS/Windows (#121).** Hai nền tảng này vẫn fsync từng file (`BATCHED_SYNC` trong `crates/svn-wc/src/durable.rs`). Cần đo trên máy thật và tìm cách gộp (F_FULLFSYNC/FlushFileBuffers theo lô).
 4. **Watcher và menu native (#11).** Kiểm tay menu trên macOS và Windows.
