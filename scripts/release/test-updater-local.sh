@@ -4,7 +4,8 @@
 #   2. signs a stand-in artifact, builds latest.json with make-latest-json.mjs
 #   3. runs the real tauri-plugin-updater (packaging/updater-harness) against the server:
 #      update found + signature verified, no update when current, tampered artifact rejected,
-#      wrong public key rejected, bearer token required and honoured (private-repo behaviour)
+#      wrong public key rejected, tampered or unsigned latest.json rejected, bearer token required
+#      and honoured (private-repo behaviour)
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 ensure_cargo
 need node "Node 24+"
@@ -70,7 +71,7 @@ expect_fail() {
 start_server
 write_manifest "$BASE"
 EP="$BASE/latest.json"
-expect_ok "update 0.1.0 -> 0.2.0 found, downloaded, signature verified" '"available":true' \
+expect_ok "update 0.1.0 (N-1) -> 0.2.0 (N) found, downloaded, signature verified" '"version":"0.2.0"' \
   --endpoint "$EP" --pubkey "$PUB_GOOD" --current 0.1.0 --download
 expect_ok "already on 0.2.0: no update" '"available":false' \
   --endpoint "$EP" --pubkey "$PUB_GOOD" --current 0.2.0 --download
@@ -81,6 +82,38 @@ printf 'tampered' | dd of="$ARTIFACT" bs=1 seek=1000 conv=notrunc 2>/dev/null
 expect_fail "tampered artifact is rejected" \
   --endpoint "$EP" --pubkey "$PUB_GOOD" --current 0.1.0 --download
 mv "$ARTIFACT.orig" "$ARTIFACT"
+
+# Tampered or unsigned manifests. The signature lives in latest.json, so editing the manifest
+# must be as fatal as editing the artifact.
+cp "$WORK/www/latest.json" "$WORK/latest.good.json"
+edit_manifest() { # $1 = JS expression run on `m` (the parsed manifest)
+  node -e 'const fs=require("fs"),f=process.argv[1],m=JSON.parse(fs.readFileSync(f));'"$1"';fs.writeFileSync(f,JSON.stringify(m))' \
+    "$WORK/www/latest.json"
+}
+OTHER="$WORK/www/OpenSVN_other.app.tar.gz"
+head -c 300000 /dev/urandom > "$OTHER"
+tauri signer sign -f "$WORK/good.key" -p "$PW" "$OTHER" >/dev/null
+OTHER_SIG="$(cat "$OTHER.sig")"
+OTHER_SIG="$OTHER_SIG" edit_manifest "for (const p of Object.values(m.platforms)) p.signature = process.env.OTHER_SIG"
+expect_fail "latest.json tampered: signature swapped for a valid one of another file" \
+  --endpoint "$EP" --pubkey "$PUB_GOOD" --current 0.1.0 --download
+cp "$WORK/latest.good.json" "$WORK/www/latest.json"
+edit_manifest "for (const p of Object.values(m.platforms)) p.url = p.url.replace(/[^/]+$/, 'OpenSVN_other.app.tar.gz')"
+expect_fail "latest.json tampered: url points at another file signed by the same key" \
+  --endpoint "$EP" --pubkey "$PUB_GOOD" --current 0.1.0 --download
+cp "$WORK/latest.good.json" "$WORK/www/latest.json"
+edit_manifest "for (const p of Object.values(m.platforms)) p.signature = p.signature.slice(0, -8) + 'AAAAAAA='"
+expect_fail "latest.json tampered: corrupted signature" \
+  --endpoint "$EP" --pubkey "$PUB_GOOD" --current 0.1.0 --download
+cp "$WORK/latest.good.json" "$WORK/www/latest.json"
+edit_manifest "for (const p of Object.values(m.platforms)) p.signature = ''"
+expect_fail "latest.json unsigned: empty signature" \
+  --endpoint "$EP" --pubkey "$PUB_GOOD" --current 0.1.0 --download
+cp "$WORK/latest.good.json" "$WORK/www/latest.json"
+edit_manifest "for (const p of Object.values(m.platforms)) delete p.signature"
+expect_fail "latest.json unsigned: no signature field" \
+  --endpoint "$EP" --pubkey "$PUB_GOOD" --current 0.1.0 --download
+cp "$WORK/latest.good.json" "$WORK/www/latest.json"
 stop_server
 
 start_server "secret-token"

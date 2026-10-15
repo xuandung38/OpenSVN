@@ -1,20 +1,38 @@
 name: release
 
-# Builds UNSIGNED installers for the three desktop OSes with the real engine (cargo feature
-# `release`) and attaches them to a DRAFT GitHub release in this repository:
+# Builds the installers for the three desktop OSes with the real engine (cargo feature `release`)
+# and publishes them, with the update manifest latest.json, to the separate releases repository
+# xuandung38/OpenSVN-releases:
 #   Windows  MSI (WiX) + NSIS setup.exe            features: release (Negotiate = SSPI)
-#   macOS    universal DMG, ad-hoc signed          features: release,negotiate-gssapi
+#   macOS    universal DMG (+ .app.tar.gz update)  features: release,negotiate-gssapi
 #   Linux    AppImage + .deb (built on 22.04)      features: release,negotiate-gssapi
 #
-# Unsigned installers are the normal, documented output (the PO does not need signed builds).
-# Nothing here needs a secret. Signing and the updater are optional placeholders, switched on only
-# when the matching secrets / variables exist (see "Signing placeholders" and "Updater
-# placeholders" below, and packaging/updater/README.md). Install instructions for the test builds:
-# docs/INSTALL-TEST.md.
+# Every credential is optional. Without any, the result is what shipped before: unsigned
+# installers (macOS ad-hoc signed), no update artifacts, and a draft release in THIS repository
+# instead of a publish. Owner setup, step by step: docs/RELEASE-SETUP.md.
+#
+# Secret isolation:
+# * There is no pull_request / pull_request_target trigger: only tag pushes and manual runs.
+# * Every job that reads a secret runs in the GitHub environment `release`. Keep all release
+#   secrets as ENVIRONMENT secrets of `release` (never repository secrets), give the environment
+#   required reviewers and restrict it to `v*` tags (+ `main` for manual runs). A job bound to the
+#   environment waits for a reviewer's approval before it starts and before any secret reaches it.
+#
+# Signing hooks (environment `release`):
+#   macOS    APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY
+#            = Developer ID signing; + APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID = notarization.
+#   Windows  WINDOWS_SIGN_COMMAND (Authenticode, "%1" = file, no password in it), optionally with
+#            WINDOWS_CERTIFICATE (base64 .pfx) + WINDOWS_CERTIFICATE_PASSWORD imported first.
+#   Updater  TAURI_SIGNING_PRIVATE_KEY (+ _PASSWORD) and variable OPENSVN_UPDATER_PUBKEY (minisign
+#            public key, embedded in the app at build time).
+#   Publish  OPENSVN_RELEASES_TOKEN: fine-grained token, Contents: Read and write on
+#            OpenSVN-releases only.
+# A partially configured group (e.g. a certificate without its password) fails the build loudly
+# instead of silently shipping unsigned.
 
 on:
-  # Tag v0.0.2 stamps version 0.0.2. MSI (WiX) only accepts a numeric pre-release, so use tags
-  # like v0.0.1-1, not v0.0.1-test1, or the Windows job fails.
+  # Tag v0.1.0 stamps version 0.1.0. MSI (WiX) only accepts a numeric pre-release, so use tags
+  # like v0.1.0-1, not v0.1.0-test1, or the Windows job fails.
   push:
     tags: ["v*"]
   workflow_dispatch:
@@ -25,14 +43,14 @@ on:
         required: false
         default: ""
       release_tag:
-        description: "Tag of the draft release to create (e.g. v0.0.1-test2). Empty = artifacts only."
+        description: "Release tag to publish (must be v<version>). Empty = build artifacts only."
         required: false
         default: ""
       updater:
-        description: "Also build signed updater artifacts (needs TAURI_SIGNING_PRIVATE_KEY + vars.OPENSVN_UPDATER_PUBKEY)"
-        type: boolean
-        required: false
-        default: false
+        description: "Updater artifacts: auto = when key + pubkey exist, on = require them, off = never"
+        type: choice
+        options: [auto, "on", "off"]
+        default: auto
 
 permissions:
   contents: read
@@ -47,12 +65,19 @@ env:
   # Semver override for stamp-version.mjs. Tag pushes use the tag without its leading "v" (see the
   # "Stamp version" step); a manual run with an empty input uses [workspace.package] version.
   RELEASE_VERSION: ${{ inputs.version }}
+  RELEASES_REPO: xuandung38/OpenSVN-releases
 
 jobs:
   build:
     name: build (${{ matrix.name }})
+    # Belt and braces: the triggers above already exclude pull requests.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    # Signing secrets live here; required reviewers approve before the job starts.
+    environment: release
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -60,25 +85,32 @@ jobs:
           - name: windows
             os: windows-2025
             bundles: msi,nsis
+            updater_bundles: ""
             features: release
             target: ""
             bundle_dir: target/release/bundle
             patterns: "msi/*.msi nsis/*-setup.exe"
+            updater_patterns: ""
           - name: macos-universal
             os: macos-15
             bundles: dmg
+            # The update artifact (.app.tar.gz) comes from the `app` bundle.
+            updater_bundles: app
             features: release,negotiate-gssapi
             target: universal-apple-darwin
             bundle_dir: target/universal-apple-darwin/release/bundle
             patterns: "dmg/*.dmg"
+            updater_patterns: "macos/*.app.tar.gz"
           # 22.04: the AppImage inherits the build host's glibc, so build on the oldest supported.
           - name: linux
             os: ubuntu-22.04
             bundles: appimage,deb
+            updater_bundles: ""
             features: release,negotiate-gssapi
             target: ""
             bundle_dir: target/release/bundle
             patterns: "appimage/*.AppImage deb/*.deb"
+            updater_patterns: ""
     defaults:
       run:
         shell: bash
@@ -86,6 +118,8 @@ jobs:
       - name: Keep LF line endings on Windows
         run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install Linux system libraries
         if: runner.os == 'Linux'
         # libkrb5-dev + libclang-dev: the `negotiate-gssapi` feature (bindgen over gssapi.h).
@@ -124,77 +158,134 @@ jobs:
       - name: Generate third-party licenses
         run: scripts/release/gen-licenses.sh
 
-      # ---- Signing placeholders -------------------------------------------------------------
-      # macOS: with secret APPLE_SIGNING_IDENTITY (+ APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD,
-      #   and for notarization APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID) Tauri signs with Developer
-      #   ID and notarizes. Without it the app is ad-hoc signed ("-"), hardened runtime off.
-      # Windows: with secret WINDOWS_SIGN_COMMAND (Authenticode, e.g. signtool / Azure Trusted
-      #   Signing, "%1" = file; no passwords in the command) Tauri signs MSI, NSIS and the exe.
-      #   Without it the installers are unsigned (SmartScreen warns).
-      - name: Signing config
+      # ---- Signing plan -----------------------------------------------------------------------
+      # Decides from the presence (never the value) of each secret what this build signs, writes
+      # the matching Tauri config override, and reports it in the job summary.
+      - name: Signing plan
         id: signing
         env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          WINDOWS_SIGN_COMMAND: ${{ secrets.WINDOWS_SIGN_COMMAND }}
-        run: |
-          mkdir -p packaging/generated
-          conf=packaging/generated/tauri.sign.ci.conf.json
-          case "$RUNNER_OS" in
-            macOS)
-              if [[ -n "$APPLE_SIGNING_IDENTITY" ]]; then
-                echo '{}' > "$conf"; echo "mode=developer-id" >> "$GITHUB_OUTPUT"
-              else
-                echo '{"bundle":{"macOS":{"signingIdentity":"-","hardenedRuntime":false}}}' > "$conf"
-                echo "mode=ad-hoc" >> "$GITHUB_OUTPUT"
-              fi ;;
-            Windows)
-              if [[ -n "$WINDOWS_SIGN_COMMAND" ]]; then
-                jq -n --arg c "$WINDOWS_SIGN_COMMAND" '{bundle:{windows:{signCommand:$c}}}' > "$conf"
-                echo "mode=authenticode" >> "$GITHUB_OUTPUT"
-              else
-                echo '{}' > "$conf"; echo "mode=unsigned" >> "$GITHUB_OUTPUT"
-              fi ;;
-            *) echo '{}' > "$conf"; echo "mode=unsigned" >> "$GITHUB_OUTPUT" ;;
-          esac
-
-      # ---- Updater placeholders -------------------------------------------------------------
-      # Off unless the `updater` input is true. Needs secret TAURI_SIGNING_PRIVATE_KEY (+ _PASSWORD)
-      # in a protected environment and variable OPENSVN_UPDATER_PUBKEY (minisign public key).
-      # Publishing installers + latest.json to the private OpenSVN-releases repository is a manual
-      # step for now (packaging/updater/README.md, "Release steps").
-      - name: Updater config
-        if: inputs.updater
-        env:
-          OPENSVN_UPDATER_PUBKEY: ${{ vars.OPENSVN_UPDATER_PUBKEY }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          [[ -n "$OPENSVN_UPDATER_PUBKEY" && -n "$TAURI_SIGNING_PRIVATE_KEY" ]] \
-            || { echo "::error::updater=true needs vars.OPENSVN_UPDATER_PUBKEY and secrets.TAURI_SIGNING_PRIVATE_KEY"; exit 1; }
-          node scripts/release/write-updater-config.mjs
-
-      - name: Build installers
-        working-directory: apps/opensvn
-        env:
-          OPENSVN_UPDATER: ${{ inputs.updater && '1' || '0' }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.updater && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.updater && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WINDOWS_SIGN_COMMAND: ${{ secrets.WINDOWS_SIGN_COMMAND }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          OPENSVN_UPDATER_PUBKEY: ${{ vars.OPENSVN_UPDATER_PUBKEY }}
+          UPDATER_MODE: ${{ inputs.updater || 'auto' }}
+        run: |
+          set -euo pipefail
+          has() { [[ -n "${!1:-}" ]]; }
+          # all_or_none GROUP VAR...: 2 = all set, 0 = none set, error when only some are.
+          all_or_none() {
+            local group="$1" n=0 v; shift
+            for v in "$@"; do if has "$v"; then n=$((n+1)); fi; done
+            if [[ $n -eq 0 ]]; then return 0; fi
+            if [[ $n -eq $# ]]; then return 2; fi
+            echo "::error::$group is partially configured: set all of $* or none"; exit 1
+          }
+          mkdir -p packaging/generated
+          conf=packaging/generated/tauri.sign.ci.conf.json
+          echo '{}' > "$conf"
+          mode=unsigned notarize=off win_cert=off
+          case "$RUNNER_OS" in
+            macOS)
+              rc=0; all_or_none "Apple Developer ID signing" APPLE_SIGNING_IDENTITY APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD || rc=$?
+              if [[ $rc -eq 2 ]]; then
+                mode=developer-id
+                rc=0; all_or_none "Apple notarization" APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID || rc=$?
+                if [[ $rc -eq 2 ]]; then notarize=on; fi
+              else
+                if has APPLE_ID || has APPLE_PASSWORD || has APPLE_TEAM_ID; then
+                  echo "::error::Apple notarization needs Developer ID signing (APPLE_SIGNING_IDENTITY, APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD)"; exit 1
+                fi
+                mode=ad-hoc
+                echo '{"bundle":{"macOS":{"signingIdentity":"-","hardenedRuntime":false}}}' > "$conf"
+              fi ;;
+            Windows)
+              rc=0; all_or_none "Windows certificate import" WINDOWS_CERTIFICATE WINDOWS_CERTIFICATE_PASSWORD || rc=$?
+              if [[ $rc -eq 2 ]]; then win_cert=on; fi
+              if has WINDOWS_SIGN_COMMAND; then
+                mode=authenticode
+                jq -n --arg c "$WINDOWS_SIGN_COMMAND" '{bundle:{windows:{signCommand:$c}}}' > "$conf"
+              elif [[ $win_cert == on ]]; then
+                echo "::error::WINDOWS_CERTIFICATE is set but WINDOWS_SIGN_COMMAND is not"; exit 1
+              fi ;;
+          esac
+          updater=off
+          case "$UPDATER_MODE" in
+            off) ;;
+            on)
+              if ! has TAURI_SIGNING_PRIVATE_KEY || ! has OPENSVN_UPDATER_PUBKEY; then
+                echo "::error::updater=on needs secret TAURI_SIGNING_PRIVATE_KEY and variable OPENSVN_UPDATER_PUBKEY"; exit 1
+              fi
+              updater=on ;;
+            auto)
+              if has TAURI_SIGNING_PRIVATE_KEY && has OPENSVN_UPDATER_PUBKEY; then updater=on
+              elif has TAURI_SIGNING_PRIVATE_KEY || has OPENSVN_UPDATER_PUBKEY; then
+                echo "::warning::updater signing skipped: needs both secret TAURI_SIGNING_PRIVATE_KEY and variable OPENSVN_UPDATER_PUBKEY"
+              fi ;;
+            *) echo "::error::unknown updater mode $UPDATER_MODE"; exit 1 ;;
+          esac
+          if [[ $updater == off ]]; then
+            echo "::notice::updater signing is off: no update artifacts, latest.json will not change"
+          fi
+          if [[ $mode == unsigned || $mode == ad-hoc ]]; then
+            echo "::notice::$RUNNER_OS installers are $mode (no code-signing secrets in environment release)"
+          fi
+          { echo "mode=$mode"; echo "notarize=$notarize"; echo "win_cert=$win_cert"; echo "updater=$updater"; } >> "$GITHUB_OUTPUT"
+          echo "Signing on $RUNNER_OS: $mode, notarization: $notarize, updater: $updater" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Updater config (embeds the public key)
+        if: steps.signing.outputs.updater == 'on'
+        env:
+          OPENSVN_UPDATER_PUBKEY: ${{ vars.OPENSVN_UPDATER_PUBKEY }}
+        run: node scripts/release/write-updater-config.mjs
+
+      - name: Import the Authenticode certificate
+        if: runner.os == 'Windows' && steps.signing.outputs.win_cert == 'on'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "sign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
+          Remove-Item $pfx -Force
+          Write-Output "imported certificate $($cert.Thumbprint)"
+
+      - name: Build installers
+        working-directory: apps/opensvn
+        env:
+          UPDATER: ${{ steps.signing.outputs.updater }}
+          NOTARIZE: ${{ steps.signing.outputs.notarize }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ steps.signing.outputs.updater == 'on' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ steps.signing.outputs.updater == 'on' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ steps.signing.outputs.mode == 'developer-id' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_CERTIFICATE: ${{ steps.signing.outputs.mode == 'developer-id' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ steps.signing.outputs.mode == 'developer-id' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_ID: ${{ steps.signing.outputs.notarize == 'on' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ steps.signing.outputs.notarize == 'on' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.signing.outputs.notarize == 'on' && secrets.APPLE_TEAM_ID || '' }}
           FEATURES: ${{ matrix.features }}
           BUNDLES: ${{ matrix.bundles }}
+          UPDATER_BUNDLES: ${{ matrix.updater_bundles }}
           TARGET: ${{ matrix.target }}
         run: |
           gen=../../packaging/generated
-          args=(--bundles "$BUNDLES" --features "$FEATURES"
+          bundle_list="$BUNDLES"
+          if [[ "$UPDATER" == "on" && -n "$UPDATER_BUNDLES" ]]; then bundle_list="$bundle_list,$UPDATER_BUNDLES"; fi
+          args=(--bundles "$bundle_list" --features "$FEATURES"
             --config src-tauri/tauri.bundle.conf.json
             --config "$gen/tauri.version.conf.json"
             --config "$gen/tauri.sign.ci.conf.json")
           if [[ -n "$TARGET" ]]; then args+=(--target "$TARGET"); fi
-          if [[ "$OPENSVN_UPDATER" == "1" ]]; then args+=(--config "$gen/tauri.updater.conf.json"); fi
+          if [[ "$UPDATER" == "on" ]]; then args+=(--config "$gen/tauri.updater.conf.json"); fi
           # Empty secrets must not reach Tauri as empty strings (it would try to sign with them).
           for v in APPLE_SIGNING_IDENTITY APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID \
                    APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
@@ -202,29 +293,58 @@ jobs:
           done
           pnpm tauri build "${args[@]}"
 
+      - name: Verify code signatures
+        if: steps.signing.outputs.mode == 'developer-id' || steps.signing.outputs.mode == 'authenticode'
+        env:
+          MODE: ${{ steps.signing.outputs.mode }}
+          NOTARIZE: ${{ steps.signing.outputs.notarize }}
+          BUNDLE_DIR: ${{ matrix.bundle_dir }}
+        run: |
+          shopt -s nullglob
+          if [[ "$MODE" == "developer-id" ]]; then
+            # Tauri notarizes and staples the .app; the DMG carries that stapled app.
+            for app in "$BUNDLE_DIR"/macos/*.app; do
+              codesign --verify --deep --strict --verbose=2 "$app"
+              if [[ "$NOTARIZE" == "on" ]]; then xcrun stapler validate "$app"; fi
+            done
+          else
+            for f in "$BUNDLE_DIR"/msi/*.msi "$BUNDLE_DIR"/nsis/*-setup.exe; do
+              pwsh -NoProfile -Command "\$s = Get-AuthenticodeSignature -LiteralPath '$f'; Write-Output \"$f: \$(\$s.Status)\"; if (\$s.Status -ne 'Valid') { exit 1 }"
+            done
+          fi
+
       - name: Collect installers
         env:
           VERSION: ${{ steps.version.outputs.version }}
           BUNDLE_DIR: ${{ matrix.bundle_dir }}
           PATTERNS: ${{ matrix.patterns }}
+          UPDATER_PATTERNS: ${{ matrix.updater_patterns }}
+          UPDATER: ${{ steps.signing.outputs.updater }}
+          MODE: ${{ steps.signing.outputs.mode }}
+          NAME: ${{ matrix.name }}
         run: |
           rm -f packaging/generated/tauri.sign.ci.conf.json
           mkdir -p dist
           shopt -s nullglob
-          for p in $PATTERNS; do
+          all="$PATTERNS"
+          if [[ "$UPDATER" == "on" ]]; then all="$all $UPDATER_PATTERNS"; fi
+          for p in $all; do
             # shellcheck disable=SC2206 # $p is a glob on purpose
             files=("$BUNDLE_DIR"/$p)
             [[ ${#files[@]} -ge 1 ]] || { echo "::error::no installer matches $BUNDLE_DIR/$p"; exit 1; }
             for f in "${files[@]}"; do
               cp -f "$f" dist/
-              if [[ -f "$f.sig" ]]; then cp -f "$f.sig" dist/; fi
+              if [[ -f "$f.sig" ]]; then cp -f "$f.sig" dist/
+              elif [[ "$UPDATER" == "on" && "$f" != *.deb && "$f" != *.dmg ]]; then
+                echo "::error::updater signing is on but $f has no .sig"; exit 1
+              fi
             done
           done
           cd dist
-          if command -v sha256sum >/dev/null; then sha256sum -- * > "SHA256SUMS-${{ matrix.name }}.txt"
-          else shasum -a 256 -- * > "SHA256SUMS-${{ matrix.name }}.txt"; fi
+          if command -v sha256sum >/dev/null; then sha256sum -- * > "SHA256SUMS-$NAME.txt"
+          else shasum -a 256 -- * > "SHA256SUMS-$NAME.txt"; fi
           ls -l
-          echo "Version $VERSION, signing: ${{ steps.signing.outputs.mode }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Version $VERSION, signing: $MODE, updater: $UPDATER" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: opensvn-${{ matrix.name }}
@@ -232,28 +352,62 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  draft-release:
-    name: draft release
+  publish:
+    name: publish
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '')
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
+    # The releases-repo token lives here; required reviewers approve the publish.
+    environment: release
     permissions:
+      # Only for the fallback draft release in this repository (no OPENSVN_RELEASES_TOKEN).
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           pattern: opensvn-*
           merge-multiple: true
-      - name: Create the draft release (never published by this workflow)
+      - name: Check the publish token
+        id: token
+        env:
+          OPENSVN_RELEASES_TOKEN: ${{ secrets.OPENSVN_RELEASES_TOKEN }}
+        run: |
+          if [[ -n "$OPENSVN_RELEASES_TOKEN" ]]; then echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::OPENSVN_RELEASES_TOKEN is not set in environment release: not publishing to $RELEASES_REPO, creating a draft release in this repository instead"
+          fi
+      - name: Publish to the releases repository
+        if: steps.token.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.OPENSVN_RELEASES_TOKEN }}
+          TAG: ${{ inputs.release_tag || github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          ls -l dist
+          node scripts/release/publish-release.mjs --repo "$RELEASES_REPO" --dist dist \
+            --tag "$TAG" --version "$VERSION" --notes "OpenSVN $VERSION. Verify downloads with the SHA256SUMS-*.txt files."
+          echo "Published $TAG to https://github.com/$RELEASES_REPO/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
+      - name: Fallback draft release in this repository (never published by this workflow)
+        if: steps.token.outputs.present != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           ls -l dist
-          notes="Unsigned test build (real engine). Windows: SmartScreen -> More info -> Run anyway.
-          macOS: ad-hoc signed; right-click -> Open, or: xattr -dr com.apple.quarantine /Applications/OpenSVN.app.
-          Linux: see docs/INSTALL-TEST.md. Verify downloads with the SHA256SUMS-*.txt files."
+          notes="Test build (real engine), not published: OPENSVN_RELEASES_TOKEN is not configured.
+          Unsigned builds: Windows SmartScreen -> More info -> Run anyway; macOS right-click -> Open, or
+          xattr -dr com.apple.quarantine /Applications/OpenSVN.app. Linux: see docs/INSTALL-TEST.md.
+          Verify downloads with the SHA256SUMS-*.txt files."
           gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --draft --prerelease \
-            --target "$GITHUB_SHA" --title "$TAG (unsigned test build)" --notes "$notes"
+            --target "$GITHUB_SHA" --title "$TAG (test build)" --notes "$notes"
