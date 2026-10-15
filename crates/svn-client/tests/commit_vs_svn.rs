@@ -401,6 +401,7 @@ async fn commit_with_a_switched_subtree_matches_svn() {
         &root.join(&rp("branches/b")).unwrap(),
         None,
         Depth::Unknown,
+        true,
         &cancel,
     )
     .await

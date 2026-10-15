@@ -691,6 +691,8 @@ async fn commit_with_changes_below_a_switched_subtree() {
             &svn_types::RepoUrl::parse(&format!("{url}/branches/b")).unwrap(),
             None,
             svn_types::Depth::Unknown,
+            // A copy of trunk/src: the ancestry check passes on the real server.
+            false,
             &cancel,
         )
         .await
@@ -758,6 +760,401 @@ async fn commit_with_changes_below_a_switched_subtree() {
             assert_eq!(text.content, expected, "{path} at r{}", rev.0);
         }
     }
+    assert_no_prompt();
+}
+
+// ---- switch ancestry ----
+
+/// The server's `get-location-segments` answer follows a copy back to its source with a gap
+/// for the revisions in between, and the engine's switch checks ancestry with it like
+/// `svn switch`: an unrelated location is refused (E195012) without touching the working copy,
+/// a branch copied from trunk is taken, and `ignore_ancestry` takes the unrelated one too.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn switch_checks_ancestry_with_location_segments() {
+    use opensvn_lib::engine::real::SessionConnector as _;
+    use svn_types::Revnum;
+    for (version, host) in servers() {
+        eprintln!("server {version}");
+        let h = harness(&host, "switch-ancestry");
+        let url = h.repo_url();
+        let e = h.engine();
+        // r2: `other`, the same layout as trunk added on its own.
+        h.scratch.load(&add_dump(
+            &["other", "other/src"],
+            &[
+                ("other/README.md".to_owned(), b"hello\n".to_vec()),
+                ("other/src/main.rs".to_owned(), b"fn other() {}\n".to_vec()),
+            ],
+        ));
+        // r3: a branch of trunk as it was in r1.
+        e.copy_location(
+            &CopyLocationRequest {
+                from_url: format!("{url}/trunk"),
+                from_rev: Some(opensvn_ipc::Rev(1)),
+                to_url: format!("{url}/branches/rel"),
+                message: "Branch".into(),
+                switch_wc_id: None,
+                from_wc: None,
+            },
+            None,
+            &ctx(),
+        )
+        .await
+        .expect("branch");
+
+        let cancel = svn_types::CancelToken::new();
+        let session = connector()
+            .connect_with(
+                &svn_types::RepoUrl::parse(&url).unwrap(),
+                &opensvn_lib::engine::real::ConnectOptions::at_url(&ctx()),
+                &cancel,
+            )
+            .await
+            .expect("session");
+        let segments = |path: &str, start: Option<u64>, end: Option<u64>| {
+            let (session, cancel) = (session.clone(), cancel.clone());
+            let path = RelPath::new(path).unwrap();
+            async move {
+                session
+                    .get_location_segments(&path, None, start.map(Revnum), end.map(Revnum), &cancel)
+                    .await
+                    .map(|v| {
+                        v.into_iter()
+                            .map(|s| {
+                                (
+                                    s.path.map(|p| p.as_str().to_owned()),
+                                    s.range_start.0,
+                                    s.range_end.0,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+            }
+        };
+        let some = |p: &str| Some(p.to_owned());
+        assert_eq!(
+            segments("branches/rel/src/main.rs", None, None)
+                .await
+                .unwrap(),
+            vec![
+                (some("branches/rel/src/main.rs"), 3, 3),
+                (None, 2, 2),
+                (some("trunk/src/main.rs"), 1, 1),
+            ]
+        );
+        assert_eq!(
+            segments("branches/rel", Some(3), Some(2)).await.unwrap(),
+            vec![(some("branches/rel"), 3, 3), (None, 2, 2)]
+        );
+        assert_eq!(
+            segments("other", None, None).await.unwrap(),
+            vec![(some("other"), 2, 3)]
+        );
+        assert_eq!(
+            segments("", None, None).await.unwrap(),
+            vec![(some(""), 0, 3)]
+        );
+        let err = segments("nowhere", None, None).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::PathNotFound, "{err}");
+
+        let wc = checkout_trunk(&h, "switch-ancestry").await;
+        h.write_file(&wc.root, "README.md", "hello\nlocal edit\n")
+            .unwrap();
+        let only_the_edit = |list: Vec<opensvn_ipc::FileStatus>| {
+            list.into_iter()
+                .filter(|s| s.text != opensvn_ipc::NodeStatus::Normal || s.tree_conflict)
+                .map(|s| (s.path, s.text, s.tree_conflict))
+                .collect::<Vec<_>>()
+        };
+        let query = StatusQuery {
+            include_ignored: false,
+            include_unversioned: true,
+        };
+        let edited = vec![(
+            "README.md".to_owned(),
+            opensvn_ipc::NodeStatus::Modified,
+            false,
+        )];
+
+        let err = e
+            .switch(&wc, &format!("{url}/other"), None, false, &ctx())
+            .await
+            .expect_err("an unrelated switch is refused");
+        assert_eq!(err.code, ErrorCode::UnrelatedResources, "{err}");
+        assert_eq!(err.svn_code, Some(195_012), "{err}");
+        let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
+        assert_eq!(info.url, format!("{url}/trunk"));
+        assert_eq!(
+            only_the_edit(e.status(&wc, query, &ctx()).await.expect("status")),
+            edited
+        );
+
+        e.switch(&wc, &format!("{url}/branches/rel"), None, false, &ctx())
+            .await
+            .expect("switch to the branch");
+        let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
+        assert_eq!(info.url, format!("{url}/branches/rel"));
+        assert_eq!(
+            only_the_edit(e.status(&wc, query, &ctx()).await.expect("status")),
+            edited
+        );
+
+        e.switch(&wc, &format!("{url}/other"), None, true, &ctx())
+            .await
+            .expect("switch ignoring ancestry");
+        let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
+        assert_eq!(info.url, format!("{url}/other"));
+        // Ignoring ancestry, the server sends changes, not a replacement: the local edit is
+        // merged into the other README, no tree conflict.
+        assert_eq!(
+            only_the_edit(e.status(&wc, query, &ctx()).await.expect("status")),
+            edited
+        );
+        assert_eq!(
+            std::fs::read_to_string(wc.root.join("src/main.rs")).unwrap(),
+            "fn other() {}\n"
+        );
+    }
+    assert_no_prompt();
+}
+
+// ---- update and second switch of a switched folder (#170 review) ----
+
+/// Lines of the servers' error logs (`OPENSVN_COMPAT_LOCAL_ERROR_LOGS`, separated by `:`) that
+/// show a crashed child: Apache's `AH00052 ... exit signal` (logged at `core:notice`) and a
+/// failed assertion the child wrote to stderr. `None` without the variable (no local server).
+fn crashed_children() -> Option<usize> {
+    let logs = std::env::var("OPENSVN_COMPAT_LOCAL_ERROR_LOGS").ok()?;
+    Some(
+        logs.split(':')
+            .filter(|p| !p.is_empty())
+            .map(|p| {
+                std::fs::read_to_string(p)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|l| l.contains("AH00052") || l.contains("Assertion"))
+                    .count()
+            })
+            .sum(),
+    )
+}
+
+/// A folder switched away from its parent's URL, with an excluded child, a child at another
+/// revision and a nested switched child, is updated and switched again over a session at the
+/// working copy root. The drive must be anchored at the folder (svn's actual-target split): a
+/// `link_path` for it followed by the entries below it makes svn_repos read freed memory, and
+/// mod_dav_svn 1.14 and 1.15 abort the child on every attempt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn update_and_switch_again_of_a_switched_folder_with_mixed_children() {
+    use opensvn_lib::engine::real::SessionConnector as _;
+    use svn_types::{CancelToken, RepoUrl, Revnum};
+    use svn_wc::db::Presence;
+    let crashed_before = crashed_children();
+    if crashed_before.is_none() {
+        eprintln!("OPENSVN_COMPAT_LOCAL_ERROR_LOGS is not set: server crashes are not checked");
+    }
+    for (version, host) in servers() {
+        eprintln!("server {version}");
+        let h = harness(&host, "switched-again");
+        let url = h.repo_url();
+        let e = h.engine();
+        let root = h.work_dir().join("wc");
+        let info = e
+            .checkout(
+                &CheckoutPlan {
+                    url: format!("{url}/trunk"),
+                    path: root.clone(),
+                    rev: None,
+                    depth: Depth::Infinity,
+                    sparse: None,
+                    format: WcFormat::V31,
+                    store_pristine: true,
+                    ignore_externals: false,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("checkout");
+        let wc = WcRef {
+            id: WcId("switched-again".into()),
+            root: PathBuf::from(info.root_path),
+        };
+        for (rel, text) in [
+            ("src/x/a.txt", "a\n"),
+            ("src/y/b.txt", "b\n"),
+            ("src/n/c.txt", "c\n"),
+        ] {
+            h.write_file(&wc.root, rel, text).unwrap();
+        }
+        let commit = |paths: Vec<String>, message: &str| CommitRequest {
+            wc_id: wc.id.clone(),
+            paths,
+            message: message.into(),
+            keep_locks: false,
+            auto_add_remove: true,
+        };
+        e.commit(&wc, &commit(vec![String::new()], "x, y, n"), &ctx())
+            .await
+            .expect("commit x, y, n");
+        let branch = |to: &'static str| CopyLocationRequest {
+            from_url: format!("{url}/trunk/src"),
+            from_rev: None,
+            to_url: format!("{url}/branches/{to}"),
+            message: format!("branch {to}"),
+            switch_wc_id: None,
+            from_wc: None,
+        };
+        let rev_b = e
+            .copy_location(&branch("b"), None, &ctx())
+            .await
+            .expect("branch b");
+        e.copy_location(&branch("c"), None, &ctx())
+            .await
+            .expect("branch c");
+
+        let cancel = CancelToken::new();
+        let at = |u: String| {
+            let cancel = cancel.clone();
+            async move {
+                connector()
+                    .connect_with(
+                        &RepoUrl::parse(&u).unwrap(),
+                        &opensvn_lib::engine::real::ConnectOptions::at_url(&ctx()),
+                        &cancel,
+                    )
+                    .await
+                    .expect("session")
+            }
+        };
+        let client = svn_client::ClientCtx::new(LockOwner {
+            store: h.store.clone() as Arc<dyn LockOwnershipStore>,
+            pid: std::process::id(),
+            boot_id: THIS_BOOT.to_owned(),
+        });
+        let branch_b = RepoUrl::parse(&format!("{url}/branches/b")).unwrap();
+        let trunk = at(format!("{url}/trunk")).await;
+        svn_client::switch(
+            &client,
+            trunk.as_ref(),
+            &wc.root.join("src"),
+            &branch_b,
+            None,
+            svn_types::Depth::Unknown,
+            // Branches of trunk/src: related, so the ancestry check passes.
+            false,
+            &cancel,
+        )
+        .await
+        .expect("first switch of src");
+        // An excluded child.
+        svn_client::sparse::set_depth(
+            &client,
+            trunk.as_ref(),
+            &wc.root.join("src/x"),
+            None,
+            svn_types::Depth::Exclude,
+            &cancel,
+        )
+        .await
+        .expect("exclude src/x");
+        // The reviewer's repro: an update of the switched folder with an excluded child.
+        svn_client::update(
+            &client,
+            trunk.as_ref(),
+            &wc.root.join("src"),
+            None,
+            svn_types::Depth::Unknown,
+            &cancel,
+        )
+        .await
+        .expect("update of the switched src with an excluded child");
+        // A change on the branch, so the later update has something to bring.
+        h.write_file(&wc.root, "src/y/b.txt", "b on the branch\n")
+            .unwrap();
+        e.commit(&wc, &commit(vec!["src".into()], "y on b"), &ctx())
+            .await
+            .expect("commit on the branch");
+        // A child at another revision (anchored at its switched parent, as svn does).
+        svn_client::update(
+            &client,
+            trunk.as_ref(),
+            &wc.root.join("src/y"),
+            Some(Revnum(rev_b.0)),
+            svn_types::Depth::Unknown,
+            &cancel,
+        )
+        .await
+        .expect("src/y back to the branch point");
+        // A nested switched child.
+        svn_client::switch(
+            &client,
+            trunk.as_ref(),
+            &wc.root.join("src/n"),
+            &RepoUrl::parse(&format!("{url}/branches/c/n")).unwrap(),
+            None,
+            svn_types::Depth::Unknown,
+            // Branches of trunk/src: related, so the ancestry check passes.
+            false,
+            &cancel,
+        )
+        .await
+        .expect("switch src/n");
+        let base = |rel: &str| {
+            WcDb::open(&wc.root)
+                .unwrap()
+                .read_base(&RelPath::new(rel).unwrap())
+                .unwrap()
+                .unwrap_or_else(|| panic!("{rel}: no BASE row"))
+        };
+        // Update of the switched folder over a session at the working copy root.
+        svn_client::update(
+            &client,
+            trunk.as_ref(),
+            &wc.root.join("src"),
+            None,
+            svn_types::Depth::Unknown,
+            &cancel,
+        )
+        .await
+        .expect("update of the switched src");
+        assert_eq!(
+            std::fs::read_to_string(wc.root.join("src/y/b.txt")).unwrap(),
+            "b on the branch\n"
+        );
+        assert_eq!(base("src").repos_relpath.as_deref(), Some("branches/b"));
+        assert_eq!(base("src/x").presence, Presence::Excluded);
+        assert!(!wc.root.join("src/x").exists());
+        assert_eq!(base("src/n").repos_relpath.as_deref(), Some("branches/c/n"));
+
+        // Switch it again to the same branch, the same way.
+        svn_client::switch(
+            &client,
+            trunk.as_ref(),
+            &wc.root.join("src"),
+            &branch_b,
+            None,
+            svn_types::Depth::Unknown,
+            // Branches of trunk/src: related, so the ancestry check passes.
+            false,
+            &cancel,
+        )
+        .await
+        .expect("second switch of src");
+        assert_eq!(base("src").repos_relpath.as_deref(), Some("branches/b"));
+        assert_eq!(
+            std::fs::read_to_string(wc.root.join("src/y/b.txt")).unwrap(),
+            "b on the branch\n"
+        );
+    }
+    // The requests must not have crashed the server: a malformed report can make svn_repos
+    // read freed memory and abort the child while the client sees a retried success.
+    assert_eq!(
+        crashed_children(),
+        crashed_before,
+        "a request crashed a mod_dav_svn child (see the server's error log)"
+    );
     assert_no_prompt();
 }
 

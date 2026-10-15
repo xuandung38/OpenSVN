@@ -586,7 +586,7 @@ export function wcMockCommands(deps: MockDeps) {
         { kind: "newRev", newRev: target },
       );
     },
-    switch: (wcId: string, url: string, rev: number | null) =>
+    switch: (wcId: string, url: string, rev: number | null, _ignoreAncestry: boolean) =>
       op(
         "switch",
         `Switch to ${baseName(url)}`,

@@ -1,5 +1,12 @@
 /** Sample data for the mock adapter (mirrors docs/system-design/ui-mockup-main-window.html; no real names). */
-import type { FileStatus, LogEntry, NodeStatus, Settings, WorkingCopy } from "../bindings";
+import type {
+  FileStatus,
+  LogEntry,
+  NodeStatus,
+  Settings,
+  TrustedCert,
+  WorkingCopy,
+} from "../bindings";
 
 export const MOCK_WC_ID = "wc-main";
 
@@ -107,9 +114,14 @@ export const mockSettings: Settings = {
   "general.checkoutRoot": "/Users/dev/work",
   "general.checkIntervalMin": 5,
   "general.language": "vi",
+  "general.openLastWc": true,
+  "general.logLevel": "info",
   "appearance.theme": "system",
+  "appearance.fontSize": 13,
+  "appearance.density": "comfortable",
   "diff.mode": "split",
   "diff.ignoreWhitespace": false,
+  "diff.tabWidth": 4,
   "network.maxConnections": 4,
   "network.timeoutSec": 60,
   "network.reconnectWaitMin": 10,
@@ -117,6 +129,7 @@ export const mockSettings: Settings = {
   "network.negotiate": true,
   "wc.defaultFormat": 32,
   "wc.readSubversionConfig": false,
+  "wc.globalIgnores": "",
   "cache.maxSizeGb": 2,
   "integrations.webRevisionUrl": "",
   "integrations.webFileUrl": "",
@@ -126,3 +139,15 @@ export const mockSettings: Settings = {
   "tools.terminal": null,
   "diff.toolsByExtension": null,
 };
+
+/** Certificates pinned with "Trust permanently" (Settings > Accounts). */
+export const mockTrustedCerts: TrustedCert[] = [
+  {
+    host: "svn.example.com",
+    port: 443,
+    sha256: "3f9a1c0b7d2e4f6a8b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a",
+    subject: "CN=svn.example.com",
+    expiresAt: "2027-03-01T00:00:00Z",
+    trustedAt: "2026-09-20T08:00:00Z",
+  },
+];

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<info>
+<entry
+   path="a.txt"
+   revision="6"
+   kind="file"
+   size="26">
+<url>http://svn.test.local/svn/repo/trunk/a.txt</url>
+<relative-url>^/trunk/a.txt</relative-url>
+<repository>
+<root>http://svn.test.local/svn/repo</root>
+<uuid>e23e297c-c8aa-11f1-b558-3de6f34b8b80</uuid>
+</repository>
+<commit
+   revision="6">
+<author>alice</author>
+<date>2026-10-15T15:12:59.042408Z</date>
+</commit>
+</entry>
+</info>

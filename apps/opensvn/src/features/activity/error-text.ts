@@ -44,12 +44,21 @@ const UNSURE: ReadonlyArray<[RegExp, ActivityKey]> = [
   [/may or may not\s+have reached the server/i, "errWriteUnsure"],
 ];
 
+/** Codes with a fixed short text; the backend's message stays in the details. */
+const BY_CODE: Partial<Record<AppError["code"], ActivityKey>> = {
+  "unrelated-resources": "errUnrelated",
+};
+
 /** Codes whose message may be a raw transport chain. */
 const TRANSPORT_CODES: ReadonlySet<AppError["code"]> = new Set(["network", "timeout"]);
 
 /** Maps an operation error to a short localised text, keeping the raw text as the detail. */
 export function errorText(error: Pick<AppError, "code" | "message" | "detail">): ErrorText {
   const raw = [error.message, error.detail].filter(Boolean).join("\n");
+  const byCode = BY_CODE[error.code];
+  if (byCode) {
+    return { key: byCode, message: error.message, detail: `${raw}\n(${error.code})` };
+  }
   const unsure = UNSURE.find(([re]) => re.test(error.message));
   if (unsure) {
     return { key: unsure[1], message: error.message, detail: `${raw}\n(${error.code})` };

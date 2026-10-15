@@ -98,6 +98,15 @@ impl CacheDb {
         })
     }
 
+    /// Drops every snapshot (Settings > Advanced > Clear cache). The next scan of each working
+    /// copy rebuilds its own.
+    pub fn status_snapshot_clear_all(&self) -> Result<(), DbError> {
+        self.db.with(|c| {
+            c.execute("DELETE FROM status_snapshot", [])?;
+            Ok(())
+        })
+    }
+
     /// Drops the snapshot of a working copy (used when it is removed from the registry).
     pub fn status_snapshot_clear(&self, wc_id: &WcId) -> Result<(), DbError> {
         self.db.with(|c| {
