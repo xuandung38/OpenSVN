@@ -22,12 +22,17 @@ pub(super) struct ReportEntry {
     pub deleted: bool,
     /// Depth the working copy has at this path (`Exclude`: excluded node).
     pub depth: Depth,
+    /// `link_path`: the repository path (root-relative) the working copy has here instead of
+    /// the session location; the paths below it are read from there too.
+    pub link: Option<RelPath>,
 }
 
 /// Reporter that records entries.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct CollectingReporter {
     pub entries: Vec<ReportEntry>,
+    /// Repository root, to read `link_path` URLs.
+    pub repos_root: RepoUrl,
 }
 
 impl Reporter for CollectingReporter {
@@ -45,6 +50,7 @@ impl Reporter for CollectingReporter {
             start_empty,
             deleted: false,
             depth,
+            link: None,
         });
         Ok(())
     }
@@ -55,24 +61,27 @@ impl Reporter for CollectingReporter {
             start_empty: true,
             deleted: true,
             depth: Depth::Infinity,
+            link: None,
         });
         Ok(())
     }
     fn link_path(
         &mut self,
         path: &RelPath,
-        _url: &RepoUrl,
+        url: &RepoUrl,
         rev: Revnum,
         depth: Depth,
         start_empty: bool,
         _lock: Option<&str>,
     ) -> Result<()> {
+        let link = super::update_drive::url_to_rel(&self.repos_root, url)?;
         self.entries.push(ReportEntry {
             path: path.clone(),
             rev,
             start_empty,
             deleted: false,
             depth,
+            link: Some(link),
         });
         Ok(())
     }
@@ -122,7 +131,10 @@ pub(super) enum Op {
 pub(super) struct PlanInput<'a> {
     pub target_rev: Revnum,
     pub target_tree: &'a Tree,
+    /// Whole repository trees of the reported revisions.
     pub base_trees: &'a HashMap<Revnum, Tree>,
+    /// Session location (root-relative): where report paths without a link are read.
+    pub session_rel: RelPath,
     pub entries: &'a [ReportEntry],
     /// Anchor-relative path being updated.
     pub anchor_target: RelPath,
@@ -233,6 +245,15 @@ impl Planner<'_> {
             .max_by_key(|e| e.path.as_str().len())
     }
 
+    /// Repository path the working copy's `path` comes from under the report entry `e` that
+    /// governs it: below a `link_path`, the linked location (svn_repos follows the link).
+    fn source(&self, e: &ReportEntry, path: &RelPath) -> Result<RelPath> {
+        match &e.link {
+            Some(l) => remap(path, &e.path, l),
+            None => super::prefixed::join(&self.input.session_rel, path),
+        }
+    }
+
     /// The node the working copy has at `path`, like svn_repos' `update_entry`: a path reported
     /// with its own `set_path` exists at the reported revision even when it is `start_empty`
     /// (that only empties its children), and even below a `start_empty` parent.
@@ -244,10 +265,11 @@ impl Planner<'_> {
         if e.deleted || (e.start_empty && e.path != *path) {
             return None;
         }
+        let src = self.source(e, path).ok()?;
         self.input
             .base_trees
             .get(&e.rev)?
-            .get(path)
+            .get(&src)
             .map(|n| (n, e.rev))
     }
 
@@ -375,13 +397,16 @@ impl Planner<'_> {
         }
         let mut names = BTreeSet::new();
         if !empty_base {
-            let rev = self
+            let gov = self
                 .governing(dir)
                 .filter(|e| !e.deleted && !e.start_empty)
-                .map(|e| e.rev);
-            if let Some(t) = rev.and_then(|r| self.input.base_trees.get(&r)) {
+                .cloned();
+            if let Some(e) = gov
+                && let Some(t) = self.input.base_trees.get(&e.rev)
+            {
+                let src = self.source(&e, dir)?;
                 names.extend(
-                    super::repo::children(t, dir)
+                    super::repo::children(t, &src)
                         .filter_map(|(k, _)| k.file_name().map(str::to_owned)),
                 );
             }

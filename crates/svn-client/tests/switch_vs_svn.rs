@@ -299,6 +299,33 @@ async fn excluded_child_of_a_switched_subdirectory_matches_svn() {
     );
 }
 
+/// A subdirectory switched on its own goes back below its parent when the parent is switched,
+/// like `svn switch`: the drive reads it from where it was switched to (`link_path`) and the
+/// server sends what makes it the parent's child at the new location.
+#[tokio::test(flavor = "multi_thread")]
+async fn switching_the_parent_of_a_switched_subdirectory_matches_svn() {
+    let Some(p) = Pair::new(build, "trunk", 1).await else {
+        return;
+    };
+    // `X` to the branch's `Y` (another path: ancestry ignored, as svn needs it too).
+    let (theirs, ours) = p
+        .switch("trunk", "X", "branches/b/Y", 2, Depth::Unknown, true)
+        .await;
+    assert!(theirs.0, "svn switch X failed: {}", theirs.1);
+    ours.expect("switch X");
+    p.assert_same("switch X");
+    let (theirs, ours) = p
+        .switch("trunk", "", "branches/b", 3, Depth::Unknown, false)
+        .await;
+    assert!(theirs.0, "svn switch failed: {}", theirs.1);
+    ours.expect("switch the working copy");
+    p.assert_same("switch the parent of a switched subdirectory");
+    assert_eq!(
+        p.row("X/x.txt"),
+        Some(("Normal".into(), Some(3), Some("branches/b/X/x.txt".into())))
+    );
+}
+
 // ---- ancestry ------------------------------------------------------------------------------
 
 /// r1 `trunk`; r2 the branch `branches/b` (copy of trunk@1) and `other` (unrelated, added on

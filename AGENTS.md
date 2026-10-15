@@ -91,7 +91,7 @@ Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #
 | #169 `ci/release-gating-publish` | Quy trình phát hành: environment có duyệt, ký số tùy chọn, tự đẩy sang `OpenSVN-releases` | #22 | Đang review |
 | #170 `perf/bench-100k-crash-soak` | Benchmark 100k file với svn 1.15, crash test cho switch, soak 2 giờ, test chạy đồng thời với svn CLI | #121, #21 | Đang code |
 | #167 `test/fixtures-hostile-repo` | Fixture WC format 31 từ svn 1.15 (42 trạng thái) và f32 (43 trạng thái); repo "độc" + evil server chạy không cần Docker; e2e `hostile.test.mjs`; `xtask compat fixtures` chạy các generator; log/author có UTF-8 hỏng hiển thị bằng U+FFFD | #8, #18 | Đang review |
-| #185 `fix/switch-exclude-ancestry` | Switch khớp svn 1.15: dòng `exclude` giữ nguyên và dời sang vị trí mới (node ngoài depth giữ vị trí cũ như svn); kiểm tra ancestry trước khi switch (E195012, mã `no-common-ancestry`, tùy chọn `ignore_ancestry` ở `svn_client::switch`, `EngineFacade::switch` và command `switch`); `RaSession::location_segments` (REPORT `get-location-segments`) | — | Đang review |
+| #185 `fix/switch-exclude-ancestry` | Switch khớp svn 1.15: dòng `exclude` giữ nguyên và dời sang vị trí mới (node ngoài depth giữ vị trí cũ như svn); kiểm tra ancestry trước khi switch (E195012, mã `no-common-ancestry`, tùy chọn `ignore_ancestry` ở `svn_client::switch`, `EngineFacade::switch` và command `switch`); `RaSession::location_segments` (REPORT `get-location-segments`); fake session đọc đúng nguồn của `link_path` | — | Đang review |
 
 Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: xem/diff file Word/Excel, hiển thị %/ETA khi checkout, giữ nguyên byte đường dẫn (NFC/NFD), build Mac. Hỏi chủ repo trước khi làm những mảng này.
 

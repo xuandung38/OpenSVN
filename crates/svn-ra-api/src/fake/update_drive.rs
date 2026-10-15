@@ -19,7 +19,7 @@ fn lock_state(state: &Mutex<RepoState>) -> std::sync::MutexGuard<'_, RepoState> 
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn url_to_rel(root: &svn_types::RepoUrl, url: &svn_types::RepoUrl) -> Result<RelPath> {
+pub(super) fn url_to_rel(root: &svn_types::RepoUrl, url: &svn_types::RepoUrl) -> Result<RelPath> {
     let base = root.as_url().path().trim_end_matches('/');
     let full = url.as_url().path();
     let rest = full.strip_prefix(base).ok_or_else(|| {
@@ -49,7 +49,10 @@ pub(super) async fn drive_update(
         repos_root,
         session_rel,
     } = at;
-    let mut reporter = CollectingReporter::default();
+    let mut reporter = CollectingReporter {
+        entries: Vec::new(),
+        repos_root: repos_root.clone(),
+    };
     report(&mut reporter)?;
 
     let tree_target = match &req.mode {
@@ -63,8 +66,8 @@ pub(super) async fn drive_update(
         // `start_empty` entries too: the reported path itself exists at its revision.
         for e in reporter.entries.iter().filter(|e| !e.deleted) {
             let (r, brv) = st.revision(Some(e.rev))?;
-            // Report paths are session-relative: so are the base trees.
-            bases.insert(r, super::prefixed::subtree(&brv.tree, session_rel)?);
+            // Whole trees: a linked entry is read at its own location (`PlanInput::source`).
+            bases.entry(r).or_insert_with(|| brv.tree.clone());
         }
         (rev, rv.tree.clone(), bases)
     };
@@ -73,6 +76,7 @@ pub(super) async fn drive_update(
         target_tree: &target_tree,
         base_trees: &base_trees,
         entries: &reporter.entries,
+        session_rel: session_rel.clone(),
         anchor_target: req.target.clone(),
         tree_target,
         send_text: req.mode != UpdateMode::Status,
