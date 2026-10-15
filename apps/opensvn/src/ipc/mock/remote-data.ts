@@ -14,6 +14,16 @@ import { mockLog } from "./data";
 export const MOCK_REPO_ROOT = "https://svn.example.com/repos/game";
 export const MOCK_REPO_UUID = "00000000-0000-0000-0000-000000000001";
 export const MOCK_YOUNGEST = 48213;
+/** Server URL that lists repositories (an `SVNParentPath`, VisualSVN's `https://host/svn/`). */
+export const MOCK_SERVER_URL = "https://svn.example.com/repos";
+export const MOCK_SERVER_REPOS = [
+  { name: "game", url: MOCK_REPO_ROOT },
+  {
+    name: "Dự án Tiếng Việt",
+    url: "https://svn.example.com/repos/D%E1%BB%B1%20%C3%A1n%20Ti%E1%BA%BFng%20Vi%E1%BB%87t",
+  },
+  { name: "My Project", url: "https://svn.example.com/repos/My%20Project" },
+];
 
 /** Hostile name on purpose: UI must render it as text (never as markup). */
 export const HOSTILE_NAME = "<img src=x onerror=alert(1)>.txt";

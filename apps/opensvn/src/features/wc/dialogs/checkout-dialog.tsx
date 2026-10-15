@@ -18,6 +18,7 @@ import { useT } from "../../../lib/i18n/i18n";
 import { parseRevision } from "../../remote/branch/branch-model";
 import { RepoTree } from "../../remote/browse/repo-tree";
 import { useRepoInfo } from "../../remote/browse/use-repo";
+import { parentRepos } from "../../remote/parent-path";
 import { hasQueryOrFragment, useWebLinkConversion } from "../../remote/web-link";
 import {
   type FolderNameError,
@@ -120,6 +121,8 @@ export function CheckoutDialog({
     urlOk && rev !== "invalid" && nameError === null && !needsRepick && !pending && !opId;
 
   const browseInfo = useRepoInfo(browseFor);
+  // A server URL (VisualSVN's `https://host/svn/`) lists its repositories instead of being one.
+  const serverRepos = browseInfo.isError ? parentRepos(browseInfo.error) : null;
   const op = useOperations().find((o) => o.handle.opId === opId);
   const outcome = useOperationOutcome(opId ?? undefined);
 
@@ -289,6 +292,20 @@ export function CheckoutDialog({
                 label={d("browseLabel")}
                 className="max-h-48 rounded-md border border-line"
               />
+            ) : serverRepos && browseFor !== null ? (
+              <div className="flex flex-col gap-1">
+                <span className="text-[12px] text-muted-text">{d("serverRepos")}</span>
+                <RepoTree
+                  key={browseFor}
+                  rootUrl={browseFor}
+                  repositories={serverRepos}
+                  rev={null}
+                  selectedUrl={trimmedUrl}
+                  onSelect={setUrl}
+                  label={d("serverReposLabel")}
+                  className="max-h-48 rounded-md border border-line"
+                />
+              </div>
             ) : browseInfo.isError ? (
               <SafeText as="p" className="m-0 text-bad-text">
                 {toAppError(browseInfo.error).message}

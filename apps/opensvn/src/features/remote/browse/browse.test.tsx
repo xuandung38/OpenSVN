@@ -5,7 +5,7 @@ import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../../
 import { BrowseScreen } from "./browse-screen";
 import { DirTable } from "./dir-table";
 import type { NodeActionHandlers } from "./node-actions";
-import { flattenTree, type TreeRow } from "./repo-tree";
+import { flattenForest, flattenTree, type TreeRow } from "./repo-tree";
 
 beforeAll(async () => {
   stubLayout();
@@ -52,6 +52,24 @@ test("flattenTree lists only folders, respects expansion and records parents", (
     ["r", 0, -1],
     ["a", 1, 0],
     ["b", 2, 1],
+  ]);
+});
+
+test("flattenForest puts several repositories at the top level", () => {
+  const rows = flattenForest(
+    [
+      { url: "https://h/svn/A", name: "A" },
+      { url: "https://h/svn/D%E1%BB%B1%20%C3%A1n", name: "Dự án" },
+    ],
+    new Set(["https://h/svn/D%E1%BB%B1%20%C3%A1n"]),
+    new Map<string, never>([
+      ["https://h/svn/D%E1%BB%B1%20%C3%A1n", [{ name: "trunk", kind: "dir" }] as never],
+    ]),
+  );
+  expect(rows.map((r) => [r.name, r.url, r.depth, r.parent])).toEqual([
+    ["A", "https://h/svn/A", 0, -1],
+    ["Dự án", "https://h/svn/D%E1%BB%B1%20%C3%A1n", 0, -1],
+    ["trunk", "https://h/svn/D%E1%BB%B1%20%C3%A1n/trunk", 1, 1],
   ]);
 });
 
