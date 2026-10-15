@@ -361,6 +361,7 @@ async fn a_checkout_cancelled_half_way_is_finished_by_update() {
             }
         }),
         interactive: true,
+        retry_now: std::sync::Arc::default(),
     };
     let err =
         s.f.engine

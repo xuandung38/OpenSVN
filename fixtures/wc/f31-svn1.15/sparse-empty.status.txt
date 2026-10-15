@@ -1,0 +1,7 @@
+# svn status -v
+                14       14 fixture      .
+# svn info (subset)
+dir
+14
+empty
+^/trunk

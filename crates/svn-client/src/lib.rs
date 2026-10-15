@@ -12,6 +12,7 @@ pub mod ctx;
 pub mod diff;
 pub mod externals;
 pub mod local;
+pub mod netwait;
 pub mod ops;
 pub mod sparse;
 pub mod status;
@@ -24,6 +25,7 @@ pub use ctx::{
     UpdateSummary,
 };
 pub use diff::{DiffOptions, diff};
+pub use netwait::{NetworkWait, WaitState};
 pub use ops::{switch, update};
 pub use sparse::set_depth;
 pub use status::{StatusOptions, status, status_remote};

@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use opensvn_ipc::{ActionCounts, OpId, OpStage, Progress, ProgressEntry, Size};
+use opensvn_ipc::{ActionCounts, ConnectionWait, OpId, OpStage, Progress, ProgressEntry, Size};
 
 use super::throttle::Throttle;
 use crate::engine::ProgressUpdate;
@@ -32,6 +32,7 @@ pub struct Coalescer {
     bytes_total: Option<u64>,
     current_path: Option<String>,
     stage: Option<OpStage>,
+    connection_wait: Option<ConnectionWait>,
     counts: Option<ActionCounts>,
     entries: VecDeque<ProgressEntry>,
     dropped: u32,
@@ -53,6 +54,7 @@ impl Coalescer {
             bytes_total: None,
             current_path: None,
             stage: None,
+            connection_wait: None,
             counts: None,
             entries: VecDeque::new(),
             dropped: 0,
@@ -83,6 +85,10 @@ impl Coalescer {
         }
         if u.stage.is_some() {
             self.stage = u.stage;
+            // The wait timing belongs to its stage: any other stage clears it.
+            self.connection_wait = u
+                .connection_wait
+                .filter(|_| self.stage == Some(OpStage::WaitingForConnection));
         }
         if let Some(entry) = u.entry {
             self.counts
@@ -135,6 +141,7 @@ impl Coalescer {
             entries: self.entries.drain(..).collect(),
             entries_dropped: std::mem::take(&mut self.dropped),
             counts: self.counts,
+            connection_wait: self.connection_wait,
         }
     }
 }
@@ -153,6 +160,7 @@ pub fn notice(op_id: &OpId, u: ProgressUpdate) -> Progress {
         entries: Vec::new(),
         entries_dropped: 0,
         counts: None,
+        connection_wait: u.connection_wait,
     }
 }
 

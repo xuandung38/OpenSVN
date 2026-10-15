@@ -91,10 +91,11 @@ fn status_edge_cases() {
         file_status_from_wc(&s).expect("listed").text,
         NodeStatus::Unversioned
     );
+    // An interrupted checkout's folder is incomplete, not obstructed (not an error).
     s.text = S::Incomplete;
     assert_eq!(
         file_status_from_wc(&s).expect("listed").text,
-        NodeStatus::Obstructed
+        NodeStatus::Incomplete
     );
     s.text = S::External;
     assert_eq!(

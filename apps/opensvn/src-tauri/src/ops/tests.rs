@@ -413,3 +413,65 @@ async fn no_progress_follows_the_end_of_an_operation() {
         Some(format!("finished:{}", h.op_id.0).as_str())
     );
 }
+
+#[tokio::test]
+async fn retry_now_wakes_an_operation_that_waits_for_the_connection() {
+    let (m, events) = manager();
+    let spawn = |title: &'static str| {
+        m.spawn(OperationKind::Checkout, None, title, |ctx| async move {
+            ctx.retry_now.notified().await;
+            Ok(OpResult::Done)
+        })
+    };
+    let one = spawn("Checkout one");
+    m.retry_now(&one.op_id).unwrap();
+    wait_for(&events, "finished", &one.op_id).await;
+    // Finished: ignored; unknown: an error.
+    m.retry_now(&one.op_id).unwrap();
+    assert!(m.retry_now(&OpId("nope".into())).is_err());
+    // The system woke up: every running operation tries again.
+    let (a, b) = (spawn("Checkout a"), spawn("Checkout b"));
+    m.retry_all_now();
+    wait_for(&events, "finished", &a.op_id).await;
+    wait_for(&events, "finished", &b.op_id).await;
+}
+
+#[tokio::test]
+async fn the_wait_timing_rides_with_its_stage_only() {
+    let (m, events) = manager();
+    let h = m.spawn(
+        OperationKind::Checkout,
+        None,
+        "Checkout",
+        |ctx| async move {
+            ctx.progress.report(ProgressUpdate {
+                phase: "checkout".into(),
+                stage: Some(opensvn_ipc::OpStage::WaitingForConnection),
+                connection_wait: Some(opensvn_ipc::ConnectionWait {
+                    retry_in_secs: 8,
+                    waited_secs: 20,
+                    max_wait_secs: 600,
+                    attempt: 2,
+                }),
+                ..ProgressUpdate::default()
+            });
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            ctx.progress.report(ProgressUpdate::stage(
+                "checkout",
+                opensvn_ipc::OpStage::Fetching,
+            ));
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            Ok(OpResult::Done)
+        },
+    );
+    wait_for(&events, "finished", &h.op_id).await;
+    let samples = events.progress();
+    let waiting = samples
+        .iter()
+        .find(|p| p.stage == Some(opensvn_ipc::OpStage::WaitingForConnection))
+        .expect("waiting sample");
+    assert_eq!(waiting.connection_wait.map(|w| w.retry_in_secs), Some(8));
+    let last = samples.last().unwrap();
+    assert_eq!(last.stage, Some(opensvn_ipc::OpStage::Fetching));
+    assert_eq!(last.connection_wait, None);
+}

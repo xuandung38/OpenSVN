@@ -13,6 +13,10 @@ export const activityStrings = defineStrings({
     stageConnecting: "Connecting",
     stageFetching: "Fetching",
     stageFinishing: "Finishing",
+    stageWaiting: "Waiting for the connection",
+    waitRetryIn: "Connection lost, retrying in {seconds}s…",
+    waitRetrying: "Connection lost, retrying…",
+    waitRetryNow: "Retry now",
     stageDone: "Done",
     stageFailed: "Failed",
     stageWorking: "Working",
@@ -50,6 +54,10 @@ export const activityStrings = defineStrings({
     backgroundFailedMany: "{count} background checks failed",
     backgroundDismiss: "Dismiss",
     // Transport errors
+    errWriteUnsure:
+      "The connection was cut while sending; the change may or may not have reached the server. Refresh before trying again.",
+    errCommitUnsure:
+      "The connection was cut while committing; the commit may or may not have reached the server. Refresh the history before committing again.",
     errConnectionClosed: "Connection was closed by the server",
     errTimeout: "The server took too long to respond",
     errRefused: "The server refused the connection",
@@ -68,6 +76,10 @@ export const activityStrings = defineStrings({
     stageConnecting: "Đang kết nối",
     stageFetching: "Đang tải về",
     stageFinishing: "Đang hoàn tất",
+    stageWaiting: "Đang chờ kết nối",
+    waitRetryIn: "Mất kết nối, thử lại sau {seconds} giây…",
+    waitRetrying: "Mất kết nối, đang thử lại…",
+    waitRetryNow: "Thử lại ngay",
     stageDone: "Xong",
     stageFailed: "Thất bại",
     stageWorking: "Đang xử lý",
@@ -104,6 +116,10 @@ export const activityStrings = defineStrings({
     backgroundFailed: "Một lần kiểm tra nền thất bại",
     backgroundFailedMany: "{count} lần kiểm tra nền thất bại",
     backgroundDismiss: "Bỏ qua",
+    errWriteUnsure:
+      "Kết nối bị ngắt khi đang gửi; thay đổi có thể đã tới máy chủ hoặc chưa. Hãy làm mới trước khi thử lại.",
+    errCommitUnsure:
+      "Kết nối bị ngắt khi đang commit; commit có thể đã tới máy chủ hoặc chưa. Hãy làm mới lịch sử trước khi commit lại.",
     errConnectionClosed: "Máy chủ đã đóng kết nối",
     errTimeout: "Máy chủ phản hồi quá lâu",
     errRefused: "Máy chủ từ chối kết nối",

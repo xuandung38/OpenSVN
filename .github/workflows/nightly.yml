@@ -35,10 +35,10 @@ jobs:
   crash:
     name: crash suite
     runs-on: ubuntu-24.04
-    # 50 kills per failpoint (19 failpoints) plus 6 x 120 random kills.
+    # 50 kills per failpoint (19 failpoints) plus 7 x 120 random kills.
     timeout-minutes: 300
     env:
-      # 6 operations x 120 random kills + 17 failpoints x 50 kills: over 1500 crash cases a night.
+      # 7 operations x 120 random kills + 19 failpoints x 50 kills: over 1700 crash cases a night.
       CRASH_RANDOM_ITERS: ${{ inputs.random_iters || '120' }}
       CRASH_FP_ITERS: ${{ inputs.fp_iters || '50' }}
       CRASH_FILES: "200"

@@ -101,7 +101,7 @@ function NumberField({
   set,
 }: PageProps & {
   name: RangedKey;
-  label: "checkInterval" | "maxConnections" | "timeoutSec" | "cacheMax";
+  label: "checkInterval" | "maxConnections" | "timeoutSec" | "reconnectWait" | "cacheMax";
 }) {
   const t = useT(settingsStrings);
   const range = rangeOf(name);
@@ -357,6 +357,11 @@ export function NetworkPage({ settings, draft, errors, set }: PageProps) {
       <NumberField
         name="network.timeoutSec"
         label="timeoutSec"
+        {...{ settings, draft, errors, set }}
+      />
+      <NumberField
+        name="network.reconnectWaitMin"
+        label="reconnectWait"
         {...{ settings, draft, errors, set }}
       />
       <Field label={t("proxy")}>

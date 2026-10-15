@@ -121,6 +121,24 @@ describe("error mapping", () => {
     expect(errorText(transportError(message, code)).key).toBe(key);
   });
 
+  test("a write or commit cut after it was sent says its outcome is unknown", () => {
+    const lock = errorText({
+      code: "network",
+      message:
+        "the connection broke while the lock request was being sent; it may or may not have reached the server. Refresh the lock state before trying again",
+      detail: OWNER_TEXT,
+    });
+    expect(lock.key).toBe("errWriteUnsure");
+    expect(lock.detail).toContain("peer closed connection");
+    const commit = errorText({
+      code: "network",
+      message:
+        "the commit may or may not have been applied: the result of merging transaction '5-a' is unknown, so the transaction was kept; check the repository's youngest revision before retrying",
+      detail: OWNER_TEXT,
+    });
+    expect(commit.key).toBe("errCommitUnsure");
+  });
+
   test("other errors keep the backend's message and detail", () => {
     const t = errorText({ code: "out-of-date", message: "File is out of date", detail: "E160028" });
     expect(t).toEqual({ key: null, message: "File is out of date", detail: "E160028" });
@@ -341,5 +359,65 @@ describe("lock banner", () => {
     expect(relatedPaths("/a/b/c", "/a/b")).toBe(true);
     expect(relatedPaths("/a/bc", "/a/b")).toBe(false);
     expect(relatedPaths("C:\\Work\\Repo", "c:/work/repo/")).toBe(true);
+  });
+});
+
+describe("waiting for a lost connection", () => {
+  const waiting = (retryInSecs: number, now: number): OpState =>
+    applyProgress(
+      newOpState(handle(), 0),
+      progress({
+        stage: "waiting-for-connection",
+        entries: [],
+        connectionWait: { retryInSecs, waitedSecs: 64, maxWaitSecs: 600, attempt: 3 },
+      }),
+      now,
+    );
+
+  test("the next attempt is due after the announced delay; another stage clears it", () => {
+    const op = waiting(8, 1000);
+    expect(op.retryAt).toBe(9000);
+    expect(
+      applyProgress(op, progress({ stage: "fetching", entries: [] }), 2000).retryAt,
+    ).toBeNull();
+  });
+
+  for (const [lang, text, retry, cancel] of [
+    ["en", "Connection lost, retrying in 8s…", "Retry now", "Cancel"],
+    ["vi", "Mất kết nối, thử lại sau 8 giây…", "Thử lại ngay", "Hủy"],
+  ] as const) {
+    test(`${lang}: the panel counts down, retries now and cancels`, async () => {
+      const cancelled: string[] = [];
+      const qc = new QueryClient();
+      render(
+        <QueryClientProvider client={qc}>
+          <I18nProvider lang={lang}>
+            <ToastProvider>
+              <ActivityPanel ops={[waiting(8, Date.now())]} onCancel={(id) => cancelled.push(id)} />
+            </ToastProvider>
+          </I18nProvider>
+        </QueryClientProvider>,
+      );
+      const notice = screen.getByTestId("connection-wait");
+      expect(within(notice).getByRole("status").textContent).toBe(text);
+      await userEvent.click(within(notice).getByRole("button", { name: retry }));
+      expect(mockCalls.filter((c) => c.name === "opRetryNow").map((c) => c.args)).toEqual([
+        ["op1"],
+      ]);
+      await userEvent.click(within(notice).getByRole("button", { name: cancel }));
+      expect(cancelled).toEqual(["op1"]);
+    });
+  }
+
+  test("once the countdown is over it says it is retrying", () => {
+    renderPanel([waiting(0, Date.now())]);
+    expect(screen.getByTestId("connection-wait").textContent).toContain(
+      "Connection lost, retrying…",
+    );
+  });
+
+  test("an operation that is not waiting shows no notice", () => {
+    renderPanel([applyProgress(newOpState(handle(), 0), progress(), 1000)]);
+    expect(screen.queryByTestId("connection-wait")).toBeNull();
   });
 });

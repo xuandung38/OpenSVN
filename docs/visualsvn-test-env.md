@@ -120,10 +120,20 @@ reproduce this:
   - `--close-after N`: closes a reused connection after N exchanges, under the next request.
   - `--reset-after N`: the same, with a reset.
   - `--idle-reset S`: resets a connection that stayed idle for S seconds.
+  - `--stale-after S`: resets a connection idle for S seconds or more under the next request,
+    without forwarding it: a proxy, firewall or NAT that dropped the idle connection silently.
+  - `--log-requests`: logs the request line of every request the client starts, forwarded or
+    not, so a test can check that no write was sent twice.
   - `--truncate-every K --truncate-at B`: cuts every K-th response bigger than B bytes mid-body.
   - `--truncate-method M`: counts and cuts only responses to these methods (`REPORT,GET`). With
     `--truncate-every 1` every such response is cut at the same offset: a server that always
     breaks at the same point.
+  - `--outage-at-bytes B --outage-for S`: a network outage. Once B response bytes went to
+    clients, every connection, open or new, goes silent for S seconds: bytes are dropped, no FIN,
+    no RST (Wi-Fi gone, VPN reconnecting, laptop asleep, server unreachable). Connections open
+    during the outage stay dead; new ones work again afterwards. The log says
+    `network down for Ss` and `network up again`.
+  - `--outage-file F`: the same outage, for as long as the file F exists.
 
   ```sh
   D=/tmp/opensvn-visualsvn
@@ -145,6 +155,27 @@ the certificates of `up` next to `OPENSVN_COMPAT_LOCAL_CA`) that cuts every `REP
 that commit nothing new, and an update must finish it once the connection works again. It
 asserts the number of cuts, so run it against the server directly, not through another faulty
 proxy.
+
+### Network outage during a checkout (`dav_resume`)
+
+`apps/opensvn/src-tauri/src/app_tests/dav_resume.rs` drives the whole app (commands, operation
+manager, registry, checkout journal, real engine) through the proxy's outage mode and compares
+each result with `svn checkout -r R` (files, NODES rows, `svn status`), so it needs svn 1.15
+(`OPENSVN_SVN_BIN`):
+
+```sh
+OPENSVN_COMPAT_LOCAL_URL=https://svn.opensvn.test:18443/svn-basic OPENSVN_SVN_BIN=/path/to/svn-1.15 \
+  cargo test -p opensvn --features real-engine,engine-conformance --lib dav_resume -- --ignored
+```
+
+- a 90 s outage mid-checkout is waited out and the checkout resumes at its revision (HEAD moves
+  on during the outage);
+- an outage longer than `network.reconnectWaitMin` leaves an incomplete working copy listed with
+  "Continue checkout"; the checkout dialog offers Continue for the same folder; once the network
+  is back Continue finishes it;
+- the app process is killed mid-checkout; after a restart the working copy is listed as an
+  interrupted checkout, its lock (ours, dead process) is cleaned without a prompt, and Continue
+  finishes it.
 
 ### App UI
 

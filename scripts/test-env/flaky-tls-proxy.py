@@ -10,11 +10,22 @@ close is a plain TCP close (FIN) or, where asked, a reset (RST). Faults, per cli
   --reset-after N    the same, with a TCP reset
   --idle-reset S     reset a connection idle for S seconds: between requests, or in the middle
                      of a response the client stopped reading (not while the server works)
+  --stale-after S    a connection idle for S seconds or more is reset under the next request,
+                     which is not forwarded (a proxy, firewall or NAT that dropped the idle
+                     connection without telling the client)
+  --log-requests     log the request line of every request the client starts, forwarded or not
+                     ("conn N: request METHOD URI"), so a test can count what was sent
   --truncate-every K cut every K-th response bigger than --truncate-at bytes after that many
                      bytes and close without close_notify (a broken connection mid-body)
   --truncate-method M  only count and cut responses to these methods (comma-separated, e.g.
                      REPORT,GET); with --truncate-every 1 every such response is cut at the
                      same offset (a server or proxy that always breaks at the same point)
+  --outage-at-bytes B --outage-for S
+                     a network outage: once B response bytes went to clients in total, every
+                     connection, open or new, goes silent for S seconds (bytes are dropped, no
+                     FIN, no RST: Wi-Fi gone, VPN reconnecting, laptop asleep). Connections
+                     open during the outage stay dead afterwards; new ones work again
+  --outage-file F    the same outage, for as long as the file F exists (a test drives it)
 
   scripts/test-env/flaky-tls-proxy.py --listen 18450 --upstream svn.opensvn.test:18443 \
       --cert $VSVN_DIR/certs/server.crt --key $VSVN_DIR/certs/server.key \
@@ -35,6 +46,51 @@ import time
 
 COUNTER = itertools.count(1)
 COUNTER_LOCK = threading.Lock()
+
+
+class Outage:
+    """Shared outage state. A connection that saw the network go down stays dead (its peer's
+    TCP state is gone after a real outage); the listener keeps accepting, but a connection
+    accepted during the outage gets no byte until it ends, and then also stays dead."""
+
+    def __init__(self, args):
+        self.args = args
+        self.lock = threading.Lock()
+        self.bytes = 0
+        self.until = None
+        self.done = False
+
+    def add_bytes(self, n):
+        if not self.args.outage_at_bytes:
+            return
+        with self.lock:
+            self.bytes += n
+            if not self.done and self.until is None and self.bytes >= self.args.outage_at_bytes:
+                self.until = time.monotonic() + self.args.outage_for
+                self.done = True
+                log(f"network down for {self.args.outage_for:.0f}s after {self.bytes} bytes")
+                # Said when the outage ends, whether or not a client is trying at that moment.
+                timer = threading.Timer(self.args.outage_for + 0.1, self.down)
+                timer.daemon = True
+                timer.start()
+
+    def down(self):
+        if self.args.outage_file:
+            import os
+
+            if os.path.exists(self.args.outage_file):
+                return True
+        with self.lock:
+            if self.until is None:
+                return False
+            if time.monotonic() < self.until:
+                return True
+            self.until = None
+            log("network up again")
+            return False
+
+
+OUTAGE = None
 
 
 def log(msg):
@@ -112,6 +168,17 @@ class Conn:
         self.awaiting = False
         self.closed = False
         self.upstream = None
+        # The network went down under this connection: it never carries a byte again.
+        self.dead = False
+
+    def blackholed(self):
+        if self.dead:
+            return True
+        if OUTAGE is not None and OUTAGE.down():
+            if not self.dead:
+                log(f"conn {self.cid}: network down, dropping its bytes")
+            self.dead = True
+        return self.dead
 
     def close(self, reset, why):
         with self.lock:
@@ -129,25 +196,35 @@ class Conn:
                 data = self.client_io.recv(lambda: self.closed)
                 if not data or self.closed:
                     break
+                if self.blackholed():
+                    continue
                 with self.lock:
+                    idle = time.monotonic() - self.last_activity
                     self.last_activity = time.monotonic()
                     self.awaiting = True
                     new_request = self.responding or self.exchanges == 0 and self.response_bytes == 0
-                    if self.responding or not self.started:
+                    starts = self.responding or not self.started
+                    if starts:
                         # The first bytes of a request (not more of its body).
                         self.started = True
                         self.method = data.split(b" ", 1)[0].decode("ascii", "replace")
+                        line = data.split(b"\r\n", 1)[0].decode("ascii", "replace")
                     if self.responding:
                         self.responding = False
                         self.exchanges += 1
                         self.response_bytes = 0
                     exchanges = self.exchanges
+                if starts and self.args.log_requests:
+                    log(f"conn {self.cid}: request {' '.join(line.split(' ')[:2])}")
                 if new_request and exchanges > 0:
                     if self.args.close_after and exchanges >= self.args.close_after:
-                        self.close(False, f"closing before request {exchanges + 1} (no close_notify)")
+                        self.close(False, f"closing before request {exchanges + 1} ({self.method}, no close_notify)")
                         return
                     if self.args.reset_after and exchanges >= self.args.reset_after:
-                        self.close(True, f"resetting before request {exchanges + 1}")
+                        self.close(True, f"resetting before request {exchanges + 1} ({self.method})")
+                        return
+                    if self.args.stale_after and idle >= self.args.stale_after:
+                        self.close(True, f"resetting a connection idle {idle:.1f}s under request {exchanges + 1} ({self.method})")
                         return
                 self.upstream_io.sendall(data)
         except OSError:
@@ -160,6 +237,9 @@ class Conn:
                 data = self.upstream_io.recv(lambda: self.closed)
                 if not data or self.closed:
                     break
+                if self.blackholed():
+                    continue
+                OUTAGE.add_bytes(len(data))
                 with self.lock:
                     self.last_activity = time.monotonic()
                     self.awaiting = False
@@ -212,6 +292,18 @@ def serve(args):
 
 
 def handle(args, server_ctx, up_ctx, up_host, up_port, raw, cid):
+    if OUTAGE.down():
+        # No handshake while the network is down: the client's connect or TLS handshake hangs
+        # until its own timeout. The connection is never served.
+        log(f"conn {cid}: accepted during the outage, never answered")
+        while True:
+            try:
+                if not raw.recv(65536):
+                    break
+            except OSError:
+                break
+        raw.close()
+        return
     try:
         client = server_ctx.wrap_socket(raw, server_side=True)
     except (OSError, ssl.SSLError):
@@ -256,10 +348,18 @@ def main():
     p.add_argument("--close-after", type=int, default=0)
     p.add_argument("--reset-after", type=int, default=0)
     p.add_argument("--idle-reset", type=float, default=0.0)
+    p.add_argument("--stale-after", type=float, default=0.0)
+    p.add_argument("--log-requests", action="store_true")
     p.add_argument("--truncate-every", type=int, default=0)
     p.add_argument("--truncate-at", type=int, default=2048)
+    p.add_argument("--outage-at-bytes", type=int, default=0)
+    p.add_argument("--outage-for", type=float, default=0.0)
+    p.add_argument("--outage-file", default="")
     p.add_argument("--truncate-method", type=lambda v: [m.strip().upper() for m in v.split(",") if m.strip()], default=[])
-    serve(p.parse_args())
+    global OUTAGE
+    args = p.parse_args()
+    OUTAGE = Outage(args)
+    serve(args)
 
 
 if __name__ == "__main__":

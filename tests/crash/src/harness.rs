@@ -79,17 +79,22 @@ pub enum Op {
     Revert,
     /// Cleanup of a working copy whose update was killed before.
     Cleanup,
+    /// "Continue checkout" (the app's `wc_continue`) of a checkout that was killed before:
+    /// recovery of the dead process's lock, then an update to the revision the incomplete
+    /// folders record.
+    Continue,
 }
 
 impl Op {
     /// All operations.
-    pub const ALL: [Op; 6] = [
+    pub const ALL: [Op; 7] = [
         Op::Checkout,
         Op::Update,
         Op::Switch,
         Op::Commit,
         Op::Revert,
         Op::Cleanup,
+        Op::Continue,
     ];
 
     /// Worker op name.
@@ -101,6 +106,7 @@ impl Op {
             Op::Commit => "commit",
             Op::Revert => "revert",
             Op::Cleanup => "cleanup",
+            Op::Continue => "continue",
         }
     }
 }
@@ -803,7 +809,7 @@ impl Fixture {
         let state = dir.join("state");
         let wc = dir.join("wc");
         match op {
-            Op::Checkout => {}
+            Op::Checkout | Op::Continue => {}
             Op::Update | Op::Switch | Op::Cleanup => self.clone_template("tpl-r1", &wc, &url)?,
             Op::Commit | Op::Revert => self.clone_template("tpl-r2", &wc, &url)?,
         }
@@ -816,6 +822,25 @@ impl Fixture {
             let r = self.worker(&state, "update", &url, &wc, &Kill::After(delay))?;
             if let Ended::Failed(m) = &r.ended {
                 return Err(err(format!("pre-cleanup update failed: {m}")));
+            }
+        }
+        if op == Op::Continue {
+            // Leave an interrupted checkout behind for Continue to finish. A kill before the
+            // working copy database is in place leaves nothing to continue: the checkout is
+            // started again, as the app does for such a folder.
+            let delay = match pre {
+                Some(d) => d,
+                None => self.duration(Op::Checkout)? / 2,
+            };
+            let r = self.worker(&state, "checkout", &url, &wc, &Kill::After(delay))?;
+            if let Ended::Failed(m) = &r.ended {
+                return Err(err(format!("pre-continue checkout failed: {m}")));
+            }
+            if !wc.join(".svn/wc.db").is_file() {
+                rec.warnings
+                    .push("the killed checkout left no working copy; checked out again".into());
+                self.worker(&state, "checkout", &url, &wc, &Kill::Never)?
+                    .require_ok("checkout again")?;
             }
         }
 
@@ -890,7 +915,11 @@ impl Fixture {
                 self.worker(&state, "checkout", &url, &wc, &Kill::Never)?
                     .require_ok("checkout after crash")?;
             }
-            Op::Checkout | Op::Update | Op::Cleanup => {
+            Op::Checkout | Op::Continue => {
+                self.worker(&state, "continue", &url, &wc, &Kill::Never)?
+                    .require_ok("continue after crash")?;
+            }
+            Op::Update | Op::Cleanup => {
                 self.worker(&state, "update", &url, &wc, &Kill::Never)?
                     .require_ok("update after crash")?;
             }
@@ -959,7 +988,7 @@ impl Fixture {
     fn intermediate(&self, op: Op, wc: &Path, url: &str) -> Result<()> {
         let m = &self.model;
         match op {
-            Op::Checkout => Ok(()),
+            Op::Checkout | Op::Continue => Ok(()),
             Op::Switch => self.intermediate_switch(wc),
             Op::Update | Op::Cleanup => {
                 for f in &m.files {
@@ -1274,7 +1303,7 @@ impl Fixture {
         let mut want_status: BTreeMap<String, String> = BTreeMap::new();
         let mut allow_extra: Vec<String> = Vec::new();
         match op {
-            Op::Checkout | Op::Commit | Op::Switch => {}
+            Op::Checkout | Op::Commit | Op::Switch | Op::Continue => {}
             Op::Update | Op::Cleanup => {
                 for f in &m.local_edits {
                     want.insert(f.clone(), Entry::File(m.r1_working(f, 2)));

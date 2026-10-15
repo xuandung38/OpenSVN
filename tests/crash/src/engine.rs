@@ -158,6 +158,34 @@ impl Engine {
         Ok(sum.revision)
     }
 
+    /// The app's "Continue checkout": after a restart (stale locks of the dead process
+    /// recovered), an update of the whole working copy to the revision its incomplete folders
+    /// record. `None` when nothing is incomplete.
+    pub async fn resume(&self, url: &str, wc: &Path) -> Result<Option<Revnum>> {
+        let r = self.recover(url, wc).await?;
+        if r.locks_need_user > 0 {
+            return Err(svn_types::SvnError::new(
+                svn_types::ErrorCode::WcBusy,
+                "a lock of unknown owner is in place",
+            ));
+        }
+        let db = self.open(wc)?;
+        let rev: Option<i64> = db.with_read(|c| {
+            c.query_row(
+                "SELECT MAX(revision) FROM nodes WHERE op_depth = 0 AND presence = 'incomplete'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(svn_wc::db::sql_err)
+        })?;
+        drop(db);
+        let Some(rev) = rev else {
+            return Ok(None);
+        };
+        let rev = Revnum(u64::try_from(rev).unwrap_or_default());
+        self.update(url, wc, Some(rev)).await
+    }
+
     /// `svn commit wc -m msg`; `None` when there was nothing to commit.
     pub async fn commit(&self, url: &str, wc: &Path, msg: &str) -> Result<Option<Revnum>> {
         let s = self.session(url).await?;

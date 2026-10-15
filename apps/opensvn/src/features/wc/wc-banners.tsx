@@ -5,6 +5,7 @@ import type { Banner as BannerData } from "../../ipc/bindings";
 import { useBanners, useOperations } from "../../ipc/queries";
 import { useT } from "../../lib/i18n/i18n";
 import { lockBanner } from "./own-operation";
+import { IncompleteBanner } from "./resume/incomplete-banner";
 import { useWcActions } from "./use-wc-actions";
 import { isConflicted } from "./wc-model";
 import { useWcSession } from "./wc-session";
@@ -52,6 +53,9 @@ export function WcBanners() {
         >
           {t("bannerConflictsText")}
         </Banner>
+      )}
+      {wc?.resume && lock?.kind !== "in-progress" && (
+        <IncompleteBanner wcId={wc.id} resume={wc.resume} />
       )}
       {lock?.kind === "in-progress" && (
         <Banner title={t("bannerOpInProgress", { title: lock.op.handle.title })}>
