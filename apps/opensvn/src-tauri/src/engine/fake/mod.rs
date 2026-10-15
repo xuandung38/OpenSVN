@@ -11,6 +11,7 @@ mod local_ops;
 mod remote_ops;
 mod seed;
 mod side_export;
+mod sparse;
 mod state;
 mod sync_ops;
 #[cfg(test)]
@@ -359,6 +360,24 @@ impl EngineFacade for FakeEngine {
     ) -> EngineResult<()> {
         ctx.check()?;
         self.do_set_depth(&wc.root, path, depth)
+    }
+
+    async fn wc_depths(
+        &self,
+        wc: &WcRef,
+        ctx: &OpContext,
+    ) -> EngineResult<Vec<opensvn_ipc::SparseEntry>> {
+        ctx.check()?;
+        self.do_wc_depths(&wc.root)
+    }
+
+    async fn sparse_apply(
+        &self,
+        wc: &WcRef,
+        entries: &[opensvn_ipc::SparseEntry],
+        ctx: &OpContext,
+    ) -> EngineResult<()> {
+        self.do_sparse_apply(wc, entries, ctx).await
     }
 
     async fn upgrade_format(&self, wc: &WcRef, to: u8, ctx: &OpContext) -> EngineResult<()> {

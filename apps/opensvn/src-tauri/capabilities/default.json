@@ -86,6 +86,8 @@
     "allow-move-path",
     "allow-cleanup",
     "allow-set-depth",
+    "allow-wc-sparse-apply",
+    "allow-wc-depths",
     "allow-upgrade-format",
     "allow-resolve",
     "allow-props-set"

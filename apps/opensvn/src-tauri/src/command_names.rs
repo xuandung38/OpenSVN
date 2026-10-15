@@ -72,6 +72,8 @@ pub const COMMAND_NAMES: &[&str] = &[
     "move_path",
     "cleanup",
     "set_depth",
+    "wc_sparse_apply",
+    "wc_depths",
     "upgrade_format",
     "resolve",
     "props_set",

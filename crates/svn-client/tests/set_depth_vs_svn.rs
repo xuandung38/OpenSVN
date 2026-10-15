@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use common::oracle::*;
 use common::*;
 use opensvn_svn_oracle::Oracle;
-use svn_client::{checkout, set_depth};
+use svn_client::{checkout, set_depth, set_depth_parents};
 use svn_types::{CancelToken, Depth, ErrorCode};
 
 fn word(d: Depth) -> &'static str {
@@ -161,6 +161,39 @@ impl Pair {
     }
 }
 
+impl Pair {
+    /// `svn update --parents --set-depth` on `target` against `set_depth_parents`.
+    async fn set_depth_parents(&self, target: &str, depth: Depth) {
+        let what = format!("--parents --set-depth {} {target}", word(depth));
+        self.repo.svn(
+            &self.theirs,
+            &[
+                "update",
+                "-q",
+                "--accept",
+                "postpone",
+                "--parents",
+                "--set-depth",
+                word(depth),
+                target,
+            ],
+        );
+        set_depth_parents(
+            &ctx(),
+            &self.repo.fake(None),
+            &self.ours.join(target),
+            None,
+            depth,
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_same(&self.oracle, &self.theirs, &self.ours, &what);
+        self.repo.svn(&self.ours, &["status"]);
+        self.repo.svn(&self.ours, &["cleanup"]);
+    }
+}
+
 async fn crop_then_grow(depth: Depth) {
     let Some(p) = pair(Depth::Infinity, local_changes).await else {
         return;
@@ -200,6 +233,113 @@ async fn grow_a_sparse_checkout_step_by_step() {
     p.set_depth("A", Depth::Immediates).await;
     p.set_depth("A/Y", Depth::Infinity).await;
     p.set_depth("", Depth::Infinity).await;
+}
+
+/// Folders the working copy does not have (outside their parent's depth) come in at the
+/// requested depth, as `svn update --set-depth` on a missing child does.
+#[tokio::test(flavor = "multi_thread")]
+async fn bring_in_folders_outside_the_parent_depth() {
+    let Some(p) = pair(Depth::Empty, |_, _| {}).await else {
+        return;
+    };
+    p.set_depth("A", Depth::Files).await;
+    assert!(p.ours.join("A/f").exists());
+    assert!(!p.ours.join("A/Y").exists());
+    p.set_depth("A/Y", Depth::Empty).await;
+    p.set_depth("A/X1", Depth::Infinity).await;
+    p.set_depth("A/Y/Z", Depth::Immediates).await;
+    // A file outside a `files` parent's depth cannot be missing; one outside `empty` can.
+    p.set_depth("A/Y", Depth::Files).await;
+    // Excluding a node the working copy does not have changes nothing.
+    let before = open_db(&p.ours).read_base(&rp("A/X2")).unwrap();
+    set_depth(
+        &ctx(),
+        &p.repo.fake(None),
+        &p.ours.join("A/X2"),
+        None,
+        Depth::Exclude,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("exclude a missing node");
+    assert_eq!(open_db(&p.ours).read_base(&rp("A/X2")).unwrap(), before);
+}
+
+/// `--parents`: every missing folder above the target comes in at depth `empty`.
+#[tokio::test(flavor = "multi_thread")]
+async fn bring_in_nested_folders_with_parents() {
+    let Some(p) = pair(Depth::Empty, |_, _| {}).await else {
+        return;
+    };
+    p.set_depth_parents("A/Y/Z", Depth::Infinity).await;
+    assert!(p.ours.join("A/Y/Z/z").exists());
+    assert!(!p.ours.join("A/f").exists());
+    p.set_depth_parents("A/X1", Depth::Files).await;
+    // A target whose parent is present takes the plain path.
+    p.set_depth_parents("A/X3", Depth::Empty).await;
+}
+
+/// What happens to a folder brought in below a shallower parent when the parent deepens.
+#[tokio::test(flavor = "multi_thread")]
+async fn deepen_parent_of_brought_in_folders() {
+    let Some(p) = pair(Depth::Empty, |_, _| {}).await else {
+        return;
+    };
+    p.set_depth_parents("A/Y", Depth::Infinity).await;
+    p.set_depth("A", Depth::Immediates).await;
+    // Like svn, deepening `empty` to `immediates` crops a folder brought in below it to `empty`.
+    let y = open_db(&p.ours).read_base(&rp("A/Y")).unwrap().unwrap();
+    assert_eq!(y.depth, Some(Depth::Empty));
+    p.set_depth("A/Y", Depth::Exclude).await;
+    p.set_depth_parents("A/X1/f", Depth::Empty).await;
+    // Like svn, deepening `empty` to `files` drops a folder brought in below it.
+    p.set_depth("A", Depth::Files).await;
+    assert!(!p.ours.join("A/X1").exists());
+    p.set_depth("A", Depth::Infinity).await;
+}
+
+/// Without `--parents` a target below a missing folder is refused and nothing changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_parent_is_refused() {
+    let Some(p) = pair(Depth::Empty, |_, _| {}).await else {
+        return;
+    };
+    let err = set_depth(
+        &ctx(),
+        &p.repo.fake(None),
+        &p.ours.join("A/Y"),
+        None,
+        Depth::Infinity,
+        &CancelToken::new(),
+    )
+    .await
+    .expect_err("A is not in the working copy");
+    assert_eq!(err.code, ErrorCode::PathNotFound, "{err}");
+    assert_same(&p.oracle, &p.theirs, &p.ours, "after the refusal");
+    let err = set_depth(
+        &ctx(),
+        &p.repo.fake(None),
+        &p.ours.join("nope"),
+        None,
+        Depth::Infinity,
+        &CancelToken::new(),
+    )
+    .await
+    .expect_err("not in the repository");
+    assert_eq!(err.code, ErrorCode::PathNotFound, "{err}");
+}
+
+/// An excluded folder comes back through its own `--set-depth`, not only its parent's.
+#[tokio::test(flavor = "multi_thread")]
+async fn excluded_folder_comes_back_on_its_own() {
+    let Some(p) = pair(Depth::Infinity, |_, _| {}).await else {
+        return;
+    };
+    p.set_depth("A/X1", Depth::Exclude).await;
+    p.set_depth("A/Y", Depth::Exclude).await;
+    p.set_depth("A/X1", Depth::Infinity).await;
+    p.set_depth("A/Y", Depth::Immediates).await;
+    assert!(p.ours.join("A/X1/f").exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]

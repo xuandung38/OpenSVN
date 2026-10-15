@@ -41,6 +41,8 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             move_path,
             cleanup,
             set_depth,
+            wc_sparse_apply,
+            wc_depths,
             upgrade_format,
             resolve,
             props_set,

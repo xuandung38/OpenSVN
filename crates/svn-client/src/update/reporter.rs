@@ -181,7 +181,24 @@ pub fn build_report(
 ) -> ReportFn {
     Box::new(move |r: &mut dyn Reporter| {
         let target_wc = join_rel(&anchor, &target)?;
-        let node = db.read_base(&target_wc)?.ok_or_else(|| {
+        let node = db.read_base(&target_wc)?;
+        // `--set-depth` on a node the working copy does not have (outside its parent's depth,
+        // `not-present` or excluded): reported missing so the server adds it, like svn's
+        // crawler (`set_path("", 0, depth)` then `delete_path("")`).
+        if sticky
+            && node
+                .as_ref()
+                .is_none_or(|n| !n.presence.is_present() && n.presence != Presence::BaseDeleted)
+        {
+            let depth = match depth {
+                Depth::Unknown | Depth::Exclude => Depth::Infinity,
+                d => d,
+            };
+            r.set_path(&target, Revnum(0), depth, false, None)?;
+            r.delete_path(&target)?;
+            return r.finish();
+        }
+        let node = node.ok_or_else(|| {
             SvnError::new(
                 ErrorCode::PathNotFound,
                 format!("'{target_wc}' is not under version control"),

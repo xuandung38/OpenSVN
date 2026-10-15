@@ -183,6 +183,21 @@ impl EngineFacade for ClientCheckout {
     ) -> EngineResult<()> {
         self.0.engine.set_depth(wc, path, depth, ctx).await
     }
+    async fn wc_depths(
+        &self,
+        wc: &WcRef,
+        ctx: &OpContext,
+    ) -> EngineResult<Vec<opensvn_ipc::SparseEntry>> {
+        self.0.engine.wc_depths(wc, ctx).await
+    }
+    async fn sparse_apply(
+        &self,
+        wc: &WcRef,
+        entries: &[opensvn_ipc::SparseEntry],
+        ctx: &OpContext,
+    ) -> EngineResult<()> {
+        self.0.engine.sparse_apply(wc, entries, ctx).await
+    }
     async fn upgrade_format(&self, wc: &WcRef, to: u8, ctx: &OpContext) -> EngineResult<()> {
         self.0.engine.upgrade_format(wc, to, ctx).await
     }

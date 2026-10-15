@@ -320,6 +320,13 @@ impl FakeEngine {
             for p in drop {
                 wc.nodes.remove(&p);
             }
+            wc.depths.retain(|p, _| !p.starts_with(&dir) || *p == dir);
+            match depth {
+                Depth::Infinity => wc.depths.remove(&dir),
+                Depth::Empty => wc.depths.insert(dir, opensvn_ipc::SparseDepth::Empty),
+                Depth::Files => wc.depths.insert(dir, opensvn_ipc::SparseDepth::Files),
+                Depth::Immediates => wc.depths.insert(dir, opensvn_ipc::SparseDepth::Immediates),
+            };
             Ok(())
         })
     }

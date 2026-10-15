@@ -190,13 +190,17 @@ pub async fn drive_update(
     session.ensure_authenticated(cancel).await?;
     cancel.check()?;
 
-    let node = db.read_base(&target_wc)?.ok_or_else(|| {
-        SvnError::new(
+    let node = db.read_base(&target_wc)?;
+    // `--set-depth` may bring in a node the working copy does not have yet (see
+    // `build_report`): the drive then adds it below its parent, which is locked instead.
+    let absent = params.sticky_depth && node.as_ref().is_none_or(|n| !n.presence.is_present());
+    if node.is_none() && !absent {
+        return Err(SvnError::new(
             ErrorCode::PathNotFound,
             format!("'{target_wc}' is not under version control"),
-        )
-    })?;
-    let lock_dir = if node.kind == NodeKind::Dir {
+        ));
+    }
+    let lock_dir = if !absent && node.is_some_and(|n| n.kind == NodeKind::Dir) {
         target_wc.clone()
     } else {
         target_wc.parent().unwrap_or_else(RelPath::root)

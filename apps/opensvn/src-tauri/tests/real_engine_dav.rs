@@ -52,7 +52,10 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use opensvn_ipc::{CommitRequest, CopyLocationRequest, Depth, UpdateRequest, WcFormat, WcId};
+use opensvn_ipc::{
+    CommitRequest, CopyLocationRequest, Depth, SparseDepth, SparseEntry, UpdateRequest, WcFormat,
+    WcId,
+};
 use opensvn_lib::engine::conformance::{self, Harness, PlantedOwner};
 use opensvn_lib::engine::real::{ClientRecovery, HttpConnector, RealEngine, RealEngineConfig};
 use opensvn_lib::engine::{CheckoutPlan, EngineFacade, OpContext, StatusQuery, WcRef};
@@ -425,6 +428,7 @@ scenario!(update_ends_in_conflict);
 scenario!(update_of_sub_paths);
 
 scenario!(mark_move_and_set_depth);
+scenario!(sparse_checkout_and_choose_folders);
 
 // ---- path-based authorization ----
 
@@ -1569,6 +1573,168 @@ async fn writes_of_one_commit_survive_a_pause_longer_than_the_proxy_keeps_idle_c
         ("UNLOCK", 1),
     ] {
         assert_eq!(count(m), n, "{m}:\n{log}");
+    }
+    assert_no_prompt();
+}
+
+// ---- sparse checkout against svn 1.15 over the same server ----
+
+/// NODES rows of a working copy, without the parts that differ between two checkouts of one
+/// repository (the working copy id and the last-modified times).
+fn nodes_rows(wc: &Path) -> Vec<String> {
+    let db = WcDb::open(wc).unwrap();
+    db.with_read(|c| {
+        let mut stmt = c
+            .prepare(
+                "SELECT local_relpath, op_depth, presence, kind, revision, repos_path, checksum, \
+                 depth, translated_size, changed_revision, changed_author FROM nodes \
+                 ORDER BY local_relpath, op_depth",
+            )
+            .map_err(svn_wc::db::sql_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(format!(
+                    "{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<i64>>(8)?,
+                    r.get::<_, Option<i64>>(9)?,
+                    r.get::<_, Option<String>>(10)?,
+                ))
+            })
+            .map_err(svn_wc::db::sql_err)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(svn_wc::db::sql_err)
+    })
+    .unwrap()
+}
+
+/// `svn` against the test server: the test CA trusted, the fixed account, no cached
+/// credentials.
+fn svn_cli(oracle: &opensvn_svn_oracle::Oracle, cwd: &Path, args: &[&str]) {
+    let mut c = oracle.svn();
+    c.current_dir(cwd)
+        .args([
+            "--username",
+            "tester",
+            "--password",
+            "tester-pass",
+            "--no-auth-cache",
+            "--config-option",
+        ])
+        .arg(format!(
+            "servers:global:ssl-authority-files={}",
+            ca_path().display()
+        ))
+        .args(args);
+    run(c, None);
+}
+
+/// A checkout with a depth per folder through the real engine leaves the same wc.db as svn
+/// 1.15 after `svn checkout --depth` and `svn update --parents --set-depth` per folder against
+/// the same server; "Choose folders" afterwards too.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn sparse_checkout_matches_svn() {
+    let Some(oracle) =
+        opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15).unwrap()
+    else {
+        return;
+    };
+    if negotiate_mode() {
+        eprintln!("skipping: svn is given Basic credentials");
+        return;
+    }
+    let entry = |path: &str, depth: SparseDepth| SparseEntry {
+        path: path.to_owned(),
+        depth,
+    };
+    for (version, host) in servers() {
+        eprintln!("sparse_checkout_matches_svn: server {version}");
+        let h = harness(&host, "sparse-svn");
+        let url = h.repo_url();
+        let work = h.work_dir();
+        std::fs::create_dir_all(&work).unwrap();
+        let theirs = work.join("svn");
+        svn_cli(
+            &oracle,
+            &work,
+            &["checkout", "-q", "--depth", "empty", &url, "svn"],
+        );
+        for (depth, path) in [("files", "trunk/src"), ("empty", "branches")] {
+            svn_cli(
+                &oracle,
+                &theirs,
+                &["update", "-q", "--parents", "--set-depth", depth, path],
+            );
+        }
+        let ours = work.join("ours");
+        h.engine
+            .checkout(
+                &CheckoutPlan {
+                    url: url.clone(),
+                    path: ours.clone(),
+                    rev: None,
+                    depth: Depth::Empty,
+                    sparse: Some(vec![
+                        entry("branches", SparseDepth::Empty),
+                        entry("trunk/src", SparseDepth::Files),
+                    ]),
+                    format: WcFormat::V31,
+                    store_pristine: true,
+                    ignore_externals: false,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("sparse checkout");
+        assert_eq!(
+            nodes_rows(&ours),
+            nodes_rows(&theirs),
+            "{version}: checkout"
+        );
+
+        let wc = WcRef {
+            id: WcId("ours".into()),
+            root: ours.clone(),
+        };
+        h.engine
+            .sparse_apply(
+                &wc,
+                &[
+                    entry("trunk", SparseDepth::Infinity),
+                    entry("trunk/src", SparseDepth::Exclude),
+                    entry("tags", SparseDepth::Empty),
+                ],
+                &ctx(),
+            )
+            .await
+            .expect("choose folders");
+        for (depth, path) in [
+            ("infinity", "trunk"),
+            ("exclude", "trunk/src"),
+            ("empty", "tags"),
+        ] {
+            svn_cli(
+                &oracle,
+                &theirs,
+                &["update", "-q", "--parents", "--set-depth", depth, path],
+            );
+        }
+        assert_eq!(
+            nodes_rows(&ours),
+            nodes_rows(&theirs),
+            "{version}: choose folders"
+        );
+        // svn keeps working with the result.
+        svn_cli(&oracle, &ours, &["update", "-q"]);
+        svn_cli(&oracle, &ours, &["status"]);
     }
     assert_no_prompt();
 }
