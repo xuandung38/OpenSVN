@@ -36,6 +36,8 @@ const BURST = Number(process.env.OPENSVN_RSS_BURST ?? 5_000);
 const LIMIT_MB = Number(process.env.OPENSVN_RSS_LIMIT_MB ?? 400);
 const APP_ENV = appEnvFrom("OPENSVN_RSS_APP_ENV");
 const INCOMING = 20;
+/** How long the refresh may find the working copy busy (OPENSVN_RSS_BUSY_WAIT_S). */
+const BUSY_WAIT_MS = Number(process.env.OPENSVN_RSS_BUSY_WAIT_S ?? 900) * 1000;
 /** The burst edits every STRIDE-th file. */
 const STRIDE = Math.max(2, Math.floor(FILES / BURST));
 /** 100 files per folder, like a source tree. */
@@ -70,6 +72,7 @@ test(`app RSS on a ${FILES}-file working copy stays under ${LIMIT_MB} MB`, async
   let sampler;
   const steps = [];
   let busyRetries = 0;
+  let busyMs = 0;
   const timed = async (phase, fn) => {
     sampler.mark(phase);
     const t0 = Date.now();
@@ -107,9 +110,12 @@ test(`app RSS on a ${FILES}-file working copy stays under ${LIMIT_MB} MB`, async
     await idle();
     const [entry] = (await invoke(app, "wc_list", {})).ok;
     await timed("refresh", async () => {
-      // Right after start-up the working copy may still be opening (not an operation, so the
-      // Activity item says Idle): the refresh is refused as busy and retryable. Retry like the
-      // user would, and count it.
+      // Right after start-up the History sidebar's log request holds a read of the working
+      // copy for its whole network call (a log with the changed paths of a 100k-path revision
+      // takes minutes on Apache with authz), and the start-up open queues a write behind it:
+      // reads are then refused as busy and retryable. Retry like the user would, and record how
+      // long the working copy stayed busy.
+      const busySince = Date.now();
       for (;;) {
         const end = await runOperation(app, "status_refresh", { wcId: entry.id, paths: null });
         if (end.finished) break;
@@ -118,9 +124,11 @@ test(`app RSS on a ${FILES}-file working copy stays under ${LIMIT_MB} MB`, async
           "wc-busy",
           `the refresh failed: ${JSON.stringify(end.failed)}`,
         );
-        assert.ok(++busyRetries <= 20, "the working copy stayed busy");
+        busyRetries++;
+        assert.ok(Date.now() - busySince < BUSY_WAIT_MS, "the working copy stayed busy");
         await sleep(1000);
       }
+      busyMs = Date.now() - busySince;
     });
 
     await timed("watcher burst", async () => {
@@ -155,6 +163,7 @@ test(`app RSS on a ${FILES}-file working copy stays under ${LIMIT_MB} MB`, async
       files: FILES,
       burst: BURST,
       refreshBusyRetries: busyRetries,
+      refreshBusyMs: busyMs,
       limitMb: LIMIT_MB,
       peak: {
         treeRssMb: peakMb,
@@ -179,6 +188,8 @@ test(`app RSS on a ${FILES}-file working copy stays under ${LIMIT_MB} MB`, async
         `# App RSS, ${FILES} files${Object.keys(APP_ENV).length ? ` (${process.env.OPENSVN_RSS_APP_ENV})` : ""}`,
         "",
         `Peak of the app process tree: RSS ${peakMb} MB (PSS ${report.peak.treePssMb} MB), app process alone ${report.peak.appRssMb} MB; limit ${LIMIT_MB} MB.`,
+        "",
+        `The refresh found the working copy busy for ${(busyMs / 1000).toFixed(1)} s after the restart (${busyRetries} refused attempts).`,
         "",
         "| Step | Time | Tree RSS peak | Tree PSS peak | App RSS peak |",
         "|---|---|---|---|---|",
