@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use opensvn_ipc::{
     BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
     EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage,
-    RepoEntry, RepoInfo, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
+    RepoInfo, RepoListing, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
 };
 use svn_ra_api::RaSession;
 use svn_types::{CancelToken, ErrorCode, LockOwnershipStore, RelPath, RepoUrl, SvnError};
@@ -470,7 +470,7 @@ impl EngineFacade for RealEngine {
         url: &str,
         rev: Option<Rev>,
         ctx: &OpContext,
-    ) -> EngineResult<Vec<RepoEntry>> {
+    ) -> EngineResult<RepoListing> {
         self.do_repo_list(url, rev, ctx).await
     }
 

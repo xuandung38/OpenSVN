@@ -7,6 +7,7 @@ import type {
   LockInfo,
   LogEntry,
   RepoEntry,
+  RepoListing,
 } from "../bindings";
 import { mockLog } from "./data";
 
@@ -76,17 +77,23 @@ const TREE: Record<string, RepoEntry[]> = {
   tags: [entry("v1.0.0", "dir"), entry("v2.4.0", "dir")],
 };
 
+/** Entries the backend would refuse for their names (only counted, like the real engine). */
+const HIDDEN: Record<string, number> = { "trunk/notes": 2 };
+
 /** Directory listing for `url` (relative path resolved against the mock root). */
-export function mockList(url: string): RepoEntry[] | null {
+export function mockList(url: string): RepoListing | null {
   if (!url.startsWith(MOCK_REPO_ROOT)) return null;
   const rel = url.slice(MOCK_REPO_ROOT.length).replace(/^\/+|\/+$/g, "");
   const entries = TREE[rel];
   if (!entries) return null;
-  return entries.map((e) => {
-    const child = `${MOCK_REPO_ROOT}/${rel ? `${rel}/` : ""}${e.name}`;
-    const lock = myLocks.has(child) ? lockMine() : otherLocks.has(child) ? lockOther : null;
-    return { ...e, lock };
-  });
+  return {
+    entries: entries.map((e) => {
+      const child = `${MOCK_REPO_ROOT}/${rel ? `${rel}/` : ""}${e.name}`;
+      const lock = myLocks.has(child) ? lockMine() : otherLocks.has(child) ? lockOther : null;
+      return { ...e, lock };
+    }),
+    hidden: HIDDEN[rel] ?? 0,
+  };
 }
 
 export function mockFileText(url: string): string {

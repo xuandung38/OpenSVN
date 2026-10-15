@@ -6,7 +6,7 @@ use bytes::Bytes;
 use opensvn_ipc::time_fmt::timestamp_to_iso;
 use opensvn_ipc::{
     BlameLine, BranchKind, BranchNode, CopyLocationRequest, EntryKind, FileDiff, Layout,
-    LogGetRequest, LogPage, RepoEntry, RepoInfo, Rev, Size, TextSide,
+    LogGetRequest, LogPage, RepoEntry, RepoInfo, RepoListing, Rev, Size, TextSide,
 };
 use svn_ra_api::fake::{FakeChange, FakeRaSession};
 use svn_ra_api::{LogRequest, RaSession};
@@ -92,19 +92,19 @@ impl FakeEngine {
         url: &str,
         rev: Option<Rev>,
         ctx: &OpContext,
-    ) -> Result<Vec<RepoEntry>, SvnError> {
+    ) -> Result<RepoListing, SvnError> {
         let (session, path) = self.locate(url)?;
         session.ensure_authenticated(&ctx.cancel).await?;
-        let entries = session
-            .list(
+        let listing = session
+            .list_counted(
                 &path,
                 revnum(rev),
                 svn_types::Depth::Immediates,
                 &ctx.cancel,
             )
             .await?;
-        let mut out = Vec::with_capacity(entries.len());
-        for e in entries {
+        let mut out = Vec::with_capacity(listing.entries.len());
+        for e in listing.entries {
             let created = e.created_rev.unwrap_or(Revnum(0));
             let (author, date) = self.rev_author_date(&session, created, ctx).await?;
             out.push(RepoEntry {
@@ -121,7 +121,10 @@ impl FakeEngine {
             (a.kind == EntryKind::File, a.name.to_lowercase())
                 .cmp(&(b.kind == EntryKind::File, b.name.to_lowercase()))
         });
-        Ok(out)
+        Ok(RepoListing {
+            entries: out,
+            hidden: u32::try_from(listing.rejected).unwrap_or(u32::MAX),
+        })
     }
 
     async fn rev_author_date(

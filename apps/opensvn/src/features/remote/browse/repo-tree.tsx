@@ -85,7 +85,7 @@ export function RepoTree({
     const lists = new Map<string, RepoEntry[] | "loading">();
     expandedUrls.forEach((url, i) => {
       const r = results[i];
-      lists.set(url, r?.data ?? "loading");
+      lists.set(url, r?.data?.entries ?? "loading");
     });
     return flattenTree(rootUrl, expanded, lists);
   }, [rootUrl, expanded, expandedUrls, results]);

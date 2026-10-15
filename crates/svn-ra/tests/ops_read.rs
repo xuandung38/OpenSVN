@@ -335,6 +335,8 @@ async fn hostile_hrefs_are_refused_or_skipped() {
                     5,
                 ),
                 response(&format!("{rvr}/trunk/%2e%2e/escape"), false, 5),
+                response(&format!("{rvr}/trunk/CON.txt"), false, 5),
+                response(&format!("{rvr}/trunk/a%3ab.txt"), false, 5),
             ]),
         ),
     )
@@ -351,6 +353,21 @@ async fn hostile_hrefs_are_refused_or_skipped() {
         .map(|e| e.name)
         .collect();
     assert_eq!(names, ["ok.txt"]);
+    // The refused entries stay out, but their number reaches the caller.
+    for depth in [Depth::Immediates, Depth::Files, Depth::Infinity] {
+        let listing = s
+            .list_counted(&RelPath::root(), None, depth, &cancel)
+            .await
+            .unwrap();
+        let names: Vec<_> = listing.entries.into_iter().map(|e| e.name).collect();
+        assert_eq!(names, ["ok.txt"], "{depth:?}");
+        assert_eq!(listing.rejected, 4, "{depth:?}");
+    }
+    let empty = s
+        .list_counted(&RelPath::root(), None, Depth::Empty, &cancel)
+        .await
+        .unwrap();
+    assert_eq!((empty.entries.len(), empty.rejected), (0, 0));
     let reqs = requests(&srv).await;
     assert!(reqs.iter().all(|(_, p)| p.starts_with("/svn/repo/")));
 }

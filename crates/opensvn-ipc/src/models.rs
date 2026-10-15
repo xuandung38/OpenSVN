@@ -253,6 +253,18 @@ pub struct RepoEntry {
     pub lock: Option<LockInfo>,
 }
 
+/// One directory listing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoListing {
+    /// Children the app can show.
+    pub entries: Vec<RepoEntry>,
+    /// Children the server listed whose names the app refuses (hostile, Windows-reserved or
+    /// otherwise unsafe). They are not in `entries` and their names are not sent: only the count,
+    /// so the folder is not shown as empty when it is not.
+    pub hidden: u32,
+}
+
 /// What to diff. Tagged by `kind`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(
