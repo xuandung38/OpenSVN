@@ -74,7 +74,16 @@ struct Server {
 
 impl Server {
     async fn start(handler: impl Fn(&Req) -> Reply + Send + Sync + 'static) -> Self {
+        Self::start_cutting_options(0, handler).await
+    }
+
+    /// [`Self::start`] whose first `cut_options` `OPTIONS` answers are cut mid-body.
+    async fn start_cutting_options(
+        cut_options: usize,
+        handler: impl Fn(&Req) -> Reply + Send + Sync + 'static,
+    ) -> Self {
         let handler: Handler = Arc::new(handler);
+        let cut_options = Arc::new(AtomicUsize::new(cut_options));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let seen: Arc<Mutex<Vec<Req>>> = Arc::default();
@@ -82,7 +91,7 @@ impl Server {
         tokio::spawn(async move {
             while let Ok((tcp, _)) = listener.accept().await {
                 let (handler, seen) = (Arc::clone(&handler), Arc::clone(&seen2));
-                tokio::spawn(serve(tcp, handler, seen));
+                tokio::spawn(serve(tcp, handler, seen, Arc::clone(&cut_options)));
             }
         });
         Self { addr, seen }
@@ -104,7 +113,12 @@ impl Server {
     }
 }
 
-async fn serve(tcp: TcpStream, handler: Handler, seen: Arc<Mutex<Vec<Req>>>) {
+async fn serve(
+    tcp: TcpStream,
+    handler: Handler,
+    seen: Arc<Mutex<Vec<Req>>>,
+    cut_options: Arc<AtomicUsize>,
+) {
     let mut io = BufReader::new(tcp);
     loop {
         let mut head = String::new();
@@ -138,7 +152,11 @@ async fn serve(tcp: TcpStream, handler: Handler, seen: Arc<Mutex<Vec<Req>>>) {
             body: String::from_utf8_lossy(&body).into_owned(),
         };
         let (reply, extra) = if req.method == "OPTIONS" {
-            (Reply::xml(200, ""), OPTIONS_HEADERS)
+            let reply = Reply::xml(200, OPTIONS_BODY);
+            let cut = cut_options
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok();
+            (if cut { reply.cut_at(40) } else { reply }, OPTIONS_HEADERS)
         } else {
             seen.lock().unwrap().push(req.clone());
             (handler(&req), "")
@@ -168,6 +186,11 @@ async fn serve(tcp: TcpStream, handler: Handler, seen: Arc<Mutex<Vec<Req>>>) {
         }
     }
 }
+
+const OPTIONS_BODY: &str = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+<D:options-response xmlns:D=\"DAV:\">\n\
+<D:activity-collection-set><D:href>/svn/repo/!svn/act/</D:href></D:activity-collection-set>\
+</D:options-response>\n";
 
 const OPTIONS_HEADERS: &str = "DAV: 1,2\r\n\
 DAV: http://subversion.tigris.org/xmlns/dav/svn/depth\r\n\
@@ -900,4 +923,27 @@ async fn a_lock_whose_answer_is_cut_is_not_sent_again() {
         .unwrap_err();
     assert!(err.connection_failure().is_some(), "{err:?}");
     assert_eq!(srv.count("LOCK"), 1);
+}
+
+// ---- session open ----
+
+#[tokio::test]
+async fn an_options_answer_cut_mid_body_is_asked_for_again() {
+    let srv = Server::start_cutting_options(2, |req| panic!("unexpected {}", req.method)).await;
+    let s = session(&srv).await;
+    assert_eq!(s.uuid(), "7462d98e-4071-4508-b797-d2922b5cda8f");
+}
+
+#[tokio::test]
+async fn an_options_answer_that_keeps_breaking_fails_with_the_connection_error() {
+    let srv = Server::start_cutting_options(10, |req| panic!("unexpected {}", req.method)).await;
+    let err = HttpRaSession::open(
+        transport_with(vec![Duration::from_millis(10); 3]),
+        srv.url(),
+        &CancelToken::new(),
+    )
+    .await
+    .err()
+    .expect("every answer cut");
+    assert!(err.connection_failure().is_some(), "{err:?}");
 }

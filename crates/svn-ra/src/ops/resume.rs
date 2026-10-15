@@ -38,8 +38,13 @@ pub(crate) struct ReadRetry {
 impl ReadRetry {
     /// Budget for the read named `what` (for logs), with the delays of the wire's transport.
     pub(crate) fn new(wire: &RaWire, what: &'static str) -> Self {
+        Self::with_delays(wire.transport().retry_policy().delays.clone(), what)
+    }
+
+    /// Budget with these delays, for reads made before a wire exists.
+    pub(crate) fn with_delays(delays: Vec<Duration>, what: &'static str) -> Self {
         Self {
-            delays: wire.transport().retry_policy().delays.clone(),
+            delays,
             stalled: 0,
             total: 0,
             what,
