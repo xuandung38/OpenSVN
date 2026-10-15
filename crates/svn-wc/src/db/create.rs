@@ -4,8 +4,9 @@
 //! rows: it is built as `.svn/tmp/wc.db.creating`, closed, and renamed into place. A process
 //! killed before the rename leaves a `.svn` *skeleton* that no client takes for a working copy:
 //! `tmp` holding the creation lock file `wc.db.creating.lock` and maybe the half-built database
-//! and its journal, and maybe an empty `pristine`. The next [`WcDb::create`] takes the skeleton
-//! over in place, unless its creator still holds the lock. A process killed after the rename
+//! and its journal, and maybe an empty `pristine`; or, killed between the `mkdir` of `.svn` and
+//! that of `tmp`, an empty `.svn`. The next [`WcDb::create`] takes the skeleton over in place,
+//! unless its creator still holds the lock. A process killed after the rename
 //! leaves a regular working copy whose root is `incomplete`, which an update finishes.
 //!
 //! Earlier versions created `wc.db` in place, so a kill in the first milliseconds left an empty
@@ -15,7 +16,10 @@
 //! # Ownership
 //! Whoever holds the OS lock on `.svn/tmp/wc.db.creating.lock` owns `.svn`. A creator makes
 //! `.svn` and `tmp` with exclusive `mkdir`s, then creates and locks the lock file; until it holds
-//! the lock it never deletes anything. Another caller takes a skeleton over only when it holds
+//! the lock it never deletes anything. An empty `.svn` holds nothing to lose: a caller that finds
+//! one makes `tmp` in it with the same exclusive `mkdir`, and of two callers only the one whose
+//! `mkdir` succeeds goes on (the other reports the area busy). Another caller takes a skeleton
+//! over only when it holds
 //! that same lock (checked to still be the file at that path) and the skeleton, inspected again
 //! under the lock, holds nothing but the names above. It then deletes only those files, one by
 //! one, never a directory, and reuses `tmp` and `pristine`. The lock file itself is deleted only
@@ -62,6 +66,11 @@ fn busy(wcroot: &Path) -> SvnError {
 /// Whether `path` is a real directory (not a symlink).
 fn real_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir())
+}
+
+/// Whether `path` is a real directory (not a symlink) with nothing in it.
+fn empty_real_dir(path: &Path) -> bool {
+    real_dir(path) && fs::read_dir(path).is_ok_and(|mut d| d.next().is_none())
 }
 
 /// Whether `path` is a regular file (not a symlink).
@@ -259,9 +268,15 @@ impl WcDb {
             Err(e) if e.kind() == ErrorKind::AlreadyExists => false,
             Err(e) => return Err(io_err("cannot create", &adm, &e)),
         };
-        if fresh {
-            // Not ours to clean up until the lock is held: never delete on these errors.
-            fs::create_dir(&tmp).map_err(|e| io_err("cannot create", &tmp, &e))?;
+        if fresh || empty_real_dir(&adm) {
+            // An empty `.svn` that is not ours is a creator killed between its two `mkdir`s, or
+            // one about to make `tmp`: whoever makes `tmp` goes on to the lock, the other
+            // stops. Not ours to clean up until the lock is held: never delete on these errors.
+            match fs::create_dir(&tmp) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => return Err(busy(wcroot)),
+                Err(e) => return Err(io_err("cannot create", &tmp, &e)),
+            }
         } else if inspect_skeleton(&adm)?.is_none() {
             return Err(existing_adm(wcroot));
         }
