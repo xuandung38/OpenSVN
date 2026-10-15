@@ -98,6 +98,8 @@ pub struct HttpTransport {
     trust: Arc<dyn TrustStore>,
     auth: AuthManager,
     origins: Mutex<HashMap<HostKey, Arc<OriginClient>>>,
+    /// Bumped by [`HttpTransport::interrupt_reads`]; responses of read-only requests watch it.
+    wake: tokio::sync::watch::Sender<u64>,
 }
 
 impl std::fmt::Debug for HttpTransport {
@@ -123,6 +125,7 @@ impl HttpTransport {
             prompter,
             trust,
             origins: Mutex::default(),
+            wake: tokio::sync::watch::Sender::new(0),
         }
     }
 
@@ -327,6 +330,16 @@ impl HttpTransport {
                 channel_binding: Mutex::new(entry.channel_binding()),
             });
         }
+    }
+
+    /// Fails the body reads of read-only requests in flight as a reset connection, and drops
+    /// the idle connections. Called when the system wakes up from sleep: the connections those
+    /// reads wait on are most likely dead, and their read timeout does not run while the system
+    /// sleeps. The callers resume read-only work on a fresh connection; the response of a write
+    /// is never interrupted.
+    pub fn interrupt_reads(&self) {
+        self.wake.send_modify(|g| *g = g.wrapping_add(1));
+        self.reset_connections();
     }
 
     fn origin_client(&self, url: &Url) -> Result<Arc<OriginClient>> {
@@ -640,6 +653,7 @@ impl HttpTransport {
                         cancel: cancel.clone(),
                         _permit: Some(permit),
                         received: 0,
+                        wake: idempotent.then(|| self.wake.subscribe()),
                     });
                 }
                 Err(e) => {

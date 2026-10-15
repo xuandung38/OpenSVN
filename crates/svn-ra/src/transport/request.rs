@@ -175,6 +175,8 @@ pub struct HttpResponse {
     pub(crate) content_length: Option<u64>,
     /// Body bytes received so far.
     pub(crate) received: u64,
+    /// For a read-only request: fires when [`super::HttpTransport::interrupt_reads`] is called.
+    pub(crate) wake: Option<tokio::sync::watch::Receiver<u64>>,
 }
 
 impl std::fmt::Debug for HttpResponse {
@@ -216,9 +218,15 @@ impl HttpResponse {
     /// connection broke.
     pub async fn chunk(&mut self) -> Result<Option<Bytes>> {
         self.cancel.check()?;
+        let wake = self.wake.clone();
         tokio::select! {
             biased;
             () = self.cancel.cancelled() => self.cancel.check().map(|()| None),
+            () = interrupted(wake) => Err(SvnError::new(
+                ErrorCode::Network,
+                "the connection was dropped after the system woke up",
+            )
+            .with_connection(ConnectionFailure::ConnectionReset)),
             r = self.inner.chunk() => match r {
                 Ok(Some(chunk)) => {
                     self.received += chunk.len() as u64;
@@ -296,5 +304,17 @@ mod tests {
             Some(10),
             10
         ));
+    }
+}
+
+/// Resolves once the transport interrupts reads; never for a response that does not watch.
+async fn interrupted(wake: Option<tokio::sync::watch::Receiver<u64>>) {
+    match wake {
+        Some(mut rx) => {
+            if rx.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+        None => std::future::pending::<()>().await,
     }
 }

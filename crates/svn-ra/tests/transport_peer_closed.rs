@@ -729,3 +729,43 @@ async fn reset_connections_drops_the_idle_ones() {
     assert_eq!(body_of(&t, "GET", &server.url("/c")).await.unwrap(), "ok");
     assert_eq!(server.connections(), 2);
 }
+
+/// After a system sleep the body of a read in flight waits on a dead connection whose read
+/// timeout did not run during the sleep: `interrupt_reads` fails it at once as a reset
+/// connection, so the drive resumes. The response of a write is left alone.
+#[tokio::test]
+async fn interrupt_reads_fails_a_stalled_read_but_never_a_write() {
+    for (method, interrupted) in [("GET", true), ("MERGE", false)] {
+        let ca = TestCa::new();
+        let server = RawServer::start(&ca, vec![Act::Stall]).await;
+        let t = transport(&ca, |c| {
+            c.read_timeout = Duration::from_secs(20);
+            c.retry.delays = Vec::new();
+        });
+        let mut resp = t
+            .send(req(method, &server.url("/s")), &CancelToken::new())
+            .await
+            .unwrap();
+        assert_eq!(resp.chunk().await.unwrap().unwrap(), "abc");
+        let waker = Arc::clone(&t);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            waker.interrupt_reads();
+        });
+        let started = Instant::now();
+        let got = tokio::time::timeout(Duration::from_secs(3), resp.chunk()).await;
+        if interrupted {
+            let err = got
+                .expect("interrupted at once")
+                .expect_err("dead connection");
+            assert_eq!(
+                err.connection_failure(),
+                Some(ConnectionFailure::ConnectionReset),
+                "{err:?}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(2));
+        } else {
+            assert!(got.is_err(), "{method}: a write's answer must not be cut");
+        }
+    }
+}
