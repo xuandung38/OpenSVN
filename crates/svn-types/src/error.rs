@@ -85,6 +85,10 @@ pub enum ErrorCode {
     /// commit, it happened; otherwise remove the transaction with `abort_txn`. Never retry the
     /// commit blindly: it could be applied twice.
     CommitOutcomeUnknown,
+    /// A write other than a commit (a lock or an unlock) whose connection broke after the
+    /// request was handed to it: the server may or may not have carried it out. Writes are
+    /// never sent twice, so the caller checks the server's state before trying again.
+    WriteOutcomeUnknown,
     /// The request is valid but its result would exceed a size limit the engine enforces to
     /// bound memory and work (for example a directory listing with more entries than the
     /// listing cap). Nothing is wrong with the data; the user can ask for less (a smaller

@@ -121,6 +121,24 @@ describe("error mapping", () => {
     expect(errorText(transportError(message, code)).key).toBe(key);
   });
 
+  test("a write or commit cut after it was sent says its outcome is unknown", () => {
+    const lock = errorText({
+      code: "network",
+      message:
+        "the connection broke while the lock request was being sent; it may or may not have reached the server. Refresh the lock state before trying again",
+      detail: OWNER_TEXT,
+    });
+    expect(lock.key).toBe("errWriteUnsure");
+    expect(lock.detail).toContain("peer closed connection");
+    const commit = errorText({
+      code: "network",
+      message:
+        "the commit may or may not have been applied: the result of merging transaction '5-a' is unknown, so the transaction was kept; check the repository's youngest revision before retrying",
+      detail: OWNER_TEXT,
+    });
+    expect(commit.key).toBe("errCommitUnsure");
+  });
+
   test("other errors keep the backend's message and detail", () => {
     const t = errorText({ code: "out-of-date", message: "File is out of date", detail: "E160028" });
     expect(t).toEqual({ key: null, message: "File is out of date", detail: "E160028" });
