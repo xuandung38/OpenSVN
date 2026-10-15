@@ -844,13 +844,16 @@ impl DeltaEditor for UpdateEditor {
         let mut shadow = p.shadow;
         let mut obstructed = false;
         let mut tree_conflict = None;
-        let (existing, base) = if p.fresh {
+        // A clean update (see `UpdateSetup::clean`) does not look at wc.db here, like svn: a
+        // tree conflict this drive recorded on the deleted node stays, it is no replacement.
+        let (existing, base) = if p.fresh || self.s.clean {
             (None, None)
         } else {
             (self.s.db.read_node(&wc)?, self.s.db.read_base(&wc)?)
         };
         if !skipped
             && shadow.is_none()
+            && !self.s.clean
             && let Some(layer) = self.take_replacement(&wc, &new_repos, NodeKind::Dir)?
         {
             shadow = Some(layer);
@@ -1155,7 +1158,9 @@ impl UpdateEditor {
             skipped = true;
         }
         let name = wc.file_name().unwrap_or("").to_owned();
-        let base = if p.fresh {
+        // An add of a clean update does not look at wc.db (see `add_directory`).
+        let blind = p.fresh || (add && self.s.clean);
+        let base = if blind {
             None
         } else {
             self.s
@@ -1186,17 +1191,17 @@ impl UpdateEditor {
         let mut tree_conflict = None;
         let mut adopt_existing = false;
         let mut shadow = if skipped { None } else { p.shadow };
-        if !skipped && add && shadow.is_none() {
+        if !skipped && add && !blind && shadow.is_none() {
             shadow = self.take_replacement(&wc, &new_repos, NodeKind::File)?;
         }
         let replacing = shadow.is_some() && p.shadow.is_none();
-        if !skipped && !replacing && !p.fresh && self.s.db.conflict(&wc)?.is_some() {
+        if !skipped && !replacing && !blind && self.s.db.conflict(&wc)?.is_some() {
             skipped = true;
             self.skipped.push(wc.clone());
             self.emit(&wc, NodeKind::File, UpdateAction::Skipped);
         }
         if !skipped && shadow.is_none() {
-            let cur = if p.fresh {
+            let cur = if blind {
                 None
             } else {
                 self.s.db.read_node(&wc)?
