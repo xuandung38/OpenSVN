@@ -1,0 +1,119 @@
+# AGENTS.md: hướng dẫn và tiến độ cho người và agent cùng làm OpenSVN
+
+Đọc file này trước khi nhận việc. Lệnh build/test, quy tắc đặt tên nhánh và cấu trúc repo nằm ở `docs/contributing.md`. Kiến trúc nằm ở `docs/system-architecture.md`.
+
+Cập nhật lần cuối: 2026-10-15, main tại `56d1f06`.
+
+---
+
+## 1. Quy tắc bắt buộc (chủ repo đặt, không ngoại lệ)
+
+1. **Danh tính commit**
+   - Mọi commit phải là `Hồ Xuân Dũng <me@hxd.vn>`. Đặt `git config user.name "Hồ Xuân Dũng"` và `git config user.email me@hxd.vn` trước khi commit.
+   - Commit message không có trailer: không `Co-Authored-By`, không link phiên làm việc.
+2. **Không ghi công công cụ AI**
+   - Áp dụng cho commit, mô tả PR, comment, review và file trong repo.
+   - Không có dòng kiểu "Generated with …", không tên công cụ hay hãng AI, không footer tự động.
+   - Công cụ tự chèn footer thì phải xóa ngay, bằng lệnh sửa PR hoặc sửa comment.
+3. **Không nêu tên công ty hay chủ quản** ở bất kỳ đâu trong repo.
+4. **Không ghi hostname thật của công ty.** Dùng `*.test` hoặc `example.com`. Script `fixtures/check-no-real-hosts.sh` phải pass.
+5. **Git**
+   - Chỉ merge commit. Không rebase, không amend, không force-push nhánh của người khác.
+   - Mỗi PR có một reviewer độc lập. Reviewer chạy lại gate rồi merge bằng merge method.
+6. **Bảo mật**
+   - TLS mặc định từ chối (`CertDecision::is_valid_for`), không bao giờ nới.
+   - Đường dẫn ngoài working copy cần `PathGrant`.
+   - Không bao giờ xóa dữ liệu người dùng khi tình huống mơ hồ.
+   - Secret chỉ nằm trong keychain của OS, không bao giờ ghi vào log.
+7. **Tương thích**
+   - Working copy phải dùng chung được với svn 1.8–1.15 (wc.db format 31).
+   - Server mục tiêu là VisualSVN (HTTPS, AD/Windows SSO).
+
+## 2. Gate trước khi mở PR ready
+
+GitHub Actions hiện **không có runner**: mọi job kết thúc sau 2–5 giây, không log, kể cả trên main. CI đỏ không phải do code. Gate thật là gate chạy trên máy. Ghi số lượng test vào mô tả PR.
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p opensvn --features real-engine --all-targets -- -D warnings
+# failpoints, nếu chạm svn-wc/svn-client:
+cargo clippy -p svn-wc -p svn-client --features failpoints --all-targets -- -D warnings
+OPENSVN_REQUIRE_SVN=1 cargo test --workspace --locked      # oracle svn 1.15.0 (build bằng nix), đặt OPENSVN_SVN_BIN/OPENSVN_SVNADMIN_BIN
+cargo test -p opensvn --features opensvn/real-engine
+cargo test -p svn-wc --features failpoints && cargo test -p svn-client --features failpoints && cargo test -p opensvn --features failpoints
+# FE (apps/opensvn):
+pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm lint:safety && pnpm test && pnpm build
+pnpm gen:ipc   # không được để lại diff
+```
+
+- **Chạm transport/RA:** chạy thêm DAV suite `real_engine_dav -- --ignored` với Apache + mod_dav_svn 1.14.3 và 1.15.0, chạy thẳng và qua `scripts/test-env/flaky-tls-proxy.py`.
+- **Chạm wc.db/update/commit:** chạy thêm crash suite với 2 seed.
+- **Thiếu dung lượng đĩa:** đặt `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0`.
+
+Build bộ cài:
+- Linux: `scripts/release/build-linux.sh`.
+- Windows (cross từ Linux): `pnpm tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis --features release --config src-tauri/tauri.bundle.conf.json --config ../../packaging/generated/tauri.version.conf.json`.
+- macOS: phải build trên máy Mac, dùng `scripts/release/build-macos.sh`.
+
+---
+
+## 3. Đã xong (trên main)
+
+| Mảng | PR |
+|---|---|
+| Checkout/update nhanh ngang hoặc hơn svn CLI (0,77–0,9×) | #142 |
+| Status nhanh hơn svn (100k file: 0,17 s, svn 0,26 s) | #139 |
+| Commit gửi delta | #140 |
+| An toàn khi crash, phục hồi work queue | #138 |
+| Link web VisualSVN `…/!/#Repo` đổi thành URL repo, kể cả link trỏ revision cũ `r<N>` | #154, #163 |
+| Settings mở được trên macOS, giới hạn ô nhập lấy chung một nguồn từ Rust | #155 |
+| Bảng tiến độ thao tác, banner khóa đúng, kiểm tra nền chạy im lặng | #156 |
+| Tự thử lại khi server cắt kết nối, tự tải tiếp checkout/update khi REPORT đứt | #157 |
+| Đọc dạng stream (log/list/cat/blame/lock) tự thử lại hoặc tải tiếp; dừng sau 2 lần không tiến triển | #164 |
+| Thao tác ghi không đi vào kết nối đã chết; không bao giờ gửi một thao tác ghi hai lần | #166 |
+| Tree-conflict và thay file↔thư mục khớp svn 1.15 | #162, #165 |
+| Obstruction trong status, WcBusy, symlink | #147, #152 |
+
+Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #144, #145, #146.
+
+## 4. Đang làm (đừng nhận trùng)
+
+| PR / nhánh | Nội dung | Issue | Trạng thái |
+|---|---|---|---|
+| #172 `feat/resume-interrupted-checkout` | Mất mạng lâu khi checkout: chờ mạng rồi tự tải tiếp; nút "Tiếp tục checkout" sau khi hủy, đóng app hoặc crash | (yêu cầu chủ repo) | Đang code |
+| #171 `feat/parent-path-repo-list` | URL server VisualSVN `https://host/svn/` hiện danh sách repo để chọn | #133 | Đang review |
+| #169 `ci/release-gating-publish` | Quy trình phát hành: environment có duyệt, ký số tùy chọn, tự đẩy sang `OpenSVN-releases` | #22 | Đang review |
+| #170 `perf/bench-100k-crash-soak` | Benchmark 100k file với svn 1.15, crash test cho switch, soak 2 giờ, test chạy đồng thời với svn CLI | #121, #21 | Đang code |
+| #168 `test/hardening-fuzz-prop-a11y` | Workflow fuzz và chạy fuzz, proptest update, độ trễ watcher, kiểm tra accessibility (axe) | #5, #11, #12, #15 | Đang code |
+| #167 `test/fixtures-hostile-repo` | Fixture format 31 từ svn 1.15, ≥25 trạng thái f32, repo "độc", e2e XSS | #8, #18 | Đang code |
+
+Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: xem/diff file Word/Excel, hiển thị %/ETA khi checkout, giữ nguyên byte đường dẫn (NFC/NFD), build Mac. Hỏi chủ repo trước khi làm những mảng này.
+
+## 5. Việc còn trống (ai cũng nhận được)
+
+Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo, để không trùng.
+
+1. **Bộ đếm "server cứ cắt đúng một chỗ" (#164, follow-up).** `LogProgress::accept` đang giả định revision tăng đơn điệu, nên sẽ gãy khi log có `-g` hoặc revprops có entry merge lồng. Cần sửa và thêm test.
+2. **Lock bị lỗi connect báo `WriteOutcomeUnknown` (#166, follow-up).** Lỗi connect nghĩa là yêu cầu chưa được gửi, nên phải báo lỗi mạng thường. Sửa nhỏ trong `svn-ra`.
+3. **Hiệu năng macOS/Windows (#121).** Hai nền tảng này vẫn fsync từng file (`BATCHED_SYNC` trong `crates/svn-wc/src/durable.rs`). Cần đo trên máy thật và tìm cách gộp (F_FULLFSYNC/FlushFileBuffers theo lô).
+4. **Watcher và menu native (#11).** Kiểm tay menu trên macOS và Windows.
+5. **Spike WebView (#12).** Chạy trên Linux (Intel/AMD/NVIDIA) và Windows 11 theo `plans/**/reports/from-dev-p09-webview-perf-spike-report.md`, rồi bỏ trạng thái "conditional" trong ADR-002.
+6. **Crash test qua app thật (#20, #21).** Dùng tauri-driver: kill app lúc commit hoặc update, mở lại, app phải tự phục hồi. Sau đó bật `real-engine` làm feature mặc định.
+7. **RAM của app (#21).** Kiểm dưới 400 MB với working copy 100k file. Ngoài ra còn ma trận compat đầy đủ, bộ test bảo mật và một tuần dùng thật (dogfood).
+
+## 6. Việc cần người thật (không tự động được)
+
+- **Kiểm trên 3 OS với VisualSVN thật** (#6, #17, #19, #20): đăng nhập SSO và Basic, browse, history, blame, lock, tạo branch, checkout lớn. Dùng `docs/visualsvn-iwa-checklist.md`.
+- **Kiểm chéo với TortoiseSVN** (#15, #16): OpenSVN tạo working copy rồi TortoiseSVN mở và commit, và làm chiều ngược lại.
+- **Ký số và phát hành** (#22): Apple Developer ID, Authenticode, cặp khóa minisign, repo `OpenSVN-releases` và token fine-grained. Làm theo `docs/RELEASE-SETUP.md` (có sau khi #169 merge).
+- **GitHub Actions không có runner:** chủ repo kiểm tra Billing/Runners của repo.
+- **Bản macOS:** build trên máy Mac.
+
+## 7. Cách phối hợp
+
+- Mỗi việc làm trên một nhánh riêng tạo từ `origin/main` và mở draft PR sớm.
+- Ghi "Closes #N" hoặc "Refs #N" trong mô tả PR.
+- Main đổi thì merge main vào nhánh. Không rebase.
+- Báo cáo kết quả ngay trong mô tả PR: gate nào đã chạy, số test pass/fail, việc gì chưa chạy được và lý do.
+- Khi xong một mảng, cập nhật mục 3–5 của file này trong cùng PR.
