@@ -97,6 +97,31 @@ impl FakeEngine {
             let decoded = super::text::percent_decode(rest.trim_matches('/'));
             return Ok((repo.clone(), RelPath::new(&decoded)?));
         }
+        // Like an `SVNParentPath` location (VisualSVN Server's `https://host/svn/`): the folder
+        // that holds repositories lists them instead of being one.
+        let here = parsed.to_string();
+        let repos: Vec<svn_types::ParentRepo> = self
+            .repos
+            .iter()
+            .filter_map(|repo| {
+                let root = repo.repos_root().to_string();
+                let (parent, name) = root.rsplit_once('/')?;
+                (parent == here).then(|| svn_types::ParentRepo {
+                    name: super::text::percent_decode(name),
+                    url: root.clone(),
+                })
+            })
+            .collect();
+        if !repos.is_empty() {
+            return Err(SvnError::new(
+                ErrorCode::PathNotFound,
+                format!(
+                    "{here} is the list of repositories on this server, not a repository; add a \
+                     repository name to the URL"
+                ),
+            )
+            .with_repositories(repos));
+        }
         Err(SvnError::new(
             ErrorCode::Network,
             format!("cannot connect to {url}: unknown repository"),
@@ -341,8 +366,13 @@ impl EngineFacade for FakeEngine {
         self.do_upgrade(&wc.root, to)
     }
 
-    async fn repo_info(&self, url: &str, ctx: &OpContext) -> EngineResult<RepoInfo> {
-        self.do_repo_info(url, ctx).await
+    async fn repo_info_at(
+        &self,
+        url: &str,
+        peg: Option<Rev>,
+        ctx: &OpContext,
+    ) -> EngineResult<RepoInfo> {
+        self.do_repo_info(url, peg, ctx).await
     }
 
     async fn repo_list(

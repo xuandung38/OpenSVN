@@ -32,6 +32,9 @@ export const dialogStrings = defineStrings({
     hideBrowse: "Hide folders",
     browseLabel: "Repository folders",
     browseLoading: "Connecting to the repository…",
+    serverRepos:
+      "This URL is the server's list of repositories. Pick a repository, or a folder in one.",
+    serverReposLabel: "Repositories on the server",
     parentFolder: "Parent folder",
     changeParent: "Change…",
     defaultParent: "default",
@@ -120,6 +123,14 @@ export const dialogStrings = defineStrings({
     switchBody: "Local changes are carried over to the new location.",
     switchAction: "Switch",
     switchUrlInvalid: "Enter a URL inside {root}.",
+    webLinkChecking: "Checking the VisualSVN web link…",
+    webLinkConverted: "Converted VisualSVN web link to repository URL {url}",
+    webLinkRev: "Revision {rev} from the link was filled in.",
+    webLinkRevOther: "The link shows revision {rev}; the revision below is different.",
+    webLinkFailed:
+      "You pasted a VisualSVN web-interface link, not a repository URL, and no repository was found for it. In VisualSVN, open the repository, use “Copy URL to clipboard” and paste that URL here.",
+    urlQueryFragment:
+      "A repository URL has no ? or # part. It looks like https://svn.example.com/svn/Repo/trunk.",
     // Cleanup
     cleanupTitle: "Clean up",
     cleanupBody: "Finishes interrupted operations and releases working copy locks.",
@@ -222,6 +233,9 @@ export const dialogStrings = defineStrings({
     hideBrowse: "Ẩn thư mục",
     browseLabel: "Thư mục trong repository",
     browseLoading: "Đang kết nối repository…",
+    serverRepos:
+      "URL này là danh sách repository trên server. Chọn một repository, hoặc một thư mục bên trong.",
+    serverReposLabel: "Repository trên server",
     parentFolder: "Thư mục cha",
     changeParent: "Đổi…",
     defaultParent: "mặc định",
@@ -303,6 +317,14 @@ export const dialogStrings = defineStrings({
     switchBody: "Thay đổi local sẽ được mang sang vị trí mới.",
     switchAction: "Switch",
     switchUrlInvalid: "Nhập URL nằm trong {root}.",
+    webLinkChecking: "Đang kiểm tra link web VisualSVN…",
+    webLinkConverted: "Đã chuyển link web VisualSVN thành URL repository {url}",
+    webLinkRev: "Đã điền revision {rev} lấy từ link.",
+    webLinkRevOther: "Link trỏ tới revision {rev}, khác revision đang nhập bên dưới.",
+    webLinkFailed:
+      "Bạn vừa dán link giao diện web VisualSVN, không phải URL repository, và không tìm thấy repository tương ứng. Trong VisualSVN, mở repository, dùng “Copy URL to clipboard” rồi dán URL đó vào đây.",
+    urlQueryFragment:
+      "URL repository không có phần ? hoặc #. URL đúng có dạng https://svn.example.com/svn/Repo/trunk.",
     cleanupTitle: "Dọn dẹp",
     cleanupBody: "Hoàn tất thao tác bị gián đoạn và nhả lock của working copy.",
     cleanupRemoveUnversioned: "Xóa file chưa quản lý",

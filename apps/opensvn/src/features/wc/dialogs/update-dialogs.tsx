@@ -5,11 +5,13 @@ import { useToast } from "../../../components/ui/toast";
 import { ipc, unwrap } from "../../../ipc/client";
 import { useT } from "../../../lib/i18n/i18n";
 import { parseRevision } from "../../remote/branch/branch-model";
+import { hasQueryOrFragment, useWebLinkConversion } from "../../remote/web-link";
 import { isCheckoutUrl } from "../wc-model";
 import { useWcSession } from "../wc-session";
 import { wcStrings } from "../wc-strings";
 import { ActionDialog } from "./action-dialog";
 import { dialogStrings } from "./dialog-strings";
+import { UrlFieldNote } from "./web-link-note";
 
 /** Update the whole working copy to HEAD or a given revision (doc 01 3.2, "Update to revision"). */
 export function UpdateToRevisionDialog({ onClose }: { onClose: () => void }) {
@@ -65,7 +67,14 @@ export function SwitchDialog({ onClose }: { onClose: () => void }) {
   const rev = parseRevision(revText);
   const root = wc?.repoRootUrl ?? "";
   const trimmed = url.trim().replace(/\/+$/, "");
-  const inRepo = isCheckoutUrl(trimmed) && (trimmed === root || trimmed.startsWith(`${root}/`));
+  const webLink = useWebLinkConversion(url, (converted, pegRev) => {
+    setUrl(converted);
+    if (pegRev !== null) setRevText(String(pegRev));
+  });
+  const inRepo =
+    isCheckoutUrl(trimmed) &&
+    !hasQueryOrFragment(trimmed) &&
+    (trimmed === root || trimmed.startsWith(`${root}/`));
   const same = trimmed === (wc?.url ?? "").replace(/\/+$/, "");
 
   return (
@@ -90,11 +99,12 @@ export function SwitchDialog({ onClose }: { onClose: () => void }) {
           aria-invalid={url.length > 0 && !inRepo}
         />
       </label>
-      {url.length > 0 && !inRepo && (
-        <span className="text-bad-text" role="alert">
-          {d("switchUrlInvalid", { root })}
-        </span>
-      )}
+      <UrlFieldNote
+        url={url}
+        state={webLink}
+        revText={revText}
+        fallback={inRepo ? null : d("switchUrlInvalid", { root })}
+      />
       <label className="flex flex-col gap-1">
         {d("revision")}
         <Input

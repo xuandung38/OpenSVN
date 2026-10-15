@@ -101,6 +101,82 @@ cargo test -p opensvn --features $F --test visualsvn_like -- --ignored big_ --te
 The no-ticket cases re-run themselves in a child process with an empty credential cache, so a
 ticket in `KRB5CCNAME` is fine for the whole run.
 
+### Connections closed, reset or cut off by the server
+
+Apache on Windows, IIS and many proxies end TLS without a `close_notify`. They also close or reset
+idle keep-alive connections and enforce `KeepAliveTimeout` / `MaxKeepAliveRequests`. Two tools
+reproduce this:
+
+- **Low keep-alive limits** on both Apaches. They apply when `up` writes the configuration, so
+  restart with `down` first:
+
+  ```sh
+  scripts/test-env/visualsvn-like.sh down
+  VSVN_KEEPALIVE_TIMEOUT=1 VSVN_MAX_KEEPALIVE_REQUESTS=5 scripts/test-env/visualsvn-like.sh up
+  ```
+
+- **`scripts/test-env/flaky-tls-proxy.py`**: a TLS proxy in front of either Apache. It never sends
+  `close_notify`. Faults:
+  - `--close-after N`: closes a reused connection after N exchanges, under the next request.
+  - `--reset-after N`: the same, with a reset.
+  - `--idle-reset S`: resets a connection that stayed idle for S seconds.
+  - `--stale-after S`: resets a connection idle for S seconds or more under the next request,
+    without forwarding it: a proxy, firewall or NAT that dropped the idle connection silently.
+  - `--log-requests`: logs the request line of every request the client starts, forwarded or
+    not, so a test can check that no write was sent twice.
+  - `--truncate-every K --truncate-at B`: cuts every K-th response bigger than B bytes mid-body.
+  - `--truncate-method M`: counts and cuts only responses to these methods (`REPORT,GET`). With
+    `--truncate-every 1` every such response is cut at the same offset: a server that always
+    breaks at the same point.
+  - `--outage-at-bytes B --outage-for S`: a network outage. Once B response bytes went to
+    clients, every connection, open or new, goes silent for S seconds: bytes are dropped, no FIN,
+    no RST (Wi-Fi gone, VPN reconnecting, laptop asleep, server unreachable). Connections open
+    during the outage stay dead; new ones work again afterwards. The log says
+    `network down for Ss` and `network up again`.
+  - `--outage-file F`: the same outage, for as long as the file F exists.
+
+  ```sh
+  D=/tmp/opensvn-visualsvn
+  python3 scripts/test-env/flaky-tls-proxy.py --listen 18452 --upstream svn.opensvn.test:18443 \
+    --cert $D/certs/server.crt --key $D/certs/server.key --ca $D/certs/ca.crt \
+    --reset-after 2 --idle-reset 2 &
+  OPENSVN_COMPAT_LOCAL_URL=https://svn.opensvn.test:18452/svn-basic \
+    cargo test -p opensvn --features real-engine,engine-conformance --test real_engine_dav \
+    -- --ignored checkout_and_remote_status_at_the_same_time
+  ```
+
+`checkout_and_remote_status_at_the_same_time` runs a 1000-file checkout and repeated remote status
+checks at the same time over the app's shared transport. The whole conformance suite can also run
+through the proxy.
+
+`checkout_cut_at_the_same_offset_stops_after_two_stalled_resumes` starts its own proxy (it needs
+the certificates of `up` next to `OPENSVN_COMPAT_LOCAL_CA`) that cuts every `REPORT`/`GET` at
+256 KiB, inside a 2 MiB file. The checkout must give up after the first drive and two resumes
+that commit nothing new, and an update must finish it once the connection works again. It
+asserts the number of cuts, so run it against the server directly, not through another faulty
+proxy.
+
+### Network outage during a checkout (`dav_resume`)
+
+`apps/opensvn/src-tauri/src/app_tests/dav_resume.rs` drives the whole app (commands, operation
+manager, registry, checkout journal, real engine) through the proxy's outage mode and compares
+each result with `svn checkout -r R` (files, NODES rows, `svn status`), so it needs svn 1.15
+(`OPENSVN_SVN_BIN`):
+
+```sh
+OPENSVN_COMPAT_LOCAL_URL=https://svn.opensvn.test:18443/svn-basic OPENSVN_SVN_BIN=/path/to/svn-1.15 \
+  cargo test -p opensvn --features real-engine,engine-conformance --lib dav_resume -- --ignored
+```
+
+- a 90 s outage mid-checkout is waited out and the checkout resumes at its revision (HEAD moves
+  on during the outage);
+- an outage longer than `network.reconnectWaitMin` leaves an incomplete working copy listed with
+  "Continue checkout"; the checkout dialog offers Continue for the same folder; once the network
+  is back Continue finishes it;
+- the app process is killed mid-checkout; after a restart the working copy is listed as an
+  interrupted checkout, its lock (ours, dead process) is cleaned without a prompt, and Continue
+  finishes it.
+
 ### App UI
 
 `scripts/test-env/ui-checkout.mjs` drives the built app through `tauri-driver` (WebKitWebDriver,

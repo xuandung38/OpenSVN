@@ -16,7 +16,7 @@ Tầng ứng dụng Rust trong `src-tauri`: thực thi các command/event của 
 
 ## Requirements
 - Functional:
-  - **OperationManager**: tạo `OpId` (UUID v7), phát `op://started|progress|finished|failed`, throttle progress ≤ 10/s/op, cancel qua `CancelToken`, giữ 50 tác vụ gần nhất (`op_list`).
+  - **OperationManager**: tạo `OpId` (UUID v7), phát `op://started|progress|finished|failed`, throttle progress ≤ 20/s/op (`ops/throttle.rs`, 50 ms), cancel qua `CancelToken`, giữ 50 tác vụ gần nhất (`op_list`).
   - **WcRegistry + WcActor**: mỗi WC một actor (tokio task + mpsc); lệnh ghi tuần tự; lệnh đọc **qua actor** với busy-retry (không giả định WAL cho wc.db — theo ghi chú `svn_sqlite.c`); trong lúc lệnh ghi dài chạy, status đọc trả cache + đánh dấu "đang cập nhật"; `catch_unwind` ở biên command.
   - **Hủy**: chuyển `CancelToken` xuống engine; FakeEngine mô phỏng 2 loại điểm hủy (pha mạng hủy ngay, pha work queue giữa item).
   - **StatusService**: watcher `notify` (debounce 300ms, gom thư mục bẩn) → gọi engine status theo thư mục → phát `wc://status-changed` dạng delta; cache snapshot vào `cache.sqlite` để mở WC hiện ngay.
@@ -67,7 +67,7 @@ tests/  (tauri::test mock runtime + FakeEngine)
 
 ## Success Criteria
 - [ ] Mọi command doc 03 §3 trả kết quả đúng kiểu với FakeEngine (test tích hợp mock runtime).
-- [ ] Hủy tác vụ dừng trong < 1s; progress không vượt 10 event/s.
+- [ ] Hủy tác vụ dừng trong < 1s; progress không vượt 20 event/s.
 - [ ] Watcher phát delta < 1s sau khi sửa file (WC 10k file test).
 - [ ] Menu native đúng cấu trúc doc 01 §8 trên macOS và Windows/Linux.
 - [ ] Property test: secret ngẫu nhiên không có trong log/diagnostics zip; zip có bước xem trước.

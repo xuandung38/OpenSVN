@@ -572,7 +572,7 @@ async fn a_lock_held_elsewhere_fails_with_its_owner_and_only_an_explicit_steal_t
     let err = f.wait_op(&h).await.unwrap_err();
     assert_eq!(err.code, opensvn_ipc::ErrorCode::LockedByOther);
     assert_eq!(
-        err.actions,
+        err.actions.as_deref().cloned(),
         Some(vec![opensvn_ipc::ErrorAction::OpenLockDialog])
     );
     let conflicts = err.lock_conflicts.expect("the refusal names the lock");
@@ -616,4 +616,30 @@ async fn other_lock_failures_carry_no_lock_conflicts() {
     let err = f.wait_op(&h).await.unwrap_err();
     assert_ne!(err.code, opensvn_ipc::ErrorCode::LockedByOther);
     assert!(err.lock_conflicts.is_none());
+}
+
+#[tokio::test]
+async fn resolve_url_passes_plain_urls_and_reports_unconverted_web_links() {
+    let f = Fixture::new(Duration::ZERO).await;
+    // Not a web link: unchanged, nothing probed (the URL does not even exist).
+    let plain = commands::repo_resolve_url(f.state(), "https://svn.example.com/x#y".into())
+        .await
+        .unwrap();
+    assert_eq!(plain.url, "https://svn.example.com/x#y");
+    assert!(!plain.converted);
+    assert_eq!(plain.peg_rev, None);
+
+    // A web link whose `/svn/<Repo>` candidate the server does not serve, and one that does not
+    // parse: both say it is a web link, with the copy-URL hint.
+    for link in [
+        "https://svn.test.local/!/#demo/view/r3/trunk",
+        "https://svn.test.local/!/#demo/view/head/%2e%2e/x",
+    ] {
+        let e = commands::repo_resolve_url(f.state(), link.into())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, opensvn_ipc::ErrorCode::InvalidArgument, "{link}");
+        assert_eq!(e.detail.as_deref(), Some(commands::VISUALSVN_WEB_LINK));
+        assert!(e.message.contains("Copy URL to clipboard"), "{}", e.message);
+    }
 }

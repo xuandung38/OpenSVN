@@ -31,8 +31,9 @@ pub struct ReposInfo {
 ///   their parent's location plus their name, like `scan_addition`. The copy source is reported
 ///   separately in [`ReposInfo::copyfrom`].
 fn location(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<(i64, String)> {
-    let current: Option<(i64, Option<i64>, Option<String>, String)> = conn
-        .query_row(
+    let current: Option<(i64, Option<i64>, Option<String>, String)> =
+        super::connection::cached_row(
+            conn,
             "SELECT op_depth, repos_id, repos_path, presence FROM nodes \
              WHERE wc_id = ?1 AND local_relpath = ?2 ORDER BY op_depth DESC LIMIT 1",
             params![wc_id, path.as_str()],
@@ -52,15 +53,15 @@ fn location(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<(i64, Strin
         return Ok((id, p));
     }
     if presence == "base-deleted" {
-        let base: Option<(i64, String)> = conn
-            .query_row(
-                "SELECT repos_id, repos_path FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+        let base: Option<(i64, String)> = super::connection::cached_row(
+            conn,
+            "SELECT repos_id, repos_path FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
                  AND op_depth = 0 AND repos_id IS NOT NULL AND repos_path IS NOT NULL",
-                params![wc_id, path.as_str()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(sql_err)?;
+            params![wc_id, path.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(sql_err)?;
         if let Some(found) = base {
             return Ok(found);
         }
@@ -85,31 +86,33 @@ impl WcDb {
     /// Repository root URL, UUID and repository path of `path`, for any versioned node including
     /// added and copied ones. `PathNotFound` when `path` is not versioned.
     pub fn read_repos_info(&self, path: &RelPath) -> Result<ReposInfo> {
-        self.with_read(|c| {
-            let (id, repos_relpath) = location(c, self.wc_id, path)?;
-            let (root, uuid): (String, String) = c
-                .query_row(
-                    "SELECT root, uuid FROM repository WHERE id = ?1",
-                    [id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .map_err(sql_err)?;
-            let copyfrom: Option<(String, i64)> = c
-                .query_row(
+        self.with_read(|c| read_repos_info_on(c, self.wc_id, path))
+    }
+}
+
+/// [`WcDb::read_repos_info`] on an open connection.
+pub(crate) fn read_repos_info_on(c: &Connection, wc_id: i64, path: &RelPath) -> Result<ReposInfo> {
+    let (id, repos_relpath) = location(c, wc_id, path)?;
+    let (root, uuid): (String, String) = super::connection::cached_row(
+        c,
+        "SELECT root, uuid FROM repository WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .map_err(sql_err)?;
+    let copyfrom: Option<(String, i64)> = super::connection::cached_row(c,
                     "SELECT repos_path, revision FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
                      AND op_depth > 0 AND repos_path IS NOT NULL AND revision IS NOT NULL \
                      AND op_depth = (SELECT MAX(op_depth) FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2)",
-                    params![self.wc_id, path.as_str()],
+                    params![wc_id, path.as_str()],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()
                 .map_err(sql_err)?;
-            Ok(ReposInfo {
-                repos_root_url: root,
-                repos_uuid: uuid,
-                repos_relpath,
-                copyfrom: copyfrom.and_then(|(p, r)| u64::try_from(r).ok().map(|r| (p, r))),
-            })
-        })
-    }
+    Ok(ReposInfo {
+        repos_root_url: root,
+        repos_uuid: uuid,
+        repos_relpath,
+        copyfrom: copyfrom.and_then(|(p, r)| u64::try_from(r).ok().map(|r| (p, r))),
+    })
 }

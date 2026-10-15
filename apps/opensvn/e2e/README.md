@@ -16,6 +16,33 @@ Apache + mod_dav_svn over HTTPS with Basic auth. It covers the MVP flows of
 | 10.5 switch | Branch ▾ → feature-x → "Carry changes and switch"; local change carried over, toolbar shows the branch; Switch… by URL back to trunk |
 | history and blame | History tab lists the revisions; Browse → file → Blame attributes lines |
 
+`settings.test.mjs` needs no server (a fresh profile starts on the Welcome screen, like a fresh
+install): the toolbar gear, Ctrl+, and Cmd+, (page reporting macOS) open a visible Settings sheet,
+Tauri accepts the menu event names the UI subscribes to, and the Network page refuses an
+out-of-range connection count inline, then saves a valid one through the real backend. `pnpm e2e` runs only the flows; run
+this one after the same build with `xvfb-run -a node e2e/settings.test.mjs` (tauri-driver and
+WebKitWebDriver on `PATH`).
+
+`hostile.test.mjs` (#18) checks out the hostile repository of `fixtures/evil/make-hostile-repo.sh`
+from the evil server (`docker/evil-server/run-local.sh`, started by the test itself on a free
+port, no Docker) and renders its log (History, revision details), its file list (Browse, with
+previews of the SVG/HTML/symlink files) and its properties (a local property edit in the diff
+view). Traps installed in the page record every dialog, `window.open`, inserted script/frame/
+handler/`javascript:` node and fetched resource; a local beacon listener (the repository's
+`BEACON`) and stand-ins for `xdg-open`/`gio`/file managers on `PATH` record any request or launch.
+All must stay empty. The symlinks that leave the working copy are refused by "Show in file
+manager" and "Open with default app", and by `reveal_in_os` / `open_external` invoked straight
+from the page; `wc_add_existing` refuses forged grants (PathGrant). It needs Apache with mod_dav_svn
+(`apache2 libapache2-mod-svn`) and `svn`/`svnadmin`/`svnmucc` on `PATH`:
+`pnpm e2e:hostile` (or `OPENSVN_E2E_SKIP_BUILD=1 pnpm e2e:hostile`).
+
+`resume.test.mjs` checks out through `scripts/test-env/flaky-tls-proxy.py` in outage mode: the
+network goes silent mid-checkout, the checkout dialog shows "Connection lost, retrying in Ns…"
+with "Retry now", and the checkout finishes on its own once the network is back. It needs the
+server certificate and key of `scripts/test-env/visualsvn-like.sh` (next to
+`OPENSVN_COMPAT_LOCAL_CA`, or in `OPENSVN_E2E_PROXY_CERTS`); run it after the same build with
+`xvfb-run -a node --test-timeout=600000 e2e/resume.test.mjs`.
+
 Every test gets a fresh scratch repository (`e2e-<test>-<pid>-<n>`) and a fresh app profile
 (`HOME`, `XDG_*_HOME` in a temp dir), so tests never share state. On failure a screenshot, the
 window text and the driver log land in `e2e-artifacts/` (`OPENSVN_E2E_ARTIFACTS`).

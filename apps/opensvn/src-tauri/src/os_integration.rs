@@ -107,7 +107,7 @@ fn default_app_refused(rel: &RelPath) -> AppError {
         "This kind of item is not opened automatically because it could run code. It is shown in your file manager instead.",
     )
     .with_path(rel.as_str());
-    e.actions = Some(vec![ErrorAction::RevealInFileManager]);
+    e.actions = Some(Box::new(vec![ErrorAction::RevealInFileManager]));
     e
 }
 
@@ -134,7 +134,7 @@ pub fn resolve_in_wc(root: &Path, rel: &str) -> Result<PathBuf, AppError> {
 
 fn not_configured(what: &str) -> AppError {
     let mut e = invalid_argument(format!("No {what} is configured. Choose one in Settings."));
-    e.actions = Some(vec![ErrorAction::OpenSettings]);
+    e.actions = Some(Box::new(vec![ErrorAction::OpenSettings]));
     e
 }
 

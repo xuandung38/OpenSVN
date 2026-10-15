@@ -1,7 +1,14 @@
 import { QueryClient } from "@tanstack/react-query";
 import { expect, test, vi } from "vitest";
 import { unwrap } from "./client";
-import { createEventBus, MAX_OPS, type OpState } from "./events";
+import {
+  createEventBus,
+  EVENT_NAMES,
+  isValidEventName,
+  MAX_OPS,
+  MENU_EVENTS,
+  type OpState,
+} from "./events";
 import { mockAdapter, mockEmit } from "./mock/adapter";
 import { queryKeys } from "./query-keys";
 
@@ -36,8 +43,8 @@ test("event bus folds op://* events into the ops cache and invalidates on wc://*
 
   const menu = vi.fn();
   bus.onMenu(menu);
-  mockEmit("menu://wc.commit");
-  expect(menu).toHaveBeenCalledWith("menu://wc.commit");
+  mockEmit("menu://wc/commit");
+  expect(menu).toHaveBeenCalledWith("menu://wc/commit");
 
   bus.stop();
   mockEmit("wc://incoming", { wcId: "wc-main", count: 1, latestRev: 2 });
@@ -167,5 +174,95 @@ test("event bus: notice phases update banners, never the operation's progress", 
   expect(qc.getQueryData(queryKeys.banners("wc-main"))).toEqual([
     { wcId: "wc-main", kind: "needs-cleanup", data: ["file in use"] },
   ]);
+  bus.stop();
+});
+
+test("every subscribed event name is one Tauri accepts", () => {
+  for (const name of [...EVENT_NAMES, ...MENU_EVENTS]) {
+    expect(isValidEventName(name), name).toBe(true);
+  }
+  expect(MENU_EVENTS).toContain("menu://app/settings");
+  // Tauri refuses `.` (and spaces, CR, ...) in event names, on emit and on listen.
+  for (const bad of ["menu://app.settings", "", "a b", "x\r"]) {
+    expect(isValidEventName(bad), bad).toBe(false);
+  }
+});
+
+test("event bus: one refused subscription does not stop the later ones", async () => {
+  const qc = new QueryClient();
+  const refused = "menu://file/checkout";
+  const adapter = {
+    ...mockAdapter,
+    listen: (name: string, handler: (payload: unknown) => void) =>
+      name === refused ? Promise.reject(new Error("refused")) : mockAdapter.listen(name, handler),
+  };
+  const bus = createEventBus(adapter, qc);
+  const menu = vi.fn();
+  bus.onMenu(menu);
+  await expect(bus.start()).rejects.toThrow(/menu:\/\/file\/checkout: refused/);
+  mockEmit("menu://app/settings");
+  expect(menu).toHaveBeenCalledWith("menu://app/settings");
+  bus.stop();
+});
+
+test("event bus: path logs, warnings and results stay with the operation; background checks leave", async () => {
+  const qc = new QueryClient();
+  const bus = createEventBus(mockAdapter, qc);
+  await bus.start();
+  mockEmit("op://started", {
+    opId: "k1",
+    kind: "checkout",
+    wcId: null,
+    title: "Checkout REPO",
+    rootPath: "/w/REPO",
+    background: false,
+  });
+  mockEmit("op://progress", {
+    opId: "k1",
+    phase: "checkout",
+    current: 2,
+    entries: [
+      { action: "added", path: "" },
+      { action: "added", path: "a" },
+    ],
+    entriesDropped: 0,
+  });
+  mockEmit("op://progress", { opId: "k1", phase: "external-warning", currentPath: "ext" });
+  mockEmit("op://progress", {
+    opId: "k1",
+    phase: "checkout",
+    current: 3,
+    entries: [{ action: "added", path: "b" }],
+    entriesDropped: 4,
+  });
+  mockEmit("op://finished", { opId: "k1", result: { kind: "checkedOut", wcId: "w9", newRev: 7 } });
+  let ops = qc.getQueryData<Record<string, OpState>>(queryKeys.ops) ?? {};
+  expect(ops.k1?.log.map((l) => l.path)).toEqual(["", "a", "b"]);
+  expect(ops.k1?.logDropped).toBe(4);
+  expect(ops.k1?.warnings).toEqual(["ext"]);
+  expect(ops.k1?.progress?.current).toBe(3);
+  expect(ops.k1?.result).toEqual({ kind: "checkedOut", wcId: "w9", newRev: 7 });
+  expect(ops.k1?.endedAt).not.toBeNull();
+
+  const bg = { opId: "b1", kind: "status-remote", wcId: "w9", title: "Check", rootPath: null };
+  mockEmit("op://started", { ...bg, background: true });
+  mockEmit("op://finished", { opId: "b1", result: { kind: "done" } });
+  ops = qc.getQueryData<Record<string, OpState>>(queryKeys.ops) ?? {};
+  expect(ops.b1).toBeUndefined();
+  mockEmit("op://started", { ...bg, opId: "b2", background: true });
+  mockEmit("op://failed", { opId: "b2", error: { code: "network", message: "offline" } });
+  ops = qc.getQueryData<Record<string, OpState>>(queryKeys.ops) ?? {};
+  expect(ops.b2?.state).toBe("failed");
+  expect(ops.b2?.appError?.message).toBe("offline");
+  // Every round fails while offline: only the newest failure of each working copy stays.
+  mockEmit("op://started", { ...bg, opId: "b3", background: true });
+  mockEmit("op://failed", { opId: "b3", error: { code: "network", message: "offline" } });
+  mockEmit("op://started", { ...bg, opId: "b4", wcId: "w8", background: true });
+  mockEmit("op://failed", { opId: "b4", error: { code: "network", message: "offline" } });
+  ops = qc.getQueryData<Record<string, OpState>>(queryKeys.ops) ?? {};
+  expect(ops.b2).toBeUndefined();
+  expect(ops.b3?.state).toBe("failed");
+  expect(ops.b4?.state).toBe("failed");
+  expect(ops.k1?.state).toBe("done");
   bus.stop();
 });

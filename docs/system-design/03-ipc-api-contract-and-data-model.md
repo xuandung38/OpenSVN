@@ -77,13 +77,22 @@ interface Conflict { path: string; kind: 'text' | 'property' | 'tree';
   treeReason?: 'edited' | 'deleted' | 'missing' | 'moved' | 'added' | 'replaced';
   treeAction?: 'edit' | 'delete' | 'add' | 'replace' | 'move'; }
 
-interface OperationHandle { opId: OpId; kind: OperationKind; wcId?: WcId; title: string; }
+interface OperationHandle { opId: OpId; kind: OperationKind; wcId?: WcId; title: string;
+  rootPath?: string;      // thư mục WC mà thao tác ghi/đọc (checkout: thư mục đích, chưa có wcId)
+  background: boolean; }  // app tự chạy (kiểm tra cập nhật định kỳ): UI báo lỗi nhẹ, không hiện dòng đỏ
 type OperationKind = 'checkout' | 'update' | 'switch' | 'commit' | 'revert' | 'cleanup' | 'lock'
   | 'unlock' | 'status-remote' | 'log' | 'blame' | 'remote-edit' | 'set-depth' | 'upgrade' | 'merge'
   | 'status-refresh' | 'add' | 'delete' | 'move' | 'copy' | 'save';
 
 interface Progress { opId: OpId; phase: string; current?: number; total?: number;
-  bytesDone?: number; bytesTotal?: number; currentPath?: string; }
+  bytesDone?: number;     // byte đã nhận từ server (transport đếm theo CancelToken của thao tác)
+  bytesTotal?: number; currentPath?: string;
+  stage?: 'connecting' | 'fetching' | 'finishing';
+  entries: { action: PathAction; path: string }[]; // path đã xử lý từ event trước, mới nhất cuối
+  entriesDropped: number; // path bị bỏ khỏi entries vì quá ENTRY_BATCH_LIMIT (200) giữa hai event
+  counts?: ActionCounts; } // đếm cộng dồn theo action, luôn chính xác
+type PathAction = 'added' | 'deleted' | 'updated' | 'merged' | 'conflicted' | 'tree-conflicted'
+  | 'existed' | 'restored' | 'skipped';                            // A D U G C C E R S
 
 // Tham số dạng union: tagged enum theo `kind` (camelCase).
 type LogTarget = { kind: 'url'; url: string } | { kind: 'wc'; wcId: WcId; path: string };
@@ -206,7 +215,7 @@ Grant dùng một lần, hết hạn sau 5 phút, gắn với cửa sổ `main`;
 
 ### 3.7 Menu native
 Menu bar do Rust dựng (`menu.rs`, `menu_spec`): một menu duy nhất, cấu trúc và phím tắt theo doc 01 §8 (OpenSVN trên macOS · File · Edit · View · Working Copy · Branch/Location · Selection · Window trên macOS · Help). Mỗi mục là một trong ba loại, có test Rust giữ đúng theo cả hai chiều:
-- **Mục của UI:** phát event không payload `menu://<id>` (id = id mục, ví dụ `menu://wc.update`, `menu://file.checkout`, `menu://edit.find`, `menu://view.diff-mode`). UI đăng ký đúng danh sách `MENU_EVENTS` (`src/ipc/events.ts`), mỗi event có hành động trong `MENU_ACTIONS` (`use-wc-shortcuts.ts`, cùng tập khóa, có test). Mục chưa làm (phase sau, ví dụ Merge, Properties, Sparse) báo "chưa có" bằng toast thay vì không làm gì.
+- **Mục của UI:** phát event không payload `menu://<id>`, trong đó dấu `.` của id mục đổi thành `/` vì Tauri chỉ nhận tên event gồm chữ, số, `-`, `/`, `:` và `_` (ví dụ `menu://wc/update`, `menu://file/checkout`, `menu://edit/find`, `menu://view/diff-mode`). UI đăng ký đúng danh sách `MENU_EVENTS` (`src/ipc/events.ts`), mỗi event có hành động trong `MENU_ACTIONS` (`use-wc-shortcuts.ts`, cùng tập khóa, có test). Mục chưa làm (phase sau, ví dụ Merge, Properties, Sparse) báo "chưa có" bằng toast thay vì không làm gì.
 - **Mục Rust tự xử lý** (`native_action`): Zoom in/out/Actual size (đổi zoom webview) và Exit; không phát event.
 - **Mục native** (undo/redo/cut/copy/paste/select all, hide, quit, minimize, full screen, about): vai trò của hệ điều hành; không phát event.
 
@@ -233,7 +242,7 @@ type ErrorCode = 'network' | 'timeout' | 'auth-required' | 'negotiate-failed' | 
 | Event | Payload | Dùng cho |
 |---|---|---|
 | `op://started` | `OperationHandle` | Activity |
-| `op://progress` | `Progress` (throttle ≤ 10/s/op). Phase thông báo không bị throttle bỏ: `needs-cleanup` (thao tác xong nhưng WC cần cleanup, `currentPath` = lý do → UI hiện banner "needs cleanup" của WC), `nested-wc-skipped` (add bỏ qua WC lồng, W150002, `currentPath` = nội dung cảnh báo → UI hiện toast) | Activity, nút Update, banner, toast |
+| `op://progress` | `Progress` (gộp, ≤ 20/s/op: mỗi sample được gộp vào trạng thái của thao tác, path dồn vào `entries` của event kế tiếp; một ticker gửi trạng thái còn giữ khi engine im lặng). Phase thông báo không bị gộp: `external-warning` (external lỗi/bỏ qua), `needs-cleanup` (thao tác xong nhưng WC cần cleanup, `currentPath` = lý do → UI hiện banner "needs cleanup" của WC), `nested-wc-skipped` (add bỏ qua WC lồng, W150002, `currentPath` = nội dung cảnh báo → UI hiện toast) | Activity, nút Update, banner, toast |
 | `op://finished` | `{ opId, result }` (kết quả theo loại, vd `{ kind: 'newRev', newRev }`; checkout: `{ kind: 'checkedOut', wcId: WcId \| null, newRev }`) | toast, invalidate query; checkout → mở WC mới |
 | `op://failed` | `{ opId, error: AppError }` | Activity, banner |
 | `wc://status-changed` | `{ wcId, changed: FileStatus[], removed: string[] }` (delta) | tab Changes |
@@ -307,7 +316,7 @@ Log theo path dùng `log_path_by_path`; khi khoảng revision chưa nằm trong 
 | Key | Kiểu | Mặc định |
 |---|---|---|
 | `general.checkoutRoot` | string (chỉ đọc qua `settings_set`; đổi bằng `checkout_root_choose`) | `~/svn` |
-| `general.checkIntervalMin` | number | 10 |
+| `general.checkIntervalMin` | number 1–1440 | 10 |
 | `general.language` | `'vi' \| 'en'` | theo OS |
 | `appearance.theme` | `'system' \| 'light' \| 'dark'` | system |
 | `diff.mode` | `'split' \| 'unified'` | split |
@@ -318,11 +327,13 @@ Log theo path dùng `log_path_by_path`; khi khoảng revision chưa nằm trong 
 | `tools.terminal` | `{ path, args } \| null` (chỉ đổi qua `program_choose`) | null |
 | `diff.toolsByExtension` | `{ ext, path, args }[] \| null` (chỉ đổi qua `program_choose_for_extension`; dùng thay `diff.externalTool` cho file có đuôi `ext`, nhận cả file nhị phân) | null |
 | `network.maxConnections` | number 1–8 | 4 |
-| `network.timeoutSec` | number | 60 |
+| `network.timeoutSec` | number 5–3600 | 60 |
 | `network.proxy` | `'system' \| { url }` | system |
 | `network.negotiate` | boolean — SSO Kerberos (Negotiate) khi server đề nghị; tắt thì không bao giờ thử Kerberos, server có Basic sẽ hỏi tên/mật khẩu. Đổi giá trị dựng lại transport (bỏ session cache) | true |
 | `wc.defaultFormat` | 31 (MVP chỉ ghi 31; 32 sau MVP) | 31 |
 | `wc.readSubversionConfig` | boolean | true |
-| `cache.maxSizeGb` | number | 2 |
+| `cache.maxSizeGb` | number 1–4096 | 2 |
 | `integrations.webRevisionUrl` | string | `https://{server}/!/#{repo}/commit/r{rev}/` |
 | `integrations.webFileUrl` | string | `https://{server}/!/#{repo}/view/{revSpec}/{path}` — `{revSpec}`: `head` hoặc `r<N>`; `{path}`: relpath từ repo root, percent-encode UTF-8 từng segment, giữ `/` |
+
+Khoảng giá trị của các key số do validator Rust (`settings/validate.rs`, `SETTING_RANGES`) định nghĩa, và chỉ định nghĩa ở đó. Bindings sinh ra mang hằng `SETTING_RANGES` để UI dùng cho kiểm tra, nhãn và `min`/`max` của ô nhập. Khi load, giá trị cũ nằm ngoài khoảng bị kẹp (clamp) về biên gần nhất.

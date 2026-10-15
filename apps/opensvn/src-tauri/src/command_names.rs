@@ -1,6 +1,7 @@
 /// Names of all app commands. Shared by build.rs (permission manifest) and lib.rs (tests).
 pub const COMMAND_NAMES: &[&str] = &[
     "repo_info",
+    "repo_resolve_url",
     "repo_list",
     "repo_cat",
     "repo_save",
@@ -15,6 +16,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "layout_detect",
     "copy_location",
     "op_cancel",
+    "op_retry_now",
     "op_list",
     "auth_respond",
     "accounts_list",
@@ -44,6 +46,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "wc_remove",
     "wc_rename",
     "wc_open",
+    "wc_continue",
     "wc_close",
     "wc_entries",
     "wc_locate",

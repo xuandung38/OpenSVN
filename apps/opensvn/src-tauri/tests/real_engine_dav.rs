@@ -411,6 +411,7 @@ scenario!(schedule_and_revert);
 scenario!(conflict_blocks_commit_until_resolved);
 scenario!(lock_and_unlock);
 scenario!(remote_edit_and_copy);
+scenario!(repo_info_at_a_peg_revision);
 scenario!(cancellation_and_errors);
 scenario!(working_copy_metadata_operations);
 scenario!(switch_to_a_branch);
@@ -755,6 +756,819 @@ async fn commit_with_changes_below_a_switched_subtree() {
                 .unwrap_or_else(|err| panic!("cat {path}: {err}"));
             assert_eq!(text.content, expected, "{path} at r{}", rev.0);
         }
+    }
+    assert_no_prompt();
+}
+
+// ---- connections closed or recycled by the server ----
+
+/// Dump of one more revision with `dirs` x `files` files of `size` bytes below `trunk/bulk`.
+fn bulk_dump(dirs: usize, files: usize, size: usize) -> Vec<u8> {
+    let empty = "PROPS-END\n";
+    let rev_props = "K 10\nsvn:author\nV 5\nalice\nK 8\nsvn:date\nV 27\n\
+                     2026-01-02T00:00:00.000000Z\nK 7\nsvn:log\nV 4\nBulk\nPROPS-END\n";
+    let mut out = format!(
+        "SVN-fs-dump-format-version: 2\n\nRevision-number: 2\nProp-content-length: {0}\n\
+         Content-length: {0}\n\n{rev_props}\n",
+        rev_props.len()
+    );
+    let add_dir = |out: &mut String, path: &str| {
+        out.push_str(&format!(
+            "Node-path: {path}\nNode-kind: dir\nNode-action: add\nProp-content-length: {0}\n\
+             Content-length: {0}\n\n{empty}\n\n",
+            empty.len()
+        ));
+    };
+    add_dir(&mut out, "trunk/bulk");
+    for d in 0..dirs {
+        add_dir(&mut out, &format!("trunk/bulk/d{d:03}"));
+        for f in 0..files {
+            let line = format!("dir {d} file {f}\n");
+            let text: String = line.repeat(size / line.len() + 1)[..size].to_owned();
+            out.push_str(&format!(
+                "Node-path: trunk/bulk/d{d:03}/f{f:03}.txt\nNode-kind: file\nNode-action: add\n\
+                 Prop-content-length: {}\nText-content-length: {}\nContent-length: {}\n\n\
+                 {empty}{text}\n\n",
+                empty.len(),
+                text.len(),
+                empty.len() + text.len()
+            ));
+        }
+    }
+    out.into_bytes()
+}
+
+impl Scratch {
+    /// Loads one more revision from `dump` (renumbered after the youngest).
+    fn load(&self, dump: &[u8]) {
+        let mut c = match &self.host {
+            Host::Docker { container, .. } => {
+                let mut c = Command::new("docker");
+                c.args(["exec", "-i", "-u", "33:33", container, "svnadmin"]);
+                c
+            }
+            Host::Local { .. } => Command::new(
+                std::env::var_os("OPENSVN_COMPAT_LOCAL_SVNADMIN")
+                    .unwrap_or_else(|| "svnadmin".into()),
+            ),
+        };
+        c.args(["load", "-q"]);
+        match &self.host {
+            Host::Docker { .. } => c.arg(format!("/var/svn/repos/{}", self.name)),
+            Host::Local { repos, .. } => c.arg(repos.join(&self.name)),
+        };
+        run(c, Some(dump));
+    }
+}
+
+/// Files below `root`, `.svn` excluded.
+fn count_files(root: &Path) -> usize {
+    let mut n = 0;
+    for entry in std::fs::read_dir(root).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name() == ".svn" {
+            continue;
+        }
+        if entry.file_type().unwrap().is_dir() {
+            n += count_files(&entry.path());
+        } else {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// A large checkout and repeated remote status checks ("check for updates") of another working
+/// copy run at the same time over the app's one shared transport, as in the app. Against a server
+/// that recycles connections often (`VSVN_KEEPALIVE_TIMEOUT=1 VSVN_MAX_KEEPALIVE_REQUESTS=5`) or
+/// through `scripts/test-env/flaky-tls-proxy.py`, both must succeed and the checkout must be
+/// complete and clean.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn checkout_and_remote_status_at_the_same_time() {
+    const DIRS: usize = 40;
+    const FILES: usize = 25;
+    for (version, host) in servers() {
+        eprintln!("server {version}");
+        let h = harness(&host, "concurrent");
+        let e = h.engine();
+        let small = checkout_trunk(&h, "small").await;
+        h.scratch.load(&bulk_dump(DIRS, FILES, 4096));
+        let plan = CheckoutPlan {
+            url: format!("{}/trunk", h.repo_url()),
+            path: h.work_dir().join("big"),
+            rev: None,
+            depth: Depth::Infinity,
+            sparse: None,
+            format: WcFormat::V31,
+            store_pristine: true,
+            ignore_externals: false,
+        };
+        let op = ctx();
+        let checkout = e.checkout(&plan, &op);
+        let checks = async {
+            let mut scans = Vec::new();
+            for _ in 0..8 {
+                scans.push(e.status_remote(&small, &ctx()).await);
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+            scans
+        };
+        let (info, scans) = tokio::join!(checkout, checks);
+        let info = info.unwrap_or_else(|err| panic!("checkout next to remote status: {err:?}"));
+        for scan in scans {
+            let scan = scan.unwrap_or_else(|err| panic!("remote status next to checkout: {err:?}"));
+            assert_eq!(scan.incoming, 1, "{scan:?}");
+        }
+        let root = PathBuf::from(info.root_path);
+        assert_eq!(count_files(&root), DIRS * FILES + 2);
+        let big = WcRef {
+            id: WcId("big".into()),
+            root,
+        };
+        let query = StatusQuery {
+            include_ignored: false,
+            include_unversioned: true,
+        };
+        let changed: Vec<_> = e
+            .status(&big, query, &ctx())
+            .await
+            .expect("status of the checkout")
+            .into_iter()
+            .filter(|s| s.text != opensvn_ipc::NodeStatus::Normal)
+            .collect();
+        assert!(changed.is_empty(), "{changed:?}");
+    }
+    assert_no_prompt();
+}
+
+/// Dump of one more revision that adds the directories `dirs` and the files `files`.
+fn add_dump(dirs: &[&str], files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let empty = "PROPS-END\n";
+    let rev_props = "K 10\nsvn:author\nV 5\nalice\nK 8\nsvn:date\nV 27\n\
+                     2026-01-02T00:00:00.000000Z\nK 7\nsvn:log\nV 5\nStall\nPROPS-END\n";
+    let mut out = format!(
+        "SVN-fs-dump-format-version: 2\n\nRevision-number: 2\nProp-content-length: {0}\n\
+         Content-length: {0}\n\n{rev_props}\n",
+        rev_props.len(),
+    )
+    .into_bytes();
+    for dir in dirs {
+        out.extend_from_slice(
+            format!(
+                "Node-path: {dir}\nNode-kind: dir\nNode-action: add\nProp-content-length: {0}\n\
+                 Content-length: {0}\n\n{empty}\n\n",
+                empty.len()
+            )
+            .as_bytes(),
+        );
+    }
+    for (path, text) in files {
+        out.extend_from_slice(
+            format!(
+                "Node-path: {path}\nNode-kind: file\nNode-action: add\n\
+                 Prop-content-length: {}\nText-content-length: {}\nContent-length: {}\n\n{empty}",
+                empty.len(),
+                text.len(),
+                empty.len() + text.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(text);
+        out.extend_from_slice(b"\n\n");
+    }
+    out
+}
+
+/// `len` incompressible bytes (svndiff compression must not shrink them below a cut offset).
+fn noise(len: usize) -> Vec<u8> {
+    let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        })
+        .collect()
+}
+
+/// `scripts/test-env/flaky-tls-proxy.py` in front of the local server; killed when dropped.
+struct FlakyProxy {
+    child: std::process::Child,
+    log: PathBuf,
+    port: u16,
+}
+
+impl FlakyProxy {
+    /// Starts the proxy on a free port in front of the server of `base` (an `https` URL of the
+    /// local server), with the fault arguments `faults`. `None` when the test certificates of
+    /// `scripts/test-env/visualsvn-like.sh` are not next to the CA.
+    fn start(base: &str, faults: &[&str], log: PathBuf) -> Option<Self> {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        Self::spawn(base, port, faults, log)
+    }
+
+    /// [`Self::start`] on `port`; `None` while the port is still taken.
+    fn start_on(base: &str, port: u16, faults: &[&str], log: PathBuf) -> Option<Self> {
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+            return None;
+        }
+        Self::spawn(base, port, faults, log)
+    }
+
+    fn spawn(base: &str, port: u16, faults: &[&str], log: PathBuf) -> Option<Self> {
+        let certs = ca_path().parent()?.to_path_buf();
+        let (cert, key) = (certs.join("server.crt"), certs.join("server.key"));
+        if !cert.exists() || !key.exists() {
+            return None;
+        }
+        let url = url::Url::parse(base).ok()?;
+        let upstream = format!("{}:{}", url.host_str()?, url.port_or_known_default()?);
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../scripts/test-env/flaky-tls-proxy.py");
+        let child = Command::new("python3")
+            .arg(script)
+            .args(["--listen", &port.to_string(), "--upstream", &upstream])
+            .arg("--cert")
+            .arg(&cert)
+            .arg("--key")
+            .arg(&key)
+            .arg("--ca")
+            .arg(ca_path())
+            .args(faults)
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .expect("python3 for the flaky proxy");
+        let started = std::time::Instant::now();
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the flaky proxy did not start"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Some(Self { child, log, port })
+    }
+
+    /// `base` with the proxy's port.
+    fn url(&self, base: &str) -> String {
+        let mut url = url::Url::parse(base).unwrap();
+        url.set_port(Some(self.port)).unwrap();
+        url.as_str().trim_end_matches('/').to_owned()
+    }
+
+    /// Responses the proxy cut off so far.
+    fn cuts(&self) -> usize {
+        std::fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("truncated a"))
+            .count()
+    }
+}
+
+impl Drop for FlakyProxy {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A proxy that always cuts the update at the same offset (inside a file bigger than the
+/// offset, so no attempt gets past it). The working copy has a conflicted directory that every
+/// drive is sent again and skips, so every resumed drive notifies something, but commits nothing
+/// new: two such resumes end the update with the connection error (counting notifications, it
+/// went on for 20). The working copy stays resumable: once the connection works, an update
+/// finishes it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
+async fn update_cut_at_the_same_offset_stops_after_two_stalled_resumes() {
+    const SMALL: usize = 12;
+    const BIG: usize = 2 << 20;
+    let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
+        eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
+        return;
+    };
+    let Host::Local { base, .. } = &host else {
+        unreachable!()
+    };
+    let h = harness(&host, "stall");
+    let e = h.engine();
+    h.scratch.load(&add_dump(
+        &["trunk/stall", "trunk/stall/aaa"],
+        &[("trunk/stall/aaa/a.txt".to_owned(), b"a\n".to_vec())],
+    ));
+    let logs = h.scratch_dir();
+    let Some(healthy) = FlakyProxy::start(base, &[], logs.join("proxy-1.log")) else {
+        eprintln!("SKIPPED: no server certificate next to the CA for the flaky proxy");
+        return;
+    };
+    let port = healthy.port;
+    let checkout = |name: &'static str, url: String| {
+        let plan = CheckoutPlan {
+            url,
+            path: h.work_dir().join(name),
+            rev: None,
+            depth: Depth::Infinity,
+            sparse: None,
+            format: WcFormat::V31,
+            store_pristine: true,
+            ignore_externals: false,
+        };
+        async move {
+            let info = e.checkout(&plan, &ctx()).await.expect("checkout");
+            WcRef {
+                id: WcId(name.to_owned()),
+                root: PathBuf::from(info.root_path),
+            }
+        }
+    };
+    let update_req = |wc: &WcRef| UpdateRequest {
+        wc_id: wc.id.clone(),
+        paths: None,
+        rev: None,
+        depth: None,
+    };
+    // `b` goes through the proxy, `a` straight to the server.
+    let b = checkout(
+        "b",
+        format!("{}/{}/trunk/stall", healthy.url(base), h.scratch.name),
+    )
+    .await;
+    let a = checkout("a", format!("{}/trunk/stall", h.repo_url())).await;
+    // A property conflict on `aaa` in `b`: every later update skips `aaa` and says so.
+    e.props_set(&a, "aaa", "color", Some("theirs"), &ctx())
+        .await
+        .expect("propset in a");
+    e.commit(
+        &a,
+        &CommitRequest {
+            wc_id: a.id.clone(),
+            paths: vec!["aaa".into()],
+            message: "color".into(),
+            keep_locks: false,
+            auto_add_remove: true,
+        },
+        &ctx(),
+    )
+    .await
+    .expect("commit from a");
+    e.props_set(&b, "aaa", "color", Some("mine"), &ctx())
+        .await
+        .expect("propset in b");
+    e.update(&b, &update_req(&b), &ctx())
+        .await
+        .expect("update into the conflict");
+    // A change in `aaa` (so the server sends `aaa` again on every drive), small files and,
+    // after them, a file bigger than the cut offset.
+    let mut files = vec![("trunk/stall/aaa/new.txt".to_owned(), b"new\n".to_vec())];
+    for f in 0..SMALL {
+        files.push((format!("trunk/stall/zzz/s{f:03}.txt"), vec![b'x'; 1024]));
+    }
+    files.push(("trunk/stall/zzz/z-big.bin".to_owned(), noise(BIG)));
+    h.scratch.load(&add_dump(&["trunk/stall/zzz"], &files));
+    drop(healthy);
+
+    let cutting = (0..50)
+        .find_map(|_| {
+            let p = FlakyProxy::start_on(
+                base,
+                port,
+                &[
+                    "--truncate-every",
+                    "1",
+                    "--truncate-at",
+                    "262144",
+                    "--truncate-method",
+                    "REPORT,GET",
+                ],
+                logs.join("proxy-2.log"),
+            );
+            if p.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            p
+        })
+        .expect("the cutting proxy on the same port");
+    let started = std::time::Instant::now();
+    let err = e
+        .update(&b, &update_req(&b), &ctx())
+        .await
+        .expect_err("an update that never gets past the cut");
+    assert!(
+        err.connection_failure().is_some(),
+        "connection failure expected: {err:?}"
+    );
+    // One cut per drive: the first drive, then the two resumes that committed nothing new.
+    assert_eq!(
+        cutting.cuts(),
+        3,
+        "{}",
+        std::fs::read_to_string(&cutting.log).unwrap_or_default()
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+    assert!(
+        !b.root.join("zzz/z-big.bin").exists(),
+        "no partial file in the working copy"
+    );
+    drop(cutting);
+
+    // The connection works again (same address, no faults): "Update to finish" completes it.
+    let _healthy = (0..50)
+        .find_map(|_| {
+            let p = FlakyProxy::start_on(base, port, &[], logs.join("proxy-3.log"));
+            if p.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            p
+        })
+        .expect("a plain proxy on the same port");
+    e.update(&b, &update_req(&b), &ctx())
+        .await
+        .expect("update finishes");
+    assert_eq!(
+        std::fs::metadata(b.root.join("zzz/z-big.bin"))
+            .unwrap()
+            .len(),
+        BIG as u64
+    );
+    assert_eq!(count_files(&b.root.join("zzz")), SMALL + 1);
+    let changed: Vec<_> = e
+        .status(
+            &b,
+            StatusQuery {
+                include_ignored: false,
+                include_unversioned: true,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("status")
+        .into_iter()
+        .filter(|s| {
+            s.text != opensvn_ipc::NodeStatus::Normal
+                || !matches!(
+                    s.props,
+                    opensvn_ipc::PropStatus::None | opensvn_ipc::PropStatus::Normal
+                )
+        })
+        .collect();
+    // Only the conflicted directory (still skipped until resolved) differs.
+    assert!(
+        changed.iter().all(|s| s.path.starts_with("aaa")),
+        "{changed:?}"
+    );
+    assert_no_prompt();
+}
+
+/// The request lines the proxy logged with `--log-requests`, as `(method, uri)`.
+fn requests(proxy: &FlakyProxy) -> Vec<(String, String)> {
+    std::fs::read_to_string(&proxy.log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(": request ").map(|(_, r)| r))
+        .filter_map(|r| r.split_once(' '))
+        .map(|(m, u)| (m.to_owned(), u.to_owned()))
+        .collect()
+}
+
+const WRITE_METHODS: [&str; 11] = [
+    "MKACTIVITY",
+    "POST",
+    "CHECKOUT",
+    "PUT",
+    "PROPPATCH",
+    "MKCOL",
+    "COPY",
+    "DELETE",
+    "MERGE",
+    "LOCK",
+    "UNLOCK",
+];
+
+/// A proxy that silently drops connections idle for 1.5 s (and resets them under the next
+/// request, which it does not forward), with pauses longer than that between operations: the
+/// commit, lock, unlock and copy succeed, every write is sent once, and the stale connections
+/// only ever meet reads (which are sent again on a new connection).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
+async fn writes_after_a_pause_survive_a_proxy_that_dropped_the_idle_connection() {
+    let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
+        eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
+        return;
+    };
+    let Host::Local { base, .. } = &host else {
+        unreachable!()
+    };
+    let h = harness(&host, "stale");
+    let e = h.engine();
+    let Some(proxy) = FlakyProxy::start(
+        base,
+        &["--stale-after", "1.5", "--log-requests"],
+        h.scratch_dir().join("proxy.log"),
+    ) else {
+        eprintln!("SKIPPED: no server certificate next to the CA for the flaky proxy");
+        return;
+    };
+    let url = format!("{}/{}", proxy.url(base), h.scratch.name);
+    let pause = || tokio::time::sleep(std::time::Duration::from_secs(2));
+    let info = e
+        .checkout(
+            &CheckoutPlan {
+                url: format!("{url}/trunk"),
+                path: h.work_dir().join("wc"),
+                rev: None,
+                depth: Depth::Infinity,
+                sparse: None,
+                format: WcFormat::V31,
+                store_pristine: true,
+                ignore_externals: false,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("checkout");
+    let wc = WcRef {
+        id: WcId("wc".to_owned()),
+        root: PathBuf::from(info.root_path),
+    };
+    pause().await;
+    h.write_file(&wc.root, "README.md", "after a pause\n")
+        .unwrap();
+    e.commit(
+        &wc,
+        &CommitRequest {
+            wc_id: wc.id.clone(),
+            paths: vec!["README.md".into()],
+            message: "after a pause".into(),
+            keep_locks: false,
+            auto_add_remove: true,
+        },
+        &ctx(),
+    )
+    .await
+    .expect("commit after a pause");
+    pause().await;
+    let scope = opensvn_lib::engine::LockScope::Wc {
+        wc: wc.clone(),
+        paths: vec!["README.md".into()],
+    };
+    e.lock(&scope, Some("after a pause"), false, &ctx())
+        .await
+        .expect("lock after a pause");
+    pause().await;
+    e.unlock(&scope, false, &ctx())
+        .await
+        .expect("unlock after a pause");
+    pause().await;
+    e.copy_location(
+        &CopyLocationRequest {
+            from_url: format!("{url}/trunk"),
+            from_rev: None,
+            to_url: format!("{url}/branches/after-a-pause"),
+            message: "copy after a pause".into(),
+            switch_wc_id: None,
+            from_wc: None,
+        },
+        None,
+        &ctx(),
+    )
+    .await
+    .expect("copy after a pause");
+
+    let log = std::fs::read_to_string(&proxy.log).unwrap_or_default();
+    let resets: Vec<&str> = log.lines().filter(|l| l.contains("idle")).collect();
+    assert!(
+        !resets.is_empty(),
+        "the proxy dropped no connection:\n{log}"
+    );
+    for r in &resets {
+        assert!(
+            !WRITE_METHODS.iter().any(|m| r.contains(&format!("({m})"))),
+            "a write met a dropped connection: {r}"
+        );
+    }
+    let count = |m: &str| requests(&proxy).iter().filter(|(x, _)| x == m).count();
+    // One commit and one copy (HTTP v2: POST, then MERGE), one lock, one unlock.
+    assert_eq!(count("MERGE"), 2, "{log}");
+    assert_eq!(count("LOCK"), 1, "{log}");
+    assert_eq!(count("UNLOCK"), 1, "{log}");
+    assert_eq!(count("PUT"), 1, "{log}");
+    assert_no_prompt();
+}
+
+/// A proxy that closes every reused connection under its next request: a write that goes out
+/// on such a connection fails, but is never sent a second time.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
+async fn a_write_the_proxy_cuts_is_never_sent_again() {
+    let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
+        eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
+        return;
+    };
+    let Host::Local { base, .. } = &host else {
+        unreachable!()
+    };
+    let h = harness(&host, "cutwrite");
+    let e = h.engine();
+    let Some(proxy) = FlakyProxy::start(
+        base,
+        &["--close-after", "1", "--log-requests"],
+        h.scratch_dir().join("proxy.log"),
+    ) else {
+        eprintln!("SKIPPED: no server certificate next to the CA for the flaky proxy");
+        return;
+    };
+    let url = format!("{}/{}", proxy.url(base), h.scratch.name);
+    let info = e
+        .checkout(
+            &CheckoutPlan {
+                url: format!("{url}/trunk"),
+                path: h.work_dir().join("wc"),
+                rev: None,
+                depth: Depth::Infinity,
+                sparse: None,
+                format: WcFormat::V31,
+                store_pristine: true,
+                ignore_externals: false,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("checkout (reads are sent again)");
+    let wc = WcRef {
+        id: WcId("wc".to_owned()),
+        root: PathBuf::from(info.root_path),
+    };
+    for f in ["README.md", "src/main.rs"] {
+        h.write_file(&wc.root, f, "changed\n").unwrap();
+    }
+    // Two PUTs back to back: the second one reuses the connection of the first.
+    let outcome = e
+        .commit(
+            &wc,
+            &CommitRequest {
+                wc_id: wc.id.clone(),
+                paths: vec!["README.md".into(), "src/main.rs".into()],
+                message: "cut".into(),
+                keep_locks: false,
+                auto_add_remove: true,
+            },
+            &ctx(),
+        )
+        .await;
+    let log = std::fs::read_to_string(&proxy.log).unwrap_or_default();
+    let cut_writes: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("closing before request"))
+        .filter(|l| WRITE_METHODS.iter().any(|m| l.contains(&format!("({m},"))))
+        .collect();
+    assert!(
+        !cut_writes.is_empty(),
+        "the proxy cut no write ({outcome:?}):\n{log}"
+    );
+    let err = outcome.expect_err("a commit whose write was cut fails");
+    assert!(
+        err.code == ErrorCode::CommitOutcomeUnknown || err.connection_failure().is_some(),
+        "{err:?}"
+    );
+    let mut writes: Vec<_> = requests(&proxy)
+        .into_iter()
+        .filter(|(m, _)| WRITE_METHODS.contains(&m.as_str()))
+        .collect();
+    let all = writes.len();
+    writes.sort();
+    writes.dedup();
+    assert_eq!(writes.len(), all, "a write was sent twice:\n{log}");
+    assert_no_prompt();
+}
+
+struct NoJournal;
+
+impl svn_ra_api::CommitObserver for NoJournal {
+    fn on_txn_created(&self, _txn: &str) -> svn_types::Result<()> {
+        Ok(())
+    }
+    fn on_merged(&self, _info: &svn_ra_api::CommitInfo) -> svn_types::Result<()> {
+        Ok(())
+    }
+}
+
+/// A pause between two writes of one operation (two files of a commit, the commit's MERGE, a
+/// lock and its unlock) longer than a proxy keeps idle connections: every write still reaches
+/// the server once. Over a session, so no read comes first to flush the dropped connections
+/// out of the pool, as the engine's operations do.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
+async fn writes_of_one_commit_survive_a_pause_longer_than_the_proxy_keeps_idle_connections() {
+    use md5::{Digest as _, Md5};
+    use opensvn_lib::engine::real::SessionConnector as _;
+    use svn_types::{Checksum, RepoUrl, Revnum};
+
+    let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
+        eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
+        return;
+    };
+    let Host::Local { base, .. } = &host else {
+        unreachable!()
+    };
+    let h = harness(&host, "pausedcommit");
+    let Some(proxy) = FlakyProxy::start(
+        base,
+        &["--stale-after", "1.5", "--log-requests"],
+        h.scratch_dir().join("proxy.log"),
+    ) else {
+        eprintln!("SKIPPED: no server certificate next to the CA for the flaky proxy");
+        return;
+    };
+    let url = format!("{}/{}", proxy.url(base), h.scratch.name);
+    let cancel = svn_types::CancelToken::new();
+    let session = connector()
+        .connect_with(
+            &RepoUrl::parse(&url).unwrap(),
+            &opensvn_lib::engine::real::ConnectOptions::at_url(&ctx()),
+            &cancel,
+        )
+        .await
+        .expect("session");
+    let pause = || tokio::time::sleep(std::time::Duration::from_secs(2));
+    let p = |s: &str| RelPath::new(s).unwrap();
+    let dir = h.scratch_dir();
+    let source = |name: &str, text: &[u8]| {
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        let md5: [u8; 16] = Md5::digest(text).into();
+        (
+            svn_ra_api::ReplayableSource {
+                path,
+                translated: true,
+                size: Some(text.len() as u64),
+            },
+            Checksum::Md5(md5),
+        )
+    };
+
+    let mut ed = session
+        .commit_editor("paused", &[], &[], false, Arc::new(NoJournal), &cancel)
+        .await
+        .expect("commit editor");
+    let root = ed.open_root(Some(Revnum(1))).await.unwrap();
+    let trunk = ed
+        .open_directory(&p("trunk"), root, Some(Revnum(1)))
+        .await
+        .unwrap();
+    for name in ["one.txt", "two.txt"] {
+        let (src, md5) = source(name, format!("{name}\n").as_bytes());
+        let f = ed
+            .add_file(&p(&format!("trunk/{name}")), trunk, None)
+            .await
+            .unwrap();
+        ed.apply_text(f, None, src, None, md5).await.unwrap();
+        ed.close_file(f)
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        pause().await;
+    }
+    ed.close_directory(trunk).await.unwrap();
+    ed.close_directory(root).await.unwrap();
+    let info = ed
+        .close_edit()
+        .await
+        .expect("the second PUT and the MERGE after pauses");
+    assert_eq!(info.revision, Revnum(2));
+    pause().await;
+    let lock = session
+        .lock(&p("trunk/one.txt"), Some("paused"), false, None, &cancel)
+        .await
+        .expect("LOCK after a pause");
+    pause().await;
+    session
+        .unlock(&p("trunk/one.txt"), Some(&lock.token), false, &cancel)
+        .await
+        .expect("UNLOCK after a pause");
+
+    let log = std::fs::read_to_string(&proxy.log).unwrap_or_default();
+    for l in log.lines().filter(|l| l.contains("idle")) {
+        assert!(
+            !WRITE_METHODS.iter().any(|m| l.contains(&format!("({m})"))),
+            "a write met a dropped connection: {l}"
+        );
+    }
+    let count = |m: &str| requests(&proxy).iter().filter(|(x, _)| x == m).count();
+    for (m, n) in [
+        ("POST", 1),
+        ("PUT", 2),
+        ("MERGE", 1),
+        ("LOCK", 1),
+        ("UNLOCK", 1),
+    ] {
+        assert_eq!(count(m), n, "{m}:\n{log}");
     }
     assert_no_prompt();
 }

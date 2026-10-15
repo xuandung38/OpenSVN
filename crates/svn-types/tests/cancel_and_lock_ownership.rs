@@ -19,6 +19,17 @@ fn cancel_is_shared_idempotent_and_checked() {
     assert_eq!(t.check().expect_err("cancelled").code, ErrorCode::Cancelled);
 }
 
+#[test]
+fn received_bytes_are_shared_by_every_clone() {
+    let t = CancelToken::new();
+    let c = t.clone();
+    assert_eq!(t.received_bytes(), 0);
+    t.add_received(10);
+    c.add_received(5);
+    assert_eq!(t.received_bytes(), 15);
+    assert_eq!(CancelToken::new().received_bytes(), 0);
+}
+
 #[tokio::test]
 async fn cancelled_future_completes_immediately_when_already_cancelled() {
     let t = CancelToken::new();

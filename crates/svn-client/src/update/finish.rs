@@ -1,6 +1,6 @@
 //! Directory completion, deletion of nodes and the final revision bump of an update drive.
 
-use svn_types::{DirId, NodeKind, RelPath, Result, SvnError};
+use svn_types::{DirId, NodeKind, PropChange, RelPath, Result, SvnError};
 use svn_wc::conflicts::markers::create_prop_marker;
 use svn_wc::conflicts::{PropConflict, TreeAction, TreeReason};
 use svn_wc::db::{BaseNode, Presence, WcDb};
@@ -8,7 +8,7 @@ use svn_wc::skel::Skel;
 use svn_wc::workqueue::WorkItem;
 
 use super::conflict_record::{self, NewConflict};
-use super::editor::{UpdateEditor, failpoint};
+use super::editor::UpdateEditor;
 use super::props::merge_props;
 use super::state::DirState;
 use crate::ctx::UpdateAction;
@@ -44,6 +44,9 @@ fn removal_items(db: &WcDb, rel: &RelPath, out: &mut Vec<Skel>) -> Result<()> {
 
 impl UpdateEditor {
     pub(super) fn delete_node(&mut self, wc: &RelPath, _parent: DirId) -> Result<()> {
+        // What decides between a delete and a kept copy (BASE, the working rows below `wc`, its
+        // conflict) is read below: commit what the batch still holds for `wc` first.
+        self.settle(wc)?;
         let db = self.s.db.clone();
         let Some(base) = db.read_base(wc)? else {
             return Ok(());
@@ -57,13 +60,18 @@ impl UpdateEditor {
             None
         };
         if !base.presence.is_present() {
-            db.with_txn(|t| {
-                t.base_remove(wc)?;
-                if let Some(m) = &marker {
-                    t.base_add(wc, m)?;
-                }
-                Ok(())
-            })?;
+            let path = wc.clone();
+            self.defer(
+                wc,
+                Box::new(move |t| {
+                    t.base_remove(&path)?;
+                    if let Some(m) = &marker {
+                        t.base_add(&path, m)?;
+                    }
+                    Ok(())
+                }),
+            )?;
+            self.batch.removed(wc.clone());
             return Ok(());
         }
         let kind = base.kind;
@@ -85,7 +93,16 @@ impl UpdateEditor {
             // rows and the disk stay as they are.
             let keep_as_working = reason == TreeReason::Edited;
             let repos = base.repos_relpath.clone().unwrap_or_default();
-            let (old, new) = self.side(Some(&base), &repos, NodeKind::None);
+            // The left side has the kind of the local node (svn's `delete_entry` reads the
+            // working node): a file replaced locally by a directory is a directory there.
+            let mut left = base;
+            if let Some(c) = shadowing
+                .as_ref()
+                .filter(|c| c.presence != Presence::BaseDeleted)
+            {
+                left.kind = c.kind;
+            }
+            let (old, new) = self.side(Some(&left), &repos, NodeKind::None);
             let info = conflict_record::operation_info(
                 self.s.switch_relpath.is_some(),
                 &self.s.repos_root,
@@ -93,38 +110,47 @@ impl UpdateEditor {
                 old.as_ref(),
                 new.as_ref(),
             );
-            db.with_txn(|t| {
-                if keep_as_working {
-                    t.convert_base_to_copy(wc)?;
-                } else {
-                    t.base_remove(wc)?;
-                }
-                if let Some(m) = &marker {
-                    t.base_add(wc, m)?;
-                }
-                conflict_record::record(
-                    t,
-                    wc,
-                    &info,
-                    vec![NewConflict::Tree(reason.clone(), TreeAction::Delete)],
-                )
-            })?;
+            let path = wc.clone();
+            let recorded = reason.clone();
+            self.defer(
+                wc,
+                Box::new(move |t| {
+                    if keep_as_working {
+                        t.convert_base_to_copy(&path)?;
+                    } else {
+                        t.base_remove(&path)?;
+                    }
+                    if let Some(m) = &marker {
+                        t.base_add(&path, m)?;
+                    }
+                    conflict_record::record(
+                        t,
+                        &path,
+                        &info,
+                        vec![NewConflict::Tree(recorded, TreeAction::Delete)],
+                    )
+                }),
+            )?;
+            self.batch.removed(wc.clone());
             self.skipped.push(wc.clone());
-            self.deletion_conflicts.insert(wc.clone(), (base, reason));
+            self.deletion_conflicts.insert(wc.clone(), (left, reason));
             self.emit(wc, NodeKind::None, UpdateAction::TreeConflicted);
             return Ok(());
         }
         let mut items = Vec::new();
         removal_items(&db, wc, &mut items)?;
-        db.with_txn(|t| {
-            t.base_remove(wc)?;
-            if let Some(m) = &marker {
-                t.base_add(wc, m)?;
-            }
-            t.queue_work(&items)
-        })?;
-        failpoint!("update.after_delete_txn");
-        self.run_queue()?;
+        let path = wc.clone();
+        self.defer(
+            wc,
+            Box::new(move |t| {
+                t.base_remove(&path)?;
+                if let Some(m) = &marker {
+                    t.base_add(&path, m)?;
+                }
+                t.queue_work(&items)
+            }),
+        )?;
+        self.batch.removed(wc.clone());
         self.emit(wc, kind, UpdateAction::Delete);
         Ok(())
     }
@@ -156,7 +182,21 @@ impl UpdateEditor {
             .unwrap_or_default();
         // A shadowed directory (deleted or replaced locally, or below an obstruction) only moves
         // BASE on; its working properties are not merged into.
-        let shadowed = d.shadow.is_some();
+        let mut prop_changes = d.prop_changes.clone();
+        if d.was_incomplete {
+            // Reported `start_empty`: the server sent every property the directory has, so a
+            // BASE property it did not mention is gone (svn's `close_directory`).
+            for (name, _) in &old_pristine {
+                let name = String::from_utf8_lossy(name);
+                if !prop_changes.iter().any(|c| c.name == name) {
+                    prop_changes.push(PropChange {
+                        name: name.into_owned(),
+                        value: None,
+                    });
+                }
+            }
+        }
+        let mut shadowed = d.shadow.is_some();
         let actual = if shadowed {
             old_pristine.clone()
         } else if d.added || d.base.is_none() {
@@ -164,7 +204,14 @@ impl UpdateEditor {
         } else {
             db.actual_props(&d.wc)?
         };
-        let pm = merge_props(&old_pristine, &d.prop_changes, &actual);
+        let mut pm = merge_props(&old_pristine, &prop_changes, &actual);
+        if d.obstructed && !pm.conflicted.is_empty() {
+            // A property conflict needs a marker file inside the directory, which is not there
+            // (and a symlink is never written through): only BASE moves on, the local
+            // properties stay as they are, and the tree conflict tells the user.
+            shadowed = true;
+            pm = merge_props(&old_pristine, &prop_changes, &old_pristine);
+        }
         let mut work: Vec<Skel> = Vec::new();
         let mut conflicts = Vec::new();
         let mut action = None;
@@ -223,17 +270,21 @@ impl UpdateEditor {
             conflicts.push(NewConflict::Tree(tc.reason.clone(), tc.action.clone()));
             action = Some(UpdateAction::TreeConflicted);
         }
-        db.with_txn(|t| {
-            t.base_add(&d.wc, &node)?;
-            if !shadowed && (d.base.is_some() || overlay.is_some()) {
-                t.set_actual_props(&d.wc, overlay.as_ref())?;
-            }
-            if !conflicts.is_empty() {
-                conflict_record::record(t, &d.wc, &info, conflicts)?;
-            }
-            t.queue_work(&work)
-        })?;
-        self.run_queue()?;
+        let path = d.wc.clone();
+        let had_base = d.base.is_some();
+        self.defer(
+            &d.wc,
+            Box::new(move |t| {
+                t.base_add(&path, &node)?;
+                if !shadowed && (had_base || overlay.is_some()) {
+                    t.set_actual_props(&path, overlay.as_ref())?;
+                }
+                if !conflicts.is_empty() {
+                    conflict_record::record(t, &path, &info, conflicts)?;
+                }
+                t.queue_work(&work)
+            }),
+        )?;
         if let Some(a) = action
             && (!shadowed || d.tree_conflict.is_some())
         {
@@ -246,7 +297,7 @@ impl UpdateEditor {
         if self.is_finished() {
             return Ok(());
         }
-        self.run_queue()?;
+        self.drain()?;
         let rev = self.rev()?;
         let db = self.s.db.clone();
         let target = self.target_wc.clone();

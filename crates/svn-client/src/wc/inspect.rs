@@ -144,17 +144,24 @@ pub fn working_repo_normal(db: &WcDb, rel: &RelPath) -> Result<Vec<u8>> {
 /// Whether `rel` or anything below it carries a local change that an incoming delete would lose:
 /// edited files, changed properties, obstructed nodes, or working layers (add, delete, replace,
 /// copy, move).
+///
+/// Any working row counts, a `base-deleted` one below `rel` included: a local delete or move
+/// of a descendant is a local change of `rel` (svn's `svn_wc__db_has_db_mods`). The caller
+/// handles `rel` itself being deleted or replaced before asking.
 pub fn subtree_has_local_changes(db: &WcDb, rel: &RelPath) -> Result<bool> {
     let Some(cur) = db.read_node(rel)? else {
         return Ok(false);
     };
-    if cur.op_depth > 0 && cur.presence != Presence::BaseDeleted {
+    if cur.op_depth > 0 {
         return Ok(true);
     }
     if props_modified(db, rel)? {
         return Ok(true);
     }
-    if cur.presence == Presence::Normal && obstructed(db, rel, &cur)? {
+    // An `incomplete` directory (left by an interrupted update) is on disk like a normal one:
+    // one replaced by a file or a symlink is obstructed too, and nothing below it is looked at.
+    if matches!(cur.presence, Presence::Normal | Presence::Incomplete) && obstructed(db, rel, &cur)?
+    {
         return Ok(true);
     }
     if cur.kind == NodeKind::File {

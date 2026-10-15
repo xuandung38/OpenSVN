@@ -452,9 +452,7 @@ impl<'a> EventBridge<'a> {
             ));
         };
         let req = propfind::allprop_request(self.wire.urls(), *rev, repo_path)?;
-        let resp = self.wire.send(req, &self.cancel).await?;
-        let resp = RaWire::require_success(resp, &self.cancel).await?;
-        let body = RaWire::read_small(resp, &self.cancel).await?;
+        let body = self.wire.fetch_small_ok(req, &self.cancel).await?;
         let mut parser = propfind::MultiStatusParser::new();
         let entries = svn_protocol::parse_chunked(&mut parser, &body, 0)?;
         let entry = entries

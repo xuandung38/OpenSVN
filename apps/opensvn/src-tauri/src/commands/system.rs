@@ -17,6 +17,14 @@ pub async fn op_cancel(state: State<'_, AppState>, op_id: OpId) -> Result<(), Ap
     guard(async { state.ops.cancel(&op_id) }).await
 }
 
+/// "Retry now" on an operation that waits for a lost connection: it tries again at once
+/// instead of at the end of its countdown. Ignored by an operation that is not waiting.
+#[tauri::command]
+#[specta::specta]
+pub async fn op_retry_now(state: State<'_, AppState>, op_id: OpId) -> Result<(), AppError> {
+    guard(async { state.ops.retry_now(&op_id) }).await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn op_list(state: State<'_, AppState>) -> Result<Vec<OperationHandle>, AppError> {

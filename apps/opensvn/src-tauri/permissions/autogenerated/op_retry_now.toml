@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-op-retry-now"
+description = "Enables the op_retry_now command without any pre-configured scope."
+commands.allow = ["op_retry_now"]
+
+[[permission]]
+identifier = "deny-op-retry-now"
+description = "Denies the op_retry_now command without any pre-configured scope."
+commands.deny = ["op_retry_now"]

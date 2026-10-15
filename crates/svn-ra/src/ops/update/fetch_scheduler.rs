@@ -66,8 +66,12 @@ impl FetchScheduler {
 
     /// Most downloads that are queued or running at once; the driver waits for the oldest one
     /// before starting another, which bounds the number of files the editor keeps open.
+    ///
+    /// Deep enough that the network keeps fetching while the editor installs a batch of files
+    /// (and the editor keeps installing while small files arrive): a shallow window ties both
+    /// to the latency of the oldest download, which showed up as idle time on both sides.
     pub(super) fn max_in_flight(&self) -> usize {
-        (self.parallelism * 2).clamp(2, 16)
+        (self.parallelism * 16).clamp(2, 64)
     }
 
     /// Downloads `url` into `sender`; the sender receives the end marker on success.

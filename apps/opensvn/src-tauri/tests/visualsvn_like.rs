@@ -27,7 +27,8 @@ use async_trait::async_trait;
 use opensvn_ipc::{CommitRequest, Depth, UpdateRequest, WcFormat, WcId};
 use opensvn_lib::engine::real::{ClientRecovery, HttpConnector, RealEngine, RealEngineConfig};
 use opensvn_lib::engine::{
-    CheckoutPlan, EngineFacade, LockScope, LogScope, OpContext, StatusQuery, WcRef,
+    CheckoutPlan, EditOp, EngineFacade, LockScope, LogScope, OpContext, RemoteEditPlan,
+    StatusQuery, WcRef,
 };
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject as _;
@@ -520,6 +521,105 @@ async fn repository_names_with_spaces_and_vietnamese() {
     }
 }
 
+/// A VisualSVN web-interface link (`https://host/!/#Repo/view/...`) converts to the `/svn/<Repo>`
+/// URL the server really serves, for names with dots, spaces and Vietnamese.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the VisualSVN-like server (scripts/test-env/visualsvn-like.sh)"]
+async fn web_interface_links_convert_to_repository_urls() {
+    let e = sso();
+    let dotted = Repo::new("web.link.repo");
+    for name in ["My Project", "Dự án Tiếng Việt", dotted.name.as_str()] {
+        for (link, rev) in [
+            (format!("{}#{name}", base("!/")), None),
+            (format!("{}#{}/view/head/", base("!/"), encode(name)), None),
+            (format!("{}#{name}/view/r0/", base("!/")), Some(0)),
+        ] {
+            let parsed = svn_types::parse_visualsvn_web_link(&link)
+                .unwrap_or_else(|| panic!("{link} is a web link"))
+                .unwrap_or_else(|err| panic!("{link}: {err}"));
+            let url = parsed.repo_url.to_string();
+            assert_eq!(url, format!("{}/{}", base("svn"), encode(name)), "{link}");
+            assert_eq!(parsed.peg_rev.map(|r| r.0), rev, "{link}");
+            let info = e
+                .engine
+                .repo_info(&url, &ctx())
+                .await
+                .unwrap_or_else(|err| panic!("repo_info {url}: {err:?}"));
+            assert!(info.repo_root_url.ends_with(&encode(name)), "{link}");
+        }
+    }
+    // The web UI itself is not a repository: the raw link is still refused with the hint.
+    let err = e
+        .engine
+        .repo_info(&format!("{}#{}", base("!/"), dotted.name), &ctx())
+        .await
+        .expect_err("raw web link");
+    assert!(err.message.contains("Copy URL to clipboard"), "{err:?}");
+}
+
+/// An `r<N>` web link names the path as it was at N: a folder deleted after N is still found
+/// there (peg revision), and checking it out at N gives its content at N.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the VisualSVN-like server (scripts/test-env/visualsvn-like.sh)"]
+async fn web_link_to_an_old_revision_finds_a_path_deleted_since() {
+    let e = sso();
+    let repo = Repo::new("web-link-rev");
+    let wc = checkout(&e, &repo.url(), "web-link-rev").await;
+    write(&wc.root, "trunk/gone/a.txt", "kept at r1\n");
+    let r1 = commit(&e, &wc, "add gone").await.expect("commit r1");
+    let gone = format!("{}/trunk/gone", repo.url());
+    e.engine
+        .remote_edit(
+            &RemoteEditPlan {
+                ops: vec![EditOp::Delete { url: gone.clone() }],
+                message: "delete gone".into(),
+            },
+            &ctx(),
+        )
+        .await
+        .expect("delete");
+
+    let link = format!("{}#{}/view/r{}/trunk/gone/", base("!/"), repo.name, r1.0);
+    let parsed = svn_types::parse_visualsvn_web_link(&link)
+        .expect("web link")
+        .expect("parses");
+    assert_eq!(parsed.repo_url.to_string(), gone);
+    assert_eq!(parsed.peg_rev.map(|r| r.0), Some(r1.0));
+    let peg = parsed.peg_rev.map(|r| opensvn_ipc::Rev(r.0));
+
+    // At HEAD the folder is gone; at the link's revision it is there.
+    let head = e.engine.repo_info(&gone, &ctx()).await.expect_err("HEAD");
+    assert_eq!(head.code, ErrorCode::PathNotFound, "{head:?}");
+    let info = e
+        .engine
+        .repo_info_at(&gone, peg, &ctx())
+        .await
+        .expect("repo_info at the link revision");
+    assert_eq!(info.kind, opensvn_ipc::EntryKind::Dir);
+    assert_eq!(info.youngest_rev.0, r1.0 + 1);
+
+    // A checkout of `gone@r1` at r1, as the checkout dialog sends it.
+    let old = e
+        .engine
+        .checkout(
+            &CheckoutPlan {
+                url: gone.clone(),
+                path: e.tmp.path().join("gone-at-r1"),
+                rev: peg,
+                depth: Depth::Infinity,
+                sparse: None,
+                format: WcFormat::V31,
+                store_pristine: true,
+                ignore_externals: false,
+            },
+            &ctx(),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("checkout {gone}@{}: {err:?}", r1.0));
+    let content = std::fs::read_to_string(Path::new(&old.root_path).join("a.txt")).unwrap();
+    assert_eq!(content, "kept at r1\n");
+}
+
 fn encode_path(path: &str) -> String {
     path.split('/').map(encode).collect::<Vec<_>>().join("/")
 }
@@ -579,6 +679,111 @@ async fn parent_path_url_names_the_repositories() {
         );
     }
     assert!(e.prompts.seen().is_empty(), "{:?}", e.prompts.seen());
+}
+
+/// The repository list of the parent path rides on the error (issue #133): every listed URL is
+/// percent-encoded and opens its repository, through SSO and through Basic alike.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the VisualSVN-like server (scripts/test-env/visualsvn-like.sh)"]
+async fn parent_path_url_lists_repositories_that_open() {
+    let sso = sso();
+    let basic = env_with(Some(("tester", "tester-pass")));
+    for (e, location) in [(&sso, "svn"), (&sso, "svn-sso"), (&basic, "svn-basic")] {
+        let url = format!("{}/", base(location));
+        let err = e
+            .engine
+            .repo_list(&url, None, &ctx())
+            .await
+            .expect_err("the parent path is not a repository");
+        assert_eq!(err.code, ErrorCode::PathNotFound, "{url}: {err:?}");
+        let repos = err
+            .parent_repositories()
+            .unwrap_or_else(|| panic!("{url}: no repositories on {err:?}"));
+        let find = |name: &str| {
+            repos
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("{url}: {name} missing from {repos:?}"))
+        };
+        for name in ["MyRepo", "My Project", "Dự án Tiếng Việt"] {
+            let repo = find(name);
+            assert_eq!(
+                repo.url,
+                format!("{}/{}", base(location), encode(name)),
+                "{name}"
+            );
+            let info = e
+                .engine
+                .repo_info(&repo.url, &ctx())
+                .await
+                .unwrap_or_else(|err| panic!("{}: {err:?}", repo.url));
+            assert_eq!(
+                info.repo_root_url.trim_end_matches('/'),
+                repo.url,
+                "{name} opens as its own root"
+            );
+        }
+        // Each listed URL is spelled once, without the trailing slash of the listing.
+        assert!(repos.iter().all(|r| !r.url.ends_with('/')), "{repos:?}");
+    }
+    assert!(sso.prompts.seen().is_empty(), "{:?}", sso.prompts.seen());
+    assert_eq!(basic.prompts.seen().len(), 1, "one Basic sign-in");
+}
+
+/// Without a ticket and with the prompt refused, the parent path reports the sign-in, not a
+/// repository list it could not read.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the VisualSVN-like server (scripts/test-env/visualsvn-like.sh)"]
+async fn parent_path_url_without_a_sign_in_reports_the_sign_in() {
+    if rerun_without_ticket("parent_path_url_without_a_sign_in_reports_the_sign_in") {
+        return;
+    }
+    let e = sso();
+    let err = e
+        .engine
+        .repo_list(&format!("{}/", base("svn")), None, &ctx())
+        .await
+        .expect_err("no ticket, prompt refused");
+    assert!(
+        matches!(
+            err.code,
+            ErrorCode::AuthRequired | ErrorCode::NegotiateFailed
+        ),
+        "{err:?}"
+    );
+    assert!(err.parent_repositories().is_none(), "{err:?}");
+}
+
+/// A server certificate the user has not trusted stays a certificate error on the parent path:
+/// the listing is never read past it (default deny).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the VisualSVN-like server (scripts/test-env/visualsvn-like.sh)"]
+async fn parent_path_url_with_an_untrusted_certificate_stays_a_certificate_error() {
+    let prompts = Arc::new(Prompts::default());
+    let (_settings, rx) = watch::channel(opensvn_lib::settings::defaults(None));
+    let (_invalidate, inv) = watch::channel(0u64);
+    let connector = Arc::new(HttpConnector::with_config_tweak(
+        prompts.clone() as Arc<dyn AuthPrompter>,
+        Arc::new(MemoryTrustStore::new()),
+        rx,
+        inv,
+        |c| c.proxy = ProxyConfig::Disabled,
+    ));
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = RealEngine::new(RealEngineConfig {
+        connector,
+        lock_ownership: Arc::new(MemoryLockOwnership::for_current_process(BOOT))
+            as Arc<dyn LockOwnershipStore>,
+        boot_id: BOOT.to_owned(),
+        state_dir: tmp.path().to_owned(),
+        recovery: Arc::new(ClientRecovery),
+    });
+    let err = engine
+        .repo_list(&format!("{}/", base("svn")), None, &ctx())
+        .await
+        .expect_err("the test CA is not trusted here");
+    assert_eq!(err.code, ErrorCode::TlsUntrusted, "{err:?}");
+    assert!(err.parent_repositories().is_none(), "{err:?}");
 }
 
 /// VisualSVN-style authz (`[groups]`, global `[/]`, a repository-specific denied folder).

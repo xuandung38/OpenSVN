@@ -16,12 +16,19 @@
 //! ([`ConnectorOpener`]). A failed external, or one removed from its definition but kept for its
 //! local changes, does not fail the operation (svn warns too): it is logged and reported as a
 //! progress sample with phase [`PHASE_EXTERNAL_WARNING`] and the external's path.
+//!
+//! A checkout or update whose server cannot be reached any more (Wi-Fi gone, VPN reconnecting,
+//! the system asleep, the server restarting) waits for it: stage
+//! [`OpStage::WaitingForConnection`] with the timing, for up to the connector's
+//! [`SessionConnector::reconnect_wait`], then resumes at the same revision (see
+//! [`svn_client::netwait`]). "Retry now" and the system waking up wake it through
+//! [`OpContext::retry_now`]. Writes never wait.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use opensvn_ipc::{Depth, Rev, UpdateRequest, WcFormat};
+use opensvn_ipc::{ConnectionWait, Depth, OpStage, Rev, UpdateRequest, WcFormat};
 use svn_ra_api::RaSession;
 use svn_types::{CancelToken, ErrorCode, RelPath, RepoUrl, Revnum, SvnError};
 
@@ -81,8 +88,8 @@ fn is_inside(root: &RepoUrl, url: &RepoUrl) -> bool {
 }
 
 /// Phase of the progress sample sent for an external that failed or kept local changes; its
-/// `current_path` is the external's path in the working copy.
-pub(super) const PHASE_EXTERNAL_WARNING: &str = "external-warning";
+/// `current_path` is the external's path in the working copy. A notice: never coalesced away.
+pub(super) use crate::engine::context::PHASE_EXTERNAL_WARNING;
 
 /// Opens an authenticated session anchored exactly at `url` through `connector`.
 async fn open_at(
@@ -166,6 +173,7 @@ impl RealEngine {
     ) -> svn_client::ClientCtx {
         let mut client = self.client_ctx(ctx);
         client.progress = Some(client_progress(&ctx.progress, phase));
+        client.network_wait = self.network_wait(ctx, phase);
         if !ignore_externals {
             client.externals = Some(Arc::new(ConnectorOpener {
                 connector: Arc::clone(&self.connector),
@@ -173,6 +181,49 @@ impl RealEngine {
             }));
         }
         client
+    }
+
+    /// How a drive of this operation waits for a lost connection: for the connector's
+    /// [`SessionConnector::reconnect_wait`], reporting [`OpStage::WaitingForConnection`] and
+    /// woken by [`OpContext::retry_now`]. `None` when the connector does not wait.
+    fn network_wait(
+        &self,
+        ctx: &OpContext,
+        phase: &'static str,
+    ) -> Option<svn_client::NetworkWait> {
+        let max_wait = self.connector.reconnect_wait()?;
+        let progress = ctx.progress.clone();
+        let secs = |d: std::time::Duration| {
+            u32::try_from(d.as_millis().div_ceil(1000)).unwrap_or(u32::MAX)
+        };
+        let on_state = move |state: svn_client::WaitState| match state {
+            svn_client::WaitState::Waiting {
+                retry_in,
+                waited,
+                max_wait,
+                attempt,
+            } => progress.report(ProgressUpdate {
+                phase: phase.to_owned(),
+                stage: Some(OpStage::WaitingForConnection),
+                connection_wait: Some(ConnectionWait {
+                    retry_in_secs: secs(retry_in),
+                    waited_secs: secs(waited),
+                    max_wait_secs: secs(max_wait),
+                    attempt,
+                }),
+                ..ProgressUpdate::default()
+            }),
+            svn_client::WaitState::Restored => {
+                progress.report(ProgressUpdate::stage(phase, OpStage::Fetching));
+            }
+            svn_client::WaitState::Probing { .. } | svn_client::WaitState::GaveUp => {}
+        };
+        Some(svn_client::NetworkWait {
+            max_wait,
+            retry_now: Arc::clone(&ctx.retry_now),
+            on_state: Some(Arc::new(on_state)),
+            ..svn_client::NetworkWait::default()
+        })
     }
 
     /// Checks out `plan.url` into `plan.path`, with its externals unless
@@ -209,7 +260,11 @@ impl RealEngine {
                 "checkout path must be absolute",
             ));
         }
+        ctx.progress
+            .report(ProgressUpdate::stage(PHASE_CHECKOUT, OpStage::Connecting));
         let session = self.session_at(&plan.url, ctx).await?;
+        ctx.progress
+            .report(ProgressUpdate::stage(PHASE_CHECKOUT, OpStage::Fetching));
         let summary = svn_client::checkout(
             &self.sync_ctx(ctx, PHASE_CHECKOUT, plan.ignore_externals),
             session.as_ref(),
@@ -220,15 +275,19 @@ impl RealEngine {
             &ctx.cancel,
         )
         .await?;
+        ctx.progress
+            .report(ProgressUpdate::stage(PHASE_CHECKOUT, OpStage::Finishing));
         report_external_warnings(&summary, ctx);
         wc_read::wc_info(&plan.path, ctx).await
     }
 
-    /// Updates the given paths, all to the same revision, with their externals.
+    /// Updates the given paths, all to the same revision, with their externals unless
+    /// `ignore_externals`.
     pub(super) async fn do_update(
         &self,
         wc: &WcRef,
         req: &UpdateRequest,
+        ignore_externals: bool,
         ctx: &OpContext,
     ) -> EngineResult<Rev> {
         ctx.check()?;
@@ -240,14 +299,18 @@ impl RealEngine {
                 .collect::<EngineResult<_>>()?,
         };
         let info = wc_read::wc_info(&wc.root, ctx).await?;
+        ctx.progress
+            .report(ProgressUpdate::stage(PHASE_UPDATE, OpStage::Connecting));
         let session = self.session_at(&info.url, ctx).await?;
+        ctx.progress
+            .report(ProgressUpdate::stage(PHASE_UPDATE, OpStage::Fetching));
         // Every path goes to the same revision, even when a commit lands in between.
         let rev = match req.rev {
             Some(r) => Revnum(r.0),
             None => session.youngest_rev(&ctx.cancel).await?,
         };
         let depth = req.depth.map_or(svn_types::Depth::Unknown, client_depth);
-        let client = self.sync_ctx(ctx, PHASE_UPDATE, false);
+        let client = self.sync_ctx(ctx, PHASE_UPDATE, ignore_externals);
         for target in &targets {
             let summary = svn_client::update(
                 &client,
@@ -260,6 +323,8 @@ impl RealEngine {
             .await?;
             report_external_warnings(&summary, ctx);
         }
+        ctx.progress
+            .report(ProgressUpdate::stage(PHASE_UPDATE, OpStage::Finishing));
         Ok(Rev(rev.0))
     }
 

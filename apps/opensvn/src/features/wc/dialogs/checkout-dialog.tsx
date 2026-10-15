@@ -4,7 +4,7 @@ import { Dialog } from "../../../components/ui/dialog";
 import { Input, Select } from "../../../components/ui/fields";
 import { SafeLink } from "../../../components/ui/safe-link";
 import { SafeText } from "../../../components/ui/safe-text";
-import type { Depth, PathGrantInfo } from "../../../ipc/bindings";
+import type { Depth, IncompleteCheckout, PathGrantInfo } from "../../../ipc/bindings";
 import { ipc, toAppError, unwrap } from "../../../ipc/client";
 import {
   useEngineCapabilities,
@@ -15,18 +15,24 @@ import {
 } from "../../../ipc/queries";
 import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
+import { ConnectionWaitNotice } from "../../activity/connection-wait";
 import { parseRevision } from "../../remote/branch/branch-model";
 import { RepoTree } from "../../remote/browse/repo-tree";
 import { useRepoInfo } from "../../remote/browse/use-repo";
+import { parentRepos } from "../../remote/parent-path";
+import { hasQueryOrFragment, useWebLinkConversion } from "../../remote/web-link";
 import {
   type FolderNameError,
   joinDisplay,
   suggestFolderName,
   validateFolderName,
 } from "../repos/repo-model";
+import { resumeStrings } from "../resume/resume-strings";
+import { useResumeActions } from "../resume/use-resume-actions";
 import { isCheckoutUrl } from "../wc-model";
 import { pickFolder } from "../welcome/use-path-grant";
 import { dialogStrings } from "./dialog-strings";
+import { UrlFieldNote } from "./web-link-note";
 
 /** Tracking issue for svn:externals support, linked from the checkout dialog. */
 export const EXTERNALS_ISSUE_URL = "https://github.com/xuandung38/OpenSVN/issues/97";
@@ -99,10 +105,21 @@ export function CheckoutDialog({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [opId, setOpId] = useState<string | null>(null);
+  // The target folder holds an interrupted checkout of this URL (or this checkout stopped and
+  // left one): offered to continue instead of starting over.
+  const [incomplete, setIncomplete] = useState<IncompleteCheckout | null>(null);
+  const resumeActions = useResumeActions();
+  const rs = useT(resumeStrings);
 
   const trimmedUrl = url.trim();
   const rev = parseRevision(revText);
-  const urlOk = isCheckoutUrl(trimmedUrl);
+  // A pasted VisualSVN web link is replaced by the repository URL once the server confirms it;
+  // an `r<N>` link names the path as it was at N, so N replaces the revision field.
+  const webLink = useWebLinkConversion(url, (converted, pegRev) => {
+    setUrl(converted);
+    if (pegRev !== null) setRevText(String(pegRev));
+  });
+  const urlOk = isCheckoutUrl(trimmedUrl) && !hasQueryOrFragment(trimmedUrl);
   // The folder name follows the URL until the user edits it.
   const folderName = name ?? suggestFolderName(trimmedUrl);
   const nameError = validateFolderName(folderName);
@@ -112,6 +129,8 @@ export function CheckoutDialog({
     urlOk && rev !== "invalid" && nameError === null && !needsRepick && !pending && !opId;
 
   const browseInfo = useRepoInfo(browseFor);
+  // A server URL (VisualSVN's `https://host/svn/`) lists its repositories instead of being one.
+  const serverRepos = browseInfo.isError ? parentRepos(browseInfo.error) : null;
   const op = useOperations().find((o) => o.handle.opId === opId);
   const outcome = useOperationOutcome(opId ?? undefined);
 
@@ -122,8 +141,22 @@ export function CheckoutDialog({
       return;
     }
     setOpId(null);
+    setIncomplete(outcome.error.incompleteCheckout ?? null);
     setError(outcome.error.code === "cancelled" ? d("checkoutCancelled") : outcome.error.message);
   }, [outcome, onClose, d]);
+
+  const resumeWith = async (how: "continue" | "latest") => {
+    if (!incomplete) return;
+    const h =
+      how === "continue"
+        ? await resumeActions.continueWc(incomplete.wcId)
+        : await resumeActions.updateLatest(incomplete.wcId);
+    if (h) {
+      setIncomplete(null);
+      setError(null);
+      setOpId(h.opId);
+    }
+  };
 
   const chooseParent = async () => {
     setError(null);
@@ -142,6 +175,7 @@ export function CheckoutDialog({
     if (!canSubmit) return;
     setPending(true);
     setError(null);
+    setIncomplete(null);
     const usedPicked = picked !== null;
     try {
       const dest = picked ?? (await unwrap(ipc().commands.checkoutRootGrant()));
@@ -169,6 +203,12 @@ export function CheckoutDialog({
       if (usedPicked && !nameRefused) {
         setPicked(null);
         setNeedsRepick(true);
+      }
+      if (err.incompleteCheckout) {
+        // Not an error for the user: the folder holds this checkout, half done.
+        setIncomplete(err.incompleteCheckout);
+        setError(null);
+        return;
       }
       setError(err.message);
     } finally {
@@ -212,6 +252,7 @@ export function CheckoutDialog({
           <SafeText as="p" className="m-0 font-semibold">
             {op?.handle.title ?? d("checkingOut")}
           </SafeText>
+          {op && <ConnectionWaitNotice op={op} />}
           <progress
             className="w-full"
             aria-label={d("checkingOut")}
@@ -265,11 +306,12 @@ export function CheckoutDialog({
               <option key={u} value={u} />
             ))}
           </datalist>
-          {url.length > 0 && !urlOk && (
-            <span className="text-bad-text" role="alert">
-              {d("urlInvalid")}
-            </span>
-          )}
+          <UrlFieldNote
+            url={url}
+            state={webLink}
+            revText={revText}
+            fallback={urlOk ? null : d("urlInvalid")}
+          />
           {browseFor !== null &&
             (browseInfo.data ? (
               <RepoTree
@@ -280,6 +322,20 @@ export function CheckoutDialog({
                 label={d("browseLabel")}
                 className="max-h-48 rounded-md border border-line"
               />
+            ) : serverRepos && browseFor !== null ? (
+              <div className="flex flex-col gap-1">
+                <span className="text-[12px] text-muted-text">{d("serverRepos")}</span>
+                <RepoTree
+                  key={browseFor}
+                  rootUrl={browseFor}
+                  repositories={serverRepos}
+                  rev={null}
+                  selectedUrl={trimmedUrl}
+                  onSelect={setUrl}
+                  label={d("serverReposLabel")}
+                  className="max-h-48 rounded-md border border-line"
+                />
+              </div>
             ) : browseInfo.isError ? (
               <SafeText as="p" className="m-0 text-bad-text">
                 {toAppError(browseInfo.error).message}
@@ -375,6 +431,24 @@ export function CheckoutDialog({
           )}
           <span className="text-[12px] text-muted-text">{d("formatNote")}</span>
         </form>
+      )}
+      {incomplete && !running && (
+        <div
+          role="status"
+          className="flex flex-col gap-2 rounded-[6px] bg-warn-soft px-3 py-2"
+          data-testid="checkout-incomplete"
+        >
+          <p className="m-0">
+            <b>{rs("checkoutIncompleteTitle")}</b>{" "}
+            {rs("folderHasCheckout", { rev: incomplete.rev })}
+          </p>
+          <div className="flex gap-2">
+            <Button variant="primary" onClick={() => void resumeWith("continue")}>
+              {rs("continueCheckout")}
+            </Button>
+            <Button onClick={() => void resumeWith("latest")}>{rs("updateLatest")}</Button>
+          </div>
+        </div>
       )}
       {error && (
         <SafeText as="p" className="m-0 break-words text-bad-text">

@@ -80,6 +80,7 @@ scenario!(schedule_and_revert);
 scenario!(conflict_blocks_commit_until_resolved);
 scenario!(lock_and_unlock);
 scenario!(remote_edit_and_copy);
+scenario!(repo_info_at_a_peg_revision);
 scenario!(cancellation_and_errors);
 scenario!(working_copy_metadata_operations);
 scenario!(switch_to_a_branch);

@@ -30,6 +30,12 @@ pub struct UpdateSetup {
     pub sticky_depth: bool,
     /// An unversioned file that is in the way is adopted instead of becoming a tree conflict.
     pub allow_unversioned_obstructions: bool,
+    /// The update target was missing on disk, or an empty directory, when the update started
+    /// (svn's "clean checkout" optimization, `is_empty_wc`): a node the server adds is not
+    /// checked against wc.db, so neither a local node nor a tree conflict recorded earlier in
+    /// the drive (a replacement) shadows it. What is on disk is still checked: an unversioned
+    /// item in the way stays an obstruction.
+    pub clean: bool,
     /// Repository root URL as stored in wc.db.
     pub repos_root: String,
     /// Repository UUID.
@@ -52,6 +58,20 @@ pub struct Outcome {
     pub revision: Option<Revnum>,
     /// `close_edit` ran.
     pub completed: bool,
+    /// Node states this drive committed to the working copy, in order. A resumed drive sends
+    /// the nodes of unfinished directories again, so its progress is what it commits beyond
+    /// the drives before it, not its notifications.
+    pub committed: Vec<CommittedNode>,
+}
+
+/// A node state committed to the working copy by an update drive.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CommittedNode {
+    /// Working copy path.
+    pub path: RelPath,
+    /// `false` for a directory committed `incomplete` (its children are still to come), `true`
+    /// for every finished node: a file, a deletion, a completed directory, a conflict.
+    pub complete: bool,
 }
 
 /// Shared handle on the [`Outcome`].
@@ -83,6 +103,9 @@ pub struct DirState {
     pub wc: RelPath,
     /// Directory is new.
     pub added: bool,
+    /// Added by this drive (not a resumed one) and not skipped: wc.db holds nothing below it
+    /// yet, so its children need no lookups.
+    pub fresh: bool,
     /// Directory lies in the part of the tree being updated (not just on the way to it).
     pub in_target: bool,
     /// Ignore every change below (conflict or obstruction).
@@ -107,6 +130,15 @@ pub struct DirState {
     /// the disk is left alone and every node gets a `base-deleted` row at this op depth. 0: no
     /// working layer to extend (an incoming replacement of a node deleted locally), BASE only.
     pub shadow: Option<u32>,
+    /// The versioned directory is replaced on disk by a file or a symlink (svn's
+    /// `edit_obstructed`): it gets a tree conflict "local obstruction, incoming edit", its own
+    /// BASE moves on, and everything below is shadowed with no working layer (BASE only). The
+    /// disk at and below it is never touched, so a symlink is never followed.
+    pub obstructed: bool,
+    /// BASE was `incomplete` when the drive reached the directory (an interrupted update): it
+    /// was reported `start_empty`, so the server sends every property it has and the ones it
+    /// leaves out are deleted at close (svn's `was_incomplete`).
+    pub was_incomplete: bool,
     /// Incoming property changes, applied at close.
     pub prop_changes: Vec<PropChange>,
     /// Entry properties.
@@ -123,6 +155,8 @@ pub struct NewText {
     pub md5: [u8; 16],
     /// SHA-1 of the text.
     pub sha1: [u8; 20],
+    /// Size of the text in bytes.
+    pub size: u64,
 }
 
 /// Slot a text sink fills when its delta ends.

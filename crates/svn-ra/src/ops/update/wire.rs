@@ -16,7 +16,8 @@ use svn_protocol::{
 use svn_types::{CancelToken, ErrorCode, RelPath, RepoUrl, Result, SvnError};
 
 use crate::ops::read::ListLimits;
-use crate::transport::{HttpRequest, HttpResponse, HttpTransport, RequestBody};
+use crate::ops::resume::ReadRetry;
+use crate::transport::{BufferedResponse, HttpRequest, HttpResponse, HttpTransport, RequestBody};
 
 /// Default number of parallel connections assumed when the caller does not say.
 const DEFAULT_CONNECTIONS: usize = 4;
@@ -99,11 +100,15 @@ impl RaWire {
     ) -> Result<Self> {
         let req = options_request(&session_url)?;
         let body = buffered_body(&req)?;
-        let started = std::time::Instant::now();
-        let resp = send_with(&transport, req, body, unattended, cancel).await?;
-        let elapsed = started.elapsed();
-        let head = svn_protocol::ResponseHead::new(resp.status().as_u16(), headers_of(&resp));
-        let body = read_limited(resp, ParserLimits::default().max_error_body_bytes, cancel).await?;
+        let (head, body, elapsed) = send_read_limited(
+            &transport,
+            convert(req, body)?,
+            ParserLimits::default().max_error_body_bytes,
+            unattended,
+            cancel,
+            "OPTIONS",
+        )
+        .await?;
         // mod_dav_svn answers a bare 500 (no `D:error`) on an `SVNParentPath` location.
         if head.status == 500
             && svn_protocol::errors::parse_dav_error(&body).is_none()
@@ -277,6 +282,49 @@ impl RaWire {
             .await
     }
 
+    /// Sends a protocol request (buffered or empty body) and reads the whole answer (at most
+    /// 4 MiB). The answer of a read-only request that breaks off on a failed connection is
+    /// fetched again (see [`HttpTransport::send_and_read`]).
+    pub async fn fetch_small(
+        &self,
+        req: svn_protocol::HttpRequest,
+        cancel: &CancelToken,
+    ) -> Result<BufferedResponse> {
+        let body = buffered_body(&req)?;
+        cancel.check()?;
+        let req = convert(req, body)?;
+        let fetch = async {
+            if self.unattended {
+                self.transport
+                    .send_and_read_unattended(req, SMALL_BODY_LIMIT, cancel)
+                    .await
+            } else {
+                self.transport
+                    .send_and_read(req, SMALL_BODY_LIMIT, cancel)
+                    .await
+            }
+        };
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(SvnError::new(ErrorCode::Cancelled, "operation cancelled")),
+            r = fetch => r,
+        }
+    }
+
+    /// [`Self::fetch_small`] that fails with the server's error unless the status is 2xx.
+    pub async fn fetch_small_ok(
+        &self,
+        req: svn_protocol::HttpRequest,
+        cancel: &CancelToken,
+    ) -> Result<Bytes> {
+        let resp = self.fetch_small(req, cancel).await?;
+        if resp.status.is_success() {
+            Ok(resp.body)
+        } else {
+            Err(buffered_error(&resp))
+        }
+    }
+
     /// Sends a request and fails with the server's error unless the status is 2xx.
     pub async fn send_ok(
         &self,
@@ -311,8 +359,10 @@ impl RaWire {
 const PARENT_LISTING_LIMIT: usize = 256 << 10;
 
 /// When `url` is the repository list of an `SVNParentPath` location (VisualSVN Server's
-/// `https://host/svn/`), the error that says so and names the repositories. `None` for any
-/// other answer: the caller then reports the original failure. Cancellation is reported.
+/// `https://host/svn/`), the error that says so and carries the repositories. `None` for any
+/// other answer: the caller then reports the original failure. Cancellation, and a sign-in or
+/// certificate the listing needed and did not get, are reported as themselves: they say more
+/// than the bare 500.
 async fn parent_path_check(
     transport: &HttpTransport,
     url: &RepoUrl,
@@ -321,21 +371,78 @@ async fn parent_path_check(
 ) -> Option<SvnError> {
     let req = svn_protocol::parent_listing_request(url).ok()?;
     let body = buffered_body(&req).ok()?;
-    let resp = match send_with(transport, req, body, unattended, cancel).await {
-        Ok(resp) => resp,
-        Err(err) if err.code == ErrorCode::Cancelled => return Some(err),
+    let req = convert(req, body).ok()?;
+    let (head, page) = match send_read_limited(
+        transport,
+        req,
+        PARENT_LISTING_LIMIT,
+        unattended,
+        cancel,
+        "repository list",
+    )
+    .await
+    {
+        Ok((head, page, _)) => (head, page),
+        Err(err)
+            if matches!(
+                err.code,
+                ErrorCode::Cancelled
+                    | ErrorCode::AuthRequired
+                    | ErrorCode::NegotiateFailed
+                    | ErrorCode::TlsUntrusted
+            ) =>
+        {
+            return Some(err);
+        }
         Err(_) => return None,
     };
-    if !resp.status().is_success() {
+    if !(200..300).contains(&head.status) {
         return None;
     }
-    let page = match read_limited(resp, PARENT_LISTING_LIMIT, cancel).await {
-        Ok(page) => page,
-        Err(err) if err.code == ErrorCode::Cancelled => return Some(err),
-        Err(_) => return None,
-    };
-    let names = svn_protocol::parent_path_listing(&page)?;
-    Some(svn_protocol::parent_path_error(url, &names))
+    let repos = svn_protocol::parent_path_repos(url, &page)?;
+    Some(svn_protocol::parent_path_error(url, &repos))
+}
+
+/// Sends a read-only request and reads at most `limit` bytes of its answer, like
+/// [`read_limited`]; also returns the head and how long the answer took to start. Nothing
+/// reaches a caller before the answer is in, so one that breaks off on a failed connection is
+/// asked for again (see [`crate::ops::resume`]).
+async fn send_read_limited(
+    transport: &HttpTransport,
+    mut req: HttpRequest,
+    limit: usize,
+    unattended: bool,
+    cancel: &CancelToken,
+    what: &'static str,
+) -> Result<(svn_protocol::ResponseHead, Bytes, std::time::Duration)> {
+    let mut retry = ReadRetry::with_delays(transport.retry_policy().delays.clone(), what);
+    loop {
+        let again = req.try_clone();
+        let attempt = async {
+            cancel.check()?;
+            let started = std::time::Instant::now();
+            let resp = if unattended {
+                transport.send_unattended(req, cancel).await?
+            } else {
+                transport.send(req, cancel).await?
+            };
+            let elapsed = started.elapsed();
+            let head = svn_protocol::ResponseHead::new(resp.status().as_u16(), headers_of(&resp));
+            let body = read_limited(resp, limit, cancel).await?;
+            Ok((head, body, elapsed))
+        }
+        .await;
+        match attempt {
+            Ok(got) => return Ok(got),
+            Err(e) => {
+                let Some(next) = again else {
+                    return Err(e);
+                };
+                retry.again(e, cancel).await?;
+                req = next;
+            }
+        }
+    }
 }
 
 /// Transport body for a protocol request that carries no stream.
@@ -382,7 +489,16 @@ pub(crate) fn join_rel(base: &RelPath, rel: &RelPath) -> Result<RelPath> {
 
 /// Converts the headers of a transport response into the protocol layer's header list.
 pub(crate) fn headers_of(resp: &HttpResponse) -> Headers {
-    Headers::from_pairs(resp.headers().iter().filter_map(|(n, v)| {
+    protocol_headers(resp.headers())
+}
+
+/// [`headers_of`] for an answer read with [`RaWire::fetch_small`].
+pub(crate) fn buffered_headers(resp: &BufferedResponse) -> Headers {
+    protocol_headers(&resp.headers)
+}
+
+fn protocol_headers(headers: &HeaderMap) -> Headers {
+    Headers::from_pairs(headers.iter().filter_map(|(n, v)| {
         v.to_str()
             .ok()
             .map(|v| (n.as_str().to_owned(), v.to_owned()))
@@ -407,6 +523,14 @@ pub(crate) async fn read_limited(
         }
     }
     Ok(buf.freeze())
+}
+
+/// Error for a non-success answer read with [`RaWire::fetch_small`].
+pub(crate) fn buffered_error(resp: &BufferedResponse) -> SvnError {
+    let headers = buffered_headers(resp);
+    let limit = ParserLimits::default().max_error_body_bytes;
+    let body = &resp.body[..resp.body.len().min(limit)];
+    error_from_response(resp.status.as_u16(), &headers, body)
 }
 
 /// Error for a non-success response: the server's `D:error` chain or a status-based fallback.

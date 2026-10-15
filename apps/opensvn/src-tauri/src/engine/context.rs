@@ -2,10 +2,12 @@
 
 use std::sync::Arc;
 
+use opensvn_ipc::{ConnectionWait, OpStage, ProgressEntry};
 use svn_types::{CancelToken, ErrorCode, SvnError};
 
 /// Progress sample reported by an engine operation. The operation manager adds the operation id
-/// and throttles delivery (at most 10 events per second per operation).
+/// and coalesces delivery (at most 20 events per second per operation): fields left `None` keep
+/// their last reported value, and every `entry` reaches the path log.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProgressUpdate {
     /// Phase label such as `network` or `work-queue`.
@@ -20,6 +22,12 @@ pub struct ProgressUpdate {
     pub bytes_total: Option<u64>,
     /// Path being processed, relative to the working copy root.
     pub current_path: Option<String>,
+    /// Stage change.
+    pub stage: Option<OpStage>,
+    /// One path the operation handled, for the path log.
+    pub entry: Option<ProgressEntry>,
+    /// Timing of [`OpStage::WaitingForConnection`]; sent with that stage.
+    pub connection_wait: Option<ConnectionWait>,
 }
 
 /// Notice phase: the operation went through, but the working copy needs `cleanup`
@@ -28,11 +36,24 @@ pub const PHASE_NEEDS_CLEANUP: &str = "needs-cleanup";
 /// Notice phase: an add skipped a nested working copy (svn's W150002); `current_path` carries the
 /// warning text. The UI shows it to the user.
 pub const PHASE_NESTED_WC_SKIPPED: &str = "nested-wc-skipped";
+/// Notice phase: an external needs attention (failed or skipped); `current_path` is its path.
+pub const PHASE_EXTERNAL_WARNING: &str = "external-warning";
 
 impl ProgressUpdate {
     /// A notice for the user rather than a progress count: never dropped by the throttle.
     pub fn is_notice(&self) -> bool {
-        self.phase == PHASE_NEEDS_CLEANUP || self.phase == PHASE_NESTED_WC_SKIPPED
+        self.phase == PHASE_NEEDS_CLEANUP
+            || self.phase == PHASE_NESTED_WC_SKIPPED
+            || self.phase == PHASE_EXTERNAL_WARNING
+    }
+
+    /// A sample that only announces a new stage.
+    pub fn stage(phase: &str, stage: OpStage) -> Self {
+        Self {
+            phase: phase.to_owned(),
+            stage: Some(stage),
+            ..Self::default()
+        }
     }
 }
 
@@ -69,6 +90,9 @@ pub struct OpContext {
     /// False for background work (periodic checks): the engine must not prompt the user and fails
     /// with `auth-required` instead when credentials are missing.
     pub interactive: bool,
+    /// Wakes an operation that waits for a lost connection, for an immediate attempt: the
+    /// user's "Retry now", or the system waking up from sleep.
+    pub retry_now: Arc<tokio::sync::Notify>,
 }
 
 impl OpContext {
@@ -78,6 +102,7 @@ impl OpContext {
             cancel: CancelToken::new(),
             progress: ProgressReporter::noop(),
             interactive: true,
+            retry_now: Arc::default(),
         }
     }
 

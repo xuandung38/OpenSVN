@@ -63,12 +63,13 @@ impl FakeEngine {
     pub(super) async fn do_repo_info(
         &self,
         url: &str,
+        peg: Option<Rev>,
         ctx: &OpContext,
     ) -> Result<RepoInfo, SvnError> {
         let (session, path) = self.locate(url)?;
         session.ensure_authenticated(&ctx.cancel).await?;
         let youngest = session.youngest_rev(&ctx.cancel).await?;
-        let kind = match session.check_path(&path, None, &ctx.cancel).await? {
+        let kind = match session.check_path(&path, revnum(peg), &ctx.cancel).await? {
             NodeKind::Dir => EntryKind::Dir,
             NodeKind::File => EntryKind::File,
             _ => {

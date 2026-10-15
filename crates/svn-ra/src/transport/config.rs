@@ -14,6 +14,17 @@ pub const MAX_CONNECTIONS: usize = 8;
 /// Default connections per host.
 pub const DEFAULT_CONNECTIONS: usize = 4;
 
+/// Default time an idle pooled connection is kept for reuse. Shorter than the keep-alive timeout
+/// of common servers (Apache 5 s, IIS 120 s, many proxies 5-60 s), so the client drops an idle
+/// connection before the server does and rarely sends a request into a closing connection.
+pub const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Default longest idle time after which a connection still carries a write. A write is never
+/// sent twice, so it must not go out on a connection that a server, proxy or NAT may have
+/// dropped while it was idle: past this window it opens a new one. Writes of one commit follow
+/// each other closely, so they still share connections.
+pub const DEFAULT_WRITE_REUSE_WINDOW: Duration = Duration::from_secs(1);
+
 /// Subversion version this client speaks as (the `User-Agent` prefix and the transaction's
 /// client compatibility property).
 pub const SVN_COMPAT_VERSION: &str = "1.15.0";
@@ -104,6 +115,12 @@ pub struct TransportConfig {
     pub read_timeout: Duration,
     /// Retry behavior for idempotent requests.
     pub retry: RetryPolicy,
+    /// How long an idle connection stays in the pool; see [`DEFAULT_POOL_IDLE_TIMEOUT`].
+    pub pool_idle_timeout: Duration,
+    /// Longest idle time of a connection reused for a write (any method but `GET`, `HEAD`,
+    /// `OPTIONS`, `PROPFIND`, `REPORT`); see [`DEFAULT_WRITE_REUSE_WINDOW`]. Zero sends every
+    /// write on a new connection.
+    pub write_reuse_window: Duration,
     /// Maximum same-origin redirects followed per request.
     pub max_redirects: u8,
     /// Proxy selection.
@@ -121,6 +138,8 @@ impl Default for TransportConfig {
             connect_timeout: Duration::from_secs(30),
             read_timeout: Duration::from_secs(60),
             retry: RetryPolicy::default(),
+            pool_idle_timeout: DEFAULT_POOL_IDLE_TIMEOUT,
+            write_reuse_window: DEFAULT_WRITE_REUSE_WINDOW,
             max_redirects: 5,
             proxy: ProxyConfig::System,
             extra_root_certs: Vec::new(),

@@ -27,6 +27,8 @@ HTTP_PORT="${VSVN_HTTP_PORT:-18080}"
 HTTPS115_PORT="${VSVN_HTTPS115_PORT:-18444}"
 # mod_dav_svn 1.15.0 built from source (optional): prefix with libexec/mod_dav_svn.so.
 SVN115_PREFIX="${VSVN_SVN115_PREFIX:-/opt/svn115}"
+KEEPALIVE_TIMEOUT="${VSVN_KEEPALIVE_TIMEOUT:-5}"
+MAX_KEEPALIVE_REQUESTS="${VSVN_MAX_KEEPALIVE_REQUESTS:-100}"
 USER_PRINC="alice"
 USER_PASS="alice-pass"
 BASIC_USER="tester"
@@ -283,6 +285,11 @@ CustomLog $VSVN_DIR/logs/access-$tag.log vsvn
 # Large commits (100 MB+ files) and long reports.
 LimitRequestBody 0
 Timeout 600
+# Keep-alive limits (Apache defaults unless set): low values reproduce servers that close or
+# recycle pooled connections often (VSVN_KEEPALIVE_TIMEOUT=1 VSVN_MAX_KEEPALIVE_REQUESTS=5).
+KeepAlive On
+KeepAliveTimeout $KEEPALIVE_TIMEOUT
+MaxKeepAliveRequests $MAX_KEEPALIVE_REQUESTS
 SSLSessionCache shmcb:$VSVN_DIR/run-$tag/ssl_scache(512000)
 SSLProtocol -all +TLSv1.2 +TLSv1.3
 # mod_auth_gssapi reads KRB5_CONFIG from Apache's environment (exported by the script).

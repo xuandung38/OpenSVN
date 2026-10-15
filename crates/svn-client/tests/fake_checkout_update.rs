@@ -182,7 +182,8 @@ async fn cancelled_update_is_resumed_by_the_next_update() {
         let db = open_db(&wc);
         let root = db.read_base(&rp("")).expect("read").expect("root");
         assert_eq!(root.presence, svn_wc::db::Presence::Incomplete);
-        assert!(db.work_items().expect("queue").is_empty());
+        // Work that the cancelled drive queued may still be queued (like svn, whose queue run
+        // stops on cancellation): the next update runs the queue first.
         assert_eq!(
             db.wc_lock_held(&rp("")).expect("lock"),
             svn_wc::db::LockState::Free,
@@ -202,7 +203,9 @@ async fn cancelled_update_is_resumed_by_the_next_update() {
     ] {
         assert_eq!(read(&wc.join(f)), text, "{f}");
     }
-    let rows = base_rows(&open_db(&wc));
+    let db = open_db(&wc);
+    assert!(db.work_items().expect("queue").is_empty());
+    let rows = base_rows(&db);
     assert!(
         rows.iter().all(|r| r.1 == "normal" && r.3 == 2),
         "rows: {rows:?}"

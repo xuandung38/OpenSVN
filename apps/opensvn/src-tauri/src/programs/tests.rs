@@ -243,7 +243,7 @@ async fn a_diff_tool_per_extension_is_confirmed_stored_replaced_and_cleared() {
     assert!(by_ext && args == ["{left}", "{right}"]);
     assert_eq!(program, std::fs::canonicalize(&exe).unwrap());
     let err = svc.external_diff_tool_for("a.txt").unwrap_err();
-    assert_eq!(err.actions, Some(vec![ErrorAction::OpenSettings]));
+    assert_eq!(err.actions, Some(Box::new(vec![ErrorAction::OpenSettings])));
 
     let s = svc
         .choose_for_extension("docx", vec!["--compare".into()])

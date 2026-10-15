@@ -3,7 +3,7 @@
 //! Write methods take `work`: serialized work items queued in the same transaction as the row
 //! changes, so a crash can never leave the rows changed without the file operation recorded.
 
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, params};
 use svn_types::{Depth, NodeKind, RelPath, Result};
 
 use super::actual::{self, ConflictRecord};
@@ -40,6 +40,17 @@ impl WcDb {
         self.with_read(|c| nodes::children(c, self.wc_id, parent))
     }
 
+    /// BASE rows of the children of `parent`, sorted by path; children without a BASE row are
+    /// left out.
+    pub fn base_children(&self, parent: &RelPath) -> Result<Vec<Node>> {
+        self.with_read(|c| nodes::base_children(c, self.wc_id, parent))
+    }
+
+    /// Current (highest layer) row of every child of `parent`, sorted by path.
+    pub fn current_children(&self, parent: &RelPath) -> Result<Vec<Node>> {
+        self.with_read(|c| nodes::current_children(c, self.wc_id, parent))
+    }
+
     /// Pristine properties of the current node (empty when it has none).
     pub fn pristine_props(&self, path: &RelPath) -> Result<Props> {
         self.with_read(|c| ops::pristine_props(c, self.wc_id, path))
@@ -66,7 +77,8 @@ impl WcDb {
     /// Destination of a local move whose source (delete root) is `path`, if any.
     pub fn moved_to(&self, path: &RelPath) -> Result<Option<RelPath>> {
         let found: Option<String> = self.with_read(|c| {
-            c.query_row(
+            super::connection::cached_row(
+                c,
                 "SELECT moved_to FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
                  AND moved_to IS NOT NULL ORDER BY op_depth DESC LIMIT 1",
                 rusqlite::params![self.wc_id, path.as_str()],
@@ -81,7 +93,8 @@ impl WcDb {
     /// The node whose `moved_to` names `path` (the source of a local move to `path`), if any.
     pub fn moved_from(&self, path: &RelPath) -> Result<Option<RelPath>> {
         let found: Option<String> = self.with_read(|c| {
-            c.query_row(
+            super::connection::cached_row(
+                c,
                 "SELECT local_relpath FROM nodes WHERE wc_id = ?1 AND moved_to = ?2 \
                  ORDER BY op_depth LIMIT 1",
                 rusqlite::params![self.wc_id, path.as_str()],
@@ -120,7 +133,7 @@ impl WcDb {
     ) -> Result<T> {
         self.with_write(|tx| {
             let value = f(tx)?;
-            ops::queue_work(tx, work)?;
+            ops::queue_work(tx, self.wc_id, work)?;
             Ok(value)
         })
     }
@@ -158,10 +171,32 @@ impl WcDb {
         completed_id: Option<i64>,
         fileinfo: &[(RelPath, FileInfo)],
     ) -> Result<Option<(i64, Vec<u8>)>> {
+        let ids: Vec<i64> = completed_id.into_iter().collect();
+        Ok(self
+            .wq_complete_and_fetch_raw(&ids, fileinfo, None, 1)?
+            .into_iter()
+            .next())
+    }
+
+    /// Batched form of [`wq_record_and_fetch_next`](Self::wq_record_and_fetch_next): deletes
+    /// every `completed` item and stores the stat caches in ONE transaction, then returns up to
+    /// `limit` remaining items with an id above `after` (any id when `None`), lowest first.
+    /// `limit` = 0 fetches nothing. Same failpoints.
+    pub(crate) fn wq_complete_and_fetch_raw(
+        &self,
+        completed: &[i64],
+        fileinfo: &[(RelPath, FileInfo)],
+        after: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<(i64, Vec<u8>)>> {
         self.with_write(|tx| {
-            if let Some(id) = completed_id {
-                tx.execute("DELETE FROM work_queue WHERE id = ?1", [id])
+            if !completed.is_empty() {
+                let mut del = tx
+                    .prepare_cached("DELETE FROM work_queue WHERE id = ?1")
                     .map_err(sql_err)?;
+                for id in completed {
+                    del.execute([id]).map_err(sql_err)?;
+                }
             }
             failpoint!("wc.wq.after_delete");
             for (path, info) in fileinfo {
@@ -177,20 +212,31 @@ impl WcDb {
                 }
             }
             failpoint!("wc.wq.after_fileinfo");
-            tx.query_row(
-                "SELECT id, work FROM work_queue ORDER BY id LIMIT 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(sql_err)
+            if limit == 0 {
+                return Ok(Vec::new());
+            }
+            let mut stmt = tx
+                .prepare_cached(
+                    "SELECT id, work FROM work_queue WHERE id > ?1 ORDER BY id LIMIT ?2",
+                )
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        after.unwrap_or(i64::MIN),
+                        i64::try_from(limit).unwrap_or(i64::MAX)
+                    ],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(sql_err)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(sql_err)
         })
     }
 
     /// Removes a finished work item.
     pub fn complete_work_item(&self, id: i64) -> Result<()> {
         self.with_write(|tx| {
-            tx.execute("DELETE FROM work_queue WHERE id = ?1", [id])
+            super::connection::cached_exec(tx, "DELETE FROM work_queue WHERE id = ?1", [id])
                 .map_err(sql_err)?;
             Ok(())
         })

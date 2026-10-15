@@ -233,12 +233,15 @@ impl Planner<'_> {
             .max_by_key(|e| e.path.as_str().len())
     }
 
+    /// The node the working copy has at `path`, like svn_repos' `update_entry`: a path reported
+    /// with its own `set_path` exists at the reported revision even when it is `start_empty`
+    /// (that only empties its children), and even below a `start_empty` parent.
     fn base_node(&self, path: &RelPath, empty_base: bool) -> Option<(&Node, Revnum)> {
         if empty_base {
             return None;
         }
         let e = self.governing(path)?;
-        if e.deleted || e.start_empty {
+        if e.deleted || (e.start_empty && e.path != *path) {
             return None;
         }
         self.input
@@ -293,7 +296,10 @@ impl Planner<'_> {
         let wc_depth = self.entry_at(&anchor).map_or(Depth::Infinity, |e| e.depth);
         if anchor.is_root() {
             self.children(&anchor, 0, false, wc_depth, req)?;
-            let base = self.base_node(&anchor, false).map(|(n, _)| n);
+            let base = self
+                .base_node(&anchor, false)
+                .map(|(n, _)| n)
+                .filter(|_| !self.reported_empty(&anchor));
             if let Some(t) = self.input.target_tree.get(&self.input.tree_target) {
                 for c in prop_changes(base, t) {
                     self.ops.push(Op::DirProp(0, c));
@@ -345,6 +351,13 @@ impl Planner<'_> {
     /// Report entry made exactly for `path`.
     fn entry_at(&self, path: &RelPath) -> Option<&ReportEntry> {
         self.input.entries.iter().rev().find(|e| e.path == *path)
+    }
+
+    /// Whether `path` was reported `start_empty`: svn_repos then diffs its properties against
+    /// none (`delta_proplists` with no source) and always opens it.
+    fn reported_empty(&self, path: &RelPath) -> bool {
+        self.entry_at(path)
+            .is_some_and(|e| e.start_empty && !e.deleted)
     }
 
     /// Children of `dir`, like svn_repos' `delta_dirs`: `wc_depth` is what the working copy has
@@ -502,13 +515,16 @@ impl Planner<'_> {
                         add: false,
                         base: Some(r),
                     });
-                    for c in prop_changes(Some(&b), &t) {
+                    let start_empty = self.reported_empty(cp);
+                    let prop_base = if start_empty { None } else { Some(&b) };
+                    for c in prop_changes(prop_base, &t) {
                         self.ops.push(Op::DirProp(slot, c));
                     }
                     self.children(cp, slot, false, wc_depth, req)?;
                     // Nothing changed below: leave the directory unopened, unless the drive
-                    // makes it deeper (the server opens it then).
-                    if self.ops.len() == mark + 1 && dv(req) <= dv(wc_depth) {
+                    // makes it deeper or it was reported `start_empty` (the server opens it
+                    // then).
+                    if self.ops.len() == mark + 1 && dv(req) <= dv(wc_depth) && !start_empty {
                         self.ops.pop();
                     } else {
                         self.close_dir(slot, cp);

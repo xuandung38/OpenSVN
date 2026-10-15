@@ -98,6 +98,16 @@ pub trait SessionConnector: Send + Sync {
         let _ = options;
         self.connect(url, cancel).await
     }
+
+    /// How long a checkout or update waits for a lost connection before it stops (the
+    /// `network.reconnectWaitMin` setting); `None` does not wait (in-memory test connectors).
+    fn reconnect_wait(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    /// The system woke up from sleep: reads in flight and pooled connections are most likely
+    /// dead (see [`svn_ra::transport::HttpTransport::interrupt_reads`]).
+    fn system_woke(&self) {}
 }
 
 /// Where a session opened by [`SessionConnector::connect_with`] is anchored.
@@ -405,7 +415,27 @@ impl EngineFacade for RealEngine {
     }
 
     async fn update(&self, wc: &WcRef, req: &UpdateRequest, ctx: &OpContext) -> EngineResult<Rev> {
-        self.do_update(wc, req, ctx).await
+        self.do_update(wc, req, false, ctx).await
+    }
+
+    async fn resume(
+        &self,
+        wc: &WcRef,
+        rev: Rev,
+        ignore_externals: bool,
+        ctx: &OpContext,
+    ) -> EngineResult<Rev> {
+        let req = UpdateRequest {
+            wc_id: wc.id.clone(),
+            paths: None,
+            rev: Some(rev),
+            depth: None,
+        };
+        self.do_update(wc, &req, ignore_externals, ctx).await
+    }
+
+    fn system_woke(&self) {
+        self.connector.system_woke();
     }
 
     async fn switch(
@@ -468,8 +498,13 @@ impl EngineFacade for RealEngine {
         self.do_upgrade_format(wc, to, ctx).await
     }
 
-    async fn repo_info(&self, url: &str, ctx: &OpContext) -> EngineResult<RepoInfo> {
-        self.do_repo_info(url, ctx).await
+    async fn repo_info_at(
+        &self,
+        url: &str,
+        peg: Option<Rev>,
+        ctx: &OpContext,
+    ) -> EngineResult<RepoInfo> {
+        self.do_repo_info(url, peg, ctx).await
     }
 
     async fn repo_list(

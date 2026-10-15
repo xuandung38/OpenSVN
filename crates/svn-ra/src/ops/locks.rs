@@ -12,7 +12,8 @@ use svn_protocol::{ResponseHead, error_from_response, map_http_status};
 use svn_types::{CancelToken, Depth, ErrorCode, LockInfo, RelPath, Result, Revnum, SvnError};
 
 use super::read::stream_items;
-use super::update::{RaWire, error_of, headers_of};
+use super::resume::ReadRetry;
+use super::update::{RaWire, buffered_headers, error_of, headers_of};
 
 /// Classification of a failed `LOCK`/`UNLOCK` that carried no classified Subversion error.
 fn lock_status_code(status: u16) -> ErrorCode {
@@ -55,25 +56,38 @@ pub(crate) async fn get_locks(
     cancel: &CancelToken,
 ) -> Result<Vec<LockInfo>> {
     let repo = wire.repo_path(path)?;
-    let req = get_locks_request(wire.urls(), &repo, depth)?;
-    let resp = wire.send(req, cancel).await?;
-    // A path that is not in HEAD answers 404; it has no locks (libsvn_ra_serf does the same).
-    if resp.status().as_u16() == 404 {
-        return Ok(Vec::new());
-    }
-    let resp = RaWire::require_success(resp, cancel).await?;
-    let mut locks = Vec::new();
-    let mut parser = GetLocksParser::new();
-    stream_items(resp, &mut parser, cancel, |l: LockInfo| {
-        if in_scope(&repo, depth, l.path.as_str()) {
-            locks.push(l);
-        } else {
-            tracing::warn!("skipping a lock outside the requested scope");
+    // Nothing reaches the caller before the whole answer is in: a report that breaks off is
+    // asked for again from the start.
+    let mut retry = ReadRetry::new(wire, "lock report");
+    loop {
+        let req = get_locks_request(wire.urls(), &repo, depth)?;
+        let attempt = async {
+            let resp = wire.send(req, cancel).await?;
+            // A path that is not in HEAD answers 404; it has no locks (libsvn_ra_serf does the
+            // same).
+            if resp.status().as_u16() == 404 {
+                return Ok(Vec::new());
+            }
+            let resp = RaWire::require_success(resp, cancel).await?;
+            let mut locks = Vec::new();
+            let mut parser = GetLocksParser::new();
+            stream_items(resp, &mut parser, cancel, |l: LockInfo| {
+                if in_scope(&repo, depth, l.path.as_str()) {
+                    locks.push(l);
+                } else {
+                    tracing::warn!("skipping a lock outside the requested scope");
+                }
+                Ok(())
+            })
+            .await?;
+            Ok(locks)
         }
-        Ok(())
-    })
-    .await?;
-    Ok(locks)
+        .await;
+        match attempt {
+            Ok(locks) => return Ok(locks),
+            Err(e) => retry.again(e, cancel).await?,
+        }
+    }
 }
 
 /// Locks `path`. `base_rev` makes the server refuse the lock when the file changed since.
@@ -113,10 +127,9 @@ async fn current_token(
     cancel: &CancelToken,
 ) -> Result<Option<String>> {
     let req = get_lock_request(wire.urls(), repo)?;
-    let resp = wire.send(req, cancel).await?;
-    let status = resp.status().as_u16();
-    let head = ResponseHead::new(status, headers_of(&resp));
-    let body = RaWire::read_small(resp, cancel).await?;
+    let resp = wire.fetch_small(req, cancel).await?;
+    let head = ResponseHead::new(resp.status.as_u16(), buffered_headers(&resp));
+    let body = resp.body;
     Ok(parse_get_lock_response(repo, &head, &body)?.map(|l| l.token))
 }
 

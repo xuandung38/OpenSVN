@@ -12,14 +12,14 @@ use svn_wc::conflicts::markers::{
 };
 use svn_wc::conflicts::{PropConflict, TextConflict, TreeReason};
 use svn_wc::db::{BaseNode, Node, Presence, Props, WcDb};
-use svn_wc::pristine::{Md5Digest, Sha1Digest};
+use svn_wc::pristine::{Md5Digest, PristineRecord, Sha1Digest};
 use svn_wc::skel::Skel;
 use svn_wc::workqueue::WorkItem;
 
 use super::conflict_record::{self, NewConflict};
 use super::editor::{UpdateEditor, failpoint};
 use super::props::merge_props;
-use super::state::{FileState, NewText, tmp_dir};
+use super::state::{FileState, tmp_dir};
 use crate::ctx::UpdateAction;
 use crate::wc::inspect;
 
@@ -72,7 +72,7 @@ impl UpdateEditor {
         f: FileState,
         text_checksum: Option<Checksum>,
     ) -> Result<()> {
-        let new_text = f.text.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let mut new_text = f.text.lock().unwrap_or_else(PoisonError::into_inner).take();
         if let (Some(cs), Some(nt)) = (&text_checksum, &new_text) {
             let ok = match cs {
                 Checksum::Md5(m) => *m == nt.md5,
@@ -96,13 +96,20 @@ impl UpdateEditor {
             .as_ref()
             .and_then(|b| b.properties.clone())
             .unwrap_or_default();
-        // A node deleted or replaced locally, or lying below such a directory, is shadowed: only
-        // BASE moves on, nothing is merged into ACTUAL and the working layer is left alone (svn
-        // records just the tree conflict).
+        // A node deleted, replaced or added locally (an incoming add over a local add or move
+        // destination), or lying below such a directory, is shadowed: only BASE moves on,
+        // nothing is merged into ACTUAL and the working layer is left alone (svn records just
+        // the tree conflict).
         let shadowed = f.shadow.is_some()
-            || f.tree_conflict
-                .as_ref()
-                .is_some_and(|t| matches!(t.reason, TreeReason::Deleted | TreeReason::Replaced));
+            || f.tree_conflict.as_ref().is_some_and(|t| {
+                matches!(
+                    t.reason,
+                    TreeReason::Deleted
+                        | TreeReason::Replaced
+                        | TreeReason::Added
+                        | TreeReason::MovedHere
+                )
+            });
         let actual: Props = if shadowed {
             old_pristine.clone()
         } else if old.is_some() {
@@ -112,18 +119,28 @@ impl UpdateEditor {
         };
         let pm = merge_props(&old_pristine, &f.prop_changes, &actual);
 
-        // 1. New pristine text.
-        let (new_checksum, new_sha) = match &new_text {
+        // 1. New pristine text: the delta result was hashed while it was written, so the file
+        // moves into the store as it is. Its row is recorded with the node (see `super::batch`);
+        // without a per-file sync, the batch syncs the filesystem before it commits.
+        let mut new_pristine: Option<PristineRecord> = None;
+        let (new_checksum, new_sha) = match new_text.take() {
             Some(nt) => {
-                let mut store = db.pristine_store();
-                let mut file = File::open(&nt.path)
-                    .map_err(|e| SvnError::from_io("cannot open the new text", &e))?;
-                let rec = store.install(
-                    &mut file,
-                    Some(&Sha1Digest(nt.sha1)),
-                    Some(&Md5Digest(nt.md5)),
-                )?;
-                (Some(rec.sha1.to_svn_string()), Some(rec.sha1))
+                let record = PristineRecord {
+                    sha1: Sha1Digest(nt.sha1),
+                    md5: Md5Digest(nt.md5),
+                    size: nt.size,
+                    hydrated: true,
+                };
+                let synced = !self.batched;
+                let stored =
+                    db.pristine_store()
+                        .place(nt.path, &record, synced, &mut self.placed)?;
+                if !stored {
+                    self.batch.placed_text(record.size, synced);
+                }
+                let sha = record.sha1;
+                new_pristine = Some(record);
+                (Some(sha.to_svn_string()), Some(sha))
             }
             None => {
                 let cs = old.as_ref().and_then(|b| b.checksum.clone());
@@ -134,7 +151,7 @@ impl UpdateEditor {
             }
         };
         let old_checksum = old.as_ref().and_then(|b| b.checksum.clone());
-        let text_changed = new_text.is_some() && new_checksum != old_checksum;
+        let text_changed = new_pristine.is_some() && new_checksum != old_checksum;
 
         // 2. Decide what happens to the working file.
         let rel_str = wc.as_str().to_owned();
@@ -176,6 +193,17 @@ impl UpdateEditor {
             if f.adopt_existing && disk_exists {
                 action = UpdateAction::Existed;
                 keep_fileinfo = false;
+            } else if self.s.clean && self.below_working_layer(&db, &wc)? {
+                // A clean update adds without looking at wc.db (see `UpdateSetup::clean`), so a
+                // working layer of the user may lie over the new BASE node: a local add of the
+                // same name, or the `base-deleted` row that extends a deleted or added parent.
+                // An install from the pristine store reads that layer, which records no text;
+                // like svn's working file writer, the file is prepared from the new BASE here.
+                let sha =
+                    new_sha.ok_or_else(|| corrupt(format!("added file '{wc}' has no text")))?;
+                let tmp = self.working_text(&db, &wc, &f, sha, &pm.new_pristine)?;
+                work.extend(install_prepared(&rel_str, &tmp)?);
+                merge_tmp.push(tmp);
             } else {
                 work.push(
                     WorkItem::FileInstall {
@@ -204,14 +232,10 @@ impl UpdateEditor {
                 );
             } else {
                 keep_fileinfo = false;
-                let nt = new_text
-                    .as_ref()
-                    .ok_or_else(|| corrupt("text change without text"))?;
                 let merged = self.merge_local(
                     &db,
                     &wc,
                     base_node,
-                    nt,
                     new_sha.ok_or_else(|| corrupt("missing new checksum"))?,
                     &pm.new_pristine,
                     &actual,
@@ -271,6 +295,9 @@ impl UpdateEditor {
             // Nothing visible changed (a pure revision bump); keep the event stream quiet.
         }
 
+        // Nothing so far rewrites the working file; the `.prej` marker below does not either.
+        let working_file_untouched = work.is_empty();
+
         // 3. Property conflict.
         if !pm.conflicted.is_empty() {
             let marker = create_prop_marker(db.wcroot(), &rel_str, false)?;
@@ -290,7 +317,7 @@ impl UpdateEditor {
 
         // 4. One transaction.
         let (keep_size, keep_mtime) =
-            if keep_fileinfo && !keep_working_tree && !text_changed && work.is_empty() {
+            if keep_fileinfo && !keep_working_tree && !text_changed && working_file_untouched {
                 old.as_ref()
                     .map_or((None, None), |b| (b.translated_size, b.last_mod_time))
             } else {
@@ -341,34 +368,45 @@ impl UpdateEditor {
         let file_external = self
             .s
             .file_external
-            .as_ref()
+            .clone()
             .filter(|_| wc == self.target_wc);
         failpoint!("update.after_merge3_before_txn");
-        db.with_txn(|t| {
-            t.base_add(&wc, &node)?;
-            if let Some(ext) = file_external {
-                t.mark_file_external(&wc)?;
-                t.external_add(&wc, ext)?;
-            }
-            if let Some(op_depth) = f.shadow.filter(|d| *d > 0) {
-                t.mark_base_deleted_at(&wc, NodeKind::File, op_depth)?;
-            } else if obstructed {
-                t.mark_base_deleted(&wc, NodeKind::File)?;
-            }
-            if !shadowed && (old.is_some() || overlay.is_some()) {
-                t.set_actual_props(&wc, overlay.as_ref())?;
-            }
-            if !conflicts.is_empty() {
-                conflict_record::record(t, &wc, &info, conflicts)?;
-            }
-            t.queue_work(&work)
-        })?;
-        // Committed: the queue owns the merge results now (it removes them after installing).
+        // The queue owns the merge results once the batch commits (it removes them after
+        // installing); until then they are removed again on failure.
         for tmp in merge_tmp {
-            let _ = tmp.keep();
+            self.batch.keep_on_commit(tmp);
         }
-        failpoint!("update.after_txn_before_queue");
-        self.run_queue()?;
+        let path = wc.clone();
+        let shadow = f.shadow;
+        let had_base = old.is_some();
+        // svn sets the ACTUAL properties of every node it does not shadow; a clean update's add
+        // can find a local add's properties there (they go, its changelist stays).
+        let clean_add = self.s.clean && f.added;
+        self.defer(
+            &wc,
+            Box::new(move |t| {
+                if let Some(record) = &new_pristine {
+                    t.record_pristine(record)?;
+                }
+                t.base_add(&path, &node)?;
+                if let Some(ext) = &file_external {
+                    t.mark_file_external(&path)?;
+                    t.external_add(&path, ext)?;
+                }
+                if let Some(op_depth) = shadow.filter(|d| *d > 0) {
+                    t.mark_base_deleted_at(&path, NodeKind::File, op_depth)?;
+                } else if obstructed {
+                    t.mark_base_deleted(&path, NodeKind::File)?;
+                }
+                if !shadowed && (had_base || clean_add || overlay.is_some()) {
+                    t.set_actual_props(&path, overlay.as_ref())?;
+                }
+                if !conflicts.is_empty() {
+                    conflict_record::record(t, &path, &info, conflicts)?;
+                }
+                t.queue_work(&work)
+            }),
+        )?;
         if f.shadow.is_some() {
             // Shadowed by an obstruction: only BASE changed, nothing to report.
             return Ok(());
@@ -383,13 +421,70 @@ impl UpdateEditor {
         Ok(())
     }
 
+    /// True when a working layer of the user covers `wc` or one of its parents: the new BASE
+    /// node then lies below a local add or below a `base-deleted` row (see
+    /// `svn_wc::db::WcTxn::base_add`). Rows this drive has not committed yet are BASE rows; the
+    /// working layers they extend were committed by the user.
+    fn below_working_layer(&self, db: &WcDb, wc: &RelPath) -> Result<bool> {
+        let mut path = Some(wc.clone());
+        while let Some(p) = path {
+            if db.read_node(&p)?.is_some_and(|n| n.op_depth > 0) {
+                return Ok(true);
+            }
+            path = p.parent();
+        }
+        Ok(false)
+    }
+
+    /// The working file of the added file `f` in `.svn/tmp`, from the new pristine text `sha`,
+    /// translated and flagged by its new BASE properties `props` like svn's
+    /// `open_working_file_writer`. A node new to the working copy holds no lock token, so
+    /// `svn:needs-lock` makes it read-only.
+    fn working_text(
+        &self,
+        db: &WcDb,
+        wc: &RelPath,
+        f: &FileState,
+        sha: Sha1Digest,
+        props: &Props,
+    ) -> Result<tempfile::TempPath> {
+        let info = svn_wc::workqueue::NodeInstallInfo {
+            checksum: Some(sha),
+            props: props
+                .iter()
+                .map(|(k, v)| (String::from_utf8_lossy(k).into_owned(), v.clone()))
+                .collect(),
+            changed_date_micros: f.entry.date,
+            changed_rev: f.entry.rev.and_then(|r| i64::try_from(r).ok()),
+            changed_author: f.entry.author.clone(),
+            repos_relpath: f.new_repos.clone(),
+            repos_root_url: self.s.repos_root.clone(),
+            is_added: false,
+            has_lock: false,
+        };
+        let read_only = info.props.contains_key("svn:needs-lock");
+        let mtime = f.entry.date.filter(|_| self.s.ctx.config.use_commit_times);
+        // The new text sits in the store already; its row is still pending (see `super::batch`).
+        let source = db.pristine_store().path_of(&sha);
+        let mut reader = File::open(&source)
+            .map_err(|e| SvnError::from_io(format!("cannot open the new text of '{wc}'"), &e))?;
+        svn_wc::workqueue::write_working_text(
+            &tmp_dir(db),
+            &mut reader,
+            &info,
+            read_only,
+            mtime,
+            &svn_wc::translate::utc_offset_local,
+        )
+        .map_err(SvnError::from)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn merge_local(
         &self,
         db: &WcDb,
         wc: &RelPath,
         base: &Node,
-        new_text: &NewText,
         new_sha: Sha1Digest,
         new_props: &Props,
         actual: &Props,
@@ -412,13 +507,16 @@ impl UpdateEditor {
             .or_else(|| inspect::prop_value(actual, "svn:mime-type"))
             .and_then(|v| std::str::from_utf8(v).ok());
         let store = db.pristine_store();
+        // The new text sits in the store already; its row is still pending (see `super::batch`),
+        // so it is read by path.
+        let new_text_path = store.path_of(&new_sha);
         let sources_ok = {
             let old_size = store
                 .path_of(&old_sha)
                 .metadata()
                 .map(|m| m.len())
                 .unwrap_or(0);
-            let new_size = fs::metadata(&new_text.path).map(|m| m.len()).unwrap_or(0);
+            let new_size = fs::metadata(&new_text_path).map(|m| m.len()).unwrap_or(0);
             let mine_size = fs::metadata(crate::wc::abs_path(db, wc)?)
                 .map(|m| m.len())
                 .unwrap_or(0);
@@ -449,7 +547,7 @@ impl UpdateEditor {
         let base_bytes = read_limited(store.open_text(&old_sha)?, MAX_MERGE_BYTES)?
             .ok_or_else(|| corrupt("base text too large to merge"))?;
         let theirs = read_limited(
-            File::open(&new_text.path)
+            File::open(&new_text_path)
                 .map_err(|e| SvnError::from_io("cannot open the new text", &e))?,
             MAX_MERGE_BYTES,
         )?
@@ -529,6 +627,27 @@ fn install_merged(rel: &str, tmp: &tempfile::TempPath, _conflicted: bool) -> Res
         }
         .to_skel(),
         WorkItem::FileRemove { relpath: src }.to_skel(),
+    ])
+}
+
+/// Work items that rename a file prepared by [`UpdateEditor::working_text`] into place and record
+/// its size and mtime on the node's top layer, as svn's `install_working_file` does.
+fn install_prepared(rel: &str, tmp: &tempfile::TempPath) -> Result<Vec<Skel>> {
+    let name = tmp
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| corrupt("install temp file has no name"))?;
+    Ok(vec![
+        WorkItem::FileMove {
+            src: format!("{}/tmp/{name}", svn_wc::db::ADM_DIR),
+            dst: rel.to_owned(),
+        }
+        .to_skel(),
+        WorkItem::RecordFileinfo {
+            relpath: rel.to_owned(),
+            mtime: None,
+        }
+        .to_skel(),
     ])
 }
 

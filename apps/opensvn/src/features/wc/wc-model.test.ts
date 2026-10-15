@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import type { FileStatus } from "../../ipc/bindings";
 import { isSafeRelativePath } from "./dialogs/file-dialogs";
-import { matchShortcut, shortcutLabel } from "./shortcuts";
+import { isMac, matchShortcut, shortcutLabel } from "./shortcuts";
 import {
   buildRows,
   changedFiles,
@@ -190,4 +190,26 @@ test("lockFiles: unmodified needs-lock or locked files, never changes or directo
   // Disjoint from the Changes list, so they are never ticked for a commit.
   const changed = new Set(changedFiles(files).map((x) => x.path));
   expect(lockFiles(files).some((x) => changed.has(x.path))).toBe(false);
+});
+
+test("isMac reads platform, then userAgentData, then the user agent", () => {
+  const mac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15";
+  const linux = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15";
+  expect(isMac({ platform: "MacIntel", userAgent: mac })).toBe(true);
+  expect(isMac({ platform: "", userAgent: mac })).toBe(true);
+  expect(isMac({ platform: "Linux x86_64", userAgent: linux })).toBe(false);
+  expect(isMac({ platform: "Win32", userAgent: "Mozilla/5.0 (Windows NT 10.0)" })).toBe(false);
+  const withHints = { platform: "", userAgent: "", userAgentData: { platform: "macOS" } };
+  expect(isMac(withHints)).toBe(true);
+  expect(isMac(undefined)).toBe(false);
+});
+
+test("Mod+, is the Settings shortcut: Cmd on macOS, Ctrl elsewhere", () => {
+  const key = (init: KeyboardEventInit) => new KeyboardEvent("keydown", init);
+  expect(matchShortcut(key({ key: ",", metaKey: true }), "settings", true)).toBe(true);
+  expect(matchShortcut(key({ key: ",", ctrlKey: true }), "settings", true)).toBe(false);
+  expect(matchShortcut(key({ key: ",", ctrlKey: true }), "settings", false)).toBe(true);
+  expect(matchShortcut(key({ key: ",", metaKey: true }), "settings", false)).toBe(false);
+  expect(shortcutLabel("settings", true)).toBe("⌘,");
+  expect(shortcutLabel("settings", false)).toBe("Ctrl+,");
 });

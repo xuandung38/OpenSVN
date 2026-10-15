@@ -59,6 +59,21 @@ pub enum ProgramKind {
     Terminal,
 }
 
+/// Inclusive bounds of a numeric setting. The backend validator owns them; the UI receives them as
+/// the `SETTING_RANGES` constant of the generated bindings, so both sides check the same range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct SettingRange {
+    pub min: u32,
+    pub max: u32,
+}
+
+impl SettingRange {
+    /// Whether `v` lies within the bounds.
+    pub fn contains(self, v: u32) -> bool {
+        (self.min..=self.max).contains(&v)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(tag = "mode", rename_all = "camelCase")]
 pub enum ProxySetting {
@@ -135,9 +150,13 @@ settings_structs! {
         appearance_theme: Theme = "appearance.theme",
         diff_mode: DiffMode = "diff.mode",
         diff_ignore_whitespace: bool = "diff.ignoreWhitespace",
-        /// 1..=16
+        /// Range: `SETTING_RANGES` (validator in the app crate).
         network_max_connections: u8 = "network.maxConnections",
         network_timeout_sec: u32 = "network.timeoutSec",
+        /// How long a checkout or update waits for a lost connection to come back before it
+        /// stops (the working copy then stays incomplete and can be continued).
+        /// Range: `SETTING_RANGES`.
+        network_reconnect_wait_min: u32 = "network.reconnectWaitMin",
         network_proxy: ProxySetting = "network.proxy",
         /// Kerberos single sign-on (Negotiate) when the server offers it; off falls back to a
         /// user name and password.

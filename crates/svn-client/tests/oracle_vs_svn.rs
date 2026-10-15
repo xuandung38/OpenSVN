@@ -1114,3 +1114,31 @@ async fn update_of_nested_targets_matches_svn() {
         assert_same(&o, &t, &w, target);
     }
 }
+
+/// The server replaces a file, a directory by a file and a file by a directory in one revision:
+/// each path is deleted and added again by the same drive, so the update must commit the
+/// deletion (and remove the old node from disk) before it looks at the added node. Local
+/// changes on replaced nodes are covered by `update_replace_kind_vs_svn`.
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_replacements_vs_svn() {
+    let Some((o, t, w)) = scenario(
+        "incoming-replacements",
+        |_, _, _| {},
+        |repo, seed| {
+            repo.svn(seed, &["rm", "-q", "README", "docs", "run.sh"]);
+            write(&seed.join("README"), "replaced\n");
+            write(&seed.join("docs"), "a file now\n");
+            write(&seed.join("run.sh/inner.txt"), "a dir now\n");
+            repo.svn(seed, &["add", "-q", "README", "docs", "run.sh"]);
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_same(&o, &t, &w, "incoming replacements");
+    assert_eq!(
+        std::fs::read_to_string(w.join("docs")).unwrap(),
+        "a file now\n"
+    );
+}

@@ -76,23 +76,33 @@ is step 8 above.
 ## Keys
 
 * Minisign key pair: `pnpm --dir apps/opensvn tauri signer generate -w <path>`. Keep the private
-  key and its password in the password manager and, for CI later, in a GitHub environment
-  `release` with required reviewers. Only the public key (`*.key.pub`) goes into the app
+  key and its password in the password manager and, for CI, as secrets of the GitHub environment
+  `release` with required reviewers (`docs/RELEASE-SETUP.md`). Only the public key (`*.key.pub`) goes into the app
   (`OPENSVN_UPDATER_PUBKEY`).
 * Build-time env: `TAURI_SIGNING_PRIVATE_KEY` (path or content) and
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Never commit them; `*.key` is git-ignored.
 * Apple / Windows code signing is separate and optional, see `docs/deployment-guide.md`.
 
-## Release steps (manual)
+## Release steps
+
+Automated by `.github/workflows/release.yml`; owner setup (environment `release`, secrets, keys,
+first tag) is in `docs/RELEASE-SETUP.md`.
 
 1. Bump the version in root `Cargo.toml` (`[workspace.package]`) and `apps/opensvn/package.json`.
-2. On each OS run the matching `scripts/release/build-*` with `OPENSVN_UPDATER=1` and the key env.
-   The scripts collect only the installer of this version and fail if its `.sig` is missing.
-3. Create release `vX.Y.Z` in `OpenSVN-releases`, upload the installers and `.sig` files.
-4. Read the asset IDs (`gh api repos/<owner>/OpenSVN-releases/releases/tags/vX.Y.Z --jq '.assets[]|[.name,.id]'`),
-   run `scripts/release/make-latest-json.mjs` with one `--entry platform,artifact,asset-api-url`
-   per platform, and commit `latest.json` to `main` of `OpenSVN-releases`.
-5. Test N-1 -> N on a machine with the previous build before announcing.
+2. Push tag `vX.Y.Z`. Reviewers approve environment `release` twice: the signed `build` jobs, then
+   `publish`.
+3. `scripts/release/publish-release.mjs` creates release `vX.Y.Z` in `OpenSVN-releases` as a draft,
+   uploads installers, `.sig` and `SHA256SUMS-*` files, reads the asset API URLs, builds
+   `latest.json` with `make-latest-json.mjs`, publishes the release and only then commits
+   `latest.json` to `main`. Pre-releases, unsigned builds and versions not newer than the current
+   manifest leave `latest.json` alone.
+4. Test N-1 -> N on a machine with the previous build before announcing.
+
+Without `OPENSVN_RELEASES_TOKEN` the workflow stops at a draft release in the source repository;
+the manual fallback is then: create the release in `OpenSVN-releases`, upload the files, read the
+asset IDs (`gh api repos/<owner>/OpenSVN-releases/releases/tags/vX.Y.Z --jq '.assets[]|[.name,.id]'`),
+run `make-latest-json.mjs` with one `--entry platform,artifact,asset-api-url` per platform and
+commit `latest.json` to `main`.
 
 ## Token rotation
 

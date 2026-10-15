@@ -2,12 +2,15 @@
 //!
 //! The driver talks to an [`EditorHandle`]; commands travel through a bounded channel (back
 //! pressure keeps memory flat when the editor is slower than the network) and are executed in
-//! order by the worker. Commands that return ids wait for the answer; the rest are queued
-//! and their failures surface on the next call. The first failure aborts the editor once and
-//! poisons the handle: every later call returns that error.
+//! order by the worker. The handle assigns directory and file ids itself and the worker maps
+//! them to the editor's. Opening or adding a node and starting a text delta wait for the
+//! editor's answer, unless the handle is [pipelined](EditorWorker::spawn_pipelined); the rest is
+//! queued and its failures surface on the next call. The first failure aborts the editor once
+//! and poisons the handle: every later call returns that error.
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use svn_types::{
@@ -50,11 +53,15 @@ impl<T> Drop for Reply<T> {
 }
 type CopyFrom = Option<(String, Revnum)>;
 
+/// Acknowledgement of a command that creates a node or a text delta; `None` when pipelined.
+type Ack = Option<Reply<()>>;
+
 enum Command {
     SetTargetRevision(Revnum),
     OpenRoot {
+        id: DirId,
         base_rev: Option<Revnum>,
-        reply: Reply<DirId>,
+        ack: Ack,
     },
     DeleteEntry {
         path: RelPath,
@@ -62,16 +69,18 @@ enum Command {
         parent: DirId,
     },
     AddDirectory {
+        id: DirId,
         path: RelPath,
         parent: DirId,
         copy_from: CopyFrom,
-        reply: Reply<DirId>,
+        ack: Ack,
     },
     OpenDirectory {
+        id: DirId,
         path: RelPath,
         parent: DirId,
         base_rev: Option<Revnum>,
-        reply: Reply<DirId>,
+        ack: Ack,
     },
     ChangeDirProp {
         dir: DirId,
@@ -83,21 +92,23 @@ enum Command {
         parent: DirId,
     },
     AddFile {
+        id: FileId,
         path: RelPath,
         parent: DirId,
         copy_from: CopyFrom,
-        reply: Reply<FileId>,
+        ack: Ack,
     },
     OpenFile {
+        id: FileId,
         path: RelPath,
         parent: DirId,
         base_rev: Option<Revnum>,
-        reply: Reply<FileId>,
+        ack: Ack,
     },
     ApplyTextDelta {
         file: FileId,
         base_checksum: Option<Checksum>,
-        reply: Reply<()>,
+        ack: Ack,
     },
     Window {
         file: FileId,
@@ -130,11 +141,29 @@ impl EditorWorker {
     /// Starts a blocking worker owning `editor` with a channel of `capacity` commands.
     /// Must be called inside a Tokio runtime.
     pub fn spawn(editor: Box<dyn DeltaEditor>, capacity: usize) -> EditorHandle {
+        Self::start(editor, capacity, false)
+    }
+
+    /// Like [`spawn`](Self::spawn), but opening or adding a node and starting a text delta do
+    /// not wait for the editor: the driver streams the whole drive and the editor works through
+    /// it at its own pace (each round trip used to cost two thread switches per file). A
+    /// failure of such a call surfaces on a later call, like any queued command.
+    pub fn spawn_pipelined(editor: Box<dyn DeltaEditor>, capacity: usize) -> EditorHandle {
+        Self::start(editor, capacity, true)
+    }
+
+    fn start(editor: Box<dyn DeltaEditor>, capacity: usize, pipelined: bool) -> EditorHandle {
         let (tx, rx) = mpsc::channel(capacity.max(1));
         let failure = Arc::new(Mutex::new(None));
         let worker_failure = Arc::clone(&failure);
         let join = tokio::task::spawn_blocking(move || run_worker(editor, rx, &worker_failure));
-        EditorHandle { tx, failure, join }
+        EditorHandle {
+            tx,
+            failure,
+            join,
+            next_id: AtomicU32::new(1),
+            pipelined,
+        }
     }
 }
 
@@ -171,11 +200,11 @@ fn run_worker(
     mut rx: mpsc::Receiver<Command>,
     failure: &Failure,
 ) {
-    let mut sinks: HashMap<FileId, Box<dyn WindowSink>> = HashMap::new();
+    let mut state = WorkerState::default();
     while let Some(cmd) = rx.blocking_recv() {
         let is_close = matches!(cmd, Command::CloseEdit { .. } | Command::AbortEdit { .. });
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            execute(editor.as_mut(), &mut sinks, cmd)
+            execute(editor.as_mut(), &mut state, cmd)
         }));
         let finished = match outcome {
             Ok(Ok(())) => is_close,
@@ -210,83 +239,160 @@ fn abort_quietly(editor: &mut dyn DeltaEditor) {
 
 fn reject(cmd: Command, err: &SvnError) {
     match cmd {
-        Command::OpenRoot { reply, .. }
-        | Command::AddDirectory { reply, .. }
-        | Command::OpenDirectory { reply, .. } => {
-            answer(reply, Err(err.clone()));
+        Command::OpenRoot { ack, .. }
+        | Command::AddDirectory { ack, .. }
+        | Command::OpenDirectory { ack, .. }
+        | Command::AddFile { ack, .. }
+        | Command::OpenFile { ack, .. }
+        | Command::ApplyTextDelta { ack, .. } => {
+            if let Some(ack) = ack {
+                answer(ack, Err(err.clone()));
+            }
         }
-        Command::AddFile { reply, .. } | Command::OpenFile { reply, .. } => {
-            answer(reply, Err(err.clone()))
-        }
-        Command::ApplyTextDelta { reply, .. } | Command::CloseEdit { reply } => {
-            answer(reply, Err(err.clone()))
-        }
+        Command::CloseEdit { reply } => answer(reply, Err(err.clone())),
         Command::AbortEdit { reply } => answer(reply, Ok(())),
         _ => {}
     }
 }
 
-/// Runs one command; reply-carrying commands answer here and report `Ok` to the loop unless
+/// The worker's view of the drive: handle ids to editor ids, and the open text deltas.
+#[derive(Default)]
+struct WorkerState {
+    dirs: HashMap<u32, DirId>,
+    files: HashMap<u32, FileId>,
+    sinks: HashMap<u32, Box<dyn WindowSink>>,
+}
+
+fn unknown(what: &str) -> SvnError {
+    SvnError::new(ErrorCode::Internal, format!("unknown {what} handle"))
+}
+
+impl WorkerState {
+    fn dir(&self, id: DirId) -> Result<DirId> {
+        self.dirs
+            .get(&id.0)
+            .copied()
+            .ok_or_else(|| unknown("directory"))
+    }
+
+    fn file(&self, id: FileId) -> Result<FileId> {
+        self.files
+            .get(&id.0)
+            .copied()
+            .ok_or_else(|| unknown("file"))
+    }
+}
+
+/// Runs one command; acknowledged commands answer here and report `Ok` to the loop unless
 /// the editor call itself failed (the loop then aborts the editor).
-fn execute(
-    ed: &mut dyn DeltaEditor,
-    sinks: &mut HashMap<FileId, Box<dyn WindowSink>>,
-    cmd: Command,
-) -> Result<()> {
+fn execute(ed: &mut dyn DeltaEditor, st: &mut WorkerState, cmd: Command) -> Result<()> {
     fn relay<T>(reply: Reply<T>, r: Result<T>) -> Result<()> {
         let status = r.as_ref().map(|_| ()).map_err(Clone::clone);
         answer(reply, r);
         status
+    }
+    /// Answers the acknowledgement (if any) with the outcome of `r`.
+    fn acked(ack: Ack, r: Result<()>) -> Result<()> {
+        match ack {
+            Some(ack) => relay(ack, r),
+            None => r,
+        }
     }
     fn cf(c: &CopyFrom) -> Option<(&str, Revnum)> {
         c.as_ref().map(|(p, r)| (p.as_str(), *r))
     }
     match cmd {
         Command::SetTargetRevision(rev) => ed.set_target_revision(rev),
-        Command::OpenRoot { base_rev, reply } => relay(reply, ed.open_root(base_rev)),
-        Command::DeleteEntry { path, rev, parent } => ed.delete_entry(&path, rev, parent),
+        Command::OpenRoot { id, base_rev, ack } => {
+            let r = ed.open_root(base_rev).map(|d| {
+                st.dirs.insert(id.0, d);
+            });
+            acked(ack, r)
+        }
+        Command::DeleteEntry { path, rev, parent } => ed.delete_entry(&path, rev, st.dir(parent)?),
         Command::AddDirectory {
+            id,
             path,
             parent,
             copy_from,
-            reply,
-        } => relay(reply, ed.add_directory(&path, parent, cf(&copy_from))),
+            ack,
+        } => {
+            let r = st
+                .dir(parent)
+                .and_then(|p| ed.add_directory(&path, p, cf(&copy_from)))
+                .map(|d| {
+                    st.dirs.insert(id.0, d);
+                });
+            acked(ack, r)
+        }
         Command::OpenDirectory {
+            id,
             path,
             parent,
             base_rev,
-            reply,
-        } => relay(reply, ed.open_directory(&path, parent, base_rev)),
-        Command::ChangeDirProp { dir, change } => ed.change_dir_prop(dir, change),
-        Command::CloseDirectory(dir) => ed.close_directory(dir),
-        Command::AbsentDirectory { path, parent } => ed.absent_directory(&path, parent),
+            ack,
+        } => {
+            let r = st
+                .dir(parent)
+                .and_then(|p| ed.open_directory(&path, p, base_rev))
+                .map(|d| {
+                    st.dirs.insert(id.0, d);
+                });
+            acked(ack, r)
+        }
+        Command::ChangeDirProp { dir, change } => ed.change_dir_prop(st.dir(dir)?, change),
+        Command::CloseDirectory(dir) => {
+            let d = st.dir(dir)?;
+            st.dirs.remove(&dir.0);
+            ed.close_directory(d)
+        }
+        Command::AbsentDirectory { path, parent } => ed.absent_directory(&path, st.dir(parent)?),
         Command::AddFile {
+            id,
             path,
             parent,
             copy_from,
-            reply,
-        } => relay(reply, ed.add_file(&path, parent, cf(&copy_from))),
+            ack,
+        } => {
+            let r = st
+                .dir(parent)
+                .and_then(|p| ed.add_file(&path, p, cf(&copy_from)))
+                .map(|f| {
+                    st.files.insert(id.0, f);
+                });
+            acked(ack, r)
+        }
         Command::OpenFile {
+            id,
             path,
             parent,
             base_rev,
-            reply,
-        } => relay(reply, ed.open_file(&path, parent, base_rev)),
+            ack,
+        } => {
+            let r = st
+                .dir(parent)
+                .and_then(|p| ed.open_file(&path, p, base_rev))
+                .map(|f| {
+                    st.files.insert(id.0, f);
+                });
+            acked(ack, r)
+        }
         Command::ApplyTextDelta {
             file,
             base_checksum,
-            reply,
-        } => match ed.apply_textdelta(file, base_checksum) {
-            Ok(sink) => {
-                sinks.insert(file, sink);
-                answer(reply, Ok(()));
-                Ok(())
-            }
-            Err(e) => relay(reply, Err(e)),
-        },
+            ack,
+        } => {
+            let r = st
+                .file(file)
+                .and_then(|f| ed.apply_textdelta(f, base_checksum))
+                .map(|sink| {
+                    st.sinks.insert(file.0, sink);
+                });
+            acked(ack, r)
+        }
         Command::Window { file, window } => {
             let end = window.is_none();
-            let sink = sinks.get_mut(&file).ok_or_else(|| {
+            let sink = st.sinks.get_mut(&file.0).ok_or_else(|| {
                 SvnError::new(
                     ErrorCode::Internal,
                     "window for a file without a text delta",
@@ -294,16 +400,20 @@ fn execute(
             })?;
             let r = sink.window(window.as_ref());
             if end {
-                sinks.remove(&file);
+                st.sinks.remove(&file.0);
             }
             r
         }
-        Command::ChangeFileProp { file, change } => ed.change_file_prop(file, change),
+        Command::ChangeFileProp { file, change } => ed.change_file_prop(st.file(file)?, change),
         Command::CloseFile {
             file,
             text_checksum,
-        } => ed.close_file(file, text_checksum),
-        Command::AbsentFile { path, parent } => ed.absent_file(&path, parent),
+        } => {
+            let f = st.file(file)?;
+            st.files.remove(&file.0);
+            ed.close_file(f, text_checksum)
+        }
+        Command::AbsentFile { path, parent } => ed.absent_file(&path, st.dir(parent)?),
         Command::CloseEdit { reply } => relay(reply, ed.close_edit()),
         Command::AbortEdit { reply } => relay(reply, ed.abort_edit()),
     }
@@ -315,6 +425,10 @@ pub struct EditorHandle {
     tx: mpsc::Sender<Command>,
     failure: Failure,
     join: JoinHandle<()>,
+    /// Next directory or file id handed out (ids are unique across both kinds).
+    next_id: AtomicU32,
+    /// Opening, adding and text deltas do not wait for the editor.
+    pipelined: bool,
 }
 
 /// Feeds the windows of one file's text delta; obtained from [`EditorHandle::apply_textdelta`].
@@ -369,10 +483,26 @@ impl EditorHandle {
     pub async fn set_target_revision(&self, rev: Revnum) -> Result<()> {
         self.push(Command::SetTargetRevision(rev)).await
     }
+    fn alloc(&self) -> u32 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Sends a command that creates a node or a text delta: waits for the editor's answer
+    /// unless pipelined.
+    async fn acked(&self, make: impl FnOnce(Ack) -> Command) -> Result<()> {
+        if self.pipelined {
+            self.push(make(None)).await
+        } else {
+            self.call(|reply| make(Some(reply))).await
+        }
+    }
+
     /// See [`DeltaEditor::open_root`].
     pub async fn open_root(&self, base_rev: Option<Revnum>) -> Result<DirId> {
-        self.call(|reply| Command::OpenRoot { base_rev, reply })
-            .await
+        let id = DirId(self.alloc());
+        self.acked(|ack| Command::OpenRoot { id, base_rev, ack })
+            .await?;
+        Ok(id)
     }
     /// See [`DeltaEditor::delete_entry`].
     pub async fn delete_entry(
@@ -396,13 +526,16 @@ impl EditorHandle {
         copy_from: Option<(&str, Revnum)>,
     ) -> Result<DirId> {
         let copy_from = copy_from.map(|(p, r)| (p.to_owned(), r));
-        self.call(|reply| Command::AddDirectory {
+        let id = DirId(self.alloc());
+        self.acked(|ack| Command::AddDirectory {
+            id,
             path: path.clone(),
             parent,
             copy_from,
-            reply,
+            ack,
         })
-        .await
+        .await?;
+        Ok(id)
     }
     /// See [`DeltaEditor::open_directory`].
     pub async fn open_directory(
@@ -411,13 +544,16 @@ impl EditorHandle {
         parent: DirId,
         base_rev: Option<Revnum>,
     ) -> Result<DirId> {
-        self.call(|reply| Command::OpenDirectory {
+        let id = DirId(self.alloc());
+        self.acked(|ack| Command::OpenDirectory {
+            id,
             path: path.clone(),
             parent,
             base_rev,
-            reply,
+            ack,
         })
-        .await
+        .await?;
+        Ok(id)
     }
     /// See [`DeltaEditor::change_dir_prop`].
     pub async fn change_dir_prop(&self, dir: DirId, change: PropChange) -> Result<()> {
@@ -443,13 +579,16 @@ impl EditorHandle {
         copy_from: Option<(&str, Revnum)>,
     ) -> Result<FileId> {
         let copy_from = copy_from.map(|(p, r)| (p.to_owned(), r));
-        self.call(|reply| Command::AddFile {
+        let id = FileId(self.alloc());
+        self.acked(|ack| Command::AddFile {
+            id,
             path: path.clone(),
             parent,
             copy_from,
-            reply,
+            ack,
         })
-        .await
+        .await?;
+        Ok(id)
     }
     /// See [`DeltaEditor::open_file`].
     pub async fn open_file(
@@ -458,13 +597,16 @@ impl EditorHandle {
         parent: DirId,
         base_rev: Option<Revnum>,
     ) -> Result<FileId> {
-        self.call(|reply| Command::OpenFile {
+        let id = FileId(self.alloc());
+        self.acked(|ack| Command::OpenFile {
+            id,
             path: path.clone(),
             parent,
             base_rev,
-            reply,
+            ack,
         })
-        .await
+        .await?;
+        Ok(id)
     }
     /// See [`DeltaEditor::apply_textdelta`]; windows are then pushed through the returned sender.
     pub async fn apply_textdelta(
@@ -472,10 +614,10 @@ impl EditorHandle {
         file: FileId,
         base_checksum: Option<Checksum>,
     ) -> Result<WindowSender> {
-        self.call(|reply| Command::ApplyTextDelta {
+        self.acked(|ack| Command::ApplyTextDelta {
             file,
             base_checksum,
-            reply,
+            ack,
         })
         .await?;
         Ok(WindowSender {

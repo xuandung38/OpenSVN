@@ -27,8 +27,16 @@ export function ModalDialog({
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    if (open && !el.open) el.showModal();
-    if (!open && el.open) el.close();
+    // WKWebView before Safari 15.4 (macOS < 12.3 without a Safari update) has no showModal/close:
+    // calling it would throw in this effect and unmount the whole app. Fall back to the attribute.
+    if (open && !el.open) {
+      if (typeof el.showModal === "function") el.showModal();
+      else el.setAttribute("open", "");
+    }
+    if (!open && el.open) {
+      if (typeof el.close === "function") el.close();
+      else el.removeAttribute("open");
+    }
   }, [open]);
   return (
     // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop click is a pointer shortcut; keyboard close is native Esc (cancel event)

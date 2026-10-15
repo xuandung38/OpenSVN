@@ -39,6 +39,23 @@ pub struct RecRa {
     /// starts, so the commit in progress is out of date at MERGE.
     pub seed_on_text: Option<(String, String, Vec<FakeChange>)>,
     pub on_auth: Option<AuthHook>,
+    /// One entry per `do_update` call, in order: break that drive with the error after this many
+    /// `close_file` calls (as if the connection failed mid-stream); `None` lets it run.
+    pub update_breaks: Mutex<std::collections::VecDeque<Option<(usize, SvnError)>>>,
+    /// Revision asked for by every `do_update` call.
+    pub update_revisions: Mutex<Vec<Option<Revnum>>>,
+    /// Break every drive with the error when it is about to close this file (a server that
+    /// always cuts the answer at the same point). Applies after `update_breaks` is used up.
+    pub update_break_at: Mutex<Option<(String, SvnError)>>,
+    /// One entry per `probe` call, in order: fail it with the error (`None`: the server
+    /// answers). Once used up, `probe_default` decides.
+    pub probe_results: Mutex<std::collections::VecDeque<Option<SvnError>>>,
+    /// Answer of a probe once `probe_results` is used up (`None`: the server answers).
+    pub probe_default: Mutex<Option<SvnError>>,
+    /// Probes made.
+    pub probes: std::sync::atomic::AtomicUsize,
+    /// `reset_connections` calls.
+    pub resets: std::sync::atomic::AtomicUsize,
 }
 
 impl RecRa {
@@ -53,6 +70,13 @@ impl RecRa {
             cancel_after_merge: None,
             seed_on_text: None,
             on_auth: None,
+            update_breaks: Mutex::default(),
+            update_revisions: Mutex::default(),
+            update_break_at: Mutex::default(),
+            probe_results: Mutex::default(),
+            probe_default: Mutex::default(),
+            probes: std::sync::atomic::AtomicUsize::new(0),
+            resets: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -327,6 +351,33 @@ impl RaSession for RecRa {
         }
         self.inner.ensure_authenticated(cancel).await
     }
+    async fn probe(&self, cancel: &CancelToken) -> Result<()> {
+        cancel.check()?;
+        self.probes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        push(&self.log, "probe".into());
+        let next = self
+            .probe_results
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front();
+        let answer = match next {
+            Some(a) => a,
+            None => self
+                .probe_default
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        };
+        match answer {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+    fn reset_connections(&self) {
+        self.resets
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     async fn youngest_rev(&self, cancel: &CancelToken) -> Result<Revnum> {
         self.inner.youngest_rev(cancel).await
     }
@@ -420,6 +471,39 @@ impl RaSession for RecRa {
         editor: Box<dyn DeltaEditor>,
         cancel: &CancelToken,
     ) -> Result<()> {
+        push(&self.log, format!("do_update rev={:?}", req.revision));
+        self.update_revisions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(req.revision);
+        let brk = self
+            .update_breaks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front()
+            .flatten();
+        let at = self
+            .update_break_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let editor: Box<dyn DeltaEditor> = match (brk, at) {
+            (Some((after, error)), _) => Box::new(BreakingEditor {
+                inner: editor,
+                left: after,
+                error,
+                at: None,
+                files: HashMap::new(),
+            }),
+            (None, Some((path, error))) => Box::new(BreakingEditor {
+                inner: editor,
+                left: usize::MAX,
+                error,
+                at: Some(path),
+                files: HashMap::new(),
+            }),
+            (None, None) => editor,
+        };
         self.inner.do_update(req, report, editor, cancel).await
     }
     async fn commit_editor(
@@ -480,4 +564,121 @@ impl RaSession for RecRa {
 /// An error with a Subversion code the RA layer could not classify.
 pub fn raw_error(svn_code: u32) -> SvnError {
     SvnError::new(ErrorCode::Internal, "server said no").with_svn_code(svn_code)
+}
+
+/// Editor that fails like a broken connection after `left` files were closed: the failing
+/// call never reaches the working copy editor, which then gets `abort_edit`.
+struct BreakingEditor {
+    inner: Box<dyn DeltaEditor>,
+    left: usize,
+    error: SvnError,
+    /// Also break at the `close_file` of this path.
+    at: Option<String>,
+    files: HashMap<FileId, String>,
+}
+
+impl BreakingEditor {
+    fn check(&self) -> Result<()> {
+        if self.left == 0 {
+            return Err(self.error.clone());
+        }
+        Ok(())
+    }
+}
+
+impl DeltaEditor for BreakingEditor {
+    fn set_target_revision(&mut self, rev: Revnum) -> Result<()> {
+        self.inner.set_target_revision(rev)
+    }
+    fn open_root(&mut self, base_rev: Option<Revnum>) -> Result<DirId> {
+        self.inner.open_root(base_rev)
+    }
+    fn delete_entry(&mut self, path: &RelPath, rev: Option<Revnum>, parent: DirId) -> Result<()> {
+        self.check()?;
+        self.inner.delete_entry(path, rev, parent)
+    }
+    fn add_directory(
+        &mut self,
+        path: &RelPath,
+        parent: DirId,
+        copyfrom: Option<(&str, Revnum)>,
+    ) -> Result<DirId> {
+        self.check()?;
+        self.inner.add_directory(path, parent, copyfrom)
+    }
+    fn open_directory(
+        &mut self,
+        path: &RelPath,
+        parent: DirId,
+        base_rev: Option<Revnum>,
+    ) -> Result<DirId> {
+        self.check()?;
+        self.inner.open_directory(path, parent, base_rev)
+    }
+    fn change_dir_prop(&mut self, dir: DirId, change: PropChange) -> Result<()> {
+        self.check()?;
+        self.inner.change_dir_prop(dir, change)
+    }
+    fn close_directory(&mut self, dir: DirId) -> Result<()> {
+        self.check()?;
+        self.inner.close_directory(dir)
+    }
+    fn absent_directory(&mut self, path: &RelPath, parent: DirId) -> Result<()> {
+        self.check()?;
+        self.inner.absent_directory(path, parent)
+    }
+    fn add_file(
+        &mut self,
+        path: &RelPath,
+        parent: DirId,
+        copyfrom: Option<(&str, Revnum)>,
+    ) -> Result<FileId> {
+        self.check()?;
+        let id = self.inner.add_file(path, parent, copyfrom)?;
+        self.files.insert(id, path.as_str().to_owned());
+        Ok(id)
+    }
+    fn open_file(
+        &mut self,
+        path: &RelPath,
+        parent: DirId,
+        base_rev: Option<Revnum>,
+    ) -> Result<FileId> {
+        self.check()?;
+        let id = self.inner.open_file(path, parent, base_rev)?;
+        self.files.insert(id, path.as_str().to_owned());
+        Ok(id)
+    }
+    fn apply_textdelta(
+        &mut self,
+        file: FileId,
+        base_checksum: Option<Checksum>,
+    ) -> Result<Box<dyn svn_types::WindowSink>> {
+        self.check()?;
+        self.inner.apply_textdelta(file, base_checksum)
+    }
+    fn change_file_prop(&mut self, file: FileId, change: PropChange) -> Result<()> {
+        self.check()?;
+        self.inner.change_file_prop(file, change)
+    }
+    fn close_file(&mut self, file: FileId, text_checksum: Option<Checksum>) -> Result<()> {
+        self.check()?;
+        if self.at.is_some() && self.files.get(&file) == self.at.as_ref() {
+            return Err(self.error.clone());
+        }
+        self.inner.close_file(file, text_checksum)?;
+        self.left -= 1;
+        Ok(())
+    }
+    fn absent_file(&mut self, path: &RelPath, parent: DirId) -> Result<()> {
+        self.check()?;
+        self.inner.absent_file(path, parent)
+    }
+    fn close_edit(&mut self) -> Result<()> {
+        self.check()?;
+        self.inner.close_edit()
+    }
+    fn abort_edit(&mut self) -> Result<()> {
+        self.inner.abort_edit()
+    }
 }

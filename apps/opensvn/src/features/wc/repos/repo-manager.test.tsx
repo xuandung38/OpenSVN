@@ -198,13 +198,39 @@ test("Mod+T opens the picker; typing filters, Enter switches through wc_open", a
   expect(screen.getByText("No repository matches “zzz”.")).toBeTruthy();
 });
 
-test("a working copy left by an unfinished checkout is flagged Incomplete — Update to finish", async () => {
-  markMockWcIncomplete("wc-docs");
+test("a working copy left by an unfinished checkout offers Continue checkout or Update to latest", async () => {
+  markMockWcIncomplete("wc-docs", 1200);
   const { list } = await openPicker();
   const docs = within(list).getByRole("option", { name: /design-docs/ });
-  expect(docs.textContent).toContain("Incomplete — Update to finish");
+  expect(docs.textContent).toContain("Checkout incomplete — Continue checkout");
   const game = within(list).getByRole("option", { name: /game-client/ });
-  expect(game.textContent).not.toContain("Incomplete");
+  expect(game.textContent).not.toContain("incomplete");
+  await act(async () => {
+    docs.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  });
+  const menu = await screen.findByRole("menu", { name: "Actions for design-docs" });
+  expect(within(menu).getByRole("menuitem", { name: "Update to latest instead" })).toBeTruthy();
+  await user().click(within(menu).getByRole("menuitem", { name: "Continue checkout" }));
+  await waitFor(() => expect(lastCall("wcContinue")?.args).toEqual(["wc-docs"]));
+  expect(calls("update")).toBe(0);
+});
+
+test("an interrupted update says so; Update to latest instead runs a plain update to HEAD", async () => {
+  markMockWcIncomplete("wc-docs", 1200, false);
+  const { list } = await openPicker();
+  const docs2 = within(list).getByRole("option", { name: /design-docs/ });
+  expect(docs2.textContent).toContain("Update incomplete — Continue update");
+  await act(async () => {
+    docs2.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  });
+  const menu2 = await screen.findByRole("menu", { name: "Actions for design-docs" });
+  expect(within(menu2).getByRole("menuitem", { name: "Continue update" })).toBeTruthy();
+  await user().click(within(menu2).getByRole("menuitem", { name: "Update to latest instead" }));
+  await waitFor(() =>
+    expect(lastCall("update")?.args).toEqual([
+      { wcId: "wc-docs", paths: null, rev: null, depth: null },
+    ]),
+  );
 });
 
 test("a missing working copy offers Locate…, which re-grants through the native dialog", async () => {
@@ -280,11 +306,11 @@ test("footer and File menu events open checkout and add existing; a menu/key ech
   await closeCheckout();
 
   now.mockReturnValue(500_000);
-  await act(async () => mockEmit("menu://file.switch-repo"));
+  await act(async () => mockEmit("menu://file/switch-repo"));
   expect(await screen.findByRole("combobox", { name: "Filter repositories" })).toBeTruthy();
   await user().keyboard("{Escape}");
 
-  await act(async () => mockEmit("menu://file.checkout"));
+  await act(async () => mockEmit("menu://file/checkout"));
   expect(
     await screen.findByRole("dialog", { name: "Checkout repository", hidden: true }),
   ).toBeTruthy();
@@ -294,14 +320,14 @@ test("footer and File menu events open checkout and add existing; a menu/key ech
   // Wall-clock time is frozen so a slow machine cannot stretch the key-to-echo gap.
   now.mockReturnValue(1_000_000);
   await user().keyboard("{Control>}o{/Control}");
-  await act(async () => mockEmit("menu://file.add-wc"));
+  await act(async () => mockEmit("menu://file/add-wc"));
   await waitFor(() => expect(calls("pathPick")).toBe(1));
   expect(await screen.findByText(/Added working copy/)).toBeTruthy();
   expect(calls("pathPick")).toBe(1);
 
   // The other order (Windows/Linux can deliver the menu event first): still shown once.
   now.mockReturnValue(2_000_000);
-  await act(async () => mockEmit("menu://file.add-wc"));
+  await act(async () => mockEmit("menu://file/add-wc"));
   now.mockReturnValue(2_000_050);
   await user().keyboard("{Control>}o{/Control}");
   await waitFor(() => expect(calls("pathPick")).toBe(2));
@@ -312,11 +338,11 @@ test("footer and File menu events open checkout and add existing; a menu/key ech
   await user().keyboard("{Control>}o{/Control}");
   await waitFor(() => expect(calls("pathPick")).toBe(3));
   now.mockReturnValue(3_000_401);
-  await act(async () => mockEmit("menu://file.add-wc"));
+  await act(async () => mockEmit("menu://file/add-wc"));
   await waitFor(() => expect(calls("pathPick")).toBe(4));
   // ...and so is a key press more than 400 ms after a menu event.
   now.mockReturnValue(4_000_000);
-  await act(async () => mockEmit("menu://file.add-wc"));
+  await act(async () => mockEmit("menu://file/add-wc"));
   await waitFor(() => expect(calls("pathPick")).toBe(5));
   now.mockReturnValue(4_000_401);
   await user().keyboard("{Control>}o{/Control}");

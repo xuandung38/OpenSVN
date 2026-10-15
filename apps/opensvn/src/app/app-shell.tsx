@@ -1,5 +1,4 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import { ActivityPanel } from "../components/layout/activity-panel";
 import { AppToolbar } from "../components/layout/app-toolbar";
 import { MainWindow } from "../components/layout/main-window";
 import { Button } from "../components/ui/button";
@@ -8,6 +7,7 @@ import { Popover } from "../components/ui/popover";
 import { SegmentedControl } from "../components/ui/segmented-control";
 import { StatusBar, StatusBarItem } from "../components/ui/status-bar";
 import { Tabs } from "../components/ui/tabs";
+import { ActivityPanel } from "../features/activity/activity-panel";
 import { BranchPopoverContent } from "../features/remote/branch/branch-popover";
 import { BranchSwitchList } from "../features/remote/branch/branch-switch-list";
 import { CreateBranchTagDialog } from "../features/remote/branch/create-branch-tag-dialog";
@@ -180,7 +180,7 @@ function ShellBody({
   });
 
   const changed = changedFiles(files).length;
-  const running = ops.filter((o) => o.state === "running").length;
+  const running = ops.filter((o) => o.state === "running" && !o.handle.background).length;
 
   const wcPicker = (item: React.ReactNode) => (
     <RepoPicker
@@ -197,13 +197,16 @@ function ShellBody({
   return (
     <>
       <DropToAddWorkingCopy />
+      {/* Outside `main`: the Welcome screen (no working copy yet, as on a fresh install) has the
+          same gear button and menu item, so Settings must open from there too. */}
+      <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <MainWindow
         toolbar={
           <AppToolbar
             workingCopyName={current?.name ?? r("noRepo")}
             workingCopyLabel={r("currentRepo")}
             workingCopyShortcut={isMac() ? "Meta+T" : "Control+T"}
-            locationLabel={current?.branch ? "Branch" : "Location"}
+            locationLabel={current?.branch ? sh("branch") : sh("location")}
             locationValue={current?.branch?.name ?? current?.pathInRepo ?? "-"}
             incoming={current?.incoming ?? 0}
             updating={ops.some((o) => o.handle.kind === "update" && o.state === "running")}
@@ -215,7 +218,12 @@ function ShellBody({
             wrapLocation={
               current
                 ? (item) => (
-                    <Popover trigger={item} open={locationOpen} onOpenChange={setLocationOpen}>
+                    <Popover
+                      trigger={item}
+                      open={locationOpen}
+                      onOpenChange={setLocationOpen}
+                      label={current.branch ? sh("branch") : sh("location")}
+                    >
                       <BranchPopoverContent wc={current} onCreate={setCreateKind} />
                       <BranchSwitchList
                         wc={current}
@@ -262,7 +270,6 @@ function ShellBody({
                   browse: current ? <RemoteBrowse wc={current} links={links} /> : noWc,
                 }}
               />
-              <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} />
               {createKind && current && (
                 <CreateBranchTagDialog
                   kind={createKind}
@@ -280,11 +287,7 @@ function ShellBody({
         }
         activity={
           showActivity ? (
-            <ActivityPanel
-              ops={ops}
-              onCancel={(opId) => void actions.cancelOp(opId)}
-              cancelLabel={t("activityCancel")}
-            />
+            <ActivityPanel ops={ops} onCancel={(opId) => void actions.cancelOp(opId)} />
           ) : undefined
         }
         statusBar={

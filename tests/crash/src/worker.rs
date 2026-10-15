@@ -1,7 +1,7 @@
 //! The `crash-worker` process: runs one engine operation and exits, or dies by `SIGKILL`.
 //!
 //! `crash-worker <state-dir> <op> <url> <wc> [message]`, op one of `checkout`, `update`,
-//! `commit`, `revert`, `cleanup`, `recover`, `status`. The last stdout line is
+//! `continue`, `commit`, `revert`, `cleanup`, `recover`, `status`. The last stdout line is
 //! `RESULT ok <details>` or `RESULT err <message>` (exit code 0 / 2).
 //!
 //! With feature `failpoints`: [`FP_ENV`] names a failpoint and [`FP_HIT_ENV`] the hit at which
@@ -82,6 +82,7 @@ async fn run(
             engine.checkout(url, wc, None).await?.map(|r| r.0)
         ),
         "update" => format!("rev={:?}", engine.update(url, wc, None).await?.map(|r| r.0)),
+        "continue" => format!("rev={:?}", engine.resume(url, wc).await?.map(|r| r.0)),
         "commit" => format!("rev={:?}", engine.commit(url, wc, msg).await?.map(|r| r.0)),
         "revert" => format!("reverted={}", engine.revert(wc)?),
         "cleanup" => format!("work_items={}", engine.cleanup(wc)?),

@@ -13,7 +13,7 @@ use crate::diagnostics::DiagnosticsService;
 use crate::engine::{EngineFacade, OpContext, WcRef};
 use crate::menu::MenuControl;
 use crate::notify::Notifier;
-use crate::ops::{AppEvents, OperationManager};
+use crate::ops::{AppEvents, OpSpec, OperationManager};
 use crate::os_integration::OsOpener;
 use crate::path_grants::{PathGrants, PathPicker};
 use crate::programs::{ProgramLauncher, ProgramPicker, ProgramService};
@@ -324,21 +324,20 @@ impl AppState {
         let r = self.wcs.resolve(id)?;
         let (engine, publisher) = (Arc::clone(&self.engine), Arc::clone(&self.status));
         let wc = r.wc.clone();
-        Ok(self
-            .ops
-            .spawn(kind, Some(id.clone()), title, move |ctx| async move {
-                // Authenticate first: a prompt must never wait while the working copy is locked.
-                engine
-                    .ensure_authenticated(&wc, &ctx)
-                    .await
-                    .map_err(|e| AppError::from(&e))?;
-                let cancel = ctx.cancel.clone();
-                let result = r.actor.write_cancellable(f(engine, wc, ctx), &cancel).await;
-                if let Err(e) = publisher.publish(&r).await {
-                    tracing::warn!(code = ?e.code, "status refresh after operation failed");
-                }
-                result
-            }))
+        let spec = OpSpec::new(kind, Some(id.clone()), title).at(&wc.root);
+        Ok(self.ops.spawn_with(spec, move |ctx| async move {
+            // Authenticate first: a prompt must never wait while the working copy is locked.
+            engine
+                .ensure_authenticated(&wc, &ctx)
+                .await
+                .map_err(|e| AppError::from(&e))?;
+            let cancel = ctx.cancel.clone();
+            let result = r.actor.write_cancellable(f(engine, wc, ctx), &cancel).await;
+            if let Err(e) = publisher.publish(&r).await {
+                tracing::warn!(code = ?e.code, "status refresh after operation failed");
+            }
+            result
+        }))
     }
 
     /// Like [`start_op`](Self::start_op), for work that builds its own `AppError`.
@@ -386,6 +385,7 @@ impl AppState {
             publisher: Arc::clone(&self.status),
             wcs: Arc::clone(&self.wcs),
             notifier: Arc::clone(&self.notifier),
+            ops: self.ops.clone(),
             settings: self.settings.subscribe(),
             period_override: period,
         });
@@ -406,7 +406,13 @@ impl AppState {
         if !report.recovered.is_empty() {
             tracing::info!(wc = %id.0, dirs = report.recovered.len(), "recovered stale working copy locks");
         }
-        if !report.needs_user_action.is_empty() {
+        // A lock held by one of our own running operations (a checkout still writing this
+        // working copy) is not stale: offering cleanup would interfere with that operation.
+        let ours = self.ops.running_on(std::path::Path::new(&wc.root_path));
+        if let Some(op) = &ours {
+            tracing::info!(wc = %id.0, op = %op.title, "working copy locked by a running operation");
+        }
+        if !report.needs_user_action.is_empty() && ours.is_none() {
             self.events.banner(&opensvn_ipc::Banner {
                 wc_id: id.clone(),
                 kind: opensvn_ipc::BannerKind::NeedsCleanup,
@@ -418,6 +424,55 @@ impl AppState {
 
     /// Runs recovery for every registered working copy (app start). A failure is logged and does
     /// not stop the others.
+    /// At start-up: the working copies of checkouts that were interrupted while the app was
+    /// closed or killed (their journal rows are still there) are registered, so they are listed
+    /// with "Continue checkout" even though the checkout never got to register them. A row whose
+    /// folder holds no working copy (the checkout stopped before it created one) or a complete
+    /// one is dropped. Nothing on disk is touched.
+    pub async fn recover_checkouts(&self) {
+        let rows = match self.db.checkout_journal_list() {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read the checkout journal");
+                return;
+            }
+        };
+        for j in rows {
+            let root = std::path::PathBuf::from(&j.root_path);
+            let keep = match self.wcs.add_unfinished(&root).await {
+                Some(wc) if wc.incomplete => {
+                    tracing::info!(wc = %wc.id.0, "an interrupted checkout can be continued");
+                    true
+                }
+                _ => false,
+            };
+            if !keep && let Err(e) = self.db.checkout_journal_remove(&j.root_path) {
+                tracing::warn!(error = %e, "could not update the checkout journal");
+            }
+        }
+    }
+
+    /// Watches for the system waking up from sleep ([`crate::wake`]): the engine fails reads
+    /// waiting on connections that died during the sleep, and every operation that waits for a
+    /// lost connection tries again at once.
+    pub fn start_wake_watch(&self) {
+        let (engine, ops) = (Arc::clone(&self.engine), self.ops.clone());
+        tauri::async_runtime::spawn(async move {
+            let mut detector = crate::wake::WakeDetector::new(
+                std::time::Instant::now(),
+                crate::wake::boot_clock(),
+            );
+            loop {
+                tokio::time::sleep(crate::wake::TICK).await;
+                if detector.tick(std::time::Instant::now(), crate::wake::boot_clock()) {
+                    tracing::info!("the system woke up; reconnecting");
+                    engine.system_woke();
+                    ops.retry_all_now();
+                }
+            }
+        });
+    }
+
     pub async fn recover_all(&self) {
         for id in self.wcs.ids().unwrap_or_default() {
             if let Err(e) = self.open_wc(&id).await {

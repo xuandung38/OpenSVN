@@ -309,12 +309,12 @@ Discard changes… · Lock… `Mod+L` · Unlock · Add to changelist ▸ · Igno
 ## 9. Settings
 | Trang | Nội dung |
 |---|---|
-| General | Thư mục gốc checkout mặc định; tự check updates mỗi N phút (mặc định 10, 0 = tắt); mở WC gần nhất khi khởi động; ngôn ngữ (vi/en) |
+| General | Thư mục gốc checkout mặc định; tự check updates mỗi N phút (mặc định 10, 1–1440; hiện chưa có chế độ tắt); mở WC gần nhất khi khởi động; ngôn ngữ (vi/en) |
 | Accounts | Danh sách realm/server đã đăng nhập (user, phương thức Basic/Windows SSO), Sign out; danh sách chứng chỉ đã tin (xóa được) |
 | Appearance | Theme, font UI/diff, cỡ chữ, mật độ danh sách (compact/comfortable) |
 | Diff & Merge | Split/Unified mặc định, hide whitespace, tab width, công cụ diff/merge ngoài (Beyond Compare, Meld, KDiff3, VS Code…) |
 | Integrations | Editor ngoài, terminal; **mẫu URL web VisualSVN**: file/thư mục `https://{server}/!/#{repo}/view/{revSpec}/{path}` (đã đối chiếu server thật; `{revSpec}` = `head` \| `r<N>`, `{path}` tính từ gốc repo, không có `/` đầu, mã hóa UTF-8 từng đoạn); revision `https://{server}/!/#{repo}/commit/r{rev}/` (chưa đối chiếu) |
-| Network | Proxy (system/manual), timeout, số kết nối song song (mặc định 4, tối đa 16) |
+| Network | Proxy (system/manual), timeout, số kết nối song song (mặc định 4, tối đa 8: giới hạn của transport HTTP) |
 | Advanced | Định dạng WC mặc định khi checkout; global-ignores; đọc config `~/.subversion` (on/off); mức log; xóa cache |
 
 ## 10. Luồng tương tác chính

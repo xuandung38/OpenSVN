@@ -215,9 +215,10 @@ async fn status_under_our_own_concurrent_update_never_fails() {
     let writer = {
         let (wc, stop, session) = (wc.clone(), Arc::clone(&stop), Arc::clone(&session));
         tokio::spawn(async move {
+            let mut result = Ok(());
             for i in 0..ROUNDS {
                 let rev = if i % 2 == 0 { 1 } else { 2 };
-                update(
+                result = update(
                     &ctx(),
                     session.as_ref(),
                     &wc,
@@ -226,13 +227,18 @@ async fn status_under_our_own_concurrent_update_never_fails() {
                     &CancelToken::new(),
                 )
                 .await
-                .expect("update");
+                .map(|_| ());
+                if result.is_err() {
+                    break;
+                }
             }
+            // Always: a failed update must end the status loop, not leave it spinning.
             stop.store(true, Ordering::Relaxed);
+            result
         })
     };
     let (runs, failed) = status_until(&wc, &stop).await;
-    writer.await.expect("writer");
+    writer.await.expect("writer").expect("update");
     assert!(
         failed.is_empty(),
         "{} of {runs} status runs failed: {failed:?}",

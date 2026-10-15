@@ -50,11 +50,21 @@ impl RepoUrl {
                 "repository URL must not contain credentials",
             ));
         }
-        if url.host_str().is_none() || url.query().is_some() || url.fragment().is_some() {
+        if url.host_str().is_none() {
             return Err(SvnError::new(
                 ErrorCode::Internal,
-                "repository URL must have a host and no query or fragment",
+                "repository URL must have a host, like https://svn.example.com/svn/Repo/trunk",
             ));
+        }
+        if url.query().is_some() || url.fragment().is_some() {
+            let msg = if crate::web_link::is_visualsvn_web_link(s) {
+                "this is a VisualSVN web-interface link, not a repository URL; in VisualSVN use \
+                 \"Copy URL to clipboard\" and paste that URL"
+            } else {
+                "a repository URL has no query (?) or fragment (#); use the address a Subversion \
+                 client uses, like https://svn.example.com/svn/Repo/trunk"
+            };
+            return Err(SvnError::new(ErrorCode::Internal, msg));
         }
         let trimmed = url.path().trim_end_matches('/').to_owned();
         url.set_path(&trimmed);

@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use reqwest::Method;
-use svn_types::{ErrorCode, SvnError};
+use svn_types::{ConnectionFailure, ErrorCode, SvnError};
 
 /// Retry settings for idempotent requests.
 #[derive(Debug, Clone)]
@@ -60,17 +60,129 @@ pub fn classify_status(status: u16) -> Option<ErrorCode> {
 }
 
 /// Converts a reqwest failure into an engine error. The URL is stripped because it may carry
-/// user-supplied path data and must never leak userinfo.
+/// user-supplied path data and must never leak userinfo. A failure of the connection itself is
+/// classified in [`SvnError::connection`].
 pub(crate) fn classify_error(err: reqwest::Error) -> SvnError {
     let err = err.without_url();
-    let code = if err.is_timeout() {
+    let failure = connection_failure(&err);
+    let code = if err.is_timeout() || failure == Some(ConnectionFailure::Timeout) {
         ErrorCode::Timeout
     } else if err.is_builder() {
         ErrorCode::Internal
     } else {
         ErrorCode::Network
     };
-    SvnError::new(code, format!("HTTP request failed: {}", error_chain(&err)))
+    let e = SvnError::new(code, format!("HTTP request failed: {}", error_chain(&err)));
+    let e = if failure.is_none() && unreachable(&err) {
+        e.with_unreachable()
+    } else {
+        e
+    };
+    match failure {
+        Some(f) => e.with_connection(f),
+        None => e,
+    }
+}
+
+/// Whether `err` failed to connect because the server could not be reached: DNS, refused,
+/// network or host unreachable. A TLS handshake or certificate problem is never unreachable:
+/// it must not be waited out.
+fn unreachable(err: &reqwest::Error) -> bool {
+    use std::io::ErrorKind;
+    if !err.is_connect() {
+        return false;
+    }
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    let mut found = false;
+    while let Some(e) = src {
+        if e.downcast_ref::<rustls::Error>().is_some() {
+            return false;
+        }
+        if let Some(io) = e.downcast_ref::<std::io::Error>() {
+            if io
+                .get_ref()
+                .is_some_and(|inner| inner.is::<rustls::Error>())
+            {
+                return false;
+            }
+            if matches!(
+                io.kind(),
+                ErrorKind::ConnectionRefused
+                    | ErrorKind::HostUnreachable
+                    | ErrorKind::NetworkUnreachable
+                    | ErrorKind::NetworkDown
+                    | ErrorKind::AddrNotAvailable
+            ) {
+                found = true;
+            }
+        }
+        // hyper-util's resolver: "dns error: failed to lookup address information".
+        let text = e.to_string();
+        if text.starts_with("dns error") || text.contains("failed to lookup address") {
+            found = true;
+        }
+        src = e.source();
+    }
+    found
+}
+
+/// How the connection behind `err` failed, from the I/O and hyper errors in its source chain.
+/// `None` for anything else (DNS, connection refused, TLS handshake, HTTP parse errors).
+pub(crate) fn connection_failure(
+    err: &(dyn std::error::Error + 'static),
+) -> Option<ConnectionFailure> {
+    let mut hyper_hint = None;
+    let mut timeout = false;
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = src {
+        if let Some(io) = e.downcast_ref::<std::io::Error>()
+            && let Some(f) = io_failure(io)
+        {
+            return Some(f);
+        }
+        if let Some(h) = e.downcast_ref::<hyper::Error>() {
+            if h.is_timeout() {
+                timeout = true;
+            } else if h.is_incomplete_message() || h.is_closed() || h.is_body_write_aborted() {
+                hyper_hint.get_or_insert(ConnectionFailure::ConnectionClosedByServer);
+            }
+        }
+        if let Some(r) = e.downcast_ref::<reqwest::Error>()
+            && r.is_timeout()
+        {
+            timeout = true;
+        }
+        src = e.source();
+    }
+    if timeout {
+        return Some(ConnectionFailure::Timeout);
+    }
+    hyper_hint
+}
+
+fn io_failure(io: &std::io::Error) -> Option<ConnectionFailure> {
+    use std::io::ErrorKind;
+    match io.kind() {
+        // rustls: "peer closed connection without sending TLS close_notify".
+        ErrorKind::UnexpectedEof if io.to_string().contains("close_notify") => {
+            Some(ConnectionFailure::TlsClosedUncleanly)
+        }
+        ErrorKind::UnexpectedEof | ErrorKind::NotConnected => {
+            Some(ConnectionFailure::ConnectionClosedByServer)
+        }
+        ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe => {
+            Some(ConnectionFailure::ConnectionReset)
+        }
+        ErrorKind::TimedOut => Some(ConnectionFailure::Timeout),
+        _ => None,
+    }
+}
+
+/// Whether a failed exchange may be sent again on a fresh connection: the connection broke
+/// (closed, reset, unclean TLS close) or stalled. Errors without a classification (connection
+/// refused, DNS, certificate, protocol violations) are not covered.
+pub(crate) fn is_connection_failure(err: &SvnError) -> bool {
+    err.connection.is_some()
 }
 
 /// Joins an error and its sources into one line.

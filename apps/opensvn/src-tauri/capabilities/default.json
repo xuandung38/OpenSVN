@@ -15,6 +15,7 @@
       ]
     },
     "allow-repo-info",
+    "allow-repo-resolve-url",
     "allow-repo-list",
     "allow-repo-cat",
     "allow-repo-save",
@@ -29,6 +30,8 @@
     "allow-layout-detect",
     "allow-copy-location",
     "allow-op-cancel",
+    "allow-op-retry-now",
+    "allow-wc-continue",
     "allow-op-list",
     "allow-auth-respond",
     "allow-accounts-list",

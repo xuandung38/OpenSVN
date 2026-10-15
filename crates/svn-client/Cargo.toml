@@ -27,12 +27,13 @@ svn-ra-api.workspace = true
 svn-types.workspace = true
 svn-wc.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
 tracing.workspace = true
 fail = { workspace = true, optional = true }
 
 [dev-dependencies]
 svn-ra-api = { workspace = true, features = ["fake"] }
 opensvn-svn-oracle = { path = "../../tests/svn-oracle" }
+proptest.workspace = true
 rusqlite.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

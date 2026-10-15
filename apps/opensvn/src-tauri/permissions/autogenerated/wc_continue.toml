@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wc-continue"
+description = "Enables the wc_continue command without any pre-configured scope."
+commands.allow = ["wc_continue"]
+
+[[permission]]
+identifier = "deny-wc-continue"
+description = "Denies the wc_continue command without any pre-configured scope."
+commands.deny = ["wc_continue"]

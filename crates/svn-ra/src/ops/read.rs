@@ -19,7 +19,8 @@ use svn_types::{
 };
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-use super::update::{RaWire, error_of};
+use super::resume::{ReadRetry, cannot_resume};
+use super::update::{RaWire, buffered_error};
 
 pub(crate) fn corrupt(msg: impl Into<String>) -> SvnError {
     SvnError::new(ErrorCode::Corrupt, msg)
@@ -107,12 +108,12 @@ pub(crate) async fn stat(
     let rev = peg(wire, rev, cancel).await?;
     let repo = wire.repo_path(path)?;
     let req = propfind::stat_request(wire.urls(), rev, &repo)?;
-    let resp = wire.send(req, cancel).await?;
-    if !resp.status().is_success() {
-        let e = error_of(resp, cancel).await;
+    let resp = wire.fetch_small(req, cancel).await?;
+    if !resp.status.is_success() {
+        let e = buffered_error(&resp);
         return if is_absent(&e) { Ok(None) } else { Err(e) };
     }
-    let body = RaWire::read_small(resp, cancel).await?;
+    let body = resp.body;
     let entries = parse_chunked(&mut MultiStatusParser::new(), &body, 0)?;
     let first = entries
         .first()
@@ -181,38 +182,56 @@ async fn list_one(
     max: usize,
     cancel: &CancelToken,
 ) -> Result<(DirEntry, Vec<(RelPath, DirEntry)>)> {
-    let req = propfind::list_request(wire.urls(), rev, dir)?;
-    let resp = wire.send_ok(req, cancel).await?;
-    let mut own = None;
-    let mut children = Vec::new();
-    // A repeated entry would make a recursive listing walk its subtree again at every level.
-    let mut seen = HashSet::new();
-    let mut parser = MultiStatusParser::new();
-    stream_items(resp, &mut parser, cancel, |e: PropfindEntry| {
-        match propfind::dir_entry_from(wire.urls(), &e) {
-            Ok((p, entry)) if &p == dir => own = Some(entry),
-            Ok((p, entry)) if p.parent().as_ref() == Some(dir) => {
-                if seen.insert(p.clone()) {
-                    if children.len() >= budget {
-                        return Err(too_many_entries(max));
+    // Nothing reaches the caller before the whole answer is in: a listing that breaks off is
+    // asked for again from the start.
+    let mut retry = ReadRetry::new(wire, "listing");
+    let (own, children) = loop {
+        let req = propfind::list_request(wire.urls(), rev, dir)?;
+        let attempt = async {
+            let resp = wire.send_ok(req, cancel).await?;
+            let mut own = None;
+            let mut children = Vec::new();
+            // A repeated entry would make a recursive listing walk its subtree again at every
+            // level.
+            let mut seen = HashSet::new();
+            let mut parser = MultiStatusParser::new();
+            stream_items(resp, &mut parser, cancel, |e: PropfindEntry| {
+                match propfind::dir_entry_from(wire.urls(), &e) {
+                    Ok((p, entry)) if &p == dir => own = Some(entry),
+                    Ok((p, entry)) if p.parent().as_ref() == Some(dir) => {
+                        if seen.insert(p.clone()) {
+                            if children.len() >= budget {
+                                return Err(too_many_entries(max));
+                            }
+                            children.push((p, entry));
+                        } else {
+                            tracing::warn!("skipping a repeated listing entry");
+                        }
                     }
-                    children.push((p, entry));
-                } else {
-                    tracing::warn!("skipping a repeated listing entry");
+                    Ok((p, _)) => {
+                        return Err(corrupt(format!(
+                            "listing of {dir} contains unrelated path {p}"
+                        )));
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            code = ?err.code,
+                            "skipping a listing entry: {}",
+                            err.message
+                        );
+                    }
                 }
-            }
-            Ok((p, _)) => {
-                return Err(corrupt(format!(
-                    "listing of {dir} contains unrelated path {p}"
-                )));
-            }
-            Err(err) => {
-                tracing::warn!(code = ?err.code, "skipping a listing entry: {}", err.message);
-            }
+                Ok(())
+            })
+            .await?;
+            Ok((own, children))
         }
-        Ok(())
-    })
-    .await?;
+        .await;
+        match attempt {
+            Ok(got) => break got,
+            Err(e) => retry.again(e, cancel).await?,
+        }
+    };
     let own = own.ok_or_else(|| corrupt("listing does not include the directory itself"))?;
     Ok((own, children))
 }
@@ -330,8 +349,7 @@ pub(crate) async fn get_file(
     // Properties, node kind and checksum first: a GET on a directory would return an HTML
     // index page, which must never end up in a file.
     let req = propfind::allprop_request(wire.urls(), rev, &repo)?;
-    let resp = wire.send_ok(req, cancel).await?;
-    let body = RaWire::read_small(resp, cancel).await?;
+    let body = wire.fetch_small_ok(req, cancel).await?;
     let entries = parse_chunked(&mut MultiStatusParser::new(), &body, 0)?;
     let entry = entries
         .first()
@@ -358,15 +376,59 @@ pub(crate) async fn get_file(
         })
         .collect();
 
-    let req = get::get_request(wire.urls(), rev, &repo)?;
-    let mut resp = wire.send_ok(req, cancel).await?;
+    // The content of `!svn/rvr/REV/path` never changes: a download that breaks off is asked for
+    // again and continues after the bytes the sink already has. The server's MD5, checked over
+    // the whole, shows that the parts belong together; without it a broken download fails.
     let mut hasher = Md5::new();
-    while let Some(chunk) = resp.chunk().await? {
-        hasher.update(&chunk);
-        sink.write_all(&chunk)
-            .await
-            .map_err(|e| SvnError::from_io("cannot write file content", &e))?;
-        cancel.check()?;
+    let mut written: u64 = 0;
+    let mut retry = ReadRetry::new(wire, "file download");
+    loop {
+        let req = get::get_request(wire.urls(), rev, &repo)?;
+        let before = written;
+        let mut sink_failed = false;
+        let attempt = async {
+            let mut resp = wire.send_ok(req, cancel).await?;
+            let mut skip = written;
+            while let Some(chunk) = resp.chunk().await? {
+                let drop = usize::try_from(skip).unwrap_or(usize::MAX).min(chunk.len());
+                skip -= drop as u64;
+                let rest = &chunk[drop..];
+                if !rest.is_empty() {
+                    hasher.update(rest);
+                    sink.write_all(rest).await.map_err(|e| {
+                        sink_failed = true;
+                        SvnError::from_io("cannot write file content", &e)
+                    })?;
+                    written += rest.len() as u64;
+                }
+                cancel.check()?;
+            }
+            if skip > 0 {
+                return Err(corrupt(format!(
+                    "content of {path} at {rev} was shorter when asked for again"
+                )));
+            }
+            Ok(())
+        }
+        .await;
+        let err = match attempt {
+            Ok(()) => break,
+            Err(e) if sink_failed => return Err(e),
+            Err(e) => e,
+        };
+        if expected.is_none() && written > 0 {
+            // Without the server's MD5 nothing would show that the bytes asked for again
+            // continue the ones the sink already has.
+            return Err(if err.connection_failure().is_some() {
+                cannot_resume(err, "file download")
+            } else {
+                err
+            });
+        }
+        if written > before {
+            retry.progressed();
+        }
+        retry.again(err, cancel).await?;
     }
     sink.flush()
         .await

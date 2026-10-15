@@ -85,6 +85,10 @@ pub enum ErrorCode {
     /// commit, it happened; otherwise remove the transaction with `abort_txn`. Never retry the
     /// commit blindly: it could be applied twice.
     CommitOutcomeUnknown,
+    /// A write other than a commit (a lock or an unlock) whose connection broke after the
+    /// request was handed to it: the server may or may not have carried it out. Writes are
+    /// never sent twice, so the caller checks the server's state before trying again.
+    WriteOutcomeUnknown,
     /// The request is valid but its result would exceed a size limit the engine enforces to
     /// bound memory and work (for example a directory listing with more entries than the
     /// listing cap). Nothing is wrong with the data; the user can ask for less (a smaller
@@ -98,6 +102,28 @@ pub enum ErrorCode {
     Internal,
 }
 
+/// How a network connection failed, for errors with [`ErrorCode::Network`] or
+/// [`ErrorCode::Timeout`] that the transport could classify. The UI uses it for a friendly text;
+/// the engine uses it to retry read-only work on a fresh connection.
+///
+/// Every variant means the request may not have completed. Whether it took effect on the server
+/// is unknown for a write; read-only requests are safe to send again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConnectionFailure {
+    /// The server (or a proxy) closed the connection before the response was complete:
+    /// a reused keep-alive connection closed under the request, or an end of stream in the
+    /// middle of a response.
+    ConnectionClosedByServer,
+    /// The connection was reset (TCP RST) or aborted, or a write found it already closed.
+    ConnectionReset,
+    /// No response bytes arrived within the configured read timeout.
+    Timeout,
+    /// The TLS stream ended without a `close_notify` alert before the response was complete
+    /// ("peer closed connection without sending TLS close_notify"). Apache on Windows, IIS and
+    /// many proxies close this way; when the body was already complete it is not an error.
+    TlsClosedUncleanly,
+}
+
 /// Engine error with an optional chain of causes, mirroring `svn_error_t`.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{code:?}: {message}")]
@@ -108,9 +134,28 @@ pub struct SvnError {
     pub message: String,
     /// Original Subversion error code when the error came from a server.
     pub svn_code: Option<u32>,
+    /// How the connection failed, when this is a classified network failure.
+    pub connection: Option<ConnectionFailure>,
+    /// No connection could be made at all: the host name did not resolve, the connection was
+    /// refused, or the network or host was unreachable. Nothing was sent, so this is never an
+    /// outcome-unknown write; kept apart from [`SvnError::connection`] so that write paths keep
+    /// their own rules.
+    pub unreachable: bool,
+    /// The repositories of the `SVNParentPath` location the URL turned out to be (VisualSVN
+    /// Server's `https://host/svn/`), when it is one and the server lists them.
+    pub repositories: Option<Box<[ParentRepo]>>,
     /// Underlying cause.
     #[source]
     pub child: Option<Box<SvnError>>,
+}
+
+/// A repository listed by an `SVNParentPath` location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentRepo {
+    /// Name for display (decoded, control characters removed).
+    pub name: String,
+    /// Repository URL (the listing URL plus the percent-encoded name).
+    pub url: String,
 }
 
 /// Result alias used across the engine.
@@ -123,8 +168,76 @@ impl SvnError {
             code,
             message: message.into(),
             svn_code: None,
+            connection: None,
+            unreachable: false,
+            repositories: None,
             child: None,
         }
+    }
+
+    /// Marks the server as unreachable (see [`SvnError::unreachable`]).
+    #[must_use]
+    pub fn with_unreachable(mut self) -> Self {
+        self.unreachable = true;
+        self
+    }
+
+    /// Whether this error or one of its causes says the server could not be reached.
+    pub fn is_unreachable(&self) -> bool {
+        let mut e = Some(self);
+        while let Some(err) = e {
+            if err.unreachable {
+                return true;
+            }
+            e = err.child.as_deref();
+        }
+        false
+    }
+
+    /// A failure of the network path to the server rather than of the request: a broken
+    /// connection ([`SvnError::connection_failure`]) or an unreachable server. A read-only
+    /// operation may wait for the network and try again; cancellation never counts.
+    pub fn is_connection_class(&self) -> bool {
+        self.code != ErrorCode::Cancelled
+            && (self.connection_failure().is_some() || self.is_unreachable())
+    }
+
+    /// Attaches the repositories of the parent-path location the URL turned out to be.
+    #[must_use]
+    pub fn with_repositories(mut self, repositories: Vec<ParentRepo>) -> Self {
+        self.repositories = Some(repositories.into_boxed_slice());
+        self
+    }
+
+    /// The repositories carried by this error or by its first cause that has them.
+    pub fn parent_repositories(&self) -> Option<&[ParentRepo]> {
+        let mut e = Some(self);
+        while let Some(err) = e {
+            if let Some(repos) = &err.repositories {
+                return Some(repos);
+            }
+            e = err.child.as_deref();
+        }
+        None
+    }
+
+    /// Records how the connection failed.
+    #[must_use]
+    pub fn with_connection(mut self, failure: ConnectionFailure) -> Self {
+        self.connection = Some(failure);
+        self
+    }
+
+    /// The connection failure of this error or of its first cause that has one.
+    pub fn connection_failure(&self) -> Option<ConnectionFailure> {
+        let mut e = Some(self);
+        while let Some(err) = e {
+            if err.connection.is_some() {
+                return err.connection;
+            }
+            e = err.child.as_deref();
+        }
+        None
     }
 
     /// Attaches a cause.
@@ -157,5 +270,50 @@ impl SvnError {
             _ => ErrorCode::Internal,
         };
         Self::new(code, format!("{context}: {err}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn the_connection_failure_is_found_in_the_cause_chain() {
+        let plain = SvnError::new(ErrorCode::Network, "refused");
+        assert_eq!(plain.connection_failure(), None);
+        let broken = SvnError::new(ErrorCode::Network, "cut off")
+            .with_connection(ConnectionFailure::TlsClosedUncleanly);
+        assert_eq!(
+            broken.connection_failure(),
+            Some(ConnectionFailure::TlsClosedUncleanly)
+        );
+        let wrapped = SvnError::new(ErrorCode::Internal, "drive failed").with_child(broken);
+        assert_eq!(wrapped.connection, None);
+        assert_eq!(
+            wrapped.connection_failure(),
+            Some(ConnectionFailure::TlsClosedUncleanly)
+        );
+    }
+
+    #[test]
+    fn the_parent_repositories_are_found_in_the_cause_chain() {
+        let repo = ParentRepo {
+            name: "Dự án".into(),
+            url: "https://h/svn/D%E1%BB%B1%20%C3%A1n".into(),
+        };
+        let listed = SvnError::new(ErrorCode::PathNotFound, "list").with_repositories(vec![repo]);
+        assert_eq!(listed.parent_repositories().map(<[_]>::len), Some(1));
+        let wrapped = SvnError::new(ErrorCode::PathNotFound, "open").with_child(listed);
+        assert_eq!(
+            wrapped.parent_repositories().unwrap()[0].url,
+            "https://h/svn/D%E1%BB%B1%20%C3%A1n"
+        );
+        assert!(
+            SvnError::new(ErrorCode::Network, "x")
+                .parent_repositories()
+                .is_none()
+        );
     }
 }

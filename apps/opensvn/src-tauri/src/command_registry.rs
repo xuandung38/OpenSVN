@@ -32,6 +32,7 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             mark_move,
             checkout,
             update,
+            wc_continue,
             switch,
             commit,
             revert,
@@ -44,6 +45,7 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             resolve,
             props_set,
             repo_info,
+            repo_resolve_url,
             repo_list,
             repo_cat,
             repo_save,
@@ -58,6 +60,7 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             layout_detect,
             copy_location,
             op_cancel,
+            op_retry_now,
             op_list,
             auth_respond,
             accounts_list,
@@ -83,6 +86,8 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             open_external,
             diagnostics_export,
         ])
+        // Bounds of numeric settings, so the UI validates with the backend's own ranges.
+        .constant("SETTING_RANGES", crate::settings::setting_ranges())
         .events(collect_events![
             OpStarted,
             OpProgress,

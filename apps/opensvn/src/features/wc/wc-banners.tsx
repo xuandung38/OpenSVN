@@ -2,8 +2,10 @@ import { useState } from "react";
 import { Banner } from "../../components/ui/banner";
 import { Button } from "../../components/ui/button";
 import type { Banner as BannerData } from "../../ipc/bindings";
-import { useBanners } from "../../ipc/queries";
+import { useBanners, useOperations } from "../../ipc/queries";
 import { useT } from "../../lib/i18n/i18n";
+import { lockBanner } from "./own-operation";
+import { IncompleteBanner } from "./resume/incomplete-banner";
 import { useWcActions } from "./use-wc-actions";
 import { isConflicted } from "./wc-model";
 import { useWcSession } from "./wc-session";
@@ -18,6 +20,7 @@ export function WcBanners() {
   const t = useT(wcStrings);
   const actions = useWcActions();
   const pushed = useBanners(wc?.id ?? null).data;
+  const ops = useOperations();
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set());
   const conflicts = files.filter(isConflicted).length;
 
@@ -29,6 +32,13 @@ export function WcBanners() {
   const pending = (pushed ?? []).filter(
     (b) => b.kind !== "conflicts" && !dismissed.has(`${b.wcId}:${b.kind}`),
   );
+  const lock = wc
+    ? lockBanner(
+        ops,
+        wc,
+        pending.some((b) => b.kind === "needs-cleanup"),
+      )
+    : null;
 
   return (
     <>
@@ -42,6 +52,14 @@ export function WcBanners() {
           }
         >
           {t("bannerConflictsText")}
+        </Banner>
+      )}
+      {wc?.resume && lock?.kind !== "in-progress" && (
+        <IncompleteBanner wcId={wc.id} resume={wc.resume} />
+      )}
+      {lock?.kind === "in-progress" && (
+        <Banner title={t("bannerOpInProgress", { title: lock.op.handle.title })}>
+          {t("bannerOpInProgressText")}
         </Banner>
       )}
       {pending.map((b) => {
@@ -70,6 +88,8 @@ export function WcBanners() {
               </Banner>
             );
           case "needs-cleanup":
+            // Our own running operation holds the lock: the note above replaces this banner.
+            if (lock?.kind !== "stale") return null;
             return (
               <Banner
                 key={b.kind}

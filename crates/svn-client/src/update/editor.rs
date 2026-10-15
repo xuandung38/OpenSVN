@@ -1,13 +1,15 @@
 //! The update editor: applies a server drive to a working copy.
 //!
 //! Safety model (see the module docs of [`super`]): every directory is marked `incomplete` before
-//! it changes, every file or directory is committed to wc.db in one transaction together with the
-//! work items that make the disk match, and cancellation or an aborted drive leaves
-//! `incomplete` markers so the next update resumes.
+//! it changes, every file or directory is committed to wc.db atomically together with the work
+//! items that make the disk match (several nodes share one transaction, in order; see
+//! [`super::batch`]), and cancellation or an aborted drive leaves `incomplete` markers so the next
+//! update resumes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use svn_types::{
     Checksum, DeltaEditor, Depth, DirId, ErrorCode, FileId, NodeKind, PropChange, RelPath, Result,
@@ -18,10 +20,11 @@ use svn_wc::db::{BaseNode, Node, Presence};
 use svn_wc::pristine::Sha1Digest;
 use svn_wc::workqueue::WorkItem;
 
+use super::batch::{Barrier, Batch, Op, Staged};
 use super::conflict_record::{self, NewConflict, Side};
 use super::state::{
-    DirState, EntryProps, FileState, Outcome, OutcomeHandle, PendingTreeConflict, TextSlot,
-    UpdateSetup, parse_svn_date, tmp_dir,
+    CommittedNode, DirState, EntryProps, FileState, Outcome, OutcomeHandle, PendingTreeConflict,
+    TextSlot, UpdateSetup, parse_svn_date, tmp_dir,
 };
 use super::text_sink::{BaseSource, DiscardSink, TextSink};
 use crate::ctx::{UpdateAction, UpdateEvent};
@@ -44,6 +47,12 @@ macro_rules! failpoint {
 }
 pub(super) use failpoint;
 
+/// How long a cancelled drive waits for durability barriers before it gives up committing.
+const CANCEL_GRACE: Duration = Duration::from_millis(500);
+
+/// How often a barrier wait looks at the cancellation token.
+const CANCEL_POLL: Duration = Duration::from_millis(50);
+
 /// Applies an update, switch or checkout drive to a working copy.
 pub struct UpdateEditor {
     pub(super) s: UpdateSetup,
@@ -60,6 +69,27 @@ pub struct UpdateEditor {
     pub(super) deletion_conflicts: HashMap<RelPath, (Node, TreeReason)>,
     old_target_repos: Option<String>,
     finished: bool,
+    /// Nodes prepared but not committed yet.
+    pub(super) batch: Batch,
+    /// The previous batch, waiting for its durability barrier.
+    staged: Option<Staged>,
+    /// Work items that ran after the last commit, completed with the next one.
+    unsettled: svn_wc::workqueue::Unsettled,
+    /// A batch could not be committed: nothing prepared after it may be committed either, or
+    /// the committed state would no longer be a prefix of the drive (a file could land below a
+    /// directory whose row was in the lost batch).
+    poisoned: bool,
+    /// Pristine texts placed by this drive whose rows are not committed yet; never replaced
+    /// (see [`svn_wc::pristine::PristineStore::place`]).
+    pub(super) placed: HashSet<Sha1Digest>,
+    /// The working copy's filesystem honours one `syncfs` barrier per batch
+    /// ([`svn_wc::durable::batched_sync`]); otherwise every file is synced on its own.
+    pub(super) batched: bool,
+    /// Set when the drive is cancelled: waiting for a barrier stops there, and what it would
+    /// have covered is left uncommitted (the next update fetches it again).
+    deadline: Option<Instant>,
+    /// `.svn/tmp` exists.
+    tmp_ready: bool,
 }
 
 fn corrupt(msg: impl Into<String>) -> SvnError {
@@ -88,6 +118,7 @@ impl UpdateEditor {
             None
         };
         let out: OutcomeHandle = Arc::new(Mutex::new(Outcome::default()));
+        let batched = svn_wc::durable::batched_sync(setup.db.wcroot());
         Ok((
             Self {
                 s: setup,
@@ -101,6 +132,14 @@ impl UpdateEditor {
                 deletion_conflicts: HashMap::new(),
                 old_target_repos,
                 finished: false,
+                batch: Batch::default(),
+                staged: None,
+                unsettled: svn_wc::workqueue::Unsettled::default(),
+                poisoned: false,
+                placed: HashSet::new(),
+                batched,
+                deadline: None,
+                tmp_ready: false,
             },
             out,
         ))
@@ -134,7 +173,9 @@ impl UpdateEditor {
         id
     }
 
-    pub(super) fn emit(&self, path: &RelPath, kind: NodeKind, action: UpdateAction) {
+    /// Reports `action` on `path` (the node is prepared; its batch commits later, see
+    /// [`super::batch`]).
+    pub(super) fn emit(&mut self, path: &RelPath, kind: NodeKind, action: UpdateAction) {
         let ev = UpdateEvent {
             path: path.clone(),
             kind,
@@ -148,13 +189,169 @@ impl UpdateEditor {
             .push(ev);
     }
 
-    pub(super) fn wc_path(&self, p: &RelPath) -> Result<RelPath> {
-        wc::join_rel(&self.s.anchor, p)
+    /// Hands the database side of a prepared node at `path` to the batch; flushes when the
+    /// batch is due. The node is finished once committed (see [`Self::defer_incomplete`]).
+    pub(super) fn defer(&mut self, path: &RelPath, op: Op) -> Result<()> {
+        self.defer_node(path, true, op)
     }
 
-    pub(super) fn run_queue(&self) -> Result<()> {
-        self.s.cancel.check()?;
-        crate::wc::run_work_queue(&self.s.db, &self.s.cancel).map(|_| ())
+    /// [`Self::defer`] for a directory that is committed `incomplete`: its children follow.
+    pub(super) fn defer_incomplete(&mut self, path: &RelPath, op: Op) -> Result<()> {
+        self.defer_node(path, false, op)
+    }
+
+    fn defer_node(&mut self, path: &RelPath, complete: bool, op: Op) -> Result<()> {
+        let node = CommittedNode {
+            path: path.clone(),
+            complete,
+        };
+        if self.batch.push(node, op) {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Commits the previously staged batch and stages the pending nodes behind a durability
+    /// barrier that runs on another thread (see [`super::batch`]).
+    ///
+    /// Cancellation is not checked here: what was prepared is committed (the queue run stops at
+    /// the next item when cancelled and the rest stays queued).
+    pub(super) fn flush(&mut self) -> Result<()> {
+        if self.poisoned {
+            // Dropped, not committed: the pristines stay as orphans and the directories keep
+            // their `incomplete` markers, so the next update fetches these nodes again.
+            drop(self.batch.take());
+            return Err(SvnError::new(
+                ErrorCode::Internal,
+                "an earlier batch of the update could not be committed",
+            ));
+        }
+        self.commit_staged()?;
+        if self.batch.is_empty() && self.unsettled.is_empty() {
+            return Ok(());
+        }
+        let pending = self.batch.take();
+        let settle = std::mem::take(&mut self.unsettled);
+        let ticket = (pending.unsynced || settle.unsynced)
+            .then(|| Barrier::start(self.s.db.wcroot().to_path_buf(), settle.elsewhere.clone()));
+        self.staged = Some(Staged {
+            pending,
+            settle,
+            ticket,
+        });
+        Ok(())
+    }
+
+    /// Commits everything: the staged and the pending nodes, the work they queued and its
+    /// completion. Afterwards wc.db and the disk agree and nothing is queued by this drive.
+    pub(super) fn drain(&mut self) -> Result<()> {
+        self.flush()?;
+        self.commit_staged()?;
+        let settle = std::mem::take(&mut self.unsettled);
+        if !settle.is_empty() {
+            if settle.unsynced {
+                let root = self.s.db.wcroot();
+                let barrier = Barrier::start(root.to_path_buf(), settle.elsewhere.clone());
+                self.await_barrier(&barrier)?;
+            }
+            self.s.db.with_txn(|t| t.complete_work(&settle))?;
+        }
+        Ok(())
+    }
+
+    /// Waits for `barrier`. A cancellation, also one that arrives during the wait, bounds the
+    /// wait to [`CANCEL_GRACE`]; past it nothing more is committed by this drive (the barrier
+    /// finishes on its own thread, and nothing that relies on it commits).
+    fn await_barrier(&mut self, barrier: &Barrier) -> Result<()> {
+        #[cfg(feature = "failpoints")]
+        fail::fail_point!("update.barrier_wait");
+        loop {
+            if self.deadline.is_none() && self.s.cancel.is_cancelled() {
+                self.deadline = Some(Instant::now() + CANCEL_GRACE);
+            }
+            let step = Instant::now() + CANCEL_POLL;
+            let until = self.deadline.map_or(step, |d| d.min(step));
+            if let Some(r) = barrier.wait(Some(until)) {
+                let root = self.s.db.wcroot();
+                return r.map_err(|e| {
+                    SvnError::from_io(format!("cannot sync '{}'", root.display()), &e)
+                });
+            }
+            if self.deadline.is_some_and(|d| Instant::now() >= d) {
+                self.poisoned = true;
+                return Err(SvnError::new(
+                    ErrorCode::Cancelled,
+                    "cancelled while waiting for the disk; the next update finishes the work",
+                ));
+            }
+        }
+    }
+
+    /// Waits for the staged batch's barrier, commits it in one transaction (with the completion
+    /// of the work that ran before the barrier started) and runs the work it queued.
+    fn commit_staged(&mut self) -> Result<()> {
+        let Some(staged) = self.staged.take() else {
+            return Ok(());
+        };
+        let p = staged.pending;
+        let has_ops = !p.ops.is_empty();
+        let committed = (|| {
+            if let Some(ticket) = &staged.ticket {
+                self.await_barrier(ticket)?;
+            }
+            if has_ops || !staged.settle.is_empty() {
+                let settle = staged.settle;
+                self.s.db.with_txn(|t| {
+                    t.complete_work(&settle)?;
+                    for op in p.ops {
+                        op(t)?;
+                    }
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = committed {
+            self.poisoned = true;
+            keep_queued(&self.s.db, p.keep);
+            return Err(e);
+        }
+        if has_ops {
+            self.out
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .committed
+                .extend(p.nodes);
+            // Committed: the queue owns the merge results now (it removes them after installing).
+            for tmp in p.keep {
+                let _ = tmp.keep();
+            }
+            if !p.removed.is_empty() {
+                failpoint!("update.after_delete_txn");
+            }
+            failpoint!("update.after_txn_before_queue");
+            let carried = std::mem::take(&mut self.unsettled);
+            self.unsettled =
+                crate::wc::run_work_queue_unsettled(&self.s.db, &self.s.cancel, carried)?;
+        }
+        Ok(())
+    }
+
+    /// Commits everything first when a node that is not committed yet (pending or staged)
+    /// removed `wc` (see [`Batch::touches`]).
+    pub(super) fn settle(&mut self, wc: &RelPath) -> Result<()> {
+        let staged = self
+            .staged
+            .as_ref()
+            .is_some_and(|s| s.pending.removed.contains(wc));
+        if staged || self.batch.touches(wc) {
+            self.drain()?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn wc_path(&self, p: &RelPath) -> Result<RelPath> {
+        wc::join_rel(&self.s.anchor, p)
     }
 
     fn dir(&self, id: DirId) -> Result<&DirState> {
@@ -210,12 +407,16 @@ impl UpdateEditor {
             old.as_ref(),
             new.as_ref(),
         );
-        self.s.db.with_txn(|t| {
-            if copy_base {
-                t.convert_base_to_copy(wc)?;
-            }
-            conflict_record::record(t, wc, &info, vec![NewConflict::Tree(reason, action)])
-        })?;
+        let path = wc.clone();
+        self.defer(
+            wc,
+            Box::new(move |t| {
+                if copy_base {
+                    t.convert_base_to_copy(&path)?;
+                }
+                conflict_record::record(t, &path, &info, vec![NewConflict::Tree(reason, action)])
+            }),
+        )?;
         self.skipped.push(wc.clone());
         self.emit(wc, kind, UpdateAction::TreeConflicted);
         Ok(())
@@ -237,6 +438,9 @@ impl UpdateEditor {
         let Some((old, reason)) = self.deletion_conflicts.remove(wc) else {
             return Ok(None);
         };
+        // The deletion's rows may still sit in the batch: commit them before this transaction,
+        // which records the replacement on top of them and reads the working layer back.
+        self.settle(wc)?;
         let (left, right) = self.side(Some(&old), new_repos, kind);
         let info = conflict_record::operation_info(
             self.s.switch_relpath.is_some(),
@@ -260,6 +464,30 @@ impl UpdateEditor {
             .filter(|n| n.op_depth > 0 && n.presence != Presence::BaseDeleted)
             .map_or(0, |n| n.op_depth);
         Ok(Some(layer))
+    }
+
+    /// Reason of the tree conflict an incoming add raises on the working node `e` it finds at
+    /// `wc` (svn's `check_tree_conflict` after `scan_addition`): `moved-here` when `e` belongs
+    /// to the destination of a move whose source still exists, `added` for a plain add, a copy,
+    /// or a move this drive already broke by deleting its source.
+    fn local_add_reason(&mut self, wc: &RelPath, e: &Node) -> Result<TreeReason> {
+        if !e.moved_here {
+            return Ok(TreeReason::Added);
+        }
+        // The deletion of the source may still sit in the batch.
+        self.drain()?;
+        let depth = usize::try_from(e.op_depth).unwrap_or(usize::MAX);
+        let root = wc
+            .as_str()
+            .split('/')
+            .take(depth)
+            .collect::<Vec<_>>()
+            .join("/");
+        Ok(if self.s.db.moved_from(&RelPath::new(&root)?)?.is_some() {
+            TreeReason::MovedHere
+        } else {
+            TreeReason::Added
+        })
     }
 
     fn base_node_for(
@@ -316,6 +544,7 @@ impl UpdateEditor {
         let base = base
             .filter(|n| n.kind == NodeKind::Dir && n.presence.is_present())
             .ok_or_else(|| corrupt(format!("directory '{wc}' is not in the working copy base")))?;
+        let was_incomplete = base.presence == Presence::Incomplete;
         let is_switch_root = self.s.switch_relpath.is_some() && wc == self.target_wc;
         let p = parent.unwrap_or_else(ParentInfo::anchor);
         let relocating = is_switch_root || p.relocating;
@@ -333,6 +562,7 @@ impl UpdateEditor {
         let mut skipped = p.skipped;
         let mut tree_conflict = None;
         let mut shadow = if skipped { None } else { p.shadow };
+        let mut obstructed = false;
         if !skipped && in_target {
             if self.s.db.conflict(&wc)?.is_some() {
                 skipped = true;
@@ -355,6 +585,12 @@ impl UpdateEditor {
                     action: TreeAction::Edit,
                 });
                 shadow = Some(cur.op_depth);
+            } else if shadow.is_none() && self.dir_obstructed(&wc)? {
+                tree_conflict = Some(PendingTreeConflict {
+                    reason: TreeReason::Obstructed,
+                    action: TreeAction::Edit,
+                });
+                obstructed = true;
             }
         }
         let mut depth = base
@@ -382,8 +618,12 @@ impl UpdateEditor {
         let not_present_on_drop = rank(requested) < rank(depth);
         if in_target && !skipped {
             let rev = self.rev()?;
-            let reloc = relocating.then_some(new_repos.as_str());
-            self.s.db.with_txn(|t| t.mark_incomplete(&wc, rev, reloc))?;
+            let reloc = relocating.then(|| new_repos.clone());
+            let path = wc.clone();
+            self.defer_incomplete(
+                &wc,
+                Box::new(move |t| t.mark_incomplete(&path, rev, reloc.as_deref())),
+            )?;
         }
         let id = self.alloc();
         self.dirs.insert(
@@ -391,6 +631,7 @@ impl UpdateEditor {
             DirState {
                 wc,
                 added: false,
+                fresh: false,
                 in_target,
                 skipped,
                 new_repos,
@@ -400,12 +641,27 @@ impl UpdateEditor {
                 limit,
                 not_present_on_drop,
                 shadow,
+                obstructed,
+                was_incomplete,
                 prop_changes: Vec::new(),
                 entry: EntryProps::default(),
                 tree_conflict,
             },
         );
         Ok((id, skipped))
+    }
+
+    /// Whether the versioned directory `wc` is replaced on disk by a file or a symlink (to
+    /// anything: the link is never followed). Only called where every parent of `wc` is a real
+    /// directory (the directories above it are neither obstructed nor shadowed).
+    fn dir_obstructed(&self, wc: &RelPath) -> Result<bool> {
+        if wc.is_root() {
+            return Ok(false);
+        }
+        Ok(matches!(
+            self.disk_kind(wc)?,
+            Some(NodeKind::File | NodeKind::Symlink)
+        ))
     }
 
     fn parent_info(&self, parent: DirId) -> Result<ParentInfo> {
@@ -421,7 +677,11 @@ impl UpdateEditor {
                 Depth::Infinity
             },
             not_present_on_drop: p.in_target && p.not_present_on_drop,
-            shadow: p.shadow,
+            // Below an obstructed directory: BASE only (svn's `shadowed` children of an
+            // `edit_obstructed` directory).
+            shadow: p.shadow.or(p.obstructed.then_some(0)),
+            // A shadowed child keeps local rows below it (see `DirState::fresh`).
+            fresh: p.fresh && p.shadow.is_none() && !p.obstructed,
         })
     }
 
@@ -434,6 +694,7 @@ impl UpdateEditor {
             DirState {
                 wc,
                 added: false,
+                fresh: false,
                 in_target: true,
                 skipped: true,
                 new_repos: String::new(),
@@ -443,6 +704,8 @@ impl UpdateEditor {
                 limit: Depth::Empty,
                 not_present_on_drop: false,
                 shadow: None,
+                obstructed: false,
+                was_incomplete: false,
                 prop_changes: Vec::new(),
                 entry: EntryProps::default(),
                 tree_conflict: None,
@@ -453,13 +716,15 @@ impl UpdateEditor {
 
     /// Records a `not-present` row for a child the server adds outside the requested depth, so
     /// the parent at the new revision does not claim to have it (svn issue #3569).
-    fn add_dropped(&self, wc: &RelPath, p: &ParentInfo, kind: NodeKind) -> Result<()> {
+    fn add_dropped(&mut self, wc: &RelPath, p: &ParentInfo, kind: NodeKind) -> Result<()> {
+        self.settle(wc)?;
         if !p.not_present_on_drop || self.s.db.read_base(wc)?.is_some() {
             return Ok(());
         }
         let repos = repos_child(&p.repos, wc.file_name().unwrap_or(""));
         let node = self.not_present_node(kind, &repos)?;
-        self.s.db.with_txn(|t| t.base_add(wc, &node))
+        let path = wc.clone();
+        self.defer(wc, Box::new(move |t| t.base_add(&path, &node)))
     }
 }
 
@@ -473,6 +738,8 @@ pub(super) struct ParentInfo {
     limit: Depth,
     not_present_on_drop: bool,
     shadow: Option<u32>,
+    /// See [`DirState::fresh`].
+    fresh: bool,
 }
 
 impl ParentInfo {
@@ -486,6 +753,7 @@ impl ParentInfo {
             limit: Depth::Infinity,
             not_present_on_drop: false,
             shadow: None,
+            fresh: false,
         }
     }
 
@@ -589,7 +857,10 @@ impl DeltaEditor for UpdateEditor {
             // file from disk (it then shows as missing). We never touch the disk here, so the
             // user's edit survives; wc.db ends up identical to svn's. Do not "fix" this to match
             // svn. Pinned by `incoming_delete_in_copy_replaced_dir_keeps_modified_file_unlike_svn`.
-            return self.s.db.with_txn(|t| t.base_remove(&wc));
+            let path = wc.clone();
+            self.defer(&wc, Box::new(move |t| t.base_remove(&path)))?;
+            self.batch.removed(wc);
+            return Ok(());
         }
         self.delete_node(&wc, parent)
     }
@@ -602,6 +873,7 @@ impl DeltaEditor for UpdateEditor {
     ) -> Result<DirId> {
         self.s.cancel.check()?;
         let wc = self.wc_path(path)?;
+        self.settle(&wc)?;
         let p = self.parent_info(parent)?;
         if !p.skipped && !p.admits(NodeKind::Dir) {
             self.add_dropped(&wc, &p, NodeKind::Dir)?;
@@ -615,14 +887,21 @@ impl DeltaEditor for UpdateEditor {
         } else {
             Depth::Infinity
         };
-        let mut skipped = p.skipped;
+        let skipped = p.skipped;
         let mut was_incomplete = false;
         let mut shadow = p.shadow;
+        let mut obstructed = false;
         let mut tree_conflict = None;
-        let existing = self.s.db.read_node(&wc)?;
-        let base = self.s.db.read_base(&wc)?;
+        // A clean update (see `UpdateSetup::clean`) does not look at wc.db here, like svn: a
+        // tree conflict this drive recorded on the deleted node stays, it is no replacement.
+        let (existing, base) = if p.fresh || self.s.clean {
+            (None, None)
+        } else {
+            (self.s.db.read_node(&wc)?, self.s.db.read_base(&wc)?)
+        };
         if !skipped
             && shadow.is_none()
+            && !self.s.clean
             && let Some(layer) = self.take_replacement(&wc, &new_repos, NodeKind::Dir)?
         {
             shadow = Some(layer);
@@ -630,32 +909,36 @@ impl DeltaEditor for UpdateEditor {
             let disk = self.disk_kind(&wc)?;
             match (&existing, &base) {
                 (_, Some(b)) if b.kind == NodeKind::Dir && b.presence.is_present() => {
-                    // A resumed update re-sends directories it already created.
+                    // A resumed update re-sends directories it already created. One replaced on
+                    // disk by a file or a symlink since is obstructed, as when it is opened.
                     was_incomplete = true;
+                    if matches!(disk, Some(NodeKind::File | NodeKind::Symlink)) {
+                        obstructed = true;
+                        tree_conflict = Some(PendingTreeConflict {
+                            reason: TreeReason::Obstructed,
+                            action: TreeAction::Edit,
+                        });
+                    }
                 }
                 (Some(e), _) if e.op_depth > 0 && e.presence == Presence::Normal => {
-                    self.record_tree_conflict(
-                        &wc,
-                        None,
-                        &new_repos,
-                        NodeKind::Dir,
-                        TreeReason::Added,
-                        TreeAction::Add,
-                        false,
-                    )?;
-                    skipped = true;
+                    // A local add, copy or move destination in the way: the server's tree
+                    // still goes into BASE, shadowed by the working layer (svn's `shadowed`
+                    // `add_directory`), with a tree conflict "local add, incoming add".
+                    shadow = Some(e.op_depth);
+                    tree_conflict = Some(PendingTreeConflict {
+                        reason: self.local_add_reason(&wc, e)?,
+                        action: TreeAction::Add,
+                    });
                 }
                 _ if matches!(disk, Some(NodeKind::File | NodeKind::Symlink)) => {
-                    self.record_tree_conflict(
-                        &wc,
-                        None,
-                        &new_repos,
-                        NodeKind::Dir,
-                        TreeReason::Unversioned,
-                        TreeAction::Add,
-                        false,
-                    )?;
-                    skipped = true;
+                    // An unversioned file or symlink in the way: like an unversioned directory
+                    // (below), the server's tree goes into BASE under a `base-deleted` layer
+                    // and the disk stays as it is.
+                    shadow = Some(relpath_depth(&wc));
+                    tree_conflict = Some(PendingTreeConflict {
+                        reason: TreeReason::Unversioned,
+                        action: TreeAction::Add,
+                    });
                 }
                 _ if disk == Some(NodeKind::Dir) && !self.s.allow_unversioned_obstructions => {
                     // An unversioned directory in the way: the server's tree goes into BASE
@@ -678,7 +961,7 @@ impl DeltaEditor for UpdateEditor {
                 base.as_ref(),
                 Some(depth),
             )?;
-            let work = if shadow.is_some() {
+            let work = if shadow.is_some() || obstructed {
                 Vec::new()
             } else {
                 vec![
@@ -688,14 +971,17 @@ impl DeltaEditor for UpdateEditor {
                     .to_skel(),
                 ]
             };
-            self.s.db.with_txn(|t| {
-                t.base_add(&wc, &node)?;
-                if let Some(op_depth) = shadow.filter(|d| *d > 0) {
-                    t.mark_base_deleted_at(&wc, NodeKind::Dir, op_depth)?;
-                }
-                t.queue_work(&work)
-            })?;
-            self.run_queue()?;
+            let path = wc.clone();
+            self.defer_incomplete(
+                &wc,
+                Box::new(move |t| {
+                    t.base_add(&path, &node)?;
+                    if let Some(op_depth) = shadow.filter(|d| *d > 0) {
+                        t.mark_base_deleted_at(&path, NodeKind::Dir, op_depth)?;
+                    }
+                    t.queue_work(&work)
+                }),
+            )?;
             if !was_incomplete && shadow.is_none() {
                 self.emit(&wc, NodeKind::Dir, UpdateAction::Add);
             }
@@ -706,6 +992,8 @@ impl DeltaEditor for UpdateEditor {
             DirState {
                 wc,
                 added: !was_incomplete,
+                // A shadowed directory keeps the local working rows below it.
+                fresh: !was_incomplete && !skipped && shadow.is_none(),
                 in_target: true,
                 skipped,
                 new_repos,
@@ -715,6 +1003,8 @@ impl DeltaEditor for UpdateEditor {
                 limit: depth,
                 not_present_on_drop: false,
                 shadow,
+                obstructed,
+                was_incomplete,
                 prop_changes: Vec::new(),
                 entry: EntryProps::default(),
                 tree_conflict,
@@ -767,6 +1057,7 @@ impl DeltaEditor for UpdateEditor {
     ) -> Result<FileId> {
         self.s.cancel.check()?;
         let wc = self.wc_path(path)?;
+        self.settle(&wc)?;
         let id = self.begin_file(wc, parent, true)?;
         Ok(FileId(id))
     }
@@ -801,9 +1092,8 @@ impl DeltaEditor for UpdateEditor {
                 let sha1 = Sha1Digest::from_svn_string(cs)
                     .ok_or_else(|| corrupt("malformed checksum in wc.db"))?;
                 let store = self.s.db.pristine_store();
+                let (row, file) = store.open_text_with_row(&sha1)?;
                 if let Some(Checksum::Md5(expected)) = base_checksum
-                    && let Some(row) =
-                        svn_wc::pristine::PristineIndex::lookup(store.index(), &sha1)?
                     && row.md5.0 != expected
                 {
                     return Err(corrupt(format!(
@@ -812,13 +1102,16 @@ impl DeltaEditor for UpdateEditor {
                     ))
                     .with_svn_code(200_014));
                 }
-                BaseSource::File(store.open_text(&sha1)?)
+                BaseSource::File(file)
             }
             None => BaseSource::Empty(std::io::Cursor::new(Vec::new())),
         };
         let dir = tmp_dir(&self.s.db);
-        fs::create_dir_all(&dir)
-            .map_err(|e| SvnError::from_io(format!("cannot create '{}'", dir.display()), &e))?;
+        if !self.tmp_ready {
+            fs::create_dir_all(&dir)
+                .map_err(|e| SvnError::from_io(format!("cannot create '{}'", dir.display()), &e))?;
+            self.tmp_ready = true;
+        }
         let tmp = tempfile::Builder::new()
             .prefix("update-")
             .tempfile_in(&dir)
@@ -870,10 +1163,61 @@ impl DeltaEditor for UpdateEditor {
     fn abort_edit(&mut self) -> Result<()> {
         // Directories already carry `incomplete` markers and finished files are committed
         // atomically, so the working copy is restartable as it stands. Queued work stays queued.
+        // Nodes prepared before the failure are complete: commit them so the next update has
+        // less to fetch (on failure they are simply not committed).
+        if self.s.cancel.is_cancelled() {
+            // The user is waiting: commit what is durable within the grace period and leave the
+            // rest (a barrier on a slow or busy disk can take long).
+            self.deadline = Some(Instant::now() + CANCEL_GRACE);
+        }
+        if !self.finished
+            && let Err(e) = self.drain()
+        {
+            tracing::debug!("could not commit the finished nodes of an aborted drive: {e}");
+        }
         self.finished = true;
         self.files.clear();
         self.dirs.clear();
         Ok(())
+    }
+}
+
+/// Deletes the temporary files of a batch whose transaction failed, except those the work queue
+/// names: a failure reported after COMMIT leaves the queued work owning them (it installs from
+/// them and removes them), so deleting them would break the item at every later run.
+fn keep_queued(db: &svn_wc::db::WcDb, files: Vec<tempfile::TempPath>) {
+    if files.is_empty() {
+        return;
+    }
+    let queued: HashSet<String> = match db.work_items() {
+        Ok(items) => items
+            .iter()
+            .filter_map(|(_, skel)| WorkItem::from_skel(skel).ok())
+            .flat_map(|item| match item {
+                WorkItem::FileInstall {
+                    source: Some(src), ..
+                } => vec![src],
+                WorkItem::FileMove { src, .. } => vec![src],
+                WorkItem::FileRemove { relpath } => vec![relpath],
+                _ => Vec::new(),
+            })
+            .collect(),
+        Err(e) => {
+            // Unknown: keeping a file costs a leftover in `.svn/tmp`, deleting one a wedge.
+            tracing::debug!("cannot read the work queue after a failed commit: {e}");
+            for tmp in files {
+                let _ = tmp.keep();
+            }
+            return;
+        }
+    };
+    for tmp in files {
+        let name = tmp
+            .file_name()
+            .map(|n| format!("{}/tmp/{}", svn_wc::db::ADM_DIR, n.to_string_lossy()));
+        if name.is_some_and(|n| queued.contains(&n)) {
+            let _ = tmp.keep();
+        }
     }
 }
 
@@ -886,8 +1230,8 @@ impl UpdateEditor {
         let wc = self.wc_path(path)?;
         let new_repos = repos_child(&p.repos, wc.file_name().unwrap_or(""));
         let node = self.base_node_for(kind, Presence::ServerExcluded, &new_repos, None, None)?;
-        self.s.db.with_txn(|t| t.base_add(&wc, &node))?;
-        Ok(())
+        let path = wc.clone();
+        self.defer(&path, Box::new(move |t| t.base_add(&wc, &node)))
     }
 
     fn begin_file(&mut self, wc: RelPath, parent: DirId, add: bool) -> Result<u32> {
@@ -901,15 +1245,20 @@ impl UpdateEditor {
             skipped = true;
         }
         let name = wc.file_name().unwrap_or("").to_owned();
-        let base = self
-            .s
-            .db
-            .read_base(&wc)?
-            .filter(|b| b.presence.is_present());
+        // An add of a clean update does not look at wc.db (see `add_directory`).
+        let blind = p.fresh || (add && self.s.clean);
+        let base = if blind {
+            None
+        } else {
+            self.s
+                .db
+                .read_base(&wc)?
+                .filter(|b| b.presence.is_present())
+        };
         let switch_root = self
             .s
             .switch_relpath
-            .as_ref()
+            .clone()
             .filter(|_| wc == self.target_wc);
         if !skipped && wc != self.target_wc && base.as_ref().is_some_and(|b| b.file_external) {
             // The parent's drive never touches a file external (see `delete_entry`).
@@ -918,7 +1267,7 @@ impl UpdateEditor {
             self.emit(&wc, NodeKind::File, UpdateAction::Skipped);
         }
         let new_repos = if let Some(sw) = switch_root {
-            sw.clone()
+            sw
         } else if p_reloc || base.is_none() {
             repos_child(&p_repos, &name)
         } else {
@@ -929,17 +1278,21 @@ impl UpdateEditor {
         let mut tree_conflict = None;
         let mut adopt_existing = false;
         let mut shadow = if skipped { None } else { p.shadow };
-        if !skipped && add && shadow.is_none() {
+        if !skipped && add && !blind && shadow.is_none() {
             shadow = self.take_replacement(&wc, &new_repos, NodeKind::File)?;
         }
         let replacing = shadow.is_some() && p.shadow.is_none();
-        if !skipped && !replacing && self.s.db.conflict(&wc)?.is_some() {
+        if !skipped && !replacing && !blind && self.s.db.conflict(&wc)?.is_some() {
             skipped = true;
             self.skipped.push(wc.clone());
             self.emit(&wc, NodeKind::File, UpdateAction::Skipped);
         }
         if !skipped && shadow.is_none() {
-            let cur = self.s.db.read_node(&wc)?;
+            let cur = if blind {
+                None
+            } else {
+                self.s.db.read_node(&wc)?
+            };
             match (&base, add) {
                 (Some(b), _) if b.kind != NodeKind::File => {
                     return Err(corrupt(format!(
@@ -952,20 +1305,17 @@ impl UpdateEditor {
                     )));
                 }
                 (None, true) => {
-                    if cur
+                    if let Some(c) = cur
                         .as_ref()
-                        .is_some_and(|c| c.op_depth > 0 && c.presence == Presence::Normal)
+                        .filter(|c| c.op_depth > 0 && c.presence == Presence::Normal)
                     {
-                        self.record_tree_conflict(
-                            &wc,
-                            None,
-                            &new_repos,
-                            NodeKind::File,
-                            TreeReason::Added,
-                            TreeAction::Add,
-                            false,
-                        )?;
-                        skipped = true;
+                        // A local add, copy or move destination in the way: the server's file
+                        // still becomes BASE, shadowed by the working node (svn's `shadowed`
+                        // `add_file`); the working node and the disk stay as they are.
+                        tree_conflict = Some(PendingTreeConflict {
+                            reason: self.local_add_reason(&wc, c)?,
+                            action: TreeAction::Add,
+                        });
                     } else if self.disk_kind(&wc)?.is_some() {
                         if self.s.allow_unversioned_obstructions {
                             adopt_existing = true;

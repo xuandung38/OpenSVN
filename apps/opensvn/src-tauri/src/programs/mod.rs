@@ -258,7 +258,7 @@ impl ProgramService {
     pub fn external_diff_tool(&self) -> Result<(PathBuf, Vec<String>), AppError> {
         let Some(tool) = self.settings.get().diff_external_tool else {
             let mut e = refuse("No external diff tool is configured. Choose one in Settings.");
-            e.actions = Some(vec![ErrorAction::OpenSettings]);
+            e.actions = Some(Box::new(vec![ErrorAction::OpenSettings]));
             return Err(e);
         };
         validate_args(&tool.args)?;

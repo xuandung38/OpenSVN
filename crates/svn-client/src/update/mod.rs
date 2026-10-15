@@ -15,6 +15,7 @@
 //! 3. Report, drive the editor, run queued work after each node.
 //! 4. Release the lock (also on error and cancellation).
 
+mod batch;
 mod conflict_record;
 mod editor;
 mod file_install;
@@ -29,6 +30,7 @@ mod text_sink;
 pub use editor::UpdateEditor;
 pub use props::{PropMerge, merge_props};
 pub use reporter::build_report;
+pub(crate) use run::RECONNECT_DELAYS;
 pub use run::{UpdateKind, UpdateParams, anchor_of, drive_update, repos_relpath_of, root_string};
 pub(crate) use state::tmp_dir as tmp_dir_of;
 pub use state::{Outcome, OutcomeHandle, UpdateSetup, format_svn_date, parse_svn_date};

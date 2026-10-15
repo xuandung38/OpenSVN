@@ -300,8 +300,9 @@ fn node_status(
         }
         Presence::Normal => NodeStatus::Normal,
     };
-    let versioned_here = matches!(cur.presence, Presence::Normal | Presence::Incomplete);
-    if versioned_here {
+    // `incomplete` has the highest precedence, as in svn's `assemble_status`: the disk of an
+    // incomplete directory is not looked at (missing or obstructed, it still reads `!`).
+    if cur.presence == Presence::Normal {
         match (on_disk, cur.kind, disk) {
             (None, _, _) => text = NodeStatus::Missing,
             (Some(k), want, _)
