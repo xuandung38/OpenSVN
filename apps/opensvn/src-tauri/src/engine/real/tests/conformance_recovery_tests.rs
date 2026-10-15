@@ -140,9 +140,13 @@ impl EngineFacade for ClientCheckout {
         wc: &WcRef,
         url: &str,
         rev: Option<Rev>,
+        ignore_ancestry: bool,
         ctx: &OpContext,
     ) -> EngineResult<Rev> {
-        self.0.engine.switch(wc, url, rev, ctx).await
+        self.0
+            .engine
+            .switch(wc, url, rev, ignore_ancestry, ctx)
+            .await
     }
     async fn commit(&self, wc: &WcRef, req: &CommitRequest, ctx: &OpContext) -> EngineResult<Rev> {
         self.0.engine.commit(wc, req, ctx).await

@@ -272,11 +272,14 @@ impl FakeEngine {
         self.apply_snapshot(wc, snap, &scope, ctx).await.map(Rev)
     }
 
+    /// Switches the fake working copy. Its copies keep no history, so `ignore_ancestry` is
+    /// accepted but there is no ancestry to check: every location of the repository is taken.
     pub(super) async fn do_switch(
         &self,
         wc: &WcRef,
         url: &str,
         rev: Option<Rev>,
+        _ignore_ancestry: bool,
         ctx: &OpContext,
     ) -> Result<Rev, SvnError> {
         let info = self.with_wc(&wc.root, |w| Ok(w.info()))?;
@@ -549,6 +552,11 @@ impl CommitPlan {
                     FakeChange::PutDir(p) => FakeChange::PutDir(map(p)?),
                     FakeChange::SetProp(p, c) => FakeChange::SetProp(map(p)?, c.clone()),
                     FakeChange::Delete(p) => FakeChange::Delete(map(p)?),
+                    FakeChange::Copy { from, rev, to } => FakeChange::Copy {
+                        from: map(from)?,
+                        rev: *rev,
+                        to: map(to)?,
+                    },
                 })
             })
             .collect()

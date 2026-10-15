@@ -77,6 +77,7 @@ Build bộ cài:
 | Fuzz hằng đêm (svn-protocol, svn-delta), proptest update so với svn 1.15, độ trễ watcher (~460 ms với 10k file), kiểm tra accessibility bằng axe (en/vi) | #168 |
 | Golden giao thức từ mod_dav_svn 1.15.0 (`tests/data-1.15`, `fixtures/protocol-1.15`), test golden và replay chạy trên cả 1.14 và 1.15; snapshot `list_report_request`/`parent_listing_request`; fuzz 8 target svn-protocol mỗi target 1 giờ, không crash | #184 |
 | `LogProgress::accept` chịu được entry merge lồng (`-g`): entry con không còn kéo lệch `last`, không bị bỏ hay lặp khi tải tiếp | #164 (follow-up) |
+| Switch kiểm tra ancestry như svn 1.15: URL không chung lịch sử bị từ chối (E195012, `UnrelatedResources`) trước khi đổi gì; tùy chọn "Ignore ancestry" trong hộp thoại Switch; REPORT `get-location-segments` (`RaSession::get_location_segments`) và `svn_client::youngest_common_ancestor` | #186 |
 | Mất mạng lâu khi checkout/update: chờ mạng (`network.reconnectWaitMin`, mặc định 10 phút) rồi tải tiếp đúng revision; "Tiếp tục checkout" sau khi hủy, đóng app hoặc crash (journal checkout); phát hiện ngủ/thức bằng đồng hồ boot, không theo giờ hệ thống | #172 |
 | Thanh bên History hiện trạng thái đang tải, lỗi kèm nút Thử lại và danh sách trống, giống màn History chính | #174 |
 | Phản hồi hỏng từ server (XML/UTF-8/base64/svndiff lỗi, editor drive sai) báo mã `server-protocol-error` (engine: `ErrorCode::ProtocolViolation`), không còn gợi ý Cleanup; `Corrupt` chỉ dành cho dữ liệu local | #175 |
@@ -110,6 +111,7 @@ Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo,
 8. **"Retry now" bấm khi thao tác chưa chờ mạng (#172, follow-up).** `OperationManager::retry_now` gọi `Notify::notify_one`, nên một lần bấm (hoặc một lần thức dậy) khi thao tác đang chạy bình thường để lại permit; lần mất mạng sau bỏ qua khoảng chờ đầu tiên. Vô hại nhưng nên chỉ đánh thức khi đang chờ.
 9. **Đếm ngược "thử lại sau Ns" đọc lại mỗi giây (#172, follow-up).** `connection-wait.tsx` đặt `role="status"` lên đoạn chữ đổi mỗi giây, nên trình đọc màn hình đọc liên tục. Nên để vùng live chỉ báo "Mất kết nối" và ẩn phần đếm ngược khỏi vùng live.
 10. **"Update lên bản mới nhất" của checkout dở bỏ qua lựa chọn ignore-externals (#172, follow-up).** Nút này chạy update thường, nên tải cả externals dù checkout ban đầu chọn bỏ qua. Nên đọc journal checkout như `wc_continue`.
+11. **DAV suite qua `flaky-tls-proxy.py --reset-after 2 --idle-reset 2` (#186, ghi nhận).** Trên main cũng có 14/26 test fail. Mọi lỗi đều do proxy reset một thao tác ghi (commit, copy, lock), và engine cố ý không gửi lại thao tác ghi. Tài liệu `docs/visualsvn-test-env.md` nói cả suite chạy được qua proxy: cần chọn lại cấu hình proxy cho suite, hoặc cho các test ghi chạy thẳng.
 
 ## 6. Việc cần người thật (không tự động được)
 
