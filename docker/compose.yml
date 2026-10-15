@@ -188,6 +188,16 @@ services:
       args: *svn18
     image: opensvn-compat/svn-client:1.8.19
 
+  # Hostile repository over HTTPS (fixtures/evil/README.md). Opt-in: --profile evil.
+  # Without Docker: docker/evil-server/run-local.sh up
+  evil-server:
+    profiles: [evil]
+    build:
+      context: ..
+      dockerfile: docker/evil-server/Dockerfile
+    image: opensvn-compat/evil-server:latest
+    ports: ["127.0.0.1:18543:18543"]
+
 volumes:
   repos110:
   repos19:

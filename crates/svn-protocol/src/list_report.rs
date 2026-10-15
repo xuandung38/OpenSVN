@@ -9,7 +9,9 @@ use crate::caps::{UrlBuilder, advertise_caps};
 use crate::http::{HttpRequest, Method, ResponseParser, parse_chunked};
 use crate::limits::ParserLimits;
 use crate::propfind::{ListItem, RejectedEntry};
-use crate::util::{corrupt, decode_text_field, parse_revnum, parse_timestamp};
+use crate::util::{
+    corrupt, decode_display_field, decode_text_field, parse_revnum, parse_timestamp,
+};
 use crate::xml::{Ns, XmlEvent, XmlReader, XmlWriter};
 
 /// How deep the listing goes.
@@ -219,7 +221,7 @@ impl ListReportParser {
                         && let Some(enc) = self.in_author.take()
                         && let Some(item) = self.item.as_mut()
                     {
-                        item.author = Some(decode_text_field(
+                        item.author = Some(decode_display_field(
                             std::mem::take(&mut self.text),
                             enc.as_deref(),
                         )?);

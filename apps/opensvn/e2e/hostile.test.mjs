@@ -39,7 +39,10 @@ const ARTIFACTS = process.env.OPENSVN_E2E_ARTIFACTS ?? join(process.cwd(), "e2e-
 
 const IMG_NAME = "<img src=x onerror=alert('name')>.txt";
 const SCRIPT_NAME = "<script>alert('name')<%2Fscript>.txt";
-const RLO_NAME = "invoice‮txt.exe";
+const RLO_NAME = "invoice\u202Etxt.exe";
+const TEMPLATE_NAME = "{{constructor.constructor('alert(1)')()}}.txt";
+const ENTITY_NAME = "&lt;img src=x onerror=alert('entity')&gt;.txt";
+const PERCENT_NAME = "%3Cscript%3Ealert('percent')%3C%2Fscript%3E.txt";
 
 /** Every request that reaches the beacon listener (any host the repository points at). */
 const beaconHits = [];
@@ -180,6 +183,29 @@ async function assertNothingExecuted(stage) {
   assert.equal(existsSync(launchLog), false, `${stage}: a launcher ran`);
 }
 
+/** Clicks the last visible element with `role` whose text matches `name` (the main area comes
+ * after the sidebar, which has a tab and rows with the same names). */
+async function clickLast(role, name, minCount = 1, timeout = 30_000) {
+  const el = await app.waitFor(
+    () =>
+      app.exec(
+        `const [role, src, flags] = arguments; const re = new RegExp(src, flags);
+         const els = [...document.querySelectorAll('[role="' + role + '"]' + (role === 'button' ? ',button' : ''))].filter((e) => {
+           const r = e.getBoundingClientRect();
+           return r.width > 0 && r.height > 0 && re.test((e.getAttribute('aria-label') || e.innerText || '').trim());
+         });
+         return els.length >= arguments[3] ? els[els.length - 1] : null;`,
+        role,
+        name.source,
+        name.flags,
+        minCount,
+      ),
+    timeout,
+    `${role} ${name}`,
+  );
+  await app.s.click(el["element-6066-11e4-a52e-4f735466cecf"]);
+}
+
 /** WebView-side `invoke` of a backend command, as any script in the page could do. */
 async function invoke(cmd, args) {
   return app.s.execAsync(
@@ -196,6 +222,17 @@ async function invoke(cmd, args) {
 test("hostile repository renders as text, runs nothing, and its escaping symlinks are refused", async () => {
   app = await App.start("hostile", { PATH: `${fakeBin}:${process.env.PATH}` });
   assert.equal(await app.exec(INSTALL_TRAPS), true);
+  // Control: the recorder notices an injected handler and a dialog call, then starts clean.
+  await app.exec(
+    `const d = document.createElement("div"); d.hidden = true;
+     d.innerHTML = '<b onclick="x()">control</b>'; document.body.append(d); window.alert("control");`,
+  );
+  await app.waitFor(async () => (await traps()).nodes.length > 0, 5_000, "trap control");
+  assert.deepEqual((await traps()).dialogs, ["alert:control"]);
+  await app.exec(
+    `document.querySelector('[onclick="x()"]').parentElement.remove();
+     window.__e2eTraps.nodes = []; window.__e2eTraps.dialogs = [];`,
+  );
 
   // Checkout trunk through the real engine (trust the throwaway CA, Basic sign-in).
   await app.click("button", "Checkout repository…");
@@ -218,15 +255,16 @@ test("hostile repository renders as text, runs nothing, and its escaping symlink
   await app.click("tab", "History");
   await app.waitText("Layout <script>alert('log r1')</script>", 30_000);
   await app.waitText("<img src=x onerror=alert('log r2')> hostile names");
-  await app.waitText("<script>alert('branch log')</script>");
   await app.waitText("<img src=x onerror=alert('author')>");
   await app.waitText("Invalid UTF-8 �");
   // Raw-markup names show up in the changed paths of r2.
-  await app.click("option", /onerror=alert\('log r2'\)/, 30_000);
+  await clickLast("tab", /^History$/);
+  // The revision rows exist twice (sidebar and main list); wait for the main list.
+  await clickLast("option", /onerror=alert\('log r2'\)/, 2);
   await app.waitText(`/names/${IMG_NAME}`, 30_000);
   await app.waitText(`/names/${SCRIPT_NAME}`);
   // The markdown/javascript link of r3 is not a link.
-  await app.click("option", /\[click me\]\(javascript:alert\('log r3'\)\)/, 30_000);
+  await clickLast("option", /\[click me\]\(javascript:alert\('log r3'\)\)/, 2);
   await app.waitText("/trunk/evil.html", 30_000);
   assert.equal(await app.exec("return document.querySelectorAll('a[href^=\"javascript:\" i]').length"), 0);
   await assertNothingExecuted("history");
@@ -236,13 +274,25 @@ test("hostile repository renders as text, runs nothing, and its escaping symlink
   await app.waitText(TEMPLATE_NAME, 30_000);
   await app.waitText(ENTITY_NAME);
   await app.waitText(PERCENT_NAME);
-  await app.click("option", /^evil\.svg/);
-  await app.waitText("<script>alert('svg script'); top.__opensvnPwned = 'svg';</script>", 30_000);
-  await app.click("option", /^evil\.html/);
-  await app.waitText("<script>alert('html script'); top.__opensvnPwned = 'html';</script>", 30_000);
+  // Previews: active content is shown as text. Opening a file moves the browser into it; the
+  // breadcrumb button leads back to trunk.
+  const preview = async (row, text) => {
+    await app.click("option", row);
+    await app.waitText(text, 30_000);
+    await clickLast("button", /^trunk$/);
+    await app.waitText(TEMPLATE_NAME, 30_000);
+  };
+  await preview(/^evil\.svg/, "<script>alert('svg script'); top.__opensvnPwned = 'svg';</script>");
+  await preview(/^evil\.html/, "<script>alert('html script'); top.__opensvnPwned = 'html';</script>");
+  await preview(/^xss-content\.txt/, "<img src=x onerror=alert(1)>");
   await app.click("option", /^escape-abs/);
   await app.waitText("link /etc/passwd", 30_000);
   assert.doesNotMatch(await app.bodyText(), /root:x?:0:0:/, "a symlink preview showed its target");
+  // Raw-markup and Windows-invalid names (names/): the engine rejects server names it could not
+  // write safely (RelPath::from_server), so the listing shows none of them; their text is in the
+  // History changed paths above.
+  await clickLast("treeitem", /^names$/);
+  await app.waitText("This folder is empty", 30_000);
   await assertNothingExecuted("browse");
 
   // Properties: local property edits put the hostile values into the diff view as text.
@@ -255,7 +305,8 @@ test("hostile repository renders as text, runs nothing, and its escaping symlink
   // Retarget an escaping symlink (still escaping), so it is listed as a local change.
   rmSync(join(wc, "escape-abs"));
   symlinkSync("/etc/hostname", join(wc, "escape-abs"));
-  await app.click("tab", "Changes");
+  await app.click("tab", /^Changes\s*\d+$/); // sidebar (with its count)
+  await clickLast("tab", /^Changes$/); // main area: the diff
   await app.click("option", /props\.txt/, 30_000);
   await app.waitText("- <script>alert('prop')</script>", 30_000);
   await app.waitText("- <img src=x onerror=alert('prop')>");
@@ -267,6 +318,8 @@ test("hostile repository renders as text, runs nothing, and its escaping symlink
   await app.click("option", /escape-abs/, 30_000);
   await app.waitText("link /etc/passwd");
   assert.doesNotMatch(await app.bodyText(), /root:x?:0:0:/);
+  // The menu acts on every ticked file; untick all so it targets the one row.
+  await app.click("checkbox", "Select all files");
   await app.contextMenu("option", /escape-abs/);
   await app.click("menuitem", "Show in file manager");
   await app.waitText("This item is a symbolic link", 15_000);

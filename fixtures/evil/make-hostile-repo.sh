@@ -5,7 +5,7 @@
 # fixtures/evil/README.md ("Hostile repository").
 #
 # Usage: fixtures/evil/make-hostile-repo.sh <repo-path>
-# Env:   BEACON  URL prefix every network beacon points at (default https://beacon.evil.test).
+# Env:   BEACON  URL prefix every network beacon points at (default https://beacon.evil.test/).
 #                The e2e test points it at a local listener and asserts that it gets no request.
 # Needs: svn, svnadmin, svnmucc (1.8+, svn 1.15.0 recommended: `nix-build
 #        docker/nix/subversion-1.15.nix`), python3. Linux or macOS (symlinks, `<>` in names).
@@ -20,7 +20,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/../repos/lib.sh"
 
 repo="${1:?usage: make-hostile-repo.sh <repo-path>}"
-BEACON="${BEACON:-https://beacon.evil.test}"
+BEACON="${BEACON:-https://beacon.evil.test/}"
+BEACON="${BEACON%/}"
 repo="$(mkdir -p "$(dirname "$repo")" && cd "$(dirname "$repo")" && pwd)/$(basename "$repo")"
 url="file://$repo"
 work="$(mktemp -d)"
@@ -162,8 +163,8 @@ svnadmin setrevprop "$repo" -r 2 svn:author "$work/a"
 printf "<script>alert('author')</script>" > "$work/a"
 svnadmin setrevprop "$repo" -r 3 svn:author "$work/a"
 
-# Last revision from a dump stream: svn:log and svn:author with invalid UTF-8, CR and control
-# bytes. `--bypass-prop-validation` is the only way in; repositories converted from other
+# Last revision from a dump stream: svn:log with invalid UTF-8, CR and control bytes, a file
+# whose content and property are invalid UTF-8. `--bypass-prop-validation` is the only way in; repositories converted from other
 # systems carry such values, and svn serves them as they are. Paths cannot be invalid UTF-8:
 # the filesystem refuses them (E160005) even then.
 next=$((head_rev + 1))
@@ -177,7 +178,9 @@ def props(d):
     return b + b"PROPS-END\n"
 rp = props({
     b"svn:log": b"Invalid UTF-8 \xff\xfe\xc3\x28 and CR\r\nand NUL-free control \x07\x1b[2J <script>alert('bad log')</script>",
-    b"svn:author": b"bad\xffauthor<script>",
+    # Not invalid UTF-8: mod_dav_svn writes svn:author raw into PROPFIND answers
+    # (creator-displayname), so svn's own `ls -v` fails on such a repository.
+    b"svn:author": b"<svg onload=alert('author r9')>",
     b"svn:date": b"2024-01-01T%02d:00:00.000000Z" % rev,
 })
 text = b"invalid UTF-8 content \xff\xfe\n<script>alert('content')</script>\n" + beacon + b"/content.png\n"
