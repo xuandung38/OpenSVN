@@ -72,6 +72,9 @@ pub struct RepoState {
     /// When set, every checked `DELETE` of a transaction fails with this server error and
     /// changes nothing (see `FakeRaSession::fail_txn_deletes`).
     pub txn_delete_fault: Option<String>,
+    /// Checked `DELETE`s left before `txn_delete_fault` clears itself; `None` keeps it until
+    /// it is reset (see `FakeRaSession::fail_txn_deletes_times`).
+    pub txn_delete_faults_left: Option<u32>,
 }
 
 /// A `MERGE` whose answer is lost, injected with `FakeRaSession::fail_next_merge`. Either way
@@ -125,6 +128,7 @@ impl RepoState {
             next_txn: 1,
             merge_fault: None,
             txn_delete_fault: None,
+            txn_delete_faults_left: None,
         }
     }
 
