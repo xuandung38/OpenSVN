@@ -172,7 +172,7 @@ impl FakeEngine {
             Some(entries) if !entries.is_empty() => {
                 let tree = snap_tree(&snap);
                 let mut layout = Layout::checkout(&tree, sparse_of(req.depth));
-                for (path, depth) in crate::engine::mapping::sparse_steps(entries)? {
+                for (path, depth) in crate::engine::mapping::sparse_steps(entries, false)? {
                     layout.set_depth(&tree, &path, depth);
                 }
                 Some(layout)
@@ -771,7 +771,7 @@ impl FakeEngine {
         ctx: &OpContext,
     ) -> Result<(), SvnError> {
         ctx.check()?;
-        let steps = crate::engine::mapping::sparse_steps(entries)?;
+        let steps = crate::engine::mapping::sparse_steps(entries, true)?;
         let (url, before) = self.with_wc(&wc.root, |w| Ok((w.info().url, wc_layout(w))))?;
         let (session, base) = self.locate(&url)?;
         session.ensure_authenticated(&ctx.cancel).await?;

@@ -28,6 +28,7 @@ export type MenuAction =
   | "updateTo"
   | "discardAll"
   | "cleanup"
+  | "sparse"
   | "unlock"
   | "changelist"
   | "ignore"
@@ -77,7 +78,7 @@ export const MENU_ACTIONS: Readonly<Record<string, MenuAction>> = {
   "menu://wc/update-to": "updateTo",
   "menu://wc/commit": "commit",
   "menu://wc/discard-all": "discardAll",
-  "menu://wc/sparse": "notYet",
+  "menu://wc/sparse": "sparse",
   "menu://wc/cleanup": "cleanup",
   "menu://wc/properties": "notYet",
   "menu://wc/layout": "notYet",
@@ -174,6 +175,10 @@ export function useWcShortcuts(props: {
         case "cleanup":
           if (!wc) return false;
           s.openDialog({ kind: "cleanup" });
+          return true;
+        case "sparse":
+          if (!wc) return false;
+          s.openDialog({ kind: "sparse" });
           return true;
         case "conflicts":
           if (!wc) return false;

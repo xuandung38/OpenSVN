@@ -454,8 +454,9 @@ pub async fn set_depth(
 }
 
 /// "Choose folders" on an existing working copy: sets the depth of each folder, parents first
-/// (`svn update --parents --set-depth` per folder), bringing in folders the working copy does
-/// not have. One operation; local changes are never removed.
+/// (`svn update --parents --set-depth` per folder; `""` is the root, which cannot be excluded),
+/// bringing in folders the working copy does not have. One operation; local changes are never
+/// removed.
 #[tauri::command]
 #[specta::specta]
 pub async fn wc_sparse_apply(
@@ -464,7 +465,7 @@ pub async fn wc_sparse_apply(
     entries: Vec<SparseEntry>,
 ) -> Result<OperationHandle, AppError> {
     guard(async {
-        crate::engine::mapping::sparse_steps(&entries).map_err(|e| AppError::from(&e))?;
+        crate::engine::mapping::sparse_steps(&entries, true).map_err(|e| AppError::from(&e))?;
         state.start_wc_op(
             OperationKind::SetDepth,
             &wc_id,

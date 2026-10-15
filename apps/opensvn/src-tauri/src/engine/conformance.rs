@@ -741,6 +741,7 @@ pub async fn sparse_checkout_and_choose_folders(h: &dyn Harness) {
     assert_eq!(
         depths,
         sparse(&[
+            ("", SparseDepth::Empty),
             ("branches", SparseDepth::Empty),
             ("trunk", SparseDepth::Empty),
             ("trunk/src", SparseDepth::Infinity),
@@ -764,6 +765,7 @@ pub async fn sparse_checkout_and_choose_folders(h: &dyn Harness) {
     assert_eq!(
         e.wc_depths(&wc, &ctx()).await.expect("wc_depths"),
         sparse(&[
+            ("", SparseDepth::Empty),
             ("branches", SparseDepth::Empty),
             ("tags", SparseDepth::Empty),
             ("trunk", SparseDepth::Files),
@@ -786,6 +788,7 @@ pub async fn sparse_checkout_and_choose_folders(h: &dyn Harness) {
     assert_eq!(
         e.wc_depths(&wc, &ctx()).await.expect("wc_depths"),
         sparse(&[
+            ("", SparseDepth::Empty),
             ("branches", SparseDepth::Empty),
             ("tags", SparseDepth::Empty),
             ("trunk", SparseDepth::Infinity),
@@ -800,6 +803,7 @@ pub async fn sparse_checkout_and_choose_folders(h: &dyn Harness) {
     assert_eq!(
         e.wc_depths(&wc, &ctx()).await.expect("wc_depths"),
         sparse(&[
+            ("", SparseDepth::Empty),
             ("branches", SparseDepth::Empty),
             ("tags", SparseDepth::Empty),
             ("trunk", SparseDepth::Infinity),
@@ -807,9 +811,16 @@ pub async fn sparse_checkout_and_choose_folders(h: &dyn Harness) {
         ])
     );
 
-    // The root takes the checkout depth; a folder is listed once.
+    // The root itself can change depth but never be excluded; a folder is listed once.
+    e.sparse_apply(&wc, &sparse(&[("", SparseDepth::Files)]), &ctx())
+        .await
+        .expect("root depth");
+    assert_eq!(
+        e.wc_depths(&wc, &ctx()).await.expect("wc_depths"),
+        sparse(&[("", SparseDepth::Files)])
+    );
     for bad in [
-        sparse(&[("", SparseDepth::Files)]),
+        sparse(&[("", SparseDepth::Exclude)]),
         sparse(&[("tags", SparseDepth::Empty), ("tags", SparseDepth::Files)]),
     ] {
         let err = e

@@ -17,8 +17,10 @@ import type {
   OperationHandle,
   OperationKind,
   OpResult,
+  PickRequest,
   ResolveRequest,
   RevertRequest,
+  SparseEntry,
   UnlockRequest,
   UpdateRequest,
   WcEntry,
@@ -51,6 +53,8 @@ interface State {
   missing: WcEntry[];
   lastOpened: Map<string, string>;
   recentUrls: string[];
+  /** Recorded folder depths per working copy (`wc_depths`), the root first. */
+  depths: Map<string, SparseEntry[]>;
   status: Map<string, FileStatus[]>;
   grants: Map<string, string>;
   youngest: number;
@@ -83,6 +87,16 @@ function initialState(): State {
     missing: [structuredClone(MOCK_MISSING_WC)],
     lastOpened: new Map([[MOCK_WC_ID, "2026-10-13T08:30:00Z"]]),
     recentUrls: ["https://svn.example.com/repos/game/trunk", "https://svn.example.com/repos/docs"],
+    depths: new Map([
+      [
+        MOCK_WC_ID,
+        [
+          { path: "", depth: "infinity" },
+          { path: "assets", depth: "immediates" },
+          { path: "src", depth: "infinity" },
+        ],
+      ],
+    ]),
     status: new Map([[MOCK_WC_ID, freshMainStatus()]]),
     grants: new Map(),
     youngest: MOCK_YOUNGEST,
@@ -214,12 +228,23 @@ export function wcMockCommands(deps: MockDeps) {
       state.status.set(wc.id, []);
       return ok(wc);
     },
-    pathPick: () => {
+    pathPick: (req?: PickRequest) => {
+      // A file dialog pretends the user chose a sample file (or kept the suggested name).
+      if (req?.kind === "file" || req?.kind === "saveFile") {
+        const displayName = req.kind === "saveFile" ? req.suggestedName : "release-notes.txt";
+        const id = `grant-${++state.seq}`;
+        state.grants.set(id, displayName);
+        return ok({ id, displayName, kind: "file" as const });
+      }
       const displayName = FOLDER_NAMES[state.seq++ % FOLDER_NAMES.length] as string;
       const id = `grant-${state.seq}`;
       state.grants.set(id, displayName);
       return ok({ id, displayName, kind: "dir" as const });
     },
+    repoSave: (url: string, _rev: number | null, grant: string) =>
+      consumeGrant(grant)
+        ? ok(simulateOp("save", `Save ${baseName(url)}`, null))
+        : fail("invalid-argument", BAD_GRANT),
     wcList: () => ok([...state.wcs]),
     wcEntries: () => ok([...state.wcs.map(entryOf), ...state.missing]),
     wcOpen: (wcId: string) => {
@@ -271,6 +296,32 @@ export function wcMockCommands(deps: MockDeps) {
     revealInOs: (wcId: string) =>
       forWc(wcId) ? ok(null) : fail("invalid-argument", "The folder no longer exists."),
     recentUrls: () => ok([...state.recentUrls]),
+    recentUrlRemove: (url: string) => {
+      state.recentUrls = state.recentUrls.filter((u) => u !== url);
+      return ok([...state.recentUrls]);
+    },
+    wcDepths: (wcId: string) =>
+      forWc(wcId)
+        ? ok([...(state.depths.get(wcId) ?? [{ path: "", depth: "infinity" as const }])])
+        : fail("not-a-working-copy", "Unknown working copy"),
+    wcSparseApply: (wcId: string, entries: SparseEntry[]) => {
+      if (!forWc(wcId)) return fail("not-a-working-copy", "Unknown working copy");
+      if (entries.some((e) => e.path === "" && e.depth === "exclude")) {
+        return fail("wc-invalid-operation", "the working copy root cannot be excluded");
+      }
+      return op("set-depth", "Choose folders", wcId, () => {
+        // Like the engine: each folder in turn, a folder's own setting resetting those below it.
+        let next = [...(state.depths.get(wcId) ?? [{ path: "", depth: "infinity" as const }])];
+        for (const e of entries) {
+          const below = (p: string) => (e.path === "" ? p !== "" : p.startsWith(`${e.path}/`));
+          next = next.filter((d) => d.path !== e.path && !below(d.path));
+          next.push(e);
+        }
+        if (!next.some((d) => d.path === "")) next.push({ path: "", depth: "infinity" });
+        next.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+        state.depths.set(wcId, next);
+      });
+    },
     checkoutRootGrant: () => {
       const id = `grant-root-${++state.seq}`;
       state.grants.set(id, baseName(mockSettings["general.checkoutRoot"]));

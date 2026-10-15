@@ -1005,6 +1005,10 @@ async fn sparse_checkout_on_an_anchored_session() {
         depths,
         vec![
             SparseEntry {
+                path: String::new(),
+                depth: SparseDepth::Empty
+            },
+            SparseEntry {
                 path: "b1".into(),
                 depth: SparseDepth::Empty
             },
@@ -1028,7 +1032,7 @@ async fn sparse_checkout_on_an_anchored_session() {
         .unwrap();
     assert!(!wc.join("b1/src").exists());
     assert_eq!(
-        s.f.engine.wc_depths(&r, &ctx()).await.unwrap()[1].depth,
+        s.f.engine.wc_depths(&r, &ctx()).await.unwrap()[2].depth,
         SparseDepth::Exclude
     );
     s.f.engine

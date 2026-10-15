@@ -51,8 +51,11 @@ fn client_depth(depth: Depth) -> svn_types::Depth {
 
 /// The folders of a sparse checkout in the order they are applied (parents first, see
 /// [`crate::engine::mapping::sparse_steps`]), with `svn-client` depths.
-fn sparse_steps(entries: &[SparseEntry]) -> EngineResult<Vec<(RelPath, svn_types::Depth)>> {
-    Ok(crate::engine::mapping::sparse_steps(entries)?
+fn sparse_steps(
+    entries: &[SparseEntry],
+    with_root: bool,
+) -> EngineResult<Vec<(RelPath, svn_types::Depth)>> {
+    Ok(crate::engine::mapping::sparse_steps(entries, with_root)?
         .into_iter()
         .map(|(rel, depth)| {
             let depth = match depth {
@@ -65,6 +68,16 @@ fn sparse_steps(entries: &[SparseEntry]) -> EngineResult<Vec<(RelPath, svn_types
             (rel, depth)
         })
         .collect())
+}
+
+/// IPC folder depth of a recorded directory depth.
+fn sparse_depth(depth: svn_types::Depth) -> SparseDepth {
+    match depth {
+        svn_types::Depth::Empty => SparseDepth::Empty,
+        svn_types::Depth::Files => SparseDepth::Files,
+        svn_types::Depth::Immediates => SparseDepth::Immediates,
+        _ => SparseDepth::Infinity,
+    }
 }
 
 /// `url` without trailing slashes, for comparisons.
@@ -263,7 +276,7 @@ impl RealEngine {
                  check out with pristine copies instead",
             ));
         }
-        let sparse = sparse_steps(plan.sparse.as_deref().unwrap_or_default())?;
+        let sparse = sparse_steps(plan.sparse.as_deref().unwrap_or_default(), false)?;
         if !plan.path.is_absolute() {
             return Err(SvnError::new(
                 ErrorCode::Internal,
@@ -468,7 +481,14 @@ impl RealEngine {
         let root = wc.root.clone();
         wc_read::blocking(move || {
             let db = wc_read::open_db(&root)?;
-            let mut out = Vec::new();
+            let root_depth = db
+                .read_base(&RelPath::root())?
+                .and_then(|n| n.depth)
+                .unwrap_or(svn_types::Depth::Infinity);
+            let mut out = vec![SparseEntry {
+                path: String::new(),
+                depth: sparse_depth(root_depth),
+            }];
             let mut stack = vec![RelPath::root()];
             while let Some(dir) = stack.pop() {
                 let mut subdirs = Vec::new();
@@ -479,12 +499,7 @@ impl RealEngine {
                     let depth = match node.presence {
                         svn_wc::db::Presence::Excluded => SparseDepth::Exclude,
                         p if p.is_present() => {
-                            match node.depth.unwrap_or(svn_types::Depth::Infinity) {
-                                svn_types::Depth::Empty => SparseDepth::Empty,
-                                svn_types::Depth::Files => SparseDepth::Files,
-                                svn_types::Depth::Immediates => SparseDepth::Immediates,
-                                _ => SparseDepth::Infinity,
-                            }
+                            sparse_depth(node.depth.unwrap_or(svn_types::Depth::Infinity))
                         }
                         _ => continue,
                     };
@@ -511,7 +526,7 @@ impl RealEngine {
         entries: &[SparseEntry],
         ctx: &OpContext,
     ) -> EngineResult<()> {
-        for (rel, depth) in sparse_steps(entries)? {
+        for (rel, depth) in sparse_steps(entries, true)? {
             self.do_set_depth_inner(wc, rel.as_str(), depth, ctx)
                 .await?;
         }

@@ -7,6 +7,7 @@ import type { LogTarget } from "../../../ipc/bindings";
 import { relativeTime } from "../../../lib/format";
 import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
+import { CompareDialog } from "./compare-dialog";
 import { HistoryFilterBar } from "./history-filters";
 import { historyStrings } from "./history-strings";
 import { RevisionDetails, type RevisionNav } from "./revision-details";
@@ -40,6 +41,10 @@ export function HistoryScreen({
   const c = useT(commonStrings);
   const [filters, setFilters] = useState(NO_FILTERS);
   const [selectedRev, setSelectedRev] = useState<number | null>(focusRev ?? null);
+  // A comparison of two revisions: the marked one and the selected one.
+  const [compareRev, setCompareRev] = useState<number | null>(null);
+  const [comparing, setComparing] = useState(false);
+  const toggleCompare = (rev: number) => setCompareRev((cur) => (cur === rev ? null : rev));
   const h = useHistory(target, filters);
 
   useEffect(() => {
@@ -47,6 +52,10 @@ export function HistoryScreen({
   }, [focusRev]);
 
   const selected = h.entries.find((e) => e.rev === selectedRev) ?? null;
+  const pair =
+    compareRev !== null && selectedRev !== null && compareRev !== selectedRev
+      ? { from: Math.min(compareRev, selectedRev), to: Math.max(compareRev, selectedRev) }
+      : null;
 
   return (
     <div className="grid h-full min-h-0 grid-cols-[minmax(300px,380px)_1fr]">
@@ -79,6 +88,10 @@ export function HistoryScreen({
                 const e = h.entries[i];
                 if (e) setSelectedRev(e.rev);
               }}
+              onToggle={(i) => {
+                const e = h.entries[i];
+                if (e) toggleCompare(e.rev);
+              }}
               onActiveChange={(i) => {
                 if (
                   h.hasNextPage &&
@@ -101,6 +114,7 @@ export function HistoryScreen({
                     author={e.author ?? c("unknownAuthor")}
                     when={relativeTime(e.date)}
                     selected={e.rev === selectedRev}
+                    badge={e.rev === compareRev ? t("compareBadge") : undefined}
                     onSelect={setSelectedRev}
                   />
                 );
@@ -120,9 +134,41 @@ export function HistoryScreen({
           </div>
         )}
       </section>
-      <section aria-label={t("title")} className="min-h-0 min-w-0">
-        <RevisionDetails entry={selected} repoRootUrl={repoRootUrl} nav={nav} />
+      <section aria-label={t("title")} className="flex min-h-0 min-w-0 flex-col">
+        {compareRev !== null && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-line px-3.5 py-2">
+            <p className="m-0 min-w-0 flex-1" role="status">
+              {t("compareMarked", { rev: compareRev })} {pair ? null : t("comparePickOther")}
+            </p>
+            {pair && (
+              <Button small variant="primary" onClick={() => setComparing(true)}>
+                {t("compareReady", pair)}
+              </Button>
+            )}
+            <Button small onClick={() => setCompareRev(null)}>
+              {t("compareClear")}
+            </Button>
+          </div>
+        )}
+        <div className="min-h-0 flex-1">
+          <RevisionDetails
+            entry={selected}
+            repoRootUrl={repoRootUrl}
+            nav={nav}
+            compareRev={compareRev}
+            onMarkCompare={toggleCompare}
+          />
+        </div>
       </section>
+      {comparing && pair && (
+        <CompareDialog
+          entries={h.entries}
+          from={pair.from}
+          to={pair.to}
+          repoRootUrl={repoRootUrl}
+          onClose={() => setComparing(false)}
+        />
+      )}
     </div>
   );
 }

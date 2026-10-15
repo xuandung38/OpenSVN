@@ -74,6 +74,7 @@ const CASES: [string, WcDialog][] = [
   ["update to revision", { kind: "update-rev" }],
   ["switch", { kind: "switch" }],
   ["cleanup", { kind: "cleanup" }],
+  ["choose folders", { kind: "sparse" }],
   ["rename repository", { kind: "repo-rename", wcId: MOCK_WC_ID, name: "game-client" }],
   ["remove repository", { kind: "repo-remove", wcId: MOCK_WC_ID, name: "game-client" }],
   ["conflict resolver (text conflict)", { kind: "resolver", path: "src/engine/physics.ts" }],

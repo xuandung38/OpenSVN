@@ -310,8 +310,8 @@ pub(crate) async fn fetch_diff(
     }
 }
 
-/// The recorded depth of every folder of the working copy, parents first (excluded folders as
-/// `exclude`): what the "Choose folders" dialog starts from. Folders it does not list are not
+/// The recorded depth of every folder of the working copy, the root (`""`) first, then parents
+/// before children (excluded folders as `exclude`): what the "Choose folders" dialog starts from. Folders it does not list are not
 /// in the working copy.
 #[tauri::command]
 #[specta::specta]

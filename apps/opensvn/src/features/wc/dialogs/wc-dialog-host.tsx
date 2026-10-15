@@ -1,5 +1,6 @@
 import { ConflictResolver } from "../conflicts/conflict-resolver";
 import { RemoveRepoDialog, RenameRepoDialog } from "../repos/repo-dialogs";
+import { SparseDialog } from "../sparse/sparse-dialog";
 import { isAppDialog, useWcSession } from "../wc-session";
 import { CheckoutDialog } from "./checkout-dialog";
 import { DeleteDialog, DiscardDialog, IgnoreDialog, RenameDialog } from "./file-dialogs";
@@ -15,7 +16,9 @@ export function WcDialogHost() {
   if (!isAppDialog(dialog) && !wc) return null;
   switch (dialog.kind) {
     case "checkout":
-      return <CheckoutDialog onClose={closeDialog} />;
+      return <CheckoutDialog onClose={closeDialog} initialUrl={dialog.url} />;
+    case "sparse":
+      return <SparseDialog onClose={closeDialog} />;
     case "discard":
       return <DiscardDialog paths={dialog.paths} all={dialog.all} onClose={closeDialog} />;
     case "ignore":

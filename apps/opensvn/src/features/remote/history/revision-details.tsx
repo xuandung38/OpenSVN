@@ -29,10 +29,16 @@ export function RevisionDetails({
   entry,
   repoRootUrl,
   nav,
+  compareRev = null,
+  onMarkCompare,
 }: {
   entry: LogEntry | null;
   repoRootUrl: string;
   nav: RevisionNav;
+  /** Revision marked for a comparison of two revisions, if any. */
+  compareRev?: number | null;
+  /** Marks (or, for the marked one, unmarks) a revision for comparison. */
+  onMarkCompare?: (rev: number) => void;
 }) {
   const t = useT(historyStrings);
   const c = useT(commonStrings);
@@ -88,6 +94,17 @@ export function RevisionDetails({
           entries={[
             { label: t("copyRev"), onSelect: () => copy(String(entry.rev)) },
             { label: t("copyMessage"), onSelect: () => copy(entry.message) },
+            ...(onMarkCompare
+              ? [
+                  {
+                    label:
+                      compareRev === entry.rev
+                        ? t("unmarkCompare", { rev: entry.rev })
+                        : t("markCompare", { rev: entry.rev }),
+                    onSelect: () => onMarkCompare(entry.rev),
+                  },
+                ]
+              : []),
             "separator",
             {
               label: t("openWeb"),

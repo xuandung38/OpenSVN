@@ -375,17 +375,18 @@ pub trait EngineFacade: Send + Sync {
         depth: Depth,
         ctx: &OpContext,
     ) -> EngineResult<()>;
-    /// The recorded depth of every folder of the working copy below its root, parents first:
-    /// excluded folders as [`opensvn_ipc::SparseDepth::Exclude`]. Folders the working copy does
-    /// not have are not listed.
+    /// The recorded depth of every folder of the working copy, the root (`""`) first, then
+    /// parents before children: excluded folders as [`opensvn_ipc::SparseDepth::Exclude`].
+    /// Folders the working copy does not have are not listed.
     async fn wc_depths(
         &self,
         wc: &WcRef,
         ctx: &OpContext,
     ) -> EngineResult<Vec<opensvn_ipc::SparseEntry>>;
     /// Sets the depth of several folders (`svn update --parents --set-depth` for each, parents
-    /// first, all at HEAD): the "Choose folders" dialog of an existing working copy. Folders the
-    /// working copy does not have are brought in; local changes are never removed.
+    /// first, all at HEAD): the "Choose folders" dialog of an existing working copy. The root may
+    /// change depth but not be excluded. Folders the working copy does not have are brought in;
+    /// local changes are never removed.
     async fn sparse_apply(
         &self,
         wc: &WcRef,

@@ -51,6 +51,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "wc_entries",
     "wc_locate",
     "recent_urls",
+    "recent_url_remove",
     "checkout_root_grant",
     "checkout_root_choose",
     "status_get",

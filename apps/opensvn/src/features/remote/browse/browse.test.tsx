@@ -160,3 +160,61 @@ test("tree: scrolls the active row into view and tracks it by folder, not index"
   await waitFor(() => expect(within(tree).getAllByRole("treeitem").length).toBeGreaterThan(4));
   expect(activeText()).toContain("tags");
 });
+
+test("Download asks where to save (suggesting the file name) and streams the file there", async () => {
+  const { mockCalls } = await import("../../../ipc/mock/adapter");
+  renderApp(screenUi());
+  await screen.findByRole("option", { name: /README\.md/ });
+  const list = screen.getByRole("listbox", { name: "Repository browser" });
+  list.focus();
+  await user().keyboard("{End}{Enter}");
+  await screen.findByRole("tab", { name: "Preview" });
+  const before = mockCalls.length;
+  await user().click(screen.getByRole("button", { name: "Actions" }));
+  await user().click(await screen.findByRole("menuitem", { name: "Download / Save as…" }));
+  await waitFor(() =>
+    expect(mockCalls.slice(before).some((c) => c.name === "repoSave")).toBe(true),
+  );
+  const calls = mockCalls.slice(before);
+  const pick = calls.find((c) => c.name === "pathPick");
+  expect(pick?.args[0]).toMatchObject({ kind: "saveFile", suggestedName: "README.md" });
+  const save = calls.find((c) => c.name === "repoSave");
+  expect(save?.args[0]).toBe(`${MOCK_REPO_ROOT}/trunk/README.md`);
+  expect(save?.args[1]).toBeNull();
+  expect(typeof save?.args[2]).toBe("string");
+  expect(await screen.findByText(/Downloading README\.md/)).toBeTruthy();
+});
+
+test("Upload needs a picked file and a message, then commits it into the folder", async () => {
+  const { mockCalls } = await import("../../../ipc/mock/adapter");
+  renderApp(screenUi());
+  await screen.findByRole("option", { name: /README\.md/ });
+  await user().click(screen.getByRole("button", { name: "Actions" }));
+  await user().click(await screen.findByRole("menuitem", { name: "Upload file…" }));
+  const dialog = await screen.findByRole("dialog", { name: "Upload file", hidden: true });
+  const submit = within(dialog).getByRole("button", { name: "Upload" }) as HTMLButtonElement;
+  expect(submit.disabled).toBe(true);
+  expect(within(dialog).getByText("No file chosen")).toBeTruthy();
+  await user().click(within(dialog).getByRole("button", { name: "Choose file…" }));
+  expect(await within(dialog).findByText("Chosen: release-notes.txt")).toBeTruthy();
+  expect((within(dialog).getByLabelText("Name") as HTMLInputElement).value).toBe(
+    "release-notes.txt",
+  );
+  expect(submit.disabled).toBe(true); // message still empty
+  // A file of that name is replaced, and the dialog says so.
+  await user().clear(within(dialog).getByLabelText("Name"));
+  await user().type(within(dialog).getByLabelText("Name"), "README.md");
+  expect(await within(dialog).findByText(/already exists in this folder/)).toBeTruthy();
+  await user().type(within(dialog).getByLabelText(/Commit message/), "Update readme");
+  expect(submit.disabled).toBe(false);
+  const before = mockCalls.length;
+  await user().click(submit);
+  await waitFor(() =>
+    expect(mockCalls.slice(before).some((c) => c.name === "remoteEdit")).toBe(true),
+  );
+  const edit = mockCalls.slice(before).find((c) => c.name === "remoteEdit");
+  expect(edit?.args[0]).toMatchObject({
+    message: "Update readme",
+    ops: [{ kind: "upload", url: `${MOCK_REPO_ROOT}/trunk/README.md` }],
+  });
+});

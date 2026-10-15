@@ -97,12 +97,11 @@ impl Layout {
         true
     }
 
-    /// The recorded depth of every folder below the root, parents first.
+    /// The recorded depth of every folder, the root first, then parents before children.
     pub(super) fn depths(&self) -> Vec<(RelPath, SparseDepth)> {
         let mut out: Vec<(RelPath, SparseDepth)> = self
             .present
             .iter()
-            .filter(|(p, _)| !p.is_root())
             .filter_map(|(p, d)| d.map(|d| (p.clone(), d)))
             .chain(
                 self.excluded
@@ -160,6 +159,7 @@ mod tests {
         assert_eq!(
             full.depths(),
             [
+                (RelPath::root(), SparseDepth::Infinity),
                 (RelPath::new("a").unwrap(), SparseDepth::Exclude),
                 (RelPath::new("c").unwrap(), SparseDepth::Infinity)
             ]

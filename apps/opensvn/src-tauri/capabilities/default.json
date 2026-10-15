@@ -65,6 +65,7 @@
     "allow-wc-entries",
     "allow-wc-locate",
     "allow-recent-urls",
+    "allow-recent-url-remove",
     "allow-checkout-root-grant",
     "allow-checkout-root-choose",
     "allow-status-get",

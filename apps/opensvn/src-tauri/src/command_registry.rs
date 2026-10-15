@@ -19,6 +19,7 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             wc_entries,
             wc_locate,
             recent_urls,
+            recent_url_remove,
             checkout_root_grant,
             checkout_root_choose,
             status_get,
