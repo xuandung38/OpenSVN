@@ -13,7 +13,7 @@ need pnpm "pnpm 11"
 
 WORK="$GEN_DIR/updater-test"
 rm -rf "$WORK"; mkdir -p "$WORK/www"
-cd "$REPO_ROOT"
+cd "$REPO_ROOT" || exit 1
 [[ -d node_modules ]] || pnpm install --frozen-lockfile >/dev/null
 
 log "building harness (pinned tauri-plugin-updater)"
