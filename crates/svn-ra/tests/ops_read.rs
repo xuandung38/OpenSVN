@@ -335,6 +335,8 @@ async fn hostile_hrefs_are_refused_or_skipped() {
                     5,
                 ),
                 response(&format!("{rvr}/trunk/%2e%2e/escape"), false, 5),
+                response(&format!("{rvr}/trunk/CON.txt"), false, 5),
+                response(&format!("{rvr}/trunk/a%3ab.txt"), false, 5),
             ]),
         ),
     )
@@ -351,6 +353,21 @@ async fn hostile_hrefs_are_refused_or_skipped() {
         .map(|e| e.name)
         .collect();
     assert_eq!(names, ["ok.txt"]);
+    // The refused entries stay out, but their number reaches the caller.
+    for depth in [Depth::Immediates, Depth::Files, Depth::Infinity] {
+        let listing = s
+            .list_counted(&RelPath::root(), None, depth, &cancel)
+            .await
+            .unwrap();
+        let names: Vec<_> = listing.entries.into_iter().map(|e| e.name).collect();
+        assert_eq!(names, ["ok.txt"], "{depth:?}");
+        assert_eq!(listing.rejected, 4, "{depth:?}");
+    }
+    let empty = s
+        .list_counted(&RelPath::root(), None, Depth::Empty, &cancel)
+        .await
+        .unwrap();
+    assert_eq!((empty.entries.len(), empty.rejected), (0, 0));
     let reqs = requests(&srv).await;
     assert!(reqs.iter().all(|(_, p)| p.starts_with("/svn/repo/")));
 }
@@ -404,7 +421,7 @@ async fn get_file_detects_a_checksum_mismatch() {
         .get_file(&p("a.txt"), None, &mut out, &CancelToken::new())
         .await
         .unwrap_err();
-    assert_eq!(err.code, ErrorCode::Corrupt);
+    assert_eq!(err.code, ErrorCode::ProtocolViolation);
 }
 
 #[tokio::test]
@@ -994,7 +1011,7 @@ async fn one_level_listings_enforce_the_entry_limit() {
 }
 
 /// The cap is enforced while the answer streams in: an answer whose tail is broken still
-/// fails on the cap (it would be `Corrupt` if the whole body were read before counting).
+/// fails on the cap (it would be `ProtocolViolation` if the whole body were read before counting).
 #[tokio::test]
 async fn entry_limit_is_enforced_while_streaming() {
     let srv = server(Bulk::Prefer).await;
@@ -1038,7 +1055,7 @@ async fn entry_limit_is_enforced_while_streaming() {
         )
         .await
         .unwrap_err();
-    assert_eq!(err.code, ErrorCode::Corrupt, "{err:?}");
+    assert_eq!(err.code, ErrorCode::ProtocolViolation, "{err:?}");
 }
 
 #[tokio::test]

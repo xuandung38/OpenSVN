@@ -332,7 +332,12 @@ async fn sso_checkout_commit_lock_log_blame_without_prompt() {
         )
         .await
         .expect("lock");
-    let list = e.engine.repo_list(&url, None, &ctx()).await.expect("list");
+    let list = e
+        .engine
+        .repo_list(&url, None, &ctx())
+        .await
+        .expect("list")
+        .entries;
     let lock = list[0].lock.as_ref().expect("lock shown in the listing");
     assert_eq!(lock.owner, "alice", "{lock:?}");
     e.engine
@@ -808,6 +813,7 @@ async fn authz_read_only_group_and_denied_folder() {
         .repo_list(&url, None, &ctx())
         .await
         .expect("bob reads the root")
+        .entries
         .into_iter()
         .map(|x| x.name)
         .collect();

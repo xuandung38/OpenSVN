@@ -94,8 +94,15 @@ pub enum ErrorCode {
     /// listing cap). Nothing is wrong with the data; the user can ask for less (a smaller
     /// subtree, a lower depth). Retrying the same request fails the same way.
     LimitExceeded,
-    /// Data on disk or on the wire is corrupt or violates a protocol rule.
+    /// Local data is corrupt: working copy metadata (wc.db), pristines, the work queue, a
+    /// commit journal. Cleanup or a fresh checkout may be needed. Malformed data from the
+    /// server is [`ErrorCode::ProtocolViolation`] instead.
     Corrupt,
+    /// The server's response is malformed or violates the wire protocol (bad XML, invalid
+    /// UTF-8, a bad base64 field or svndiff stream, an impossible editor drive, a body over its
+    /// size cap). Nothing local is damaged, so cleanup cannot help; the same request usually
+    /// fails the same way.
+    ProtocolViolation,
     /// Server lacks a required capability.
     ServerUnsupported,
     /// Bug or unclassified failure.

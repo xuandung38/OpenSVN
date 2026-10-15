@@ -12,7 +12,7 @@ use svn_types::{
     CancelToken, ErrorCode, PropChange, RelPath, Result, Revnum, SvnError, WindowSink,
 };
 
-use super::read::{corrupt, peg, stream_items};
+use super::read::{corrupt, peg, server_svndiff, stream_items};
 use super::resume::{ReadRetry, cannot_resume};
 use super::update::RaWire;
 
@@ -77,13 +77,15 @@ impl Drive<'_> {
                     return Err(corrupt("file-revs delta data outside a delta"));
                 }
                 if let Some((decoder, sink)) = self.sink.as_mut() {
-                    decoder.feed_sink(&bytes, sink.as_mut())?;
+                    decoder
+                        .feed_sink(&bytes, sink.as_mut())
+                        .map_err(server_svndiff)?;
                 }
             }
             FileRevEvent::TxDeltaEnd => {
                 self.in_delta = false;
                 if let Some((mut decoder, mut sink)) = self.sink.take() {
-                    decoder.finish_sink(sink.as_mut())?;
+                    decoder.finish_sink(sink.as_mut()).map_err(server_svndiff)?;
                 }
             }
             FileRevEvent::End => {

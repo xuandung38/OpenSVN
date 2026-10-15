@@ -1,6 +1,6 @@
 #![allow(missing_docs, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use opensvn_ipc::{AppError, ErrorCode, LockConflict, map_svn_error_code};
+use opensvn_ipc::{AppError, ErrorAction, ErrorCode, LockConflict, map_svn_error_code};
 use svn_types::{ErrorCode as SvnErrorCode, SvnError};
 
 /// Exhaustive on purpose (no wildcard): adding an engine code breaks this test until mapped.
@@ -36,6 +36,7 @@ fn all_codes() -> Vec<SvnErrorCode> {
         WriteOutcomeUnknown,
         LimitExceeded,
         Corrupt,
+        ProtocolViolation,
         ServerUnsupported,
         Internal,
     ] {
@@ -46,7 +47,7 @@ fn all_codes() -> Vec<SvnErrorCode> {
             | RepositoryMoved | PristineNotHydrated | WcInvalidOperation | PathNotFound
             | UnsafePath | DiskFull | PermissionDenied | FileInUse | Cancelled
             | CommitOutcomeUnknown | WriteOutcomeUnknown | LimitExceeded | Corrupt
-            | ServerUnsupported | Internal => v.push(c),
+            | ProtocolViolation | ServerUnsupported | Internal => v.push(c),
         }
     }
     v
@@ -72,6 +73,35 @@ fn corrupt_needs_cleanup_and_unsafe_path_is_internal() {
     let (unsafe_path, _, _) = map_svn_error_code(SvnErrorCode::UnsafePath);
     assert_eq!(corrupt, ErrorCode::WcNeedsCleanup);
     assert_eq!(unsafe_path, ErrorCode::Internal);
+}
+
+#[test]
+fn corrupt_working_copy_offers_cleanup() {
+    let e = AppError::from(&SvnError::new(
+        SvnErrorCode::Corrupt,
+        "wc.db: working copy root has no BASE",
+    ));
+    assert_eq!(e.code, ErrorCode::WcNeedsCleanup);
+    assert!(!e.retryable);
+    assert_eq!(e.actions, Some(Box::new(vec![ErrorAction::Cleanup])));
+    let v = serde_json::to_value(&e).unwrap();
+    assert_eq!(v["code"], "wc-needs-cleanup");
+    assert_eq!(v["actions"], serde_json::json!(["cleanup"]));
+}
+
+#[test]
+fn malformed_server_response_is_a_protocol_error_without_cleanup() {
+    let e = AppError::from(&SvnError::new(
+        SvnErrorCode::ProtocolViolation,
+        "malformed XML: invalid UTF-8",
+    ));
+    assert_eq!(e.code, ErrorCode::ServerProtocolError);
+    assert!(!e.retryable);
+    assert_eq!(e.actions, None);
+    assert_eq!(e.message, "malformed XML: invalid UTF-8");
+    let v = serde_json::to_value(&e).unwrap();
+    assert_eq!(v["code"], "server-protocol-error");
+    assert_eq!(v["actions"], serde_json::Value::Null);
 }
 
 #[test]
