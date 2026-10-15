@@ -23,8 +23,8 @@ use svn_wc::workqueue::WorkItem;
 use super::batch::{Barrier, Batch, Op, Staged};
 use super::conflict_record::{self, NewConflict, Side};
 use super::state::{
-    DirState, EntryProps, FileState, Outcome, OutcomeHandle, PendingTreeConflict, TextSlot,
-    UpdateSetup, parse_svn_date, tmp_dir,
+    CommittedNode, DirState, EntryProps, FileState, Outcome, OutcomeHandle, PendingTreeConflict,
+    TextSlot, UpdateSetup, parse_svn_date, tmp_dir,
 };
 use super::text_sink::{BaseSource, DiscardSink, TextSink};
 use crate::ctx::{UpdateAction, UpdateEvent};
@@ -189,9 +189,23 @@ impl UpdateEditor {
             .push(ev);
     }
 
-    /// Hands the database side of a prepared node to the batch; flushes when the batch is due.
-    pub(super) fn defer(&mut self, op: Op) -> Result<()> {
-        if self.batch.push(op) {
+    /// Hands the database side of a prepared node at `path` to the batch; flushes when the
+    /// batch is due. The node is finished once committed (see [`Self::defer_incomplete`]).
+    pub(super) fn defer(&mut self, path: &RelPath, op: Op) -> Result<()> {
+        self.defer_node(path, true, op)
+    }
+
+    /// [`Self::defer`] for a directory that is committed `incomplete`: its children follow.
+    pub(super) fn defer_incomplete(&mut self, path: &RelPath, op: Op) -> Result<()> {
+        self.defer_node(path, false, op)
+    }
+
+    fn defer_node(&mut self, path: &RelPath, complete: bool, op: Op) -> Result<()> {
+        let node = CommittedNode {
+            path: path.clone(),
+            complete,
+        };
+        if self.batch.push(node, op) {
             self.flush()?;
         }
         Ok(())
@@ -299,9 +313,15 @@ impl UpdateEditor {
         })();
         if let Err(e) = committed {
             self.poisoned = true;
+            keep_queued(&self.s.db, p.keep);
             return Err(e);
         }
         if has_ops {
+            self.out
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .committed
+                .extend(p.nodes);
             // Committed: the queue owns the merge results now (it removes them after installing).
             for tmp in p.keep {
                 let _ = tmp.keep();
@@ -388,12 +408,15 @@ impl UpdateEditor {
             new.as_ref(),
         );
         let path = wc.clone();
-        self.defer(Box::new(move |t| {
-            if copy_base {
-                t.convert_base_to_copy(&path)?;
-            }
-            conflict_record::record(t, &path, &info, vec![NewConflict::Tree(reason, action)])
-        }))?;
+        self.defer(
+            wc,
+            Box::new(move |t| {
+                if copy_base {
+                    t.convert_base_to_copy(&path)?;
+                }
+                conflict_record::record(t, &path, &info, vec![NewConflict::Tree(reason, action)])
+            }),
+        )?;
         self.skipped.push(wc.clone());
         self.emit(wc, kind, UpdateAction::TreeConflicted);
         Ok(())
@@ -573,9 +596,10 @@ impl UpdateEditor {
             let rev = self.rev()?;
             let reloc = relocating.then(|| new_repos.clone());
             let path = wc.clone();
-            self.defer(Box::new(move |t| {
-                t.mark_incomplete(&path, rev, reloc.as_deref())
-            }))?;
+            self.defer_incomplete(
+                &wc,
+                Box::new(move |t| t.mark_incomplete(&path, rev, reloc.as_deref())),
+            )?;
         }
         let id = self.alloc();
         self.dirs.insert(
@@ -676,7 +700,7 @@ impl UpdateEditor {
         let repos = repos_child(&p.repos, wc.file_name().unwrap_or(""));
         let node = self.not_present_node(kind, &repos)?;
         let path = wc.clone();
-        self.defer(Box::new(move |t| t.base_add(&path, &node)))
+        self.defer(wc, Box::new(move |t| t.base_add(&path, &node)))
     }
 }
 
@@ -810,7 +834,7 @@ impl DeltaEditor for UpdateEditor {
             // user's edit survives; wc.db ends up identical to svn's. Do not "fix" this to match
             // svn. Pinned by `incoming_delete_in_copy_replaced_dir_keeps_modified_file_unlike_svn`.
             let path = wc.clone();
-            self.defer(Box::new(move |t| t.base_remove(&path)))?;
+            self.defer(&wc, Box::new(move |t| t.base_remove(&path)))?;
             self.batch.removed(wc);
             return Ok(());
         }
@@ -844,13 +868,16 @@ impl DeltaEditor for UpdateEditor {
         let mut shadow = p.shadow;
         let mut obstructed = false;
         let mut tree_conflict = None;
-        let (existing, base) = if p.fresh {
+        // A clean update (see `UpdateSetup::clean`) does not look at wc.db here, like svn: a
+        // tree conflict this drive recorded on the deleted node stays, it is no replacement.
+        let (existing, base) = if p.fresh || self.s.clean {
             (None, None)
         } else {
             (self.s.db.read_node(&wc)?, self.s.db.read_base(&wc)?)
         };
         if !skipped
             && shadow.is_none()
+            && !self.s.clean
             && let Some(layer) = self.take_replacement(&wc, &new_repos, NodeKind::Dir)?
         {
             shadow = Some(layer);
@@ -925,13 +952,16 @@ impl DeltaEditor for UpdateEditor {
                 ]
             };
             let path = wc.clone();
-            self.defer(Box::new(move |t| {
-                t.base_add(&path, &node)?;
-                if let Some(op_depth) = shadow.filter(|d| *d > 0) {
-                    t.mark_base_deleted_at(&path, NodeKind::Dir, op_depth)?;
-                }
-                t.queue_work(&work)
-            }))?;
+            self.defer_incomplete(
+                &wc,
+                Box::new(move |t| {
+                    t.base_add(&path, &node)?;
+                    if let Some(op_depth) = shadow.filter(|d| *d > 0) {
+                        t.mark_base_deleted_at(&path, NodeKind::Dir, op_depth)?;
+                    }
+                    t.queue_work(&work)
+                }),
+            )?;
             if !was_incomplete && shadow.is_none() {
                 self.emit(&wc, NodeKind::Dir, UpdateAction::Add);
             }
@@ -1132,6 +1162,45 @@ impl DeltaEditor for UpdateEditor {
     }
 }
 
+/// Deletes the temporary files of a batch whose transaction failed, except those the work queue
+/// names: a failure reported after COMMIT leaves the queued work owning them (it installs from
+/// them and removes them), so deleting them would break the item at every later run.
+fn keep_queued(db: &svn_wc::db::WcDb, files: Vec<tempfile::TempPath>) {
+    if files.is_empty() {
+        return;
+    }
+    let queued: HashSet<String> = match db.work_items() {
+        Ok(items) => items
+            .iter()
+            .filter_map(|(_, skel)| WorkItem::from_skel(skel).ok())
+            .flat_map(|item| match item {
+                WorkItem::FileInstall {
+                    source: Some(src), ..
+                } => vec![src],
+                WorkItem::FileMove { src, .. } => vec![src],
+                WorkItem::FileRemove { relpath } => vec![relpath],
+                _ => Vec::new(),
+            })
+            .collect(),
+        Err(e) => {
+            // Unknown: keeping a file costs a leftover in `.svn/tmp`, deleting one a wedge.
+            tracing::debug!("cannot read the work queue after a failed commit: {e}");
+            for tmp in files {
+                let _ = tmp.keep();
+            }
+            return;
+        }
+    };
+    for tmp in files {
+        let name = tmp
+            .file_name()
+            .map(|n| format!("{}/tmp/{}", svn_wc::db::ADM_DIR, n.to_string_lossy()));
+        if name.is_some_and(|n| queued.contains(&n)) {
+            let _ = tmp.keep();
+        }
+    }
+}
+
 impl UpdateEditor {
     fn absent(&mut self, path: &RelPath, parent: DirId, kind: NodeKind) -> Result<()> {
         let p = self.parent_info(parent)?;
@@ -1141,7 +1210,8 @@ impl UpdateEditor {
         let wc = self.wc_path(path)?;
         let new_repos = repos_child(&p.repos, wc.file_name().unwrap_or(""));
         let node = self.base_node_for(kind, Presence::ServerExcluded, &new_repos, None, None)?;
-        self.defer(Box::new(move |t| t.base_add(&wc, &node)))
+        let path = wc.clone();
+        self.defer(&path, Box::new(move |t| t.base_add(&wc, &node)))
     }
 
     fn begin_file(&mut self, wc: RelPath, parent: DirId, add: bool) -> Result<u32> {
@@ -1155,7 +1225,9 @@ impl UpdateEditor {
             skipped = true;
         }
         let name = wc.file_name().unwrap_or("").to_owned();
-        let base = if p.fresh {
+        // An add of a clean update does not look at wc.db (see `add_directory`).
+        let blind = p.fresh || (add && self.s.clean);
+        let base = if blind {
             None
         } else {
             self.s
@@ -1186,17 +1258,17 @@ impl UpdateEditor {
         let mut tree_conflict = None;
         let mut adopt_existing = false;
         let mut shadow = if skipped { None } else { p.shadow };
-        if !skipped && add && shadow.is_none() {
+        if !skipped && add && !blind && shadow.is_none() {
             shadow = self.take_replacement(&wc, &new_repos, NodeKind::File)?;
         }
         let replacing = shadow.is_some() && p.shadow.is_none();
-        if !skipped && !replacing && !p.fresh && self.s.db.conflict(&wc)?.is_some() {
+        if !skipped && !replacing && !blind && self.s.db.conflict(&wc)?.is_some() {
             skipped = true;
             self.skipped.push(wc.clone());
             self.emit(&wc, NodeKind::File, UpdateAction::Skipped);
         }
         if !skipped && shadow.is_none() {
-            let cur = if p.fresh {
+            let cur = if blind {
                 None
             } else {
                 self.s.db.read_node(&wc)?

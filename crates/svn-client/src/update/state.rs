@@ -30,6 +30,12 @@ pub struct UpdateSetup {
     pub sticky_depth: bool,
     /// An unversioned file that is in the way is adopted instead of becoming a tree conflict.
     pub allow_unversioned_obstructions: bool,
+    /// The update target was missing on disk, or an empty directory, when the update started
+    /// (svn's "clean checkout" optimization, `is_empty_wc`): a node the server adds is not
+    /// checked against wc.db, so neither a local node nor a tree conflict recorded earlier in
+    /// the drive (a replacement) shadows it. What is on disk is still checked: an unversioned
+    /// item in the way stays an obstruction.
+    pub clean: bool,
     /// Repository root URL as stored in wc.db.
     pub repos_root: String,
     /// Repository UUID.
@@ -52,6 +58,20 @@ pub struct Outcome {
     pub revision: Option<Revnum>,
     /// `close_edit` ran.
     pub completed: bool,
+    /// Node states this drive committed to the working copy, in order. A resumed drive sends
+    /// the nodes of unfinished directories again, so its progress is what it commits beyond
+    /// the drives before it, not its notifications.
+    pub committed: Vec<CommittedNode>,
+}
+
+/// A node state committed to the working copy by an update drive.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CommittedNode {
+    /// Working copy path.
+    pub path: RelPath,
+    /// `false` for a directory committed `incomplete` (its children are still to come), `true`
+    /// for every finished node: a file, a deletion, a completed directory, a conflict.
+    pub complete: bool,
 }
 
 /// Shared handle on the [`Outcome`].

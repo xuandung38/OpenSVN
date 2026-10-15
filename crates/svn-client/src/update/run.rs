@@ -1,5 +1,6 @@
 //! Orchestration of one update, switch or checkout drive.
 
+use std::collections::HashSet;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use svn_wc::db::{ObtainMode, WcDb};
 use super::editor::UpdateEditor;
 use super::reporter::build_report;
 use super::restore;
-use super::state::UpdateSetup;
+use super::state::{CommittedNode, UpdateSetup};
 use crate::ctx::{ClientCtx, UpdateAction, UpdateEvent, UpdateSummary};
 use crate::wc;
 
@@ -45,13 +46,14 @@ pub struct UpdateParams {
 }
 
 /// Delays before asking again after a connection failure that left nothing done: a remote
-/// status check (which writes nothing) or an update drive that broke off before it changed the
-/// working copy. The length is how many such attempts in a row are made.
+/// status check (which writes nothing), or an update drive whose resumes commit nothing new to
+/// the working copy. The length is how many such attempts in a row are made: a drive whose last
+/// two resumes made no progress is not resumed again.
 pub(crate) const RECONNECT_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
 
-/// Most automatic resumes of one update drive. A drive that broke off after it changed the
-/// working copy made progress, so the next resume waits only the first delay and does not count
-/// against [`RECONNECT_DELAYS`]; this cap bounds a connection that keeps breaking anyway.
+/// Most automatic resumes of one update drive. A resume that committed nodes no drive before it
+/// had committed made progress, so the next resume waits only the first delay and does not
+/// count against [`RECONNECT_DELAYS`]; this cap bounds a connection that keeps breaking anyway.
 const MAX_RESUMES: usize = 20;
 
 /// Whether a failed drive is resumed automatically: an update or checkout (not a switch, whose
@@ -239,6 +241,9 @@ pub async fn drive_update(
         blocking(move || crate::wc::run_work_queue(&db, &cancel).map(|_| ())).await?;
     }
 
+    // Decided before anything is restored, like svn (`is_empty_wc` runs before the crawl).
+    let mut clean = Some(clean_target(&db, &target_wc, &params.kind)?);
+
     // `svn update` first restores versioned items that were removed from disk behind its back.
     let restored = {
         let (db, cancel, tc) = (
@@ -273,9 +278,18 @@ pub async fn drive_update(
     // Notifications of drives that broke off on a failed connection.
     let mut earlier_events: Vec<UpdateEvent> = Vec::new();
     let mut reconnects = 0usize;
-    // Broken drives in a row that changed nothing.
+    // Resumed drives in a row that committed nothing new.
     let mut stalled = 0usize;
+    // Every node state committed by the drives so far: the high-water mark of the progress. A
+    // resumed drive sends the nodes of unfinished directories again (and notifies them again),
+    // so only node states beyond this set are progress.
+    let mut committed: HashSet<CommittedNode> = HashSet::new();
     let outcome = loop {
+        // A resumed drive looks at the disk again: the broken one may have filled the target.
+        let clean = match clean.take() {
+            Some(c) => c,
+            None => clean_target(&db, &target_wc, &params.kind)?,
+        };
         let setup = UpdateSetup {
             db: Arc::clone(&db),
             anchor: anchor.clone(),
@@ -284,6 +298,7 @@ pub async fn drive_update(
             depth: params.depth,
             sticky_depth: params.sticky_depth,
             allow_unversioned_obstructions: params.allow_unversioned_obstructions,
+            clean,
             repos_root: root.clone(),
             uuid: uuid.clone(),
             ctx: ctx.clone(),
@@ -340,10 +355,16 @@ pub async fn drive_update(
             let out = outcome.lock().unwrap_or_else(PoisonError::into_inner);
             revision = revision.or(out.revision);
             earlier_events.extend(out.events.iter().cloned());
-            !out.events.is_empty()
+            let mut new = false;
+            for node in &out.committed {
+                new |= committed.insert(node.clone());
+            }
+            new
         };
-        stalled = if progressed { 0 } else { stalled + 1 };
-        let Some(delay) = RECONNECT_DELAYS.get(stalled.saturating_sub(1)).copied() else {
+        if reconnects > 0 {
+            stalled = if progressed { 0 } else { stalled + 1 };
+        }
+        let Some(delay) = RECONNECT_DELAYS.get(stalled).copied() else {
             return Err(e);
         };
         reconnects += 1;
@@ -401,6 +422,48 @@ pub async fn drive_update(
         revision: out.revision,
         events,
         externals: Vec::new(),
+    })
+}
+
+/// svn's "clean checkout" check (`is_empty_wc` in `libsvn_client/update.c`): an update (never a
+/// switch) whose target is missing on disk, or is a directory without entries, adds what the
+/// server sends without looking at wc.db (see [`UpdateSetup::clean`]). The administrative
+/// directory only counts as empty when the target anchors svn's drive itself: the working copy
+/// root or a switched directory. A file target, or a target that cannot be read, is not empty.
+fn clean_target(db: &WcDb, target_wc: &RelPath, kind: &UpdateKind) -> Result<bool> {
+    if !matches!(kind, UpdateKind::Update) {
+        return Ok(false);
+    }
+    let Ok(path) = wc::abs_path(db, target_wc) else {
+        return Ok(false);
+    };
+    let entries = match std::fs::read_dir(&path) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(_) => return Ok(false),
+    };
+    let adm_is_empty = target_wc.is_root() || is_switched(db, target_wc)?;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return Ok(false);
+        };
+        if !(adm_is_empty && entry.file_name() == ".svn") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// `wc` is not where its parent's repository path puts it (svn's `svn_wc__db_is_switched`).
+fn is_switched(db: &WcDb, wc: &RelPath) -> Result<bool> {
+    let (Some(parent), Some(name)) = (wc.parent(), wc.file_name()) else {
+        return Ok(false);
+    };
+    let own = db.read_base(wc)?.and_then(|n| n.repos_relpath);
+    let parent = db.read_base(&parent)?.and_then(|n| n.repos_relpath);
+    Ok(match (own, parent) {
+        (Some(own), Some(parent)) => own != super::editor::repos_child(&parent, name),
+        _ => false,
     })
 }
 

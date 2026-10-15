@@ -141,5 +141,5 @@ pub(crate) fn sparse_remove(
         .map_err(sql_err)?;
     }
     let skels: Vec<_> = work.iter().map(WorkItem::to_skel).collect();
-    queue_work(conn, &skels)
+    queue_work(conn, wc_id, &skels)
 }
