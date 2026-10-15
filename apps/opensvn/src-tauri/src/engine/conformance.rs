@@ -113,7 +113,8 @@ pub async fn repository_reads(h: &dyn Harness) {
     let entries = e
         .repo_list(&format!("{url}/trunk"), None, &ctx())
         .await
-        .expect("list");
+        .expect("list")
+        .entries;
     let names: Vec<_> = entries.iter().map(|x| x.name.as_str()).collect();
     assert!(
         names.contains(&"README.md") && names.contains(&"src"),
@@ -1158,6 +1159,7 @@ pub async fn commit_with_auto_add_remove(h: &dyn Harness) {
         .repo_list(&format!("{url}/trunk"), None, &ctx())
         .await
         .expect("list")
+        .entries
         .into_iter()
         .map(|x| x.name)
         .collect();

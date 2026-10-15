@@ -63,6 +63,18 @@ pub struct FileMeta {
     pub verified: bool,
 }
 
+/// Result of [`RaSession::list_counted`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DirListing {
+    /// Entries the client accepted, as `list` returns them.
+    pub entries: Vec<DirEntry>,
+    /// Entries the server listed that the client refused (hostile or Windows-reserved names,
+    /// another origin). They are not in `entries`; the count lets a caller say that something
+    /// is hidden instead of showing a folder as empty. Counts every refused entry the server
+    /// sent within the listed depth, whatever its kind.
+    pub rejected: usize,
+}
+
 /// Parameters of `log`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogRequest {
@@ -129,6 +141,17 @@ pub trait RaSession: Send + Sync {
     /// URL this session is rooted at.
     fn session_url(&self) -> &RepoUrl;
 
+    /// The same session rooted at `url` (same repository, connection settings and
+    /// credentials), for a drive anchored elsewhere than this session's URL: an update or
+    /// switch of a directory switched away from its parent is anchored at that directory, at
+    /// its own URL, like svn's `svn_wc_get_actual_target2`. The default refuses.
+    fn reparented(&self, url: &RepoUrl) -> Result<Box<dyn RaSession>> {
+        Err(SvnError::new(
+            ErrorCode::Internal,
+            format!("this session cannot be rooted at {url}"),
+        ))
+    }
+
     /// User name this session authenticates as, when known (the Basic user name the server
     /// last accepted). `None` before authentication, for anonymous access and for mechanisms
     /// that do not reveal a name (Negotiate). Commits journal it so that recovery can match
@@ -174,6 +197,20 @@ pub trait RaSession: Send + Sync {
         depth: Depth,
         cancel: &CancelToken,
     ) -> Result<Vec<DirEntry>>;
+    /// Like [`list`](Self::list), also counting the entries the client refused. Sessions that
+    /// never refuse an entry keep the default, which reports none.
+    async fn list_counted(
+        &self,
+        path: &RelPath,
+        rev: Option<Revnum>,
+        depth: Depth,
+        cancel: &CancelToken,
+    ) -> Result<DirListing> {
+        Ok(DirListing {
+            entries: self.list(path, rev, depth, cancel).await?,
+            rejected: 0,
+        })
+    }
     /// Streams file content into `sink`.
     ///
     /// On error the sink may already hold part of the content, or all of it unverified; the

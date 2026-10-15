@@ -78,6 +78,8 @@ Build bộ cài:
 | `LogProgress::accept` chịu được entry merge lồng (`-g`): entry con không còn kéo lệch `last`, không bị bỏ hay lặp khi tải tiếp | #164 (follow-up) |
 | Mất mạng lâu khi checkout/update: chờ mạng (`network.reconnectWaitMin`, mặc định 10 phút) rồi tải tiếp đúng revision; "Tiếp tục checkout" sau khi hủy, đóng app hoặc crash (journal checkout); phát hiện ngủ/thức bằng đồng hồ boot, không theo giờ hệ thống | #172 |
 | Thanh bên History hiện trạng thái đang tải, lỗi kèm nút Thử lại và danh sách trống, giống màn History chính | #174 |
+| Phản hồi hỏng từ server (XML/UTF-8/base64/svndiff lỗi, editor drive sai) báo mã `server-protocol-error` (engine: `ErrorCode::ProtocolViolation`), không còn gợi ý Cleanup; `Corrupt` chỉ dành cho dữ liệu local | #175 |
+| Browse báo số mục bị ẩn vì tên không an toàn, không còn hiện "thư mục trống" (chỉ gửi số đếm qua IPC) | #176 |
 
 Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #144, #145, #146.
 
@@ -104,13 +106,10 @@ Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo,
 5. **Spike WebView (#12).** Chạy trên Linux (Intel/AMD/NVIDIA) và Windows 11 theo `plans/**/reports/from-dev-p09-webview-perf-spike-report.md`, rồi bỏ trạng thái "conditional" trong ADR-002.
 6. **Crash test qua app thật (#20, #21).** Dùng tauri-driver: kill app lúc commit hoặc update, mở lại, app phải tự phục hồi. Sau đó bật `real-engine` làm feature mặc định.
 7. **RAM của app (#21).** Kiểm dưới 400 MB với working copy 100k file. Ngoài ra còn ma trận compat đầy đủ, bộ test bảo mật và một tuần dùng thật (dogfood).
-8. **Lỗi giao thức của server bị gắn mã `wc-needs-cleanup` (#167, follow-up).** Khi server trả XML hỏng (`ErrorCode::Corrupt` trong svn-protocol), app báo cần Cleanup working copy. Cần mã lỗi riêng cho lỗi phía server.
-9. **Browse giấu tên không an toàn mà không báo (#167, follow-up).** Mục bị `RelPath::from_server` từ chối (`<`, `:`, `|`, `CON`…) bị bỏ đi, nên thư mục hiện "This folder is empty". Cần báo "N mục bị ẩn"; repo "độc" (`names/`) tái hiện được.
-10. **"Retry now" bấm khi thao tác chưa chờ mạng (#172, follow-up).** `OperationManager::retry_now` gọi `Notify::notify_one`, nên một lần bấm (hoặc một lần thức dậy) khi thao tác đang chạy bình thường để lại permit; lần mất mạng sau bỏ qua khoảng chờ đầu tiên. Vô hại nhưng nên chỉ đánh thức khi đang chờ.
-11. **Đếm ngược "thử lại sau Ns" đọc lại mỗi giây (#172, follow-up).** `connection-wait.tsx` đặt `role="status"` lên đoạn chữ đổi mỗi giây, nên trình đọc màn hình đọc liên tục. Nên để vùng live chỉ báo "Mất kết nối" và ẩn phần đếm ngược khỏi vùng live.
-12. **"Update lên bản mới nhất" của checkout dở bỏ qua lựa chọn ignore-externals (#172, follow-up).** Nút này chạy update thường, nên tải cả externals dù checkout ban đầu chọn bỏ qua. Nên đọc journal checkout như `wc_continue`.
-13. **Switch thư mục có thư mục con đã switch riêng lỗi `Corrupt` (#185, follow-up).** Switch `A` sang nhánh khi `A/X` đã switch sang chỗ khác báo "file 'X/x.txt' is not in the working copy base"; svn thì đưa `X` về vị trí con của `A` ở nhánh mới. Tái hiện với fake session: checkout `trunk`, `svn_client::switch` thư mục con `X` sang `branches/b/Y`, rồi switch gốc working copy sang `branches/b`; có trên main trước nhánh này. Lỗi nằm ở reporter (`link_path`), vùng #170 đang sửa: làm sau khi #170 merge.
-14. **Switch depth hẹp khi có thư mục con đã switch riêng thiếu dòng `not-present` (#185, follow-up).** Với `--depth immediates`, svn ghi `not-present` cho file mà thư mục con mới có nhưng drive không gửi (giống `record_unseen_children` của update); `svn-client` chỉ làm việc này cho update. Hiếm gặp: engine luôn switch với depth `Unknown`.
+8. **"Retry now" bấm khi thao tác chưa chờ mạng (#172, follow-up).** `OperationManager::retry_now` gọi `Notify::notify_one`, nên một lần bấm (hoặc một lần thức dậy) khi thao tác đang chạy bình thường để lại permit; lần mất mạng sau bỏ qua khoảng chờ đầu tiên. Vô hại nhưng nên chỉ đánh thức khi đang chờ.
+9. **Đếm ngược "thử lại sau Ns" đọc lại mỗi giây (#172, follow-up).** `connection-wait.tsx` đặt `role="status"` lên đoạn chữ đổi mỗi giây, nên trình đọc màn hình đọc liên tục. Nên để vùng live chỉ báo "Mất kết nối" và ẩn phần đếm ngược khỏi vùng live.
+10. **"Update lên bản mới nhất" của checkout dở bỏ qua lựa chọn ignore-externals (#172, follow-up).** Nút này chạy update thường, nên tải cả externals dù checkout ban đầu chọn bỏ qua. Nên đọc journal checkout như `wc_continue`.
+11. **Switch depth hẹp khi có thư mục con đã switch riêng (#185, follow-up).** Với `--depth immediates`, svn nhận từ server lệnh thay thế thư mục con (delete rồi add, vì nó không cùng lịch sử với vị trí mới), ghi depth `empty` và dòng `not-present` cho con của nó (giống `record_unseen_children` của update, mà `svn-client` chỉ làm cho update). Fake session chưa thay thế node theo lịch sử nên chưa tái hiện được bằng oracle. Hiếm gặp: engine luôn switch với depth `Unknown`.
 
 ## 6. Việc cần người thật (không tự động được)
 

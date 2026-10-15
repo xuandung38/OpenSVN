@@ -61,7 +61,7 @@ fn bad_encodings_are_protocol_errors() {
         ));
         assert_eq!(
             parse_log(doc.as_bytes()).unwrap_err().code,
-            ErrorCode::Corrupt,
+            ErrorCode::ProtocolViolation,
             "{attr}"
         );
     }
@@ -141,7 +141,7 @@ fn run_multistatus(limits: ParserLimits, doc: &str) -> svn_types::Result<usize> 
 
 fn assert_corrupt<T: std::fmt::Debug>(r: svn_types::Result<T>, what: &str) {
     let e = r.expect_err(what);
-    assert_eq!(e.code, ErrorCode::Corrupt, "{what}: {e}");
+    assert_eq!(e.code, ErrorCode::ProtocolViolation, "{what}: {e}");
 }
 
 #[test]

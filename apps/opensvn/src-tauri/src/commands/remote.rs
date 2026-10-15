@@ -4,7 +4,7 @@
 use opensvn_ipc::{
     AppError, BranchNode, CopyLocationRequest, Layout, LayoutDetection, LockRequest, LockTargets,
     LogGetRequest, LogPage, LogTarget, OpResult, OperationHandle, OperationKind, PathGrantId,
-    RemoteEditRequest, RemoteOp, RepoEntry, RepoInfo, ResolvedRepoUrl, Rev, TextSide,
+    RemoteEditRequest, RemoteOp, RepoInfo, RepoListing, ResolvedRepoUrl, Rev, TextSide,
     UnlockRequest,
 };
 use tauri::State;
@@ -98,7 +98,7 @@ pub async fn repo_list(
     state: State<'_, AppState>,
     url: String,
     rev: Option<Rev>,
-) -> Result<Vec<RepoEntry>, AppError> {
+) -> Result<RepoListing, AppError> {
     guard(async {
         state
             .engine

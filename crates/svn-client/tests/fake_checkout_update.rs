@@ -212,10 +212,10 @@ async fn cancelled_update_is_resumed_by_the_next_update() {
     );
 }
 
-/// A nested target whose parent is switched cannot be anchored at the session URL: both an
-/// update and a switch of it are refused before anything changes.
+/// A nested target whose parent is switched is anchored at that parent, over a session at the
+/// parent's own URL, like svn: an update keeps it on the branch and a switch moves it.
 #[tokio::test(flavor = "multi_thread")]
-async fn nested_target_below_a_switched_parent_is_refused_for_update_and_switch() {
+async fn nested_target_below_a_switched_parent_is_anchored_at_the_parent() {
     let s = session();
     s.seed(
         "a",
@@ -248,7 +248,9 @@ async fn nested_target_below_a_switched_parent_is_refused_for_update_and_switch(
     .expect("switch trunk/src");
     assert_eq!(read(&wc.join("trunk/src/lib/a.rs")), "branch\n");
 
-    let err = update(
+    s.seed("a", "r2", &[put("branches/b/src/lib/a.rs", "branch 2\n")])
+        .expect("r2");
+    update(
         &ctx(),
         &s,
         &wc.join("trunk/src/lib"),
@@ -257,9 +259,9 @@ async fn nested_target_below_a_switched_parent_is_refused_for_update_and_switch(
         &cancel,
     )
     .await
-    .expect_err("update below a switched parent");
-    assert_eq!(err.code, svn_types::ErrorCode::WcInvalidOperation, "{err}");
-    let err = svn_client::switch(
+    .expect("update below a switched parent");
+    assert_eq!(read(&wc.join("trunk/src/lib/a.rs")), "branch 2\n");
+    svn_client::switch(
         &ctx(),
         &s,
         &wc.join("trunk/src/lib"),
@@ -270,12 +272,14 @@ async fn nested_target_below_a_switched_parent_is_refused_for_update_and_switch(
         &cancel,
     )
     .await
-    .expect_err("switch below a switched parent");
-    assert_eq!(err.code, svn_types::ErrorCode::WcInvalidOperation, "{err}");
-    assert!(err.to_string().contains("switched"), "{err}");
-    assert_eq!(
-        read(&wc.join("trunk/src/lib/a.rs")),
-        "branch\n",
-        "nothing changed"
-    );
+    .expect("switch below a switched parent");
+    assert_eq!(read(&wc.join("trunk/src/lib/x.rs")), "other\n");
+    assert!(!wc.join("trunk/src/lib/a.rs").exists());
+    let db = open_db(&wc);
+    let rows = base_rows(&db);
+    let lib = rows
+        .iter()
+        .find(|r| r.0 == "trunk/src/lib")
+        .expect("trunk/src/lib");
+    assert_eq!(lib.4, "branches/b/other", "{rows:?}");
 }

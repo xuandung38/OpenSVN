@@ -205,6 +205,9 @@ impl RaSession for FakeRaSession {
         &self.uuid
     }
 
+    fn reparented(&self, url: &RepoUrl) -> Result<Box<dyn RaSession>> {
+        Ok(Box::new(self.at(url)?))
+    }
     fn session_url(&self) -> &RepoUrl {
         &self.session
     }

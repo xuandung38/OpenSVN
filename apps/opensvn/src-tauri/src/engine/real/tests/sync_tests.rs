@@ -163,6 +163,24 @@ fn assert_monotonic(samples: &[ProgressUpdate], phase: &str) {
     assert!(samples.iter().all(|u| u.phase == phase));
 }
 
+/// A checkout killed between creating `.svn` and `.svn/tmp` leaves a folder holding only an
+/// empty `.svn`: the app offers that folder again (`checkout_target::is_checkout_skeleton`), and
+/// the next checkout builds the working copy in it.
+#[tokio::test(flavor = "multi_thread")]
+async fn checkout_into_the_empty_admin_dir_of_a_killed_checkout() {
+    let s = setup();
+    let wc = s.tmp.path().join("wc");
+    std::fs::create_dir_all(wc.join(".svn")).unwrap();
+    let info =
+        s.f.engine
+            .checkout(&plan(&format!("{URL}/trunk"), &wc), &ctx())
+            .await
+            .unwrap();
+    assert_eq!(read(&wc.join("README.md")), "hello\n");
+    assert!(wc.join(".svn/wc.db").is_file());
+    assert!(info.base_rev.0 > 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn checkout_then_update_follows_the_repository() {
     let s = setup();
