@@ -270,7 +270,10 @@ fn status_code(line: &str) -> Result<u16> {
 }
 
 fn unreadable_status() -> SvnError {
-    SvnError::new(ErrorCode::Corrupt, "unreadable status in PROPPATCH answer")
+    SvnError::new(
+        ErrorCode::ProtocolViolation,
+        "unreadable status in PROPPATCH answer",
+    )
 }
 
 #[cfg(test)]
@@ -320,10 +323,13 @@ mod tests {
     fn proppatch_rejects_garbage() {
         let body =
             br#"<D:multistatus xmlns:D="DAV:"><D:status>nonsense</D:status></D:multistatus>"#;
-        assert_eq!(check_proppatch(body).unwrap_err().code, ErrorCode::Corrupt);
+        assert_eq!(
+            check_proppatch(body).unwrap_err().code,
+            ErrorCode::ProtocolViolation
+        );
         assert_eq!(
             check_proppatch(b"<unclosed").unwrap_err().code,
-            ErrorCode::Corrupt
+            ErrorCode::ProtocolViolation
         );
     }
 }

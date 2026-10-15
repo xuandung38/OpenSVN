@@ -81,6 +81,7 @@ Build bộ cài:
 | `LogProgress::accept` chịu được entry merge lồng (`-g`): entry con không còn kéo lệch `last`, không bị bỏ hay lặp khi tải tiếp | #164 (follow-up) |
 | Mất mạng lâu khi checkout/update: chờ mạng (`network.reconnectWaitMin`, mặc định 10 phút) rồi tải tiếp đúng revision; "Tiếp tục checkout" sau khi hủy, đóng app hoặc crash (journal checkout); phát hiện ngủ/thức bằng đồng hồ boot, không theo giờ hệ thống | #172 |
 | Thanh bên History hiện trạng thái đang tải, lỗi kèm nút Thử lại và danh sách trống, giống màn History chính | #174 |
+| Phản hồi hỏng từ server (XML/UTF-8/base64/svndiff lỗi, editor drive sai) báo mã `server-protocol-error` (engine: `ErrorCode::ProtocolViolation`), không còn gợi ý Cleanup; `Corrupt` chỉ dành cho dữ liệu local | #175 |
 
 Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #144, #145, #146.
 
@@ -91,7 +92,7 @@ Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #
 | #171 `feat/parent-path-repo-list` | URL server VisualSVN `https://host/svn/` hiện danh sách repo để chọn | #133 | Đang review |
 | #169 `ci/release-gating-publish` | Quy trình phát hành: environment có duyệt, ký số tùy chọn, tự đẩy sang `OpenSVN-releases` | #22 | Đang review |
 | #170 `perf/bench-100k-crash-soak` | Benchmark 100k file với svn 1.15, crash test cho switch, soak 2 giờ, test chạy đồng thời với svn CLI | #121, #21 | Đang code |
-| `feat/wc-views-menus` | Menu View: hiện/ẩn file unversioned và ignored, nhóm theo changelist, dạng cây (nhớ theo người dùng); Compare with branch/another folder; Help: tài liệu, thư mục log (`logs_reveal`), Report a problem (xem trước gói chẩn đoán rồi lưu zip); diff ảnh có onion skin và swipe; `?os=mac\|win` cho mock/dev; `pnpm test:browser` | #18, #12 | Đang review |
+| #189 `feat/wc-views-menus` | Menu View: hiện/ẩn file unversioned và ignored, nhóm theo changelist, dạng cây (nhớ theo người dùng); Compare with branch/another folder; Help: tài liệu, thư mục log (`logs_reveal`), Report a problem (xem trước gói chẩn đoán rồi lưu zip); diff ảnh có onion skin và swipe; `?os=mac\|win` cho mock/dev; `pnpm test:browser` | #18, #12 | Đang review |
 | #167 `test/fixtures-hostile-repo` | Fixture WC format 31 từ svn 1.15 (42 trạng thái) và f32 (43 trạng thái); repo "độc" + evil server chạy không cần Docker; e2e `hostile.test.mjs`; `xtask compat fixtures` chạy các generator; log/author có UTF-8 hỏng hiển thị bằng U+FFFD | #8, #18 | Đang review |
 
 Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: xem/diff file Word/Excel, hiển thị %/ETA khi checkout, giữ nguyên byte đường dẫn (NFC/NFD), build Mac. Hỏi chủ repo trước khi làm những mảng này.
@@ -107,14 +108,13 @@ Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo,
 5. **Spike WebView (#12).** Chạy trên Linux (Intel/AMD/NVIDIA) và Windows 11 theo `plans/**/reports/from-dev-p09-webview-perf-spike-report.md`, rồi bỏ trạng thái "conditional" trong ADR-002.
 6. **Crash test qua app thật (#20, #21).** Dùng tauri-driver: kill app lúc commit hoặc update, mở lại, app phải tự phục hồi. Sau đó bật `real-engine` làm feature mặc định.
 7. **RAM của app (#21).** Kiểm dưới 400 MB với working copy 100k file. Ngoài ra còn ma trận compat đầy đủ, bộ test bảo mật và một tuần dùng thật (dogfood).
-8. **Lỗi giao thức của server bị gắn mã `wc-needs-cleanup` (#167, follow-up).** Khi server trả XML hỏng (`ErrorCode::Corrupt` trong svn-protocol), app báo cần Cleanup working copy. Cần mã lỗi riêng cho lỗi phía server.
-9. **Browse giấu tên không an toàn mà không báo (#167, follow-up).** Mục bị `RelPath::from_server` từ chối (`<`, `:`, `|`, `CON`…) bị bỏ đi, nên thư mục hiện "This folder is empty". Cần báo "N mục bị ẩn"; repo "độc" (`names/`) tái hiện được.
-10. **"Retry now" bấm khi thao tác chưa chờ mạng (#172, follow-up).** `OperationManager::retry_now` gọi `Notify::notify_one`, nên một lần bấm (hoặc một lần thức dậy) khi thao tác đang chạy bình thường để lại permit; lần mất mạng sau bỏ qua khoảng chờ đầu tiên. Vô hại nhưng nên chỉ đánh thức khi đang chờ.
-11. **Đếm ngược "thử lại sau Ns" đọc lại mỗi giây (#172, follow-up).** `connection-wait.tsx` đặt `role="status"` lên đoạn chữ đổi mỗi giây, nên trình đọc màn hình đọc liên tục. Nên để vùng live chỉ báo "Mất kết nối" và ẩn phần đếm ngược khỏi vùng live.
-12. **"Update lên bản mới nhất" của checkout dở bỏ qua lựa chọn ignore-externals (#172, follow-up).** Nút này chạy update thường, nên tải cả externals dù checkout ban đầu chọn bỏ qua. Nên đọc journal checkout như `wc_continue`.
-13. **`pnpm test:browser` trên WebKit (#12, follow-up).** Máy dev chưa có WebKit của Playwright nên mới chạy Chromium. Cần chạy `pnpm exec playwright-core install webkit` (hoặc dùng máy có sẵn), chạy script rồi xem ảnh trong `test-results/browser`.
-14. **Mục View dạng check trong menu native (#18, follow-up).** Show unversioned/ignored, Group by changelist, Show as tree hiện là mục thường và báo trạng thái bằng toast. Nên dùng `CheckMenuItem` và đồng bộ trạng thái từ UI (cần lệnh IPC như `menu_set_layout`).
-15. **Compare ở revision cụ thể hoặc tính cả thay đổi local (#18, follow-up).** Compare hiện so hai URL ở HEAD và so từng thư mục theo last-changed revision và kích thước. Muốn chính xác theo nội dung hoặc gồm working copy thì cần lệnh diff URL↔URL ở backend.
+8. **Browse giấu tên không an toàn mà không báo (#167, follow-up).** Mục bị `RelPath::from_server` từ chối (`<`, `:`, `|`, `CON`…) bị bỏ đi, nên thư mục hiện "This folder is empty". Cần báo "N mục bị ẩn"; repo "độc" (`names/`) tái hiện được.
+9. **"Retry now" bấm khi thao tác chưa chờ mạng (#172, follow-up).** `OperationManager::retry_now` gọi `Notify::notify_one`, nên một lần bấm (hoặc một lần thức dậy) khi thao tác đang chạy bình thường để lại permit; lần mất mạng sau bỏ qua khoảng chờ đầu tiên. Vô hại nhưng nên chỉ đánh thức khi đang chờ.
+10. **Đếm ngược "thử lại sau Ns" đọc lại mỗi giây (#172, follow-up).** `connection-wait.tsx` đặt `role="status"` lên đoạn chữ đổi mỗi giây, nên trình đọc màn hình đọc liên tục. Nên để vùng live chỉ báo "Mất kết nối" và ẩn phần đếm ngược khỏi vùng live.
+11. **"Update lên bản mới nhất" của checkout dở bỏ qua lựa chọn ignore-externals (#172, follow-up).** Nút này chạy update thường, nên tải cả externals dù checkout ban đầu chọn bỏ qua. Nên đọc journal checkout như `wc_continue`.
+12. **`pnpm test:browser` trên WebKit (#12, follow-up).** Máy dev chưa có WebKit của Playwright nên mới chạy Chromium. Cần chạy `pnpm exec playwright-core install webkit` (hoặc dùng máy có sẵn), chạy script rồi xem ảnh trong `test-results/browser`.
+13. **Mục View dạng check trong menu native (#18, follow-up).** Show unversioned/ignored, Group by changelist, Show as tree hiện là mục thường và báo trạng thái bằng toast. Nên dùng `CheckMenuItem` và đồng bộ trạng thái từ UI (cần lệnh IPC như `menu_set_layout`).
+14. **Compare ở revision cụ thể hoặc tính cả thay đổi local (#18, follow-up).** Compare hiện so hai URL ở HEAD và so từng thư mục theo last-changed revision và kích thước. Muốn chính xác theo nội dung hoặc gồm working copy thì cần lệnh diff URL↔URL ở backend.
 
 ## 6. Việc cần người thật (không tự động được)
 
