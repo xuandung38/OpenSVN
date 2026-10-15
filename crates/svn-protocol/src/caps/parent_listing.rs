@@ -83,7 +83,9 @@ fn listed_names(body: &[u8]) -> Option<Vec<String>> {
         }
         if let Ok(decoded) = percent_decode(name)
             && !decoded.is_empty()
-            && !decoded.contains('/')
+            // An encoded `..`, `/` or `\` could step out of the listing URL.
+            && !decoded.starts_with('.')
+            && !decoded.contains(['/', '\\'])
             && !names.contains(&decoded)
         {
             names.push(decoded);
@@ -298,6 +300,9 @@ mod tests {
   <dir name="100%" href="100%25/" />
   <dir name="a#b" href="a%23b/" />
   <dir name="dup" href="Dự%20án/" />
+  <dir name="up" href="%2e%2e/" />
+  <dir name="slash" href="a%2fb/" />
+  <dir name="back" href="a%5cb/" />
 </index></svn>"#;
         let repos = repos_of("https://h:18443/svn", page);
         let got: Vec<(&str, &str)> = repos
