@@ -1,9 +1,9 @@
 //! Hard caps for everything the parsers buffer.
 //!
 //! A hostile server must not be able to make the client allocate without bound: exceeding any
-//! cap is a protocol error (`ErrorCode::Corrupt`), never an out-of-memory condition. Text that
-//! belongs to an element a parser does not know is not buffered at all; the XML reader still
-//! bounds every tag, attribute set and nesting depth (see `XmlLimits`).
+//! cap is a protocol error (`ErrorCode::ProtocolViolation`), never an out-of-memory condition.
+//! Text that belongs to an element a parser does not know is not buffered at all; the XML reader
+//! still bounds every tag, attribute set and nesting depth (see `XmlLimits`).
 
 /// Size and count limits shared by the response parsers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -19,6 +19,7 @@ const NO_DIFF: Omit<FileDiff, "path"> = {
   image: null,
   tooLarge: null,
   tooComplex: null,
+  office: null,
 };
 
 function status(path: string, patch: Partial<FileStatus>): FileStatus {
