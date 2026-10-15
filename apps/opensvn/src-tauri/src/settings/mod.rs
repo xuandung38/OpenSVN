@@ -10,20 +10,22 @@ mod validate;
 
 use std::sync::Mutex;
 
-use opensvn_ipc::{AppError, ExternalDiffTool, ProgramKind, Settings, SettingsPatch};
+use opensvn_ipc::{AppError, ExtDiffTool, ExternalDiffTool, ProgramKind, Settings, SettingsPatch};
 use serde_json::{Map, Value};
 use tokio::sync::watch;
 
 use crate::db::AppDb;
 
 pub use defaults::{defaults, system_locale};
+pub use validate::{MAX_EXT_TOOLS, valid_ext};
 
 /// Dotted keys that launch programs. A test asserts this list equals the set of nullable keys of
 /// [`Settings`], so a new program-launching setting cannot be forgotten. `SettingsPatch` has none
 /// of them.
-pub const PROGRAM_KEYS: [&str; 4] = [
+pub const PROGRAM_KEYS: [&str; 5] = [
     "diff.externalTool",
     "diff.mergeTool",
+    "diff.toolsByExtension",
     "tools.editor",
     "tools.terminal",
 ];
@@ -123,6 +125,21 @@ impl SettingsService {
         };
         let mut changes = Map::new();
         changes.insert(program_key(kind).to_owned(), value);
+        self.change(changes)
+    }
+
+    /// Stores the per-extension diff tools (`None` or an empty list clears them). Callers must
+    /// have obtained the user's confirmation through a native dialog for any added program.
+    pub fn set_ext_tools(&self, tools: Vec<ExtDiffTool>) -> Result<Settings, AppError> {
+        let value = if tools.is_empty() {
+            Value::Null
+        } else {
+            serde_json::to_value(tools).map_err(|e| {
+                AppError::internal("programs could not be serialized").with_detail(e.to_string())
+            })?
+        };
+        let mut changes = Map::new();
+        changes.insert("diff.toolsByExtension".to_owned(), value);
         self.change(changes)
     }
 

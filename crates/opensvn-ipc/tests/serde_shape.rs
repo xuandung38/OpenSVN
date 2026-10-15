@@ -170,6 +170,7 @@ fn program_settings_are_readable_but_not_patchable() {
         "diff.mergeTool",
         "tools.editor",
         "tools.terminal",
+        "diff.toolsByExtension",
     ] {
         let err = serde_json::from_value::<SettingsPatch>(json!({ key: null })).unwrap_err();
         assert!(err.to_string().contains("unknown field"), "{key}: {err}");
@@ -215,6 +216,7 @@ fn sample_settings() -> Settings {
         diff_merge_tool: None,
         tools_editor: None,
         tools_terminal: None,
+        diff_tools_by_extension: None,
     }
 }
 

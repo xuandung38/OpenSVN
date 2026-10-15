@@ -242,3 +242,86 @@ async fn each_version_opens_read_only_in_the_default_app() {
     }
     assert_eq!(f.opener.calls.lock().unwrap().len(), before);
 }
+
+#[tokio::test]
+async fn a_diff_tool_set_for_the_extension_gets_both_files_even_when_binary() {
+    use std::sync::atomic::Ordering;
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    let v1 = docx(&["một"], 50);
+    let r1 = commit_docx(&f, &wc.id, &v1).await;
+    let v2 = docx(&["hai"], 60);
+    f.engine
+        .edit_file(&demo_wc_root(), "report.docx", &v2)
+        .unwrap();
+    let target = DiffTarget::Wc {
+        wc_id: wc.id.clone(),
+        path: "report.docx".into(),
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir
+        .path()
+        .join(if cfg!(windows) { "cmp.exe" } else { "cmp" });
+    std::fs::write(&exe, b"x").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    *f.picker.pick.lock().unwrap() = Some(exe.clone());
+    f.picker.accept.store(true, Ordering::SeqCst);
+    commands::program_choose_for_extension(
+        f.state(),
+        "docx".into(),
+        vec!["{left}".into(), "{right}".into()],
+    )
+    .await
+    .unwrap();
+
+    commands::open_external_diff(&f.state(), target)
+        .await
+        .unwrap();
+    let launched = f.launcher.launched.lock().unwrap().clone();
+    assert_eq!(launched.len(), 1);
+    let (program, args) = &launched[0];
+    assert_eq!(program, &std::fs::canonicalize(&exe).unwrap());
+    let (l, r) = (
+        std::path::Path::new(&args[0]),
+        std::path::Path::new(&args[1]),
+    );
+    assert!(l.ends_with("left.docx") && r.ends_with("right.docx"));
+    assert_eq!(std::fs::read(l).unwrap(), v1);
+    assert_eq!(std::fs::read(r).unwrap(), v2);
+    assert!(std::fs::metadata(r).unwrap().permissions().readonly());
+
+    // In history, the revision that added the file: the missing older side is an empty file.
+    commands::open_external_diff(
+        &f.state(),
+        DiffTarget::Rev {
+            url: format!("{DEMO_REPO_URL}/trunk/report.docx"),
+            rev: r1,
+        },
+    )
+    .await
+    .unwrap();
+    let launched = f.launcher.launched.lock().unwrap().clone();
+    let args = &launched[1].1;
+    assert_eq!(std::fs::read(&args[0]).unwrap(), b"");
+    assert_eq!(std::fs::read(&args[1]).unwrap(), v1);
+
+    // Without a tool for the extension, binary files are still refused by the global tool path.
+    commands::program_clear_for_extension(f.state(), ".docx".into())
+        .await
+        .unwrap();
+    let err = commands::open_external_diff(
+        &f.state(),
+        DiffTarget::Wc {
+            wc_id: wc.id.clone(),
+            path: "report.docx".into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, opensvn_ipc::ErrorCode::InvalidArgument);
+}

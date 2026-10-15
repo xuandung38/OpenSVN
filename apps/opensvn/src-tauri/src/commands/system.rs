@@ -143,6 +143,28 @@ pub async fn program_choose(
     guard(state.programs.choose(kind, args)).await
 }
 
+/// Like `program_choose` for the diff tool of one file extension (`docx` or `.docx`). The tool
+/// is used instead of `diff.externalTool` for those files, binary ones included.
+#[tauri::command]
+#[specta::specta]
+pub async fn program_choose_for_extension(
+    state: State<'_, AppState>,
+    ext: String,
+    args: Vec<String>,
+) -> Result<Settings, AppError> {
+    guard(state.programs.choose_for_extension(&ext, args)).await
+}
+
+/// Removes the diff tool of one file extension.
+#[tauri::command]
+#[specta::specta]
+pub async fn program_clear_for_extension(
+    state: State<'_, AppState>,
+    ext: String,
+) -> Result<Settings, AppError> {
+    guard(async { state.programs.clear_for_extension(&ext) }).await
+}
+
 /// Removes a configured program.
 #[tauri::command]
 #[specta::specta]

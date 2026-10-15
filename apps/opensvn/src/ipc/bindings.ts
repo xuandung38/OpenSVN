@@ -45,9 +45,11 @@ export const commands = {
 	statusRemote: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("status_remote", { wcId })),
 	diffGet: (request: DiffGetRequest) => typedError<FileDiff, AppError>(__TAURI_INVOKE("diff_get", { request })),
 	/**
-	 *  Opens `target` in the configured external diff tool (`diff.externalTool`): both sides are
-	 *  written as read-only copies into a private folder and the tool is started on them. Used when a
-	 *  diff is too complex or too large to show, or on request. Binary files are refused.
+	 *  Opens `target` in the configured external diff tool: both sides are written as read-only
+	 *  copies into a private folder and the tool is started on them. Used when a diff is too complex
+	 *  or too large to show, or on request. A tool set for the file's extension
+	 *  (`diff.toolsByExtension`) gets the files as they are, binary ones included; `diff.externalTool`
+	 *  gets text only and binary files are refused.
 	 */
 	diffExternal: (target: DiffTarget) => typedError<null, AppError>(__TAURI_INVOKE("diff_external", { target })),
 	/**
@@ -117,6 +119,13 @@ export const commands = {
 	programChoose: (kind: ProgramKind, args: string[]) => typedError<Settings, AppError>(__TAURI_INVOKE("program_choose", { kind, args })),
 	/**  Removes a configured program. */
 	programClear: (kind: ProgramKind) => typedError<Settings, AppError>(__TAURI_INVOKE("program_clear", { kind })),
+	/**
+	 *  Like `program_choose` for the diff tool of one file extension (`docx` or `.docx`). The tool
+	 *  is used instead of `diff.externalTool` for those files, binary ones included.
+	 */
+	programChooseForExtension: (ext: string, args: string[]) => typedError<Settings, AppError>(__TAURI_INVOKE("program_choose_for_extension", { ext, args })),
+	/**  Removes the diff tool of one file extension. */
+	programClearForExtension: (ext: string) => typedError<Settings, AppError>(__TAURI_INVOKE("program_clear_for_extension", { ext })),
 	/**
 	 *  Shows a native file or folder dialog and returns an opaque, single-use grant for the choice
 	 *  (`None` when cancelled). Commands that need a local path outside a working copy take the grant.
@@ -469,6 +478,17 @@ export type ErrorCode = "network" | "timeout" | "auth-required" |
 "negotiate-failed" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "hook-failed" | "repository-moved" | "pristine-not-hydrated" | "wc-invalid-operation" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | 
 /**  The request itself is invalid (bad value, expired path grant, unsupported option). */
 "invalid-argument" | "internal";
+
+/**
+ *  External diff tool for one file extension, used instead of `diff.externalTool` for files with
+ *  that extension (like TortoiseSVN's per-extension diff viewers). Binary files are handed to it.
+ */
+export type ExtDiffTool = {
+	/**  Lowercase extension without the dot (`docx`). */
+	ext: string,
+	path: string,
+	args: string[],
+};
 
 export type ExternalDiffTool = {
 	path: string,
@@ -854,6 +874,8 @@ export type Settings = {
 	"tools.editor": ExternalDiffTool | null,
 	/**  Terminal used by "open terminal here". `null` when not configured. */
 	"tools.terminal": ExternalDiffTool | null,
+	/**  Diff tools by file extension (`program_choose_for_extension`). `null` when none. */
+	"diff.toolsByExtension": ExtDiffTool[] | null,
 };
 
 /**

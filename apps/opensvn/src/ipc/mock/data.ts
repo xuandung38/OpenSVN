@@ -123,4 +123,5 @@ export const mockSettings: Settings = {
   "diff.mergeTool": null,
   "tools.editor": null,
   "tools.terminal": null,
+  "diff.toolsByExtension": null,
 };

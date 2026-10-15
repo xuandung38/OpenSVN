@@ -224,3 +224,58 @@ fn verbatim_prefix_is_removed_only_for_drive_paths() {
     );
     assert_eq!(strip_verbatim("/usr/bin/ed"), "/usr/bin/ed");
 }
+
+#[tokio::test]
+async fn a_diff_tool_per_extension_is_confirmed_stored_replaced_and_cleared() {
+    let (_dir, exe) = an_executable();
+    let (svc, picker) = service(Some(exe.clone()), true);
+    let s = svc
+        .choose_for_extension(".DOCX", vec!["{left}".into(), "{right}".into()])
+        .await
+        .unwrap();
+    let tools = s.diff_tools_by_extension.unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].ext, "docx");
+    assert!(picker.confirmed.lock().unwrap()[0].starts_with("Diff tool for .docx files:\n"));
+
+    // The tool for the extension wins over the global one; other files use the global one.
+    let (program, args, by_ext) = svc.external_diff_tool_for("a/b/Report.docx").unwrap();
+    assert!(by_ext && args == ["{left}", "{right}"]);
+    assert_eq!(program, std::fs::canonicalize(&exe).unwrap());
+    let err = svc.external_diff_tool_for("a.txt").unwrap_err();
+    assert_eq!(err.actions, Some(vec![ErrorAction::OpenSettings]));
+
+    let s = svc
+        .choose_for_extension("docx", vec!["--compare".into()])
+        .await
+        .unwrap();
+    let tools = s.diff_tools_by_extension.unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].args, ["--compare"]);
+    svc.choose_for_extension("xlsx", vec![]).await.unwrap();
+
+    for bad in ["", ".", "do cx", "x.y", "dóc", "abcdefghijklmnopq"] {
+        assert!(
+            svc.choose_for_extension(bad, vec![]).await.is_err(),
+            "{bad}"
+        );
+    }
+    let s = svc.clear_for_extension(".docx").unwrap();
+    let tools = s.diff_tools_by_extension.unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].ext, "xlsx");
+    assert!(
+        svc.clear_for_extension("xlsx")
+            .unwrap()
+            .diff_tools_by_extension
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_declined_extension_tool_is_not_stored() {
+    let (_dir, exe) = an_executable();
+    let (svc, _) = service(Some(exe), false);
+    let s = svc.choose_for_extension("docx", vec![]).await.unwrap();
+    assert!(s.diff_tools_by_extension.is_none());
+}

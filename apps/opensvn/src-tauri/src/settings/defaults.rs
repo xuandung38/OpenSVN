@@ -37,6 +37,7 @@ pub fn defaults(locale: Option<&str>) -> Settings {
         diff_merge_tool: None,
         tools_editor: None,
         tools_terminal: None,
+        diff_tools_by_extension: None,
     }
 }
 

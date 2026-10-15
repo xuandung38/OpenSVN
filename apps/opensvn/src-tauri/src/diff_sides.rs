@@ -142,3 +142,32 @@ pub(crate) async fn open_version(
     }
     state.opener.open_default(&dest)
 }
+
+/// Writes both sides of `target` as read-only `left.<ext>` / `right.<ext>` in a new folder of the
+/// private external-diff directory, streamed and byte for byte (binary files too). A missing side
+/// (added or deleted file) is an empty file, as for the text copies.
+pub(crate) async fn stage_raw_sides(
+    state: &AppState,
+    target: &DiffTarget,
+) -> Result<(PathBuf, PathBuf), AppError> {
+    use crate::programs::external_diff::{
+        STALE_AFTER, make_read_only, new_stage_dir, staged_names, sweep_stale,
+    };
+    let root =
+        crate::preview::prepare_private_dir(&state.data_dir, crate::preview::EXTERNAL_DIFF_DIR)?;
+    sweep_stale(&root, STALE_AFTER);
+    let dir = new_stage_dir(&root)?;
+    let (ln, rn) = staged_names(&target_path(target));
+    let (l, r) = (dir.join(ln), dir.join(rn));
+    export_target(state, target, Some(l.clone()), Some(r.clone())).await?;
+    for side in [&l, &r] {
+        if !side.exists() {
+            std::fs::write(side, b"").map_err(|e| {
+                AppError::internal("Could not prepare the files for the external diff tool.")
+                    .with_detail(e.to_string())
+            })?;
+        }
+        make_read_only(side)?;
+    }
+    Ok((l, r))
+}

@@ -24,6 +24,8 @@ pub const COMMAND_NAMES: &[&str] = &[
     "settings_set",
     "program_choose",
     "program_clear",
+    "program_choose_for_extension",
+    "program_clear_for_extension",
     "path_pick",
     "updater_token_set",
     "updater_token_clear",

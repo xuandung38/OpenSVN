@@ -9,6 +9,7 @@ import type { Settings } from "../../../ipc/bindings";
 import { ipc, unwrap } from "../../../ipc/client";
 import { queryKeys } from "../../../ipc/query-keys";
 import { useT } from "../../../lib/i18n/i18n";
+import { ExtDiffTools } from "./ext-diff-tools";
 import { type Draft, settingValue } from "./settings-model";
 import { settingsStrings } from "./settings-strings";
 
@@ -257,6 +258,7 @@ export function DiffMergePage({ settings, draft, set }: PageProps) {
           )}
         </div>
       </Field>
+      <ExtDiffTools settings={settings} />
     </div>
   );
 }

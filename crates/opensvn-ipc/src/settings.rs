@@ -37,6 +37,17 @@ pub struct ExternalDiffTool {
     pub args: Vec<String>,
 }
 
+/// External diff tool for one file extension, used instead of `diff.externalTool` for files with
+/// that extension (like TortoiseSVN's per-extension diff viewers). Binary files are handed to it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtDiffTool {
+    /// Lowercase extension without the dot (`docx`).
+    pub ext: String,
+    pub path: String,
+    pub args: Vec<String>,
+}
+
 /// Settings that make the app launch a program. They are changed only through a native file
 /// picker plus confirmation (`program_choose` / `program_clear`), never through `settings_set`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
@@ -152,6 +163,8 @@ settings_structs! {
         tools_editor: ExternalDiffTool = "tools.editor",
         /// Terminal used by "open terminal here". `null` when not configured.
         tools_terminal: ExternalDiffTool = "tools.terminal",
+        /// Diff tools by file extension (`program_choose_for_extension`). `null` when none.
+        diff_tools_by_extension: Vec<ExtDiffTool> = "diff.toolsByExtension",
     }
 }
 

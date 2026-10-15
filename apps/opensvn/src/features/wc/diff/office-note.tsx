@@ -21,6 +21,7 @@ export const officeStrings = defineStrings({
     openWorking: "Open working version",
     openRev: "Open r{rev}",
     opening: "Opening…",
+    externalTool: "External tool",
   },
   vi: {
     extractedTitle: "So sánh nội dung chữ",
@@ -36,6 +37,7 @@ export const officeStrings = defineStrings({
     openWorking: "Mở bản đang sửa",
     openRev: "Mở bản r{rev}",
     opening: "Đang mở…",
+    externalTool: "Công cụ ngoài",
   },
 });
 
@@ -94,6 +96,7 @@ export function OfficeNote({
       </b>
       <SafeText className="min-w-0 flex-1">{text}</SafeText>
       {openable && <VersionButtons target={target} diff={diff} known={office.extracted} />}
+      {target && <ExternalToolButton target={target} />}
     </div>
   );
 }
@@ -133,5 +136,27 @@ function VersionButtons({
         </Button>
       ))}
     </span>
+  );
+}
+
+/** Opens the diff in the external tool (the one set for this file type, else the global one). */
+function ExternalToolButton({ target }: { target: DiffTarget }) {
+  const t = useT(officeStrings);
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const open = async () => {
+    setBusy(true);
+    try {
+      await unwrap(ipc().commands.diffExternal(target));
+    } catch (e) {
+      toast.show(toAppError(e).message, 6000);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Button small disabled={busy} onClick={() => void open()}>
+      {busy ? t("opening") : t("externalTool")}
+    </Button>
   );
 }
