@@ -23,6 +23,13 @@ out-of-range connection count inline, then saves a valid one through the real ba
 this one after the same build with `xvfb-run -a node e2e/settings.test.mjs` (tauri-driver and
 WebKitWebDriver on `PATH`).
 
+`resume.test.mjs` checks out through `scripts/test-env/flaky-tls-proxy.py` in outage mode: the
+network goes silent mid-checkout, the checkout dialog shows "Connection lost, retrying in Ns…"
+with "Retry now", and the checkout finishes on its own once the network is back. It needs the
+server certificate and key of `scripts/test-env/visualsvn-like.sh` (next to
+`OPENSVN_COMPAT_LOCAL_CA`, or in `OPENSVN_E2E_PROXY_CERTS`); run it after the same build with
+`xvfb-run -a node --test-timeout=600000 e2e/resume.test.mjs`.
+
 Every test gets a fresh scratch repository (`e2e-<test>-<pid>-<n>`) and a fresh app profile
 (`HOME`, `XDG_*_HOME` in a temp dir), so tests never share state. On failure a screenshot, the
 window text and the driver log land in `e2e-artifacts/` (`OPENSVN_E2E_ARTIFACTS`).
