@@ -109,7 +109,7 @@ enum Local {
     Obstructed,
     Deleted,
     /// `svn rm --keep-local`: both stay on disk, unversioned.
-    DeletedKeptLocal,
+    Unversioned,
     Missing,
 }
 
@@ -122,7 +122,7 @@ const ALL: [Local; 10] = [
     Local::LocallyReplaced,
     Local::Obstructed,
     Local::Deleted,
-    Local::DeletedKeptLocal,
+    Local::Unversioned,
     Local::Missing,
 ];
 
@@ -166,7 +166,7 @@ fn prepare(repo: &Repo, wc: &Path, local: Local) {
         Local::Deleted => {
             repo.svn(&a, &["rm", "-q", "f", "d"]);
         }
-        Local::DeletedKeptLocal => {
+        Local::Unversioned => {
             repo.svn(&a, &["rm", "-q", "--keep-local", "f", "d"]);
         }
         Local::Missing => {
