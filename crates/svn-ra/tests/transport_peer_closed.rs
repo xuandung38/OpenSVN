@@ -416,6 +416,8 @@ async fn writes_are_never_sent_twice() {
                 .expect_err("a broken write fails");
             assert_eq!(err.code, ErrorCode::Network, "{m} {broken:?}: {err:?}");
             assert_eq!(err.connection, Some(failure), "{m} {broken:?}: {err:?}");
+            // It reached the server: the outcome is unknown, not "never sent".
+            assert!(!err.is_not_sent(), "{m} {broken:?}: {err:?}");
             // The write reached the server once and was not repeated.
             assert_eq!(server.seen(), ["GET", m], "{m} {broken:?}");
         }
@@ -693,6 +695,58 @@ async fn a_refused_connection_is_unreachable_not_a_connection_failure() {
         assert!(err.is_connection_class(), "{m}: {err:?}");
         assert_eq!(err.connection_failure(), None, "{m}: {err:?}");
     }
+}
+
+/// A connection that breaks before a request byte could go out (the TLS handshake is reset, or
+/// it never completes) is a broken connection that never sent the request: a lock or unlock
+/// that fails this way did not happen, so it is a plain network error, not "outcome unknown".
+#[tokio::test]
+async fn a_write_whose_connection_breaks_during_the_handshake_was_never_sent() {
+    let ca = TestCa::new();
+    // Accepts every connection and resets it before the TLS handshake.
+    let resetting = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let reset_addr = resetting.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for tcp in resetting.incoming().flatten() {
+            socket_reset(tcp);
+        }
+    });
+    // Accepts (through the kernel backlog) and never answers the handshake.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let silent_addr = silent.local_addr().unwrap();
+    let t = transport(&ca, |c| {
+        c.retry = RetryPolicy::none();
+        c.connect_timeout = Duration::from_millis(300);
+    });
+    for m in ["LOCK", "UNLOCK"] {
+        let err = t
+            .send_and_read(
+                req(m, &format!("https://{reset_addr}/repo/f")),
+                1024,
+                &CancelToken::new(),
+            )
+            .await
+            .expect_err("reset during the handshake");
+        assert!(err.is_not_sent(), "{m}: {err:?}");
+        assert_eq!(err.code, ErrorCode::Network, "{m}: {err:?}");
+        let err = t
+            .send_and_read(
+                req(m, &format!("https://{silent_addr}/repo/f")),
+                1024,
+                &CancelToken::new(),
+            )
+            .await
+            .expect_err("handshake never completes");
+        assert!(err.is_not_sent(), "{m}: {err:?}");
+        assert_eq!(err.code, ErrorCode::Timeout, "{m}: {err:?}");
+        // A broken connection as far as reads are concerned; still nothing was sent.
+        assert_eq!(
+            err.connection,
+            Some(ConnectionFailure::Timeout),
+            "{m}: {err:?}"
+        );
+    }
+    drop(silent);
 }
 
 /// A certificate the client does not trust is never "unreachable": it must not be waited out.
