@@ -224,7 +224,7 @@ fn http_errors_are_not_log_documents() {
     let f = load("errors/not-found-404-html");
     assert_eq!(
         parse_log(&f.resp_body).unwrap_err().code,
-        ErrorCode::Corrupt
+        ErrorCode::ProtocolViolation
     );
 }
 

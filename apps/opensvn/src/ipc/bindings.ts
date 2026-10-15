@@ -549,6 +549,11 @@ export type ErrorCode = "network" | "timeout" | "auth-required" |
  *  token was invalid, or the user chose SSO again after it had failed.
  */
 "negotiate-failed" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "hook-failed" | "repository-moved" | "pristine-not-hydrated" | "wc-invalid-operation" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | 
+/**
+ *  The server sent a malformed response (bad XML or encoding, an impossible editor drive).
+ *  Nothing local is damaged, so cleanup is not offered; the message names what was wrong.
+ */
+"server-protocol-error" | 
 /**  The request itself is invalid (bad value, expired path grant, unsupported option). */
 "invalid-argument" | "internal";
 
