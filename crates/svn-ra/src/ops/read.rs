@@ -23,7 +23,20 @@ use super::resume::{ReadRetry, cannot_resume};
 use super::update::{RaWire, buffered_error};
 
 pub(crate) fn corrupt(msg: impl Into<String>) -> SvnError {
-    SvnError::new(ErrorCode::Corrupt, msg)
+    SvnError::new(ErrorCode::ProtocolViolation, msg)
+}
+
+/// Svndiff that `svn_delta` cannot decode came from the server: a protocol violation, not
+/// damage to the working copy. Other codes (a sink's own failure, cancellation) pass through.
+pub(crate) fn server_svndiff(err: SvnError) -> SvnError {
+    if err.code == ErrorCode::Corrupt {
+        SvnError {
+            code: ErrorCode::ProtocolViolation,
+            ..err
+        }
+    } else {
+        err
+    }
 }
 
 /// Newest revision, read from the `SVN-Youngest-Rev` header of a fresh `OPTIONS` (HTTPv2).
@@ -331,8 +344,8 @@ fn parse_md5(text: &str) -> Option<[u8; 16]> {
 /// properties and the MD5 of the streamed bytes.
 ///
 /// The content is checked against the MD5 the server reports for the node (mod_dav_svn always
-/// reports one for files); a mismatch is `Corrupt`. If the server reports none, the MD5 is
-/// still computed and returned with `verified: false`.
+/// reports one for files); a mismatch is `ProtocolViolation`. If the server reports none, the
+/// MD5 is still computed and returned with `verified: false`.
 ///
 /// On any error the sink may hold partial, or complete but unverified, content: the caller
 /// must discard it.
@@ -456,6 +469,17 @@ pub(crate) async fn get_file(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undecodable_server_svndiff_is_a_protocol_violation() {
+        let err = svn_delta::SvndiffDecoder::new()
+            .feed(b"NOT-SVNDIFF")
+            .map_err(server_svndiff)
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolViolation, "{err:?}");
+        let cancelled = server_svndiff(SvnError::new(ErrorCode::Cancelled, "stopped"));
+        assert_eq!(cancelled.code, ErrorCode::Cancelled);
+    }
 
     #[test]
     fn md5_parsing() {

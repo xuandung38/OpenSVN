@@ -86,7 +86,7 @@ struct LocalSides {
     unversioned: bool,
 }
 
-fn not_versioned(rel: &RelPath) -> SvnError {
+pub(super) fn not_versioned(rel: &RelPath) -> SvnError {
     SvnError::new(
         ErrorCode::PathNotFound,
         format!("'{rel}' is not under version control"),
@@ -136,7 +136,7 @@ fn capped(data: Vec<u8>, limit: usize) -> Content {
 
 /// What is on disk at `abs`, without following a symlink: `None` when nothing is there or a
 /// directory obstructs it (no file to show), else its metadata (a symlink or a regular file).
-fn file_on_disk(abs: &Path, rel: &RelPath) -> EngineResult<Option<fs::Metadata>> {
+pub(super) fn file_on_disk(abs: &Path, rel: &RelPath) -> EngineResult<Option<fs::Metadata>> {
     match fs::symlink_metadata(abs) {
         Ok(md) if md.file_type().is_symlink() || md.file_type().is_file() => Ok(Some(md)),
         Ok(_) => Ok(None),
@@ -149,7 +149,7 @@ fn file_on_disk(abs: &Path, rel: &RelPath) -> EngineResult<Option<fs::Metadata>>
 /// following a symlink in the last component (`O_NOFOLLOW`, `FILE_FLAG_OPEN_REPARSE_POINT`), and
 /// checks that the handle is still that regular file. A file swapped for a symlink, a FIFO or
 /// another file between the check and the open is refused instead of read.
-fn open_seen_file(abs: &Path, seen: &fs::Metadata, rel: &RelPath) -> EngineResult<File> {
+pub(super) fn open_seen_file(abs: &Path, seen: &fs::Metadata, rel: &RelPath) -> EngineResult<File> {
     let changed = || {
         SvnError::new(
             ErrorCode::WcInvalidOperation,
@@ -243,7 +243,7 @@ fn working_text(db: &WcDb, rel: &RelPath, limit: usize) -> EngineResult<Content>
 
 /// Checks that an unversioned `rel` stays inside the working copy at `wcroot`: never inside the
 /// administrative area, never through a symlinked parent folder (which could lead outside).
-fn unversioned_path(wcroot: &Path, rel: &RelPath) -> EngineResult<std::path::PathBuf> {
+pub(super) fn unversioned_path(wcroot: &Path, rel: &RelPath) -> EngineResult<std::path::PathBuf> {
     let parts: Vec<&str> = rel.as_str().split('/').filter(|p| !p.is_empty()).collect();
     // Any spelling that can resolve to an administrative folder (`.svn.`, `SVN~1`, `_svn`, …).
     if parts.is_empty() || parts.iter().any(|p| svn_types::is_any_admin_dir_name(p)) {
@@ -374,6 +374,7 @@ fn sideless(path: &str, prop_changes: Vec<opensvn_ipc::PropChange>) -> FileDiff 
         image: None,
         too_large: None,
         too_complex: None,
+        office: None,
     }
 }
 

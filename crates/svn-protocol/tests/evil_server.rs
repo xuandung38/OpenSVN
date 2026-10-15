@@ -61,7 +61,7 @@ fn bytewise<P: ResponseParser>(mut p: P, body: &[u8]) -> Result<Vec<P::Item>> {
 }
 
 /// Asserts `whole` and `split` both fail with a protocol-safety error. `unsafe` cases may
-/// surface as `UnsafePath` or as `Corrupt` (a name no server could legitimately send); either way
+/// surface as `UnsafePath` or as `ProtocolViolation` (a name no server could legitimately send); either way
 /// nothing reaches the caller. Returns the failures instead of stopping at the first one.
 fn check_rejected<T: std::fmt::Debug>(
     case: &Case,
@@ -75,7 +75,7 @@ fn check_rejected<T: std::fmt::Debug>(
                 "{} ({how}): hostile document was ACCEPTED: {v:?}",
                 case.id
             )),
-            Err(e) if matches!(e.code, ErrorCode::UnsafePath | ErrorCode::Corrupt) => {}
+            Err(e) if matches!(e.code, ErrorCode::UnsafePath | ErrorCode::ProtocolViolation) => {}
             Err(e) => bad.push(format!("{} ({how}): unexpected error kind {e:?}", case.id)),
         }
     }
@@ -119,13 +119,13 @@ fn propfind_listings_with_foreign_or_traversing_hrefs_are_rejected() {
                 assert_eq!(rejected.len(), 1, "{}", c.id);
                 let code = rejected[0].error.code;
                 assert!(
-                    matches!(code, ErrorCode::UnsafePath | ErrorCode::Corrupt),
+                    matches!(code, ErrorCode::UnsafePath | ErrorCode::ProtocolViolation),
                     "{}: {code:?}",
                     c.id
                 );
             }
             Err(e) => assert!(
-                matches!(e.code, ErrorCode::UnsafePath | ErrorCode::Corrupt),
+                matches!(e.code, ErrorCode::UnsafePath | ErrorCode::ProtocolViolation),
                 "{}: {e:?}",
                 c.id
             ),
@@ -202,7 +202,9 @@ fn options_answers_pointing_elsewhere_are_rejected() {
             Err(e) => assert!(
                 matches!(
                     e.code,
-                    ErrorCode::Corrupt | ErrorCode::UnsafePath | ErrorCode::ServerUnsupported
+                    ErrorCode::ProtocolViolation
+                        | ErrorCode::UnsafePath
+                        | ErrorCode::ServerUnsupported
                 ),
                 "{}: unexpected error kind {e:?}",
                 c.id
