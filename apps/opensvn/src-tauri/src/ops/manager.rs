@@ -33,6 +33,8 @@ struct Running {
     progress: Arc<Mutex<Coalescer>>,
     /// Set once the operation ended: the progress ticker stops and sends nothing more.
     done: Arc<AtomicBool>,
+    /// Wakes the operation when it waits for a lost connection (see [`OpContext::retry_now`]).
+    retry_now: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Default)]
@@ -196,6 +198,7 @@ impl OperationManager {
             Throttle::new(),
         )));
         let done = Arc::new(AtomicBool::new(false));
+        let retry_now = Arc::new(tokio::sync::Notify::new());
         {
             let mut st = self.state();
             st.order.push(handle.op_id.0.clone());
@@ -207,6 +210,7 @@ impl OperationManager {
                     root: spec.root.clone(),
                     progress: Arc::clone(&progress),
                     done: Arc::clone(&done),
+                    retry_now: Arc::clone(&retry_now),
                 },
             );
         }
@@ -242,6 +246,7 @@ impl OperationManager {
             interactive: !spec.background,
             cancel,
             progress: reporter,
+            retry_now,
         };
         let manager = self.clone();
         let task_handle = handle.clone();
@@ -309,6 +314,27 @@ impl OperationManager {
             let related = op_root.starts_with(&root) || root.starts_with(op_root);
             (related && !r.handle.background && writes_wc(r.handle.kind)).then(|| r.handle.clone())
         })
+    }
+
+    /// "Retry now": an operation waiting for a lost connection tries again at once. A finished
+    /// operation, or one that is not waiting, ignores it; an unknown id is an error.
+    pub fn retry_now(&self, op_id: &OpId) -> Result<(), AppError> {
+        let st = self.state();
+        if let Some(r) = st.running.get(&op_id.0) {
+            r.retry_now.notify_one();
+            return Ok(());
+        }
+        if st.finished.iter().any(|h| h.op_id == *op_id) {
+            return Ok(());
+        }
+        Err(AppError::internal("Unknown operation.").with_detail(op_id.0.clone()))
+    }
+
+    /// Wakes every running operation that waits for a lost connection (the system woke up).
+    pub fn retry_all_now(&self) {
+        for r in self.state().running.values() {
+            r.retry_now.notify_one();
+        }
     }
 
     /// Requests cancellation. Cancelling a finished operation is a no-op; an unknown id is an error.

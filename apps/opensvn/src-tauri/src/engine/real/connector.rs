@@ -367,6 +367,16 @@ fn make_transport(
 
 #[async_trait]
 impl SessionConnector for HttpConnector {
+    fn reconnect_wait(&self) -> Option<Duration> {
+        let minutes = locked(&self.settings).borrow().network_reconnect_wait_min;
+        Some(Duration::from_secs(u64::from(minutes.max(1)) * 60))
+    }
+
+    fn system_woke(&self) {
+        let transport = Arc::clone(&locked(&self.state).transport);
+        transport.interrupt_reads();
+    }
+
     async fn connect(
         &self,
         url: &RepoUrl,

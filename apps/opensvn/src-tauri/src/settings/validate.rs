@@ -11,14 +11,20 @@ use serde_json::Value;
 /// - `network.maxConnections`: the HTTP transport supports 1..=8 per host
 ///   (`svn_ra::transport::config::MAX_CONNECTIONS`); default 4, like svn.
 /// - `network.timeoutSec`: below 5 s a slow TLS handshake already fails.
+/// - `network.reconnectWaitMin`: how long a checkout or update waits for a lost connection;
+///   up to 2 hours (a long outage, a laptop closed for a meeting).
 /// - `cache.maxSizeGb`: up to 4 TB.
-pub const SETTING_RANGES: [(&str, SettingRange); 4] = [
+pub const SETTING_RANGES: [(&str, SettingRange); 5] = [
     (
         "general.checkIntervalMin",
         SettingRange { min: 1, max: 1440 },
     ),
     ("network.maxConnections", SettingRange { min: 1, max: 8 }),
     ("network.timeoutSec", SettingRange { min: 5, max: 3600 }),
+    (
+        "network.reconnectWaitMin",
+        SettingRange { min: 1, max: 120 },
+    ),
     ("cache.maxSizeGb", SettingRange { min: 1, max: 4096 }),
 ];
 
@@ -126,6 +132,7 @@ pub fn validate(s: &Settings) -> Result<(), AppError> {
         u32::from(s.network_max_connections),
     )?;
     check_range("network.timeoutSec", s.network_timeout_sec)?;
+    check_range("network.reconnectWaitMin", s.network_reconnect_wait_min)?;
     check_range("cache.maxSizeGb", s.cache_max_size_gb)?;
     if s.wc_default_format != WcFormat::V31 {
         return Err(invalid("wc.defaultFormat", "only format 31 can be written"));
@@ -166,6 +173,7 @@ mod tests {
                         s.network_max_connections = u8::try_from(v).unwrap();
                     }
                     "network.timeoutSec" => s.network_timeout_sec = v,
+                    "network.reconnectWaitMin" => s.network_reconnect_wait_min = v,
                     "cache.maxSizeGb" => s.cache_max_size_gb = v,
                     other => panic!("no field for ranged key {other}"),
                 }

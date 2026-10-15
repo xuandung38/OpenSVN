@@ -3561,6 +3561,7 @@ dependencies = [
  "reqwest",
  "rfd",
  "rusqlite",
+ "rustix",
  "rustls",
  "secrecy",
  "secure-store",

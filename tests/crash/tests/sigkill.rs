@@ -35,12 +35,17 @@ fn random_sigkill_suite() {
         report.cases.push(rec);
     }
     let update = fx.duration(Op::Update).expect("control update");
+    let checkout = fx.duration(Op::Checkout).expect("control checkout");
     for op in Op::ALL {
         let d = fx.duration(op).expect("control case");
         eprintln!("{}: uninterrupted {} ms", op.name(), d.as_millis());
         for _ in 0..iters {
             let delay = d.mul_f64(rng.unit() * 1.1);
-            let pre = (op == Op::Cleanup).then(|| update.mul_f64(rng.unit()));
+            let pre = match op {
+                Op::Cleanup => Some(update.mul_f64(rng.unit())),
+                Op::Continue => Some(checkout.mul_f64(rng.unit())),
+                _ => None,
+            };
             let rec = fx.case(op, &Kill::After(delay), pre);
             if let Some(f) = &rec.failure {
                 eprintln!("FAIL case {} {} {}: {f}", rec.id, op.name(), rec.kill);

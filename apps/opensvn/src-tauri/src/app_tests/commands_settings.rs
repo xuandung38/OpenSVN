@@ -340,7 +340,7 @@ async fn diff_external_needs_a_configured_tool_and_launches_it_on_read_only_copi
         .unwrap_err();
     assert_eq!(err.code, opensvn_ipc::ErrorCode::InvalidArgument);
     assert_eq!(
-        err.actions,
+        err.actions.as_deref().cloned(),
         Some(vec![opensvn_ipc::ErrorAction::OpenSettings])
     );
     assert!(f.launcher.launched.lock().unwrap().is_empty());

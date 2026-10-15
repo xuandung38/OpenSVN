@@ -1,6 +1,6 @@
 //! Registry of working copies: persisted list plus one [`WcActor`] per working copy.
 
-use opensvn_ipc::{AppError, BranchRef, ErrorCode, WcEntry, WcId, WorkingCopy};
+use opensvn_ipc::{AppError, BranchRef, ErrorCode, ResumeInfo, WcEntry, WcId, WorkingCopy};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -145,10 +145,27 @@ impl WcRegistry {
             .await
     }
 
+    /// How to finish an incomplete working copy: at the revision it was reaching; a checkout
+    /// when the app's checkout journal still holds it (a working copy left incomplete by
+    /// another client is offered as an interrupted update).
+    fn resume_of(&self, info: &WcInfo) -> Option<ResumeInfo> {
+        let rev = info.resume_rev.filter(|_| info.incomplete)?;
+        let checkout = self
+            .db
+            .checkout_journal_get(&info.root_path)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "could not read the checkout journal");
+                None
+            })
+            .is_some();
+        Some(ResumeInfo { rev, checkout })
+    }
+
     async fn describe(&self, row: &WcRow) -> Result<WorkingCopy, AppError> {
         let info = self.info_of(row).await?;
         let branch = self.branch_of(&info.repo_uuid, &info.repo_root_url, &info.url);
         let live = self.live(&row.id);
+        let resume = self.resume_of(&info);
         Ok(WorkingCopy {
             id: WcId(row.id.clone()),
             name: row.name.clone(),
@@ -165,6 +182,7 @@ impl WcRegistry {
             incoming: live.incoming,
             last_checked_at: live.last_checked_at,
             incomplete: info.incomplete,
+            resume,
         })
     }
 
@@ -186,9 +204,12 @@ impl WcRegistry {
     pub async fn entries(&self) -> Result<Vec<WcEntry>, AppError> {
         let mut out = Vec::new();
         for row in self.db.wc_list()? {
-            let (url, incomplete, problem) = match self.info_of(&row).await {
-                Ok(info) => (Some(info.url), info.incomplete, None),
-                Err(e) => (None, false, Some(e.message)),
+            let (url, incomplete, resume, problem) = match self.info_of(&row).await {
+                Ok(info) => {
+                    let resume = self.resume_of(&info);
+                    (Some(info.url), info.incomplete, resume, None)
+                }
+                Err(e) => (None, false, None, Some(e.message)),
             };
             out.push(WcEntry {
                 id: WcId(row.id),
@@ -202,6 +223,7 @@ impl WcRegistry {
                 missing: problem.is_some(),
                 problem,
                 incomplete,
+                resume,
             });
         }
         Ok(out)

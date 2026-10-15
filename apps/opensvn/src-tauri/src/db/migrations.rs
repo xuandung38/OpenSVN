@@ -22,6 +22,10 @@ pub const APP_MIGRATIONS: &[Migration] = &[
         version: 2,
         sql: include_str!("migrations/app_0002_account_stale.sql"),
     },
+    Migration {
+        version: 3,
+        sql: include_str!("migrations/app_0003_checkout_journal.sql"),
+    },
 ];
 
 /// Migrations of `cache.sqlite`.
@@ -73,7 +77,7 @@ mod tests {
     fn applies_all_and_is_idempotent() {
         let mut c = Connection::open_in_memory().unwrap();
         migrate(&mut c, APP_MIGRATIONS).unwrap();
-        assert_eq!(version(&c), 2);
+        assert_eq!(version(&c), 3);
         migrate(&mut c, APP_MIGRATIONS).unwrap();
         c.execute("INSERT INTO setting (key, value) VALUES ('a', '1')", [])
             .unwrap();
@@ -120,7 +124,7 @@ mod tests {
             migrate(&mut c, APP_MIGRATIONS),
             Err(DbError::NewerSchema {
                 found: 99,
-                supported: 2
+                supported: 3
             })
         ));
     }
@@ -197,6 +201,6 @@ mod race_tests {
         let v: u32 = c
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
     }
 }

@@ -142,6 +142,10 @@ settings_structs! {
         /// Range: `SETTING_RANGES` (validator in the app crate).
         network_max_connections: u8 = "network.maxConnections",
         network_timeout_sec: u32 = "network.timeoutSec",
+        /// How long a checkout or update waits for a lost connection to come back before it
+        /// stops (the working copy then stays incomplete and can be continued).
+        /// Range: `SETTING_RANGES`.
+        network_reconnect_wait_min: u32 = "network.reconnectWaitMin",
         network_proxy: ProxySetting = "network.proxy",
         /// Kerberos single sign-on (Negotiate) when the server offers it; off falls back to a
         /// user name and password.

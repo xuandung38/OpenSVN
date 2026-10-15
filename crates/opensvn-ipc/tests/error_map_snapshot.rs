@@ -105,10 +105,39 @@ fn app_error_wire_shape() {
             "retryable": false,
             "actions": ["update"],
             "lockConflicts": null,
+            "incompleteCheckout": null,
             "repositories": null,
         })
     );
     assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), e);
+}
+
+#[test]
+fn an_interrupted_checkout_rides_on_the_error_with_its_action_first() {
+    let e = AppError::from_code(SvnErrorCode::Timeout, "the server took too long")
+        .with_incomplete_checkout(opensvn_ipc::IncompleteCheckout {
+            wc_id: opensvn_ipc::WcId("wc-1".into()),
+            rev: opensvn_ipc::Rev(1200),
+            root_path: "/w/project".into(),
+        });
+    let v = serde_json::to_value(&e).unwrap();
+    assert_eq!(
+        v["actions"],
+        serde_json::json!(["continue-checkout", "retry", "open-settings"])
+    );
+    assert_eq!(
+        v["incompleteCheckout"],
+        serde_json::json!({"wcId": "wc-1", "rev": 1200, "rootPath": "/w/project"})
+    );
+    // Older payloads without the key still parse.
+    let mut old = v.clone();
+    old.as_object_mut().unwrap().remove("incompleteCheckout");
+    assert_eq!(
+        serde_json::from_value::<AppError>(old)
+            .unwrap()
+            .incomplete_checkout,
+        None
+    );
 }
 
 #[test]

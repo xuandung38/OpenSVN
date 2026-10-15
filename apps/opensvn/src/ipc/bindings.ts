@@ -55,14 +55,26 @@ export const commands = {
 	markMove: (wcId: WcId, from: string, to: string) => typedError<null, AppError>(__TAURI_INVOKE("mark_move", { wcId, from, to })),
 	/**
 	 *  Checks out into a new folder (`dest_name`) inside the granted parent folder, or into the granted
-	 *  folder itself. The target must not exist or be an empty folder. On success the working copy is
+	 *  folder itself. The target must not exist or be an empty folder, unless it holds an interrupted
+	 *  checkout of the same URL: then the checkout is refused with
+	 *  [`AppError::incomplete_checkout`] set, so the UI offers "Continue checkout" instead.
+	 * 
+	 *  The choices of the checkout are journaled before it starts and dropped when it finishes, so a
+	 *  checkout interrupted in any way (connection lost for longer than the wait, cancelled, app
+	 *  closed or killed) can be continued exactly ([`wc_continue`]). On success the working copy is
 	 *  registered and its id returned in `OpResult::CheckedOut`. When the checkout fails or is cancelled
 	 *  after it created the working copy, the partial working copy is registered anyway (listed as
-	 *  incomplete; an update finishes it); otherwise a folder this checkout created is removed again
-	 *  while it is still empty.
+	 *  incomplete, with "Continue checkout"); otherwise a folder this checkout created is removed again
+	 *  while it is still empty. Nothing else is ever removed.
 	 */
 	checkout: (request: CheckoutRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("checkout", { request })),
 	update: (request: UpdateRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("update", { request })),
+	/**
+	 *  Finishes an interrupted checkout or update of the whole working copy at the revision it was
+	 *  reaching (recorded in the working copy), with the depths it records and, for a checkout,
+	 *  the externals choice the user made. Fails when nothing is incomplete.
+	 */
+	wcContinue: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("wc_continue", { wcId })),
 	switch: (wcId: WcId, url: string, rev: number | null) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("switch", { wcId, url, rev })),
 	commit: (request: CommitRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("commit", { request })),
 	revert: (request: RevertRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("revert", { request })),
@@ -102,6 +114,11 @@ export const commands = {
 	layoutDetect: (repoRootUrl: string, url: string) => typedError<LayoutDetection, AppError>(__TAURI_INVOKE("layout_detect", { repoRootUrl, url })),
 	copyLocation: (request: CopyLocationRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("copy_location", { request })),
 	opCancel: (opId: OpId) => typedError<null, AppError>(__TAURI_INVOKE("op_cancel", { opId })),
+	/**
+	 *  "Retry now" on an operation that waits for a lost connection: it tries again at once
+	 *  instead of at the end of its countdown. Ignored by an operation that is not waiting.
+	 */
+	opRetryNow: (opId: OpId) => typedError<null, AppError>(__TAURI_INVOKE("op_retry_now", { opId })),
 	opList: () => typedError<OperationHandle[], AppError>(__TAURI_INVOKE("op_list")),
 	authRespond: (requestId: string, response: AuthResponse) => typedError<null, AppError>(__TAURI_INVOKE("auth_respond", { requestId, response })),
 	accountsList: () => typedError<Account[], AppError>(__TAURI_INVOKE("accounts_list")),
@@ -189,7 +206,7 @@ export const events = {
 };
 
 /* Constants */
-export const SETTING_RANGES = {"cache.maxSizeGb":{"max":4096,"min":1},"general.checkIntervalMin":{"max":1440,"min":1},"network.maxConnections":{"max":8,"min":1},"network.timeoutSec":{"max":3600,"min":5}} as const;
+export const SETTING_RANGES = {"cache.maxSizeGb":{"max":4096,"min":1},"general.checkIntervalMin":{"max":1440,"min":1},"network.maxConnections":{"max":8,"min":1},"network.reconnectWaitMin":{"max":120,"min":1},"network.timeoutSec":{"max":3600,"min":5}} as const;
 
 /* Types */
 /**  Credential metadata only; never contains a password. */
@@ -235,6 +252,11 @@ export type AppError = {
 	 *  can offer them. `None` for any other error.
 	 */
 	repositories?: ParentRepo[] | null,
+	/**
+	 *  A checkout found its target folder holding an interrupted checkout of the same location
+	 *  (or a checkout stopped and left one): the UI offers "Continue checkout".
+	 */
+	incompleteCheckout?: IncompleteCheckout | null,
 };
 
 /**  Authentication scheme the server offers. */
@@ -383,6 +405,21 @@ export type CommitRequest = {
 	autoAddRemove: boolean,
 };
 
+/**  Timing of [`OpStage::WaitingForConnection`]. */
+export type ConnectionWait = {
+	/**  Seconds until the next attempt ("Retry now" tries at once). */
+	retryInSecs: number,
+	/**  Seconds since the connection was lost. */
+	waitedSecs: number,
+	/**
+	 *  Seconds the operation waits in total before it stops; the working copy then stays
+	 *  incomplete and can be continued.
+	 */
+	maxWaitSecs: number,
+	/**  Attempts made so far. */
+	attempt: number,
+};
+
 export type CopyFrom = {
 	path: string,
 	rev: Rev,
@@ -484,7 +521,9 @@ export type Eol = "LF" | "CRLF" | "mixed";
 
 export type ErrorAction = "retry" | "update" | "cleanup" | "sign-in" | "trust-cert" | "open-lock-dialog" | "open-settings" | 
 /**  The default app was refused for this item; show it in the file manager instead. */
-"reveal-in-file-manager";
+"reveal-in-file-manager" | 
+/**  An interrupted checkout can be finished: see [`AppError::incomplete_checkout`]. */
+"continue-checkout";
 
 export type ErrorCode = "network" | "timeout" | "auth-required" | 
 /**
@@ -581,6 +620,14 @@ export type Incoming = {
 	latestRev: Rev,
 };
 
+/**  An interrupted checkout the user can continue (`wc_continue`). */
+export type IncompleteCheckout = {
+	wcId: WcId,
+	/**  Revision the checkout was reaching. */
+	rev: Rev,
+	rootPath: string,
+};
+
 export type Language = "vi" | "en";
 
 /**  SVN has no real branches/tags: layout is a naming convention that may not exist. */
@@ -659,7 +706,12 @@ export type LogPage = {
 /**  Where a log query reads from. */
 export type LogTarget = { kind: "url"; url: string } | { kind: "wc"; wcId: WcId; path: string };
 
-export type NodeStatus = "normal" | "modified" | "added" | "deleted" | "replaced" | "unversioned" | "missing" | "conflicted" | "ignored" | "obstructed" | "external";
+export type NodeStatus = "normal" | "modified" | "added" | "deleted" | "replaced" | "unversioned" | "missing" | "conflicted" | "ignored" | "obstructed" | "external" | 
+/**
+ *  A folder an interrupted checkout or update did not finish (svn's `!` on a directory):
+ *  not a local change and not an error; continuing the checkout or update finishes it.
+ */
+"incomplete";
 
 export type OpFailed = {
 	opId: OpId,
@@ -701,7 +753,12 @@ export type OpStage =
 /**  Receiving the tree and file contents and writing them to the working copy. */
 "fetching" | 
 /**  The server drive is over; recording the result (externals, working copy info). */
-"finishing";
+"finishing" | 
+/**
+ *  The connection was lost and the server cannot be reached: the operation probes it and
+ *  resumes on its own once it answers ([`Progress::connection_wait`] has the timing).
+ */
+"waiting-for-connection";
 
 export type OpStarted = OperationHandle;
 
@@ -808,6 +865,8 @@ export type Progress = {
 	entries: ProgressEntry[],
 	entriesDropped: number,
 	counts: ActionCounts | null,
+	/**  Set while `stage` is [`OpStage::WaitingForConnection`]. */
+	connectionWait?: ConnectionWait | null,
 };
 
 /**  One line of an operation's path log. */
@@ -883,6 +942,16 @@ export type ResolvedRepoUrl = {
 };
 
 /**
+ *  An interrupted checkout or update, as the working copy records it: `wc_continue` finishes it
+ *  at `rev`, the revision it was reaching.
+ */
+export type ResumeInfo = {
+	rev: Rev,
+	/**  The working copy was never complete: a checkout was interrupted (otherwise an update). */
+	checkout: boolean,
+};
+
+/**
  *  Repository revision. Wire value is a JSON number (u64, safe below 2^53); the TS type is
  *  declared as `number` via a `u32` override because specta rejects u64/f64 without nulls.
  */
@@ -916,6 +985,12 @@ export type Settings = {
 	/**  Range: `SETTING_RANGES` (validator in the app crate). */
 	"network.maxConnections": number,
 	"network.timeoutSec": number,
+	/**
+	 *  How long a checkout or update waits for a lost connection to come back before it
+	 *  stops (the working copy then stays incomplete and can be continued).
+	 *  Range: `SETTING_RANGES`.
+	 */
+	"network.reconnectWaitMin": number,
 	"network.proxy": ProxySetting,
 	/**
 	 *  Kerberos single sign-on (Negotiate) when the server offers it; off falls back to a
@@ -965,6 +1040,12 @@ export type SettingsPatch_Deserialize = {
 	/**  Range: `SETTING_RANGES` (validator in the app crate). */
 	"network.maxConnections"?: number | null,
 	"network.timeoutSec"?: number | null,
+	/**
+	 *  How long a checkout or update waits for a lost connection to come back before it
+	 *  stops (the working copy then stays incomplete and can be continued).
+	 *  Range: `SETTING_RANGES`.
+	 */
+	"network.reconnectWaitMin"?: number | null,
 	"network.proxy"?: ProxySetting | null,
 	/**
 	 *  Kerberos single sign-on (Negotiate) when the server offers it; off falls back to a
@@ -993,6 +1074,12 @@ export type SettingsPatch_Serialize = {
 	/**  Range: `SETTING_RANGES` (validator in the app crate). */
 	"network.maxConnections"?: number | null,
 	"network.timeoutSec"?: number | null,
+	/**
+	 *  How long a checkout or update waits for a lost connection to come back before it
+	 *  stops (the working copy then stays incomplete and can be continued).
+	 *  Range: `SETTING_RANGES`.
+	 */
+	"network.reconnectWaitMin"?: number | null,
 	"network.proxy"?: ProxySetting | null,
 	/**
 	 *  Kerberos single sign-on (Negotiate) when the server offers it; off falls back to a
@@ -1097,10 +1184,12 @@ export type WcEntry = {
 	/**  Why the working copy cannot be read (only when `missing`). */
 	problem: string | null,
 	/**
-	 *  A checkout or update stopped before it finished; the UI shows "Incomplete — Update to
-	 *  finish". Always `false` when `missing`.
+	 *  A checkout or update stopped before it finished; the UI offers to continue it. Always
+	 *  `false` when `missing`.
 	 */
 	incomplete: boolean,
+	/**  See [`WorkingCopy::resume`]. */
+	resume?: ResumeInfo | null,
 };
 
 /**  Working-copy format; only 31 and 32 are valid (validated on deserialize; `number` in TS). */
@@ -1137,6 +1226,11 @@ export type WorkingCopy = {
 	 *  are recorded as incomplete. Updating the working copy finishes it.
 	 */
 	incomplete: boolean,
+	/**
+	 *  How to finish an incomplete working copy at the revision it was reaching (`None` when it
+	 *  is complete).
+	 */
+	resume?: ResumeInfo | null,
 };
 
 /* Tauri Specta runtime */

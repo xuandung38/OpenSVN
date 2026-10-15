@@ -198,13 +198,39 @@ test("Mod+T opens the picker; typing filters, Enter switches through wc_open", a
   expect(screen.getByText("No repository matches “zzz”.")).toBeTruthy();
 });
 
-test("a working copy left by an unfinished checkout is flagged Incomplete — Update to finish", async () => {
-  markMockWcIncomplete("wc-docs");
+test("a working copy left by an unfinished checkout offers Continue checkout or Update to latest", async () => {
+  markMockWcIncomplete("wc-docs", 1200);
   const { list } = await openPicker();
   const docs = within(list).getByRole("option", { name: /design-docs/ });
-  expect(docs.textContent).toContain("Incomplete — Update to finish");
+  expect(docs.textContent).toContain("Checkout incomplete — Continue checkout");
   const game = within(list).getByRole("option", { name: /game-client/ });
-  expect(game.textContent).not.toContain("Incomplete");
+  expect(game.textContent).not.toContain("incomplete");
+  await act(async () => {
+    docs.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  });
+  const menu = await screen.findByRole("menu", { name: "Actions for design-docs" });
+  expect(within(menu).getByRole("menuitem", { name: "Update to latest instead" })).toBeTruthy();
+  await user().click(within(menu).getByRole("menuitem", { name: "Continue checkout" }));
+  await waitFor(() => expect(lastCall("wcContinue")?.args).toEqual(["wc-docs"]));
+  expect(calls("update")).toBe(0);
+});
+
+test("an interrupted update says so; Update to latest instead runs a plain update to HEAD", async () => {
+  markMockWcIncomplete("wc-docs", 1200, false);
+  const { list } = await openPicker();
+  const docs2 = within(list).getByRole("option", { name: /design-docs/ });
+  expect(docs2.textContent).toContain("Update incomplete — Continue update");
+  await act(async () => {
+    docs2.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  });
+  const menu2 = await screen.findByRole("menu", { name: "Actions for design-docs" });
+  expect(within(menu2).getByRole("menuitem", { name: "Continue update" })).toBeTruthy();
+  await user().click(within(menu2).getByRole("menuitem", { name: "Update to latest instead" }));
+  await waitFor(() =>
+    expect(lastCall("update")?.args).toEqual([
+      { wcId: "wc-docs", paths: null, rev: null, depth: null },
+    ]),
+  );
 });
 
 test("a missing working copy offers Locate…, which re-grants through the native dialog", async () => {
