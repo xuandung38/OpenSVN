@@ -19,7 +19,7 @@ use svn_types::{
 };
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-use super::resume::ReadRetry;
+use super::resume::{ReadRetry, cannot_resume};
 use super::update::{RaWire, buffered_error};
 
 pub(crate) fn corrupt(msg: impl Into<String>) -> SvnError {
@@ -377,7 +377,8 @@ pub(crate) async fn get_file(
         .collect();
 
     // The content of `!svn/rvr/REV/path` never changes: a download that breaks off is asked for
-    // again and continues after the bytes the sink already has.
+    // again and continues after the bytes the sink already has. The server's MD5, checked over
+    // the whole, shows that the parts belong together; without it a broken download fails.
     let mut hasher = Md5::new();
     let mut written: u64 = 0;
     let mut retry = ReadRetry::new(wire, "file download");
@@ -415,6 +416,15 @@ pub(crate) async fn get_file(
             Err(e) if sink_failed => return Err(e),
             Err(e) => e,
         };
+        if expected.is_none() && written > 0 {
+            // Without the server's MD5 nothing would show that the bytes asked for again
+            // continue the ones the sink already has.
+            return Err(if err.connection_failure().is_some() {
+                cannot_resume(err, "file download")
+            } else {
+                err
+            });
+        }
         if written > before {
             retry.progressed();
         }

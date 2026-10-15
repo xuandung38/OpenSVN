@@ -622,6 +622,102 @@ async fn a_download_that_keeps_breaking_at_the_same_byte_fails_with_the_connecti
     assert_eq!(sink.data, content[..30_000]);
 }
 
+/// A file server announcing `props`, whose `k`-th GET (0-based) answers `gets[k]`: a body and
+/// where it is cut.
+async fn file_server_serving(props: Vec<u8>, gets: Vec<(Vec<u8>, Option<usize>)>) -> Server {
+    let n = AtomicUsize::new(0);
+    Server::start(move |req| match req.method.as_str() {
+        "PROPFIND" => Reply::xml(207, props.clone()),
+        "GET" => {
+            let (body, cut) = gets[n.fetch_add(1, Ordering::SeqCst)].clone();
+            let reply = Reply {
+                status: 200,
+                content_type: "text/plain",
+                body,
+                cut: None,
+            };
+            match cut {
+                Some(at) => reply.cut_at(at),
+                None => reply,
+            }
+        }
+        m => panic!("unexpected {m}"),
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_download_whose_content_differs_when_asked_again_fails_and_never_mixes() {
+    let content = file_content();
+    let mut other = content.clone();
+    other[50_000] ^= 0xff;
+    let srv = file_server_serving(
+        allprop_for(&content),
+        vec![(content.clone(), Some(30_000)), (other, None)],
+    )
+    .await;
+    let s = session(&srv).await;
+    let mut sink = Recording::default();
+    let err = s
+        .get_file(&p("a.txt"), Some(Revnum(9)), &mut sink, &CancelToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Corrupt, "{err:?}");
+    assert_eq!(srv.count("GET"), 2);
+}
+
+#[tokio::test]
+async fn a_download_without_the_servers_checksum_is_not_resumed() {
+    let content = file_content();
+    let props = String::from_utf8(allprop_for(&content))
+        .unwrap()
+        .lines()
+        .filter(|l| !l.contains("md5-checksum"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into_bytes();
+    let srv = file_server_serving(
+        props,
+        vec![(content.clone(), Some(30_000)), (content.clone(), None)],
+    )
+    .await;
+    let s = session(&srv).await;
+    let mut sink = Recording::default();
+    let err = s
+        .get_file(&p("a.txt"), Some(Revnum(9)), &mut sink, &CancelToken::new())
+        .await
+        .unwrap_err();
+    assert!(err.connection_failure().is_some(), "{err:?}");
+    assert!(err.message.contains("cannot be resumed"), "{err:?}");
+    assert_eq!(srv.count("GET"), 1);
+}
+
+#[tokio::test]
+async fn a_download_without_the_servers_checksum_cut_before_any_byte_is_asked_again() {
+    let content = file_content();
+    let props = String::from_utf8(allprop_for(&content))
+        .unwrap()
+        .lines()
+        .filter(|l| !l.contains("md5-checksum"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into_bytes();
+    let srv = file_server_serving(
+        props,
+        vec![(content.clone(), Some(0)), (content.clone(), None)],
+    )
+    .await;
+    let s = session(&srv).await;
+    let mut sink = Recording::default();
+    let meta = s
+        .get_file(&p("a.txt"), Some(Revnum(9)), &mut sink, &CancelToken::new())
+        .await
+        .expect("nothing was written before the cut");
+    assert!(!meta.verified);
+    assert!(sink.data == content);
+    assert_eq!(srv.count("GET"), 2);
+}
+
 #[tokio::test]
 async fn a_download_is_not_retried_without_a_retry_budget() {
     let content = file_content();
