@@ -45,11 +45,18 @@ export const commands = {
 	statusRemote: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("status_remote", { wcId })),
 	diffGet: (request: DiffGetRequest) => typedError<FileDiff, AppError>(__TAURI_INVOKE("diff_get", { request })),
 	/**
-	 *  Opens `target` in the configured external diff tool (`diff.externalTool`): both sides are
-	 *  written as read-only copies into a private folder and the tool is started on them. Used when a
-	 *  diff is too complex or too large to show, or on request. Binary files are refused.
+	 *  Opens `target` in the configured external diff tool: both sides are written as read-only
+	 *  copies into a private folder and the tool is started on them. Used when a diff is too complex
+	 *  or too large to show, or on request. A tool set for the file's extension
+	 *  (`diff.toolsByExtension`) gets the files as they are, binary ones included; `diff.externalTool`
+	 *  gets text only and binary files are refused.
 	 */
 	diffExternal: (target: DiffTarget) => typedError<null, AppError>(__TAURI_INVOKE("diff_external", { target })),
+	/**
+	 *  Opens one version of `target` (the older or the newer side) with the default application, as
+	 *  a read-only copy. Only document types the default application may open are accepted.
+	 */
+	diffOpenVersion: (target: DiffTarget, side: DiffSideKind) => typedError<null, AppError>(__TAURI_INVOKE("diff_open_version", { target, side })),
 	changelistSet: (wcId: WcId, paths: string[], name: string | null) => typedError<null, AppError>(__TAURI_INVOKE("changelist_set", { wcId, paths, name })),
 	ignoreAdd: (request: IgnoreAddRequest) => typedError<null, AppError>(__TAURI_INVOKE("ignore_add", { request })),
 	markMove: (wcId: WcId, from: string, to: string) => typedError<null, AppError>(__TAURI_INVOKE("mark_move", { wcId, from, to })),
@@ -141,6 +148,13 @@ export const commands = {
 	programChoose: (kind: ProgramKind, args: string[]) => typedError<Settings, AppError>(__TAURI_INVOKE("program_choose", { kind, args })),
 	/**  Removes a configured program. */
 	programClear: (kind: ProgramKind) => typedError<Settings, AppError>(__TAURI_INVOKE("program_clear", { kind })),
+	/**
+	 *  Like `program_choose` for the diff tool of one file extension (`docx` or `.docx`). The tool
+	 *  is used instead of `diff.externalTool` for those files, binary ones included.
+	 */
+	programChooseForExtension: (ext: string, args: string[]) => typedError<Settings, AppError>(__TAURI_INVOKE("program_choose_for_extension", { ext, args })),
+	/**  Removes the diff tool of one file extension. */
+	programClearForExtension: (ext: string) => typedError<Settings, AppError>(__TAURI_INVOKE("program_clear_for_extension", { ext })),
 	/**
 	 *  Shows a native file or folder dialog and returns an opaque, single-use grant for the choice
 	 *  (`None` when cancelled). Commands that need a local path outside a working copy take the grant.
@@ -474,6 +488,9 @@ export type DiffGetRequest = {
 
 export type DiffMode = "split" | "unified";
 
+/**  One side of a diff: the older (`left`) or the newer (`right`) version. */
+export type DiffSideKind = "left" | "right";
+
 /**  What to diff. Tagged by `kind`. */
 export type DiffTarget = 
 /**  base <-> working */
@@ -540,6 +557,17 @@ export type ErrorCode = "network" | "timeout" | "auth-required" |
 /**  The request itself is invalid (bad value, expired path grant, unsupported option). */
 "invalid-argument" | "internal";
 
+/**
+ *  External diff tool for one file extension, used instead of `diff.externalTool` for files with
+ *  that extension (like TortoiseSVN's per-extension diff viewers). Binary files are handed to it.
+ */
+export type ExtDiffTool = {
+	/**  Lowercase extension without the dot (`docx`). */
+	ext: string,
+	path: string,
+	args: string[],
+};
+
 export type ExternalDiffTool = {
 	path: string,
 	args: string[],
@@ -571,6 +599,11 @@ export type FileDiff = {
 	 *  external diff tool (`diff_external`) instead; it never retries the display diff.
 	 */
 	tooComplex: boolean | null,
+	/**
+	 *  Set for Word and Excel files: the sides are the text extracted from the documents (not
+	 *  their formatting), or, when `extracted` is false, why no text could be extracted.
+	 */
+	office: OfficeText | null,
 };
 
 export type FileKind = "file" | "dir" | "symlink";
@@ -717,6 +750,20 @@ export type NodeStatus = "normal" | "modified" | "added" | "deleted" | "replaced
  *  not a local change and not an error; continuing the checkout or update finishes it.
  */
 "incomplete";
+
+/**  Office document families the diff knows. */
+export type OfficeKind = "word" | "excel";
+
+/**  How an Office file was diffed. */
+export type OfficeText = {
+	kind: OfficeKind,
+	/**
+	 *  The text sides were extracted from the documents. When false the diff is the plain
+	 *  (usually binary) one and `reason` says why: a 97-2003 file, a protected or damaged one.
+	 */
+	extracted: boolean,
+	reason: string | null,
+};
 
 export type OpFailed = {
 	opId: OpId,
@@ -1020,6 +1067,8 @@ export type Settings = {
 	"tools.editor": ExternalDiffTool | null,
 	/**  Terminal used by "open terminal here". `null` when not configured. */
 	"tools.terminal": ExternalDiffTool | null,
+	/**  Diff tools by file extension (`program_choose_for_extension`). `null` when none. */
+	"diff.toolsByExtension": ExtDiffTool[] | null,
 };
 
 /**

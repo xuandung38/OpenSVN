@@ -67,6 +67,7 @@ interface FileDiff {
   image?: { leftUrl?: string; rightUrl?: string };                 // asset:// URL tạm
   tooLarge?: boolean;                                              // > 5MB text → hỏi trước khi tải (forceLarge); left/right bỏ trống, propChanges vẫn gửi
   tooComplex?: boolean;                                            // vượt ngân sách diff hiển thị (svn_diff::DISPLAY_MAX_COST): bỏ left/right, UI mời mở `diff_external`, không thử lại
+  office?: { kind: 'word' | 'excel'; extracted: boolean; reason?: string }; // file Word/Excel (theo đuôi): left/right là chữ đã trích (không phải định dạng); extracted=false → diff nhị phân + lý do (.doc/.xls, file bảo vệ/hỏng)
 }
 interface TextSide { content: string; encoding: string; eol: 'LF' | 'CRLF' | 'mixed'; label: string; }
 interface Hunk { oldStart: number; oldLines: number; newStart: number; newLines: number; lines: string[]; }
@@ -138,8 +139,9 @@ interface WcEntry {
 | `status_get` | `{ wcId, includeIgnored?, includeUnversioned? }` | `FileStatus[]` (từ cache, có thể cũ) |
 | `status_refresh` | `{ wcId, paths? }` | `OperationHandle` |
 | `status_remote` | `{ wcId }` | `OperationHandle` (cập nhật `remote` trong FileStatus + `incoming`) |
-| `diff_get` | `{ target: DiffTarget, ignoreWhitespace?, forceLarge? }` | `FileDiff` |
-| `diff_external` | `{ target: DiffTarget }` | `void`. Mở `diff.externalTool` trên hai bản sao chỉ-đọc của hai bên (thư mục riêng `<data>/external-diff/<id>/{left,right}.<ext>`, tên cố định, `ext` chỉ giữ `[A-Za-z0-9]{1,16}`; tự xóa sau 24h, giữ tối đa 32 thư mục / 512 MiB, xóa cũ nhất trước; khi xóa không bao giờ đi theo symlink). Chạy trực tiếp, không qua shell; trong `args`, `{left}`/`{right}` được thay bằng đường dẫn hai bản sao, nếu không có placeholder thì hai đường dẫn được nối vào cuối. Chưa cấu hình → `invalidArgument` + action `openSettings`; file nhị phân → `invalidArgument` |
+| `diff_get` | `{ target: DiffTarget, ignoreWhitespace?, forceLarge? }` | `FileDiff`. File `.docx/.docm/.dotx/.dotm` và `.xlsx/.xlsm/.xltx/.xltm`: engine ghi hai phiên bản ra `<data>/office-diff/<id>/` theo stream (không giới hạn 5 MB với file gốc), trích chữ (`crates/office-text`: docx mỗi đoạn một dòng, bảng `\| ô \| ô \|`, header/footer/chú thích; xlsx `Sheet!A1: giá trị  [=công thức]`), xóa thư mục, rồi diff như văn bản; chữ trích > 5 MB → `tooLarge`. Giới hạn: 20 000 entry, 512 MiB giải nén mỗi part, 1 GiB tổng, XML sâu 256, chữ 64 MiB, không DTD. `.doc/.xls` → `office.extracted = false` |
+| `diff_open_version` | `{ target: DiffTarget, side: 'left' \| 'right' }` | `void`. Ghi một phiên bản (stream) thành bản sao chỉ-đọc `<data>/external-diff/<id>/{base,working,rN}.<ext>` rồi mở bằng ứng dụng mặc định (dùng Compare của Word/Excel). Chỉ loại tài liệu trong allow-list của `open_external` (`docx`, `xlsx`, `pptx`, ...; không `.doc/.xls`, không file có macro), kiểm trước khi tải và trên bản sao; phiên bản không tồn tại (file thêm/xóa ở revision đó) → `invalidArgument` |
+| `diff_external` | `{ target: DiffTarget }` | `void`. Mở `diff.externalTool` trên hai bản sao chỉ-đọc của hai bên (thư mục riêng `<data>/external-diff/<id>/{left,right}.<ext>`, tên cố định, `ext` chỉ giữ `[A-Za-z0-9]{1,16}`; tự xóa sau 24h, giữ tối đa 32 thư mục / 512 MiB, xóa cũ nhất trước; khi xóa không bao giờ đi theo symlink). Chạy trực tiếp, không qua shell; trong `args`, `{left}`/`{right}` được thay bằng đường dẫn hai bản sao, nếu không có placeholder thì hai đường dẫn được nối vào cuối. Chưa cấu hình → `invalidArgument` + action `openSettings`; file nhị phân → `invalidArgument`. Nếu đuôi file có công cụ riêng trong `diff.toolsByExtension` thì dùng công cụ đó, hai bên được ghi nguyên byte theo stream (kể cả file nhị phân, bên không tồn tại là file rỗng) |
 | `changelist_set` | `{ wcId, paths, name \| null }` | `void` |
 | `ignore_add` | `{ wcId, pattern, dir, scope: 'svn:ignore' \| 'local' }` | `void` |
 | `mark_move` | `{ wcId, from, to }` | `void` |
@@ -187,7 +189,8 @@ interface WcEntry {
 | `accounts_list`, `accounts_sign_out { realm }` | Quản lý credential |
 | `certs_list`, `certs_remove { key: {host, port, sha256} }` | Chứng chỉ đã tin cậy vĩnh viễn (Settings → Certificates); xóa thì lần kết nối sau hỏi lại |
 | `engine_capabilities` | `EngineCapabilities { externals: boolean, demo: boolean }`: engine đang chạy hỗ trợ gì. `externals: false` → checkout/update/switch không fetch `svn:externals` (issue #97); UI ẩn tùy chọn "Ignore externals" và ghi chú "Externals are not fetched yet". `demo: true` → bản release đang chạy engine demo trong bộ nhớ (không tới server thật); UI hiện banner cố định "Demo engine — not connected to real servers". Luôn `false` ở bản debug |
-| `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.language"`, `patch` chỉ chứa khóa cần đổi. `SettingsPatch` **không có** các khóa chạy chương trình (`diff.externalTool`, `diff.mergeTool`, `tools.editor`, `tools.terminal`) và **không có** `general.checkoutRoot` (nơi app ghi; chỉ đổi qua `checkout_root_choose`); khóa lạ bị từ chối với lỗi `invalid-argument` |
+| `settings_get`, `settings_set { patch }` | Settings (§6.3); khóa dạng `"general.language"`, `patch` chỉ chứa khóa cần đổi. `SettingsPatch` **không có** các khóa chạy chương trình (`diff.externalTool`, `diff.mergeTool`, `tools.editor`, `tools.terminal`, `diff.toolsByExtension`) và **không có** `general.checkoutRoot` (nơi app ghi; chỉ đổi qua `checkout_root_choose`); khóa lạ bị từ chối với lỗi `invalid-argument` |
+| `program_choose_for_extension { ext, args }`, `program_clear_for_extension { ext }` | Như `program_choose`/`program_clear` cho công cụ diff của một đuôi file (`docx` hoặc `.docx`, chuẩn hóa thành chữ thường `[a-z0-9]{1,16}`, tối đa 32 đuôi); dialog xác nhận ghi rõ đuôi file. Trả `Settings` mới |
 | `program_choose { kind, args }`, `program_clear { kind }` | Đặt/xóa chương trình ngoài (`kind`: `diff-tool` \| `merge-tool` \| `editor` \| `terminal`). Rust mở dialog chọn file native rồi dialog xác nhận native (mỗi tham số một dòng, có quote; từ chối ký tự điều khiển/bidi/vô hình theo quy tắc chung `display_text::is_deceptive`); trả `Settings` mới (không đổi nếu người dùng hủy) |
 | `path_pick { request }` | Dialog native chọn thư mục / file / nơi lưu (`PickRequest`), trả `PathGrantInfo \| null` (xem §3.6). `title` (≤ 120 ký tự) và `suggestedName` (≤ 255, không có `/` `\`, không phải `.`/`..`) không được chứa ký tự điều khiển, bidi hay zero-width, nếu có thì lỗi `invalid-argument`. `displayName` hiện các ký tự đó dạng `\u{XXXX}` |
 | `updater_token_set { token }`, `updater_token_clear`, `updater_token_status` | Token GitHub đọc bản cập nhật: chỉ lưu trong kho credential của OS (Keychain / Credential Manager / Secret Service), không bao giờ vào file, settings hay bộ nhớ dự phòng; không có kho OS thì `set` lỗi. Chỉ ghi, `status` chỉ trả `boolean` |
@@ -322,6 +325,7 @@ Log theo path dùng `log_path_by_path`; khi khoảng revision chưa nằm trong 
 | `diff.mergeTool` | `{ path, args } \| null` (chỉ đổi qua `program_choose`) | null |
 | `tools.editor` | `{ path, args } \| null` (chỉ đổi qua `program_choose`) | null |
 | `tools.terminal` | `{ path, args } \| null` (chỉ đổi qua `program_choose`) | null |
+| `diff.toolsByExtension` | `{ ext, path, args }[] \| null` (chỉ đổi qua `program_choose_for_extension`; dùng thay `diff.externalTool` cho file có đuôi `ext`, nhận cả file nhị phân) | null |
 | `network.maxConnections` | number 1–8 | 4 |
 | `network.timeoutSec` | number 5–3600 | 60 |
 | `network.proxy` | `'system' \| { url }` | system |
