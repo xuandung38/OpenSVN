@@ -120,6 +120,10 @@ reproduce this:
   - `--close-after N`: closes a reused connection after N exchanges, under the next request.
   - `--reset-after N`: the same, with a reset.
   - `--idle-reset S`: resets a connection that stayed idle for S seconds.
+  - `--stale-after S`: resets a connection idle for S seconds or more under the next request,
+    without forwarding it: a proxy, firewall or NAT that dropped the idle connection silently.
+  - `--log-requests`: logs the request line of every request the client starts, forwarded or
+    not, so a test can check that no write was sent twice.
   - `--truncate-every K --truncate-at B`: cuts every K-th response bigger than B bytes mid-body.
   - `--truncate-method M`: counts and cuts only responses to these methods (`REPORT,GET`). With
     `--truncate-every 1` every such response is cut at the same offset: a server that always
