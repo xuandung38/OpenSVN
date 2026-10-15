@@ -95,7 +95,7 @@ Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: xem/dif
 Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo, để không trùng.
 
 1. **Bộ đếm "server cứ cắt đúng một chỗ" (#164, follow-up).** `LogProgress::accept` đang giả định revision tăng đơn điệu, nên sẽ gãy khi log có `-g` hoặc revprops có entry merge lồng. Cần sửa và thêm test.
-2. **Lock bị lỗi connect báo `WriteOutcomeUnknown` (#166, follow-up).** Lỗi connect nghĩa là yêu cầu chưa được gửi, nên phải báo lỗi mạng thường. Sửa nhỏ trong `svn-ra`.
+2. **Lock bị lỗi connect báo `WriteOutcomeUnknown` (#166, follow-up).** Lỗi connect nghĩa là yêu cầu chưa được gửi, nên phải báo lỗi mạng thường. Sửa nhỏ ở `outcome_unknown` trong `apps/opensvn/src-tauri/src/engine/real/locks.rs` (có thể cần `svn-ra` phân biệt lỗi connect).
 3. **Hiệu năng macOS/Windows (#121).** Hai nền tảng này vẫn fsync từng file (`BATCHED_SYNC` trong `crates/svn-wc/src/durable.rs`). Cần đo trên máy thật và tìm cách gộp (F_FULLFSYNC/FlushFileBuffers theo lô).
 4. **Watcher và menu native (#11).** Kiểm tay menu trên macOS và Windows.
 5. **Spike WebView (#12).** Chạy trên Linux (Intel/AMD/NVIDIA) và Windows 11 theo `plans/**/reports/from-dev-p09-webview-perf-spike-report.md`, rồi bỏ trạng thái "conditional" trong ADR-002.
