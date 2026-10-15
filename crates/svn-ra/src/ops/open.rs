@@ -91,7 +91,7 @@ impl HttpRaSession {
             .filter(|u| valid_uuid(u))
             .ok_or_else(|| {
                 SvnError::new(
-                    ErrorCode::Corrupt,
+                    ErrorCode::ProtocolViolation,
                     "server did not send a usable SVN-Repository-UUID",
                 )
             })?;

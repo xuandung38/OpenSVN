@@ -156,6 +156,7 @@ pub(crate) fn file_diff(
         image: None,
         too_large: None,
         too_complex: too_complex.then_some(true),
+        office: None,
     })
 }
 
