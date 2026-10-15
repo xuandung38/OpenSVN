@@ -64,7 +64,7 @@ fn busy() -> AppError {
     let mut e = AppError::internal("The working copy is busy. Try again in a moment.");
     e.code = ErrorCode::WcBusy;
     e.retryable = true;
-    e.actions = Some(vec![ErrorAction::Retry]);
+    e.actions = Some(Box::new(vec![ErrorAction::Retry]));
     e
 }
 

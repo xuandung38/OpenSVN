@@ -28,6 +28,7 @@ mod programs;
 pub mod settings;
 mod status;
 mod updater;
+mod wake;
 mod wc;
 
 use std::sync::Arc;
@@ -207,8 +208,10 @@ async fn finish_startup<R: tauri::Runtime>(handle: tauri::AppHandle<R>, kind: En
         // Best effort: a failure here only means the sidebar starts empty.
         let _ = state.wcs.add_existing(&demo_root.to_string_lossy()).await;
     }
+    state.recover_checkouts().await;
     state.recover_all().await;
     state.start_poller(None);
+    state.start_wake_watch();
 }
 
 /// The generated app context (config, capabilities, assets). The macro may expand only once per

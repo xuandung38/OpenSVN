@@ -155,6 +155,7 @@ const BACKEND_RANGES = {
   "general.checkIntervalMin": { min: 1, max: 1440 },
   "network.maxConnections": { min: 1, max: 8 },
   "network.timeoutSec": { min: 5, max: 3600 },
+  "network.reconnectWaitMin": { min: 1, max: 120 },
   "cache.maxSizeGb": { min: 1, max: 4096 },
 };
 

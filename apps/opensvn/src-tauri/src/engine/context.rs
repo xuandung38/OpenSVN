@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use opensvn_ipc::{OpStage, ProgressEntry};
+use opensvn_ipc::{ConnectionWait, OpStage, ProgressEntry};
 use svn_types::{CancelToken, ErrorCode, SvnError};
 
 /// Progress sample reported by an engine operation. The operation manager adds the operation id
@@ -26,6 +26,8 @@ pub struct ProgressUpdate {
     pub stage: Option<OpStage>,
     /// One path the operation handled, for the path log.
     pub entry: Option<ProgressEntry>,
+    /// Timing of [`OpStage::WaitingForConnection`]; sent with that stage.
+    pub connection_wait: Option<ConnectionWait>,
 }
 
 /// Notice phase: the operation went through, but the working copy needs `cleanup`
@@ -88,6 +90,9 @@ pub struct OpContext {
     /// False for background work (periodic checks): the engine must not prompt the user and fails
     /// with `auth-required` instead when credentials are missing.
     pub interactive: bool,
+    /// Wakes an operation that waits for a lost connection, for an immediate attempt: the
+    /// user's "Retry now", or the system waking up from sleep.
+    pub retry_now: Arc<tokio::sync::Notify>,
 }
 
 impl OpContext {
@@ -97,6 +102,7 @@ impl OpContext {
             cancel: CancelToken::new(),
             progress: ProgressReporter::noop(),
             interactive: true,
+            retry_now: Arc::default(),
         }
     }
 

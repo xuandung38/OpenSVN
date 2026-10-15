@@ -214,6 +214,8 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     });
     return ok(null);
   },
+  // Nothing in the mock waits for a lost connection.
+  opRetryNow: () => ok(null),
   settingsGet: () => ok(mockSettings),
   // Like the fake engine; the checkout dialog explains when an engine does not fetch externals.
   engineCapabilities: () => ok({ ...engineCaps }),

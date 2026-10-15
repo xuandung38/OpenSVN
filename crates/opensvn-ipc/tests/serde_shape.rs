@@ -204,6 +204,7 @@ fn sample_settings() -> Settings {
         diff_ignore_whitespace: false,
         network_max_connections: 4,
         network_timeout_sec: 60,
+        network_reconnect_wait_min: 10,
         network_proxy: ProxySetting::System,
         network_negotiate: true,
         wc_default_format: WcFormat::V31,

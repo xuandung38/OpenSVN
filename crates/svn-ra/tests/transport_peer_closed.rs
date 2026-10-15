@@ -673,3 +673,99 @@ fn the_default_idle_timeout_is_below_common_keep_alive_timeouts() {
         svn_ra::transport::DEFAULT_POOL_IDLE_TIMEOUT
     );
 }
+
+/// A server that cannot be reached is told apart from a broken connection: nothing was sent,
+/// and a checkout or update may wait for the network. A write keeps its own rules (it is not a
+/// connection failure).
+#[tokio::test]
+async fn a_refused_connection_is_unreachable_not_a_connection_failure() {
+    let ca = TestCa::new();
+    let closed = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    let t = transport(&ca, |c| c.retry = RetryPolicy::none());
+    for m in ["OPTIONS", "MERGE"] {
+        let err = body_of(&t, m, &format!("https://{closed}/repo"))
+            .await
+            .expect_err("nothing listens");
+        assert!(err.is_unreachable(), "{m}: {err:?}");
+        assert!(err.is_connection_class(), "{m}: {err:?}");
+        assert_eq!(err.connection_failure(), None, "{m}: {err:?}");
+    }
+}
+
+/// A certificate the client does not trust is never "unreachable": it must not be waited out.
+#[tokio::test]
+async fn an_untrusted_certificate_is_not_unreachable() {
+    let ca = TestCa::new();
+    let server = RawServer::start(&ca, vec![]).await;
+    let other = TestCa::new();
+    let t = common::transport_trusting(
+        &other,
+        ScriptedPrompter::with_cert_decision(svn_ra_api::CertDecision::Reject),
+        |c| {
+            c.retry = RetryPolicy::none();
+        },
+    );
+    let err = body_of(&t, "OPTIONS", &server.url("/a"))
+        .await
+        .expect_err("untrusted");
+    assert!(!err.is_unreachable(), "{err:?}");
+    assert!(!err.is_connection_class(), "{err:?}");
+}
+
+/// After an outage or a sleep the pooled connections are dropped: the next request opens a
+/// new one instead of waiting on a dead one.
+#[tokio::test]
+async fn reset_connections_drops_the_idle_ones() {
+    let ca = TestCa::new();
+    let server = RawServer::start(&ca, vec![]).await;
+    let t = transport(&ca, |_| {});
+    assert_eq!(body_of(&t, "GET", &server.url("/a")).await.unwrap(), "ok");
+    assert_eq!(body_of(&t, "GET", &server.url("/b")).await.unwrap(), "ok");
+    assert_eq!(server.connections(), 1);
+    t.reset_connections();
+    assert_eq!(body_of(&t, "GET", &server.url("/c")).await.unwrap(), "ok");
+    assert_eq!(server.connections(), 2);
+}
+
+/// After a system sleep the body of a read in flight waits on a dead connection whose read
+/// timeout did not run during the sleep: `interrupt_reads` fails it at once as a reset
+/// connection, so the drive resumes. The response of a write is left alone.
+#[tokio::test]
+async fn interrupt_reads_fails_a_stalled_read_but_never_a_write() {
+    for (method, interrupted) in [("GET", true), ("MERGE", false)] {
+        let ca = TestCa::new();
+        let server = RawServer::start(&ca, vec![Act::Stall]).await;
+        let t = transport(&ca, |c| {
+            c.read_timeout = Duration::from_secs(20);
+            c.retry.delays = Vec::new();
+        });
+        let mut resp = t
+            .send(req(method, &server.url("/s")), &CancelToken::new())
+            .await
+            .unwrap();
+        assert_eq!(resp.chunk().await.unwrap().unwrap(), "abc");
+        let waker = Arc::clone(&t);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            waker.interrupt_reads();
+        });
+        let started = Instant::now();
+        let got = tokio::time::timeout(Duration::from_secs(3), resp.chunk()).await;
+        if interrupted {
+            let err = got
+                .expect("interrupted at once")
+                .expect_err("dead connection");
+            assert_eq!(
+                err.connection_failure(),
+                Some(ConnectionFailure::ConnectionReset),
+                "{err:?}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(2));
+        } else {
+            assert!(got.is_err(), "{method}: a write's answer must not be cut");
+        }
+    }
+}

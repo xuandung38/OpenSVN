@@ -56,6 +56,8 @@ export function stageKey(op: OpState): ActivityKey {
       return "stageFetching";
     case "finishing":
       return "stageFinishing";
+    case "waiting-for-connection":
+      return "stageWaiting";
     default:
       return "stageWorking";
   }

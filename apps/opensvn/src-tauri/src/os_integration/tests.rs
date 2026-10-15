@@ -81,7 +81,7 @@ fn reveal_uses_the_resolved_path() {
 fn refused_with_reveal(err: &AppError, what: &str) {
     assert_eq!(err.code, ErrorCode::InvalidArgument, "{what}");
     assert_eq!(
-        err.actions,
+        err.actions.as_deref().cloned(),
         Some(vec![ErrorAction::RevealInFileManager]),
         "{what}: the UI offers reveal instead"
     );
@@ -268,7 +268,12 @@ fn a_symlinked_item_refused_by_the_default_app_is_not_revealed_either() {
         None,
     )
     .unwrap_err();
-    assert_eq!(escaped.actions, None, "{}", escaped.message);
+    assert_eq!(
+        escaped.actions.as_deref().cloned(),
+        None,
+        "{}",
+        escaped.message
+    );
     for n in ["notes.txt", "docs/secret.txt", "alias.txt"] {
         if n != "docs/secret.txt" {
             let opened = open_external(&r, d.path(), n, OpenWith::Default, None, None).unwrap_err();
@@ -280,7 +285,11 @@ fn a_symlinked_item_refused_by_the_default_app_is_not_revealed_either() {
             "{n}: {}",
             revealed.message
         );
-        assert_eq!(revealed.actions, None, "{n}: no second fallback is offered");
+        assert_eq!(
+            revealed.actions.as_deref().cloned(),
+            None,
+            "{n}: no second fallback is offered"
+        );
     }
     assert!(r.calls.lock().unwrap().is_empty());
 }
@@ -354,7 +363,10 @@ fn unconfigured_editor_and_terminal_point_to_settings() {
     let r = Recorder::default();
     for with in [OpenWith::Editor, OpenWith::Terminal] {
         let err = open_external(&r, d.path(), "src/main.rs", with, None, None).unwrap_err();
-        assert_eq!(err.actions, Some(vec![ErrorAction::OpenSettings]));
+        assert_eq!(
+            err.actions.as_deref().cloned(),
+            Some(vec![ErrorAction::OpenSettings])
+        );
     }
 }
 

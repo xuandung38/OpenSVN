@@ -73,10 +73,57 @@ pub(crate) fn classify_error(err: reqwest::Error) -> SvnError {
         ErrorCode::Network
     };
     let e = SvnError::new(code, format!("HTTP request failed: {}", error_chain(&err)));
+    let e = if failure.is_none() && unreachable(&err) {
+        e.with_unreachable()
+    } else {
+        e
+    };
     match failure {
         Some(f) => e.with_connection(f),
         None => e,
     }
+}
+
+/// Whether `err` failed to connect because the server could not be reached: DNS, refused,
+/// network or host unreachable. A TLS handshake or certificate problem is never unreachable:
+/// it must not be waited out.
+fn unreachable(err: &reqwest::Error) -> bool {
+    use std::io::ErrorKind;
+    if !err.is_connect() {
+        return false;
+    }
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    let mut found = false;
+    while let Some(e) = src {
+        if e.downcast_ref::<rustls::Error>().is_some() {
+            return false;
+        }
+        if let Some(io) = e.downcast_ref::<std::io::Error>() {
+            if io
+                .get_ref()
+                .is_some_and(|inner| inner.is::<rustls::Error>())
+            {
+                return false;
+            }
+            if matches!(
+                io.kind(),
+                ErrorKind::ConnectionRefused
+                    | ErrorKind::HostUnreachable
+                    | ErrorKind::NetworkUnreachable
+                    | ErrorKind::NetworkDown
+                    | ErrorKind::AddrNotAvailable
+            ) {
+                found = true;
+            }
+        }
+        // hyper-util's resolver: "dns error: failed to lookup address information".
+        let text = e.to_string();
+        if text.starts_with("dns error") || text.contains("failed to lookup address") {
+            found = true;
+        }
+        src = e.source();
+    }
+    found
 }
 
 /// How the connection behind `err` failed, from the I/O and hyper errors in its source chain.

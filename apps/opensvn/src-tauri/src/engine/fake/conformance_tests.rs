@@ -108,6 +108,7 @@ fn counting_ctx() -> (OpContext, std::sync::Arc<std::sync::Mutex<Vec<String>>>) 
         interactive: true,
         cancel: svn_types::CancelToken::new(),
         progress: ProgressReporter::new(move |u| s.lock().unwrap().push(u.phase)),
+        retry_now: std::sync::Arc::default(),
     };
     (ctx, seen)
 }

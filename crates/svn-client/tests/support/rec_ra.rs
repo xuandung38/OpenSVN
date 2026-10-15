@@ -47,6 +47,15 @@ pub struct RecRa {
     /// Break every drive with the error when it is about to close this file (a server that
     /// always cuts the answer at the same point). Applies after `update_breaks` is used up.
     pub update_break_at: Mutex<Option<(String, SvnError)>>,
+    /// One entry per `probe` call, in order: fail it with the error (`None`: the server
+    /// answers). Once used up, `probe_default` decides.
+    pub probe_results: Mutex<std::collections::VecDeque<Option<SvnError>>>,
+    /// Answer of a probe once `probe_results` is used up (`None`: the server answers).
+    pub probe_default: Mutex<Option<SvnError>>,
+    /// Probes made.
+    pub probes: std::sync::atomic::AtomicUsize,
+    /// `reset_connections` calls.
+    pub resets: std::sync::atomic::AtomicUsize,
 }
 
 impl RecRa {
@@ -64,6 +73,10 @@ impl RecRa {
             update_breaks: Mutex::default(),
             update_revisions: Mutex::default(),
             update_break_at: Mutex::default(),
+            probe_results: Mutex::default(),
+            probe_default: Mutex::default(),
+            probes: std::sync::atomic::AtomicUsize::new(0),
+            resets: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -337,6 +350,33 @@ impl RaSession for RecRa {
             h();
         }
         self.inner.ensure_authenticated(cancel).await
+    }
+    async fn probe(&self, cancel: &CancelToken) -> Result<()> {
+        cancel.check()?;
+        self.probes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        push(&self.log, "probe".into());
+        let next = self
+            .probe_results
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front();
+        let answer = match next {
+            Some(a) => a,
+            None => self
+                .probe_default
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        };
+        match answer {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+    fn reset_connections(&self) {
+        self.resets
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
     async fn youngest_rev(&self, cancel: &CancelToken) -> Result<Revnum> {
         self.inner.youngest_rev(cancel).await
