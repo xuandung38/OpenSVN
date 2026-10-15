@@ -5,7 +5,7 @@
 //! killed before the rename leaves a `.svn` *skeleton* that no client takes for a working copy:
 //! `tmp` holding the creation lock file `wc.db.creating.lock` and maybe the half-built database
 //! and its journal, and maybe an empty `pristine`; or, killed between the `mkdir` of `.svn` and
-//! that of `tmp`, an empty `.svn`. The next [`WcDb::create`] takes the skeleton over in place,
+//! the lock file, an empty `.svn` or a `.svn` holding only an empty `tmp`. The next [`WcDb::create`] takes the skeleton over in place,
 //! unless its creator still holds the lock. A process killed after the rename
 //! leaves a regular working copy whose root is `incomplete`, which an update finishes.
 //!
@@ -113,6 +113,7 @@ fn inspect_skeleton(adm: &Path) -> Result<Option<Skeleton>> {
     }
     let mut junk = Vec::new();
     let (mut has_tmp, mut has_lock, mut has_db, mut has_db_journal) = (false, false, false, false);
+    let (mut tmp_files, mut has_pristine) = (0usize, false);
     for entry in fs::read_dir(adm).map_err(|e| io_err("cannot read", adm, &e))? {
         let entry = entry.map_err(|e| io_err("cannot read", adm, &e))?;
         let path = entry.path();
@@ -125,6 +126,7 @@ fn inspect_skeleton(adm: &Path) -> Result<Option<Skeleton>> {
                     if !regular_file(&p) {
                         return Ok(None);
                     }
+                    tmp_files += 1;
                     match inner.file_name().to_str() {
                         Some(CREATING_LOCK) => has_lock = true,
                         Some(CREATING_DB | CREATING_JOURNAL) => junk.push(p),
@@ -133,6 +135,7 @@ fn inspect_skeleton(adm: &Path) -> Result<Option<Skeleton>> {
                 }
             }
             Some("pristine") if real_dir(&path) => {
+                has_pristine = true;
                 let mut it = fs::read_dir(&path).map_err(|e| io_err("cannot read", &path, &e))?;
                 if it.next().is_some() {
                     return Ok(None);
@@ -149,9 +152,12 @@ fn inspect_skeleton(adm: &Path) -> Result<Option<Skeleton>> {
             _ => return Ok(None),
         }
     }
-    // Ours only with the evidence of a creation: the lock file of this version, or the empty
-    // in-place database of earlier ones. An empty `.svn`, or a `tmp` alone, proves nothing.
-    if !has_tmp || !(has_lock || has_db) || (has_db_journal && !has_db) {
+    // Ours with the evidence of a creation: the lock file of this version, or the empty
+    // in-place database of earlier ones. Without either, only an empty `tmp` and nothing else
+    // (a creator killed between its `mkdir` of `tmp` and the lock file) is taken over: it holds
+    // nothing to lose, and the creation lock decides between callers as for any skeleton.
+    let bare_tmp = tmp_files == 0 && !has_pristine && !has_db_journal;
+    if !has_tmp || !(has_lock || has_db || bare_tmp) || (has_db_journal && !has_db) {
         return Ok(None);
     }
     Ok(Some(Skeleton { junk }))

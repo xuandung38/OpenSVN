@@ -131,15 +131,41 @@ fn anything_else_in_the_admin_area_is_never_removed() {
 }
 
 #[test]
-fn a_tmp_without_lock_or_database_is_not_a_skeleton() {
-    // `.svn/tmp` alone: what a creator has before it holds its lock, or anything else. Never
-    // taken over.
+fn a_tmp_with_unknown_files_is_not_a_skeleton() {
+    // `.svn/tmp` with no lock file and no database but something else in `tmp`, or next to it
+    // an empty `pristine` (made only under the lock): never taken over.
+    type Extra = fn(&Path);
+    let cases: [(&str, Extra); 2] = [
+        ("unknown file in tmp", |r| {
+            fs::write(r.join(".svn/tmp/svn-AbCd"), b"keep").unwrap();
+        }),
+        ("pristine without lock", |r| {
+            fs::create_dir(r.join(".svn/pristine")).unwrap();
+        }),
+    ];
+    for (what, extra) in cases {
+        let t = tempfile::tempdir().unwrap();
+        fs::create_dir_all(t.path().join(".svn/tmp")).unwrap();
+        extra(t.path());
+        let before = snapshot(&t.path().join(".svn"));
+        let err = WcDb::create(t.path(), &new_wc()).expect_err(what);
+        assert_eq!(
+            err.code,
+            ErrorCode::WcFormatUnsupported,
+            "{what}: {}",
+            err.message
+        );
+        assert_eq!(snapshot(&t.path().join(".svn")), before, "{what}");
+    }
+}
+
+#[test]
+fn an_empty_tmp_alone_is_taken_over() {
+    // A creator killed between its `mkdir` of `.svn/tmp` and the lock file.
     let t = tempfile::tempdir().unwrap();
     fs::create_dir_all(t.path().join(".svn/tmp")).unwrap();
-    let before = snapshot(&t.path().join(".svn"));
-    let err = WcDb::create(t.path(), &new_wc()).expect_err("foreign");
-    assert_eq!(err.code, ErrorCode::WcFormatUnsupported, "{}", err.message);
-    assert_eq!(snapshot(&t.path().join(".svn")), before);
+    drop(WcDb::create(t.path(), &new_wc()).expect("restart"));
+    assert_fresh(t.path());
 }
 
 #[test]
@@ -216,11 +242,18 @@ fn snapshot(dir: &Path) -> Vec<(String, Option<Vec<u8>>)> {
 
 #[test]
 fn concurrent_takeovers_of_a_skeleton_have_one_winner() {
-    for (legacy, empty) in [(false, false), (true, false), (false, true)] {
+    for (legacy, empty, bare_tmp) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
         for _ in 0..20 {
             let t = tempfile::tempdir().unwrap();
             if empty {
                 fs::create_dir(t.path().join(".svn")).unwrap();
+            } else if bare_tmp {
+                fs::create_dir_all(t.path().join(".svn/tmp")).unwrap();
             } else if legacy {
                 fs::create_dir_all(t.path().join(".svn/tmp")).unwrap();
                 fs::write(t.path().join(".svn").join(DB_FILE), b"").unwrap();
