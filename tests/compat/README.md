@@ -156,7 +156,8 @@ scenarios with a clear error.
 | Set | Generator | Content | Checked by |
 |---|---|---|---|
 | `fixtures/wc/f31/` | `SVN=svn fixtures/wc/make-wc-fixtures.sh 31` | 28 WC states, format 31 (clean, modified text/binary/props, added, deleted, missing, unversioned+ignored, replaced, copied, moved file/dir, text/prop/tree conflict, obstructed add, kind changed, locked, sparse empty/files/immediates, excluded, externals, mixed-rev, switched, changelist, uncommitted merge, Unicode paths) | `cargo test -p opensvn-compat --test wc_fixtures` |
-| `fixtures/wc/f32/` | `SVN=/path/to/svn-1.15 fixtures/wc/make-wc-fixtures.sh 32` | 11 states, format 32 (`--compatible-version 1.15`, one with `--store-pristine no`) | same |
+| `fixtures/wc/f31-svn1.15/` | `SVN=<svn 1.15.0> fixtures/wc/make-wc-fixtures.sh 31` | 42 states, format 31 written by svn 1.15.0: the 28 above plus the 14 below | same |
+| `fixtures/wc/f32/` | `SVN=<svn 1.15.0> fixtures/wc/make-wc-fixtures.sh 32` | 43 states, format 32 (`--compatible-version 1.15`): the 42 of `f31-svn1.15` plus `no-pristine` (`--store-pristine no`). Added with 1.15: tree conflicts local-delete/incoming-edit, moved-away/incoming-edit, add/add, delete/delete; merge text and tree conflicts; binary conflict; directory obstructing an add; replaced directory; switched file; mixed sparse depths; stolen lock; server-excluded (svnserve authz); incomplete (update cut off by the server) | same |
 | `fixtures/protocol/<session>/` | `fixtures/protocol/capture.sh` | HTTPv2 transcripts `NNN-{request,response}.http` for `checkout`, `checkout-skelta`, `update`, `log`, `commit` against Apache + mod_dav_svn | `cargo test -p svn-ra --test fixture_replay` (replayed through the transport against a fake HTTPS server, parsed by svn-protocol) |
 | `fixtures/evil/` | `python3 fixtures/evil/generate.py` | 70 hostile-server cases, see its README | `svn-protocol --test evil_server`, `svn-delta --test evil_svndiff`, `svn-ra --test evil_transport` |
 

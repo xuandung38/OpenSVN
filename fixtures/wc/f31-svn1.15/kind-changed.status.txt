@@ -1,0 +1,28 @@
+# svn status -v
+                14       14 fixture      .
+                14       11 fixture      README.txt
+                14        3 fixture      crlf.txt
+                14        3 fixture      data
+                14        2 fixture      data/blob.bin
+                14        3 fixture      data/image.png
+                14       13 fixture      docs
+                14        3 fixture      keywords.txt
+                14        3 fixture      locked.txt
+                14       10 fixture      many-props.txt
+                14        2 fixture      mixed-eol.txt
+                14       14 fixture      new.txt
+~               14        3 fixture      run.sh
+                14       12 fixture      src
+                14        6 fixture      src/app-copy.c
+                14       12 fixture      src/app.c
+                14        4 fixture      with-externals
+X                                        with-externals/docs-ext
+    X           14       11 fixture      with-externals/readme-ext.txt
+
+Performing status on external item at 'with-externals/docs-ext':
+                14       13 fixture      with-externals/docs-ext
+# svn info (subset)
+dir
+14
+infinity
+^/trunk
