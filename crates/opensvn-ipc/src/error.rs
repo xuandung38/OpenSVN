@@ -68,10 +68,11 @@ pub struct AppError {
     pub actions: Option<Vec<ErrorAction>>,
     /// For `locked-by-other`: the locks held by someone else on the requested paths, as the
     /// server reports them now. `None` when the engine could not ask (or for other codes).
-    // A boxed slice keeps `AppError` (returned by every command) small.
+    // A thin box keeps `AppError` (returned by every command) small.
     #[serde(default)]
     #[specta(optional)]
-    pub lock_conflicts: Option<Box<[LockConflict]>>,
+    #[allow(clippy::box_collection)]
+    pub lock_conflicts: Option<Box<Vec<LockConflict>>>,
     /// A checkout found its target folder holding an interrupted checkout of the same location
     /// (or a checkout stopped and left one): the UI offers "Continue checkout".
     #[serde(default)]
@@ -155,7 +156,7 @@ impl AppError {
 
     /// Attaches the locks that refused a lock request; an empty list attaches nothing.
     pub fn with_lock_conflicts(mut self, conflicts: Vec<LockConflict>) -> Self {
-        self.lock_conflicts = (!conflicts.is_empty()).then(|| conflicts.into_boxed_slice());
+        self.lock_conflicts = (!conflicts.is_empty()).then(|| Box::new(conflicts));
         self
     }
 }

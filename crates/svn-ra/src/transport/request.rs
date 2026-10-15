@@ -284,6 +284,18 @@ fn body_complete_before(err: &SvnError, content_length: Option<u64>, received: u
         )
 }
 
+/// Resolves once the transport interrupts reads; never for a response that does not watch.
+async fn interrupted(wake: Option<tokio::sync::watch::Receiver<u64>>) {
+    match wake {
+        Some(mut rx) => {
+            if rx.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,17 +316,5 @@ mod tests {
             Some(10),
             10
         ));
-    }
-}
-
-/// Resolves once the transport interrupts reads; never for a response that does not watch.
-async fn interrupted(wake: Option<tokio::sync::watch::Receiver<u64>>) {
-    match wake {
-        Some(mut rx) => {
-            if rx.changed().await.is_err() {
-                std::future::pending::<()>().await;
-            }
-        }
-        None => std::future::pending::<()>().await,
     }
 }
