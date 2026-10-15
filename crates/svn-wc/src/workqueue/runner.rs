@@ -641,6 +641,48 @@ impl<'a> WorkQueueRunner<'a> {
     }
 }
 
+/// Writes the working form of the normal-form text `reader` into a new synced file in
+/// `tmp_dir`, translated and flagged by `info` the way svn's working file writer prepares an
+/// updated file from its new BASE properties (`open_working_file_writer` in svn's update
+/// editor): eol style, keywords, `svn:special`, `svn:executable`, and read-only when
+/// `read_only`. `mtime` (microseconds) is set when given. A `file-move` item then renames the
+/// file into place, so the install does not depend on what the node's top layer records.
+pub fn write_working_text(
+    tmp_dir: &Path,
+    reader: &mut dyn Read,
+    info: &NodeInstallInfo,
+    read_only: bool,
+    mtime: Option<i64>,
+    tz: UtcOffsetAt<'_>,
+) -> Result<tempfile::TempPath, WorkQueueError> {
+    fs::create_dir_all(tmp_dir).map_err(WorkQueueError::io("create directory", tmp_dir))?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix("install-")
+        .tempfile_in(tmp_dir)
+        .map_err(WorkQueueError::io("create temp file in", tmp_dir))?;
+    let tinfo = TranslateInfo::from_props(|name| info.props.get(name).map(Vec::as_slice));
+    if tinfo.special {
+        let path = tmp.into_temp_path();
+        fs::remove_file(&path).map_err(WorkQueueError::io("remove", &path))?;
+        special::install_from_reader(&path, reader)?;
+        return Ok(path);
+    }
+    let translator = ContentTranslator::to_working(&tinfo, &info.keyword_context(), tz);
+    translate_stream(reader, tmp.as_file_mut(), translator)?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(WorkQueueError::io("sync", tmp.path()))?;
+    let path = tmp.into_temp_path();
+    if let Some(m) = mtime {
+        set_mtime(&path, m)?;
+    }
+    flags::set_executable(&path, info.props.contains_key("svn:executable"))?;
+    if read_only {
+        flags::set_read_only(&path)?;
+    }
+    Ok(path)
+}
+
 /// Content an install reads.
 enum Source {
     /// A plain file (a pristine text or a temporary file).

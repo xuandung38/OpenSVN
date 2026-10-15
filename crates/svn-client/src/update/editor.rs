@@ -299,6 +299,7 @@ impl UpdateEditor {
         })();
         if let Err(e) = committed {
             self.poisoned = true;
+            keep_queued(&self.s.db, p.keep);
             return Err(e);
         }
         if has_ops {
@@ -1132,6 +1133,45 @@ impl DeltaEditor for UpdateEditor {
         self.files.clear();
         self.dirs.clear();
         Ok(())
+    }
+}
+
+/// Deletes the temporary files of a batch whose transaction failed, except those the work queue
+/// names: a failure reported after COMMIT leaves the queued work owning them (it installs from
+/// them and removes them), so deleting them would break the item at every later run.
+fn keep_queued(db: &svn_wc::db::WcDb, files: Vec<tempfile::TempPath>) {
+    if files.is_empty() {
+        return;
+    }
+    let queued: HashSet<String> = match db.work_items() {
+        Ok(items) => items
+            .iter()
+            .filter_map(|(_, skel)| WorkItem::from_skel(skel).ok())
+            .flat_map(|item| match item {
+                WorkItem::FileInstall {
+                    source: Some(src), ..
+                } => vec![src],
+                WorkItem::FileMove { src, .. } => vec![src],
+                WorkItem::FileRemove { relpath } => vec![relpath],
+                _ => Vec::new(),
+            })
+            .collect(),
+        Err(e) => {
+            // Unknown: keeping a file costs a leftover in `.svn/tmp`, deleting one a wedge.
+            tracing::debug!("cannot read the work queue after a failed commit: {e}");
+            for tmp in files {
+                let _ = tmp.keep();
+            }
+            return;
+        }
+    };
+    for tmp in files {
+        let name = tmp
+            .file_name()
+            .map(|n| format!("{}/tmp/{}", svn_wc::db::ADM_DIR, n.to_string_lossy()));
+        if name.is_some_and(|n| queued.contains(&n)) {
+            let _ = tmp.keep();
+        }
     }
 }
 

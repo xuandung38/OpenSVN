@@ -56,12 +56,51 @@ fn require_live_parent(conn: &Connection, wc_id: i64, path: &RelPath) -> Result<
 }
 
 /// Appends serialized work items to the queue in the caller's transaction.
-pub(crate) fn queue_work(conn: &Connection, items: &[Skel]) -> Result<()> {
+///
+/// An install from the pristine store reads the checksum of the node's top layer when it runs
+/// (`svn_wc__db_read_node_install_info`). One queued for a node whose top layer has none (a
+/// plain local add, a `base-deleted` row, no row at all) would fail at every run and wedge the
+/// working copy, for svn's cleanup too. So it is refused here, before anything of the
+/// caller's transaction is committed.
+pub(crate) fn queue_work(conn: &Connection, wc_id: i64, items: &[Skel]) -> Result<()> {
+    for item in items {
+        if let Ok(crate::workqueue::WorkItem::FileInstall {
+            relpath,
+            source: None,
+            ..
+        }) = crate::workqueue::WorkItem::from_skel(item)
+        {
+            check_installable(conn, wc_id, &relpath)?;
+        }
+    }
     let mut stmt = conn
         .prepare_cached("INSERT INTO work_queue (work) VALUES (?1)")
         .map_err(sql_err)?;
     for item in items {
         stmt.execute([item.unparse()]).map_err(sql_err)?;
+    }
+    Ok(())
+}
+
+/// Fails unless the top layer of `relpath` records a pristine checksum (see [`queue_work`]).
+fn check_installable(conn: &Connection, wc_id: i64, relpath: &str) -> Result<()> {
+    let checksum: Option<Option<String>> = super::connection::cached_row(
+        conn,
+        "SELECT checksum FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+         ORDER BY op_depth DESC LIMIT 1",
+        params![wc_id, relpath],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(sql_err)?;
+    if checksum.flatten().is_none() {
+        return Err(SvnError::new(
+            ErrorCode::Corrupt,
+            format!(
+                "refusing to queue the install of '{relpath}' from the pristine store: \
+                 no checksum is recorded for it"
+            ),
+        ));
     }
     Ok(())
 }
@@ -165,6 +204,48 @@ pub(crate) fn base_add(conn: &Connection, wc_id: i64, path: &RelPath, n: &BaseNo
         ],
     )
     .map_err(sql_err)?;
+    // A present node below a directory deleted or replaced in a working layer is deleted in that
+    // layer too (svn's `insert_base_node`).
+    if !path.is_root() && matches!(n.presence, Presence::Normal | Presence::Incomplete) {
+        extend_parent_delete(conn, wc_id, path, kind_word(n.kind), 0)?;
+    }
+    Ok(())
+}
+
+/// svn's `db_extend_parent_delete`: when the parent of `path` has a working layer deeper
+/// than `op_depth`, `path` gets a `base-deleted` row in it (unless it already has a row
+/// at or above that depth).
+pub(crate) fn extend_parent_delete(
+    conn: &Connection,
+    wc_id: i64,
+    path: &RelPath,
+    kind: &str,
+    op_depth: u32,
+) -> Result<()> {
+    let lowest = |p: &str| -> Result<Option<u32>> {
+        super::connection::cached_row(
+            conn,
+            "SELECT op_depth FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+             AND op_depth > ?3 ORDER BY op_depth LIMIT 1",
+            params![wc_id, p, op_depth],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql_err)
+    };
+    let parent = parent_text(path).unwrap_or_default();
+    let Some(parent_op_depth) = lowest(&parent)? else {
+        return Ok(());
+    };
+    if lowest(path.as_str())?.is_none_or(|existing| parent_op_depth < existing) {
+        super::connection::cached_exec(
+            conn,
+            "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
+             presence, kind) VALUES (?1, ?2, ?3, ?4, 'base-deleted', ?5)",
+            params![wc_id, path.as_str(), parent_op_depth, parent, kind],
+        )
+        .map_err(sql_err)?;
+    }
     Ok(())
 }
 
