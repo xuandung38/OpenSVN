@@ -139,7 +139,13 @@ test("a network outage mid-checkout: Connection lost, Retry now, then the checko
   // The outage: the dialog says so, with Retry now; the checkout is not failed.
   await app.waitText("Connection lost, retrying", 120_000);
   assert.match(readFileSync(log, "utf8"), /network down/);
-  await app.click("button", "Retry now");
+  // The Activity panel shows the same notice under the modal dialog: use the dialog's button.
+  const clicked = await app.exec(
+    `const b = [...document.querySelectorAll('dialog[open] button')].find((x) => x.textContent.trim() === 'Retry now');
+     b?.click();
+     return !!b;`,
+  );
+  assert.ok(clicked, "the checkout dialog offers Retry now");
   // Back online: the checkout resumes on its own and finishes.
   await app.waitText(`Checked out ${repo.name}`, 240_000);
   await app.waitText("No local changes", 30_000);
