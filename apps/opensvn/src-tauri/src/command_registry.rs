@@ -26,6 +26,7 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             status_remote,
             diff_get,
             diff_external,
+            diff_open_version,
             changelist_set,
             ignore_add,
             mark_move,

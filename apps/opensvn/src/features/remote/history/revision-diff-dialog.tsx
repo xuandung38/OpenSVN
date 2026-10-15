@@ -80,7 +80,7 @@ function DiffBody({ diff, url, rev }: { diff: FileDiff; url: string; rev: number
   if (!diff.office) return <PlainDiffBody diff={diff} url={url} rev={rev} />;
   return (
     <div className="flex flex-col gap-2">
-      <OfficeNote office={diff.office} />
+      <OfficeNote office={diff.office} diff={diff} target={{ kind: "rev", url, rev }} />
       {diff.office.extracted && (diff.left || diff.right) ? (
         <div className="h-[60vh] min-h-[200px] rounded-md border border-line">
           <Suspense fallback={<p className="m-0 p-2">{t("diffLoading")}</p>}>

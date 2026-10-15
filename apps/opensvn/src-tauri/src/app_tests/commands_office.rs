@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use opensvn_ipc::{CommitRequest, DiffGetRequest, DiffTarget, OfficeKind, Rev, WcId};
+use opensvn_ipc::{CommitRequest, DiffGetRequest, DiffSideKind, DiffTarget, OfficeKind, Rev, WcId};
 
 use super::fixture::Fixture;
 use crate::commands;
@@ -168,4 +168,77 @@ async fn unreadable_and_legacy_office_files_explain_why_there_is_no_text() {
         assert!(d.binary && !office.extracted && office.kind == kind);
         assert!(office.reason.unwrap().contains(why), "{path}");
     }
+}
+
+#[tokio::test]
+async fn each_version_opens_read_only_in_the_default_app() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    let v1 = docx(&["một"], 100);
+    let v2 = docx(&["hai"], 100);
+    let r1 = commit_docx(&f, &wc.id, &v1).await;
+    let r2 = commit_docx(&f, &wc.id, &v2).await;
+    let url = format!("{DEMO_REPO_URL}/trunk/report.docx");
+    let opened = || {
+        let calls = f.opener.calls.lock().unwrap();
+        let last = calls.last().unwrap().clone();
+        std::path::PathBuf::from(last.strip_prefix("open ").unwrap())
+    };
+
+    let rev = DiffTarget::Rev {
+        url: url.clone(),
+        rev: r2,
+    };
+    commands::diff_open_version(f.state(), rev.clone(), DiffSideKind::Left)
+        .await
+        .unwrap();
+    let left = opened();
+    assert_eq!(
+        left.file_name().unwrap().to_string_lossy(),
+        format!("r{}.docx", r1.0)
+    );
+    assert!(left.starts_with(&f.state().data_dir));
+    assert_eq!(std::fs::read(&left).unwrap(), v1);
+    assert!(std::fs::metadata(&left).unwrap().permissions().readonly());
+
+    commands::diff_open_version(f.state(), rev, DiffSideKind::Right)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(opened()).unwrap(), v2);
+
+    let wc_target = DiffTarget::Wc {
+        wc_id: wc.id.clone(),
+        path: "report.docx".into(),
+    };
+    commands::diff_open_version(f.state(), wc_target, DiffSideKind::Right)
+        .await
+        .unwrap();
+    assert!(opened().ends_with("working.docx"));
+
+    // The revision that added the file has no older version.
+    let err = commands::diff_open_version(
+        f.state(),
+        DiffTarget::Rev { url, rev: r1 },
+        DiffSideKind::Left,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, opensvn_ipc::ErrorCode::InvalidArgument);
+
+    // Types the default app may not open (macros, legacy formats) are refused before any work.
+    let before = f.opener.calls.lock().unwrap().len();
+    for path in ["old.doc", "book.xlsm", "run.exe"] {
+        let err = commands::diff_open_version(
+            f.state(),
+            DiffTarget::Wc {
+                wc_id: wc.id.clone(),
+                path: path.into(),
+            },
+            DiffSideKind::Right,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, opensvn_ipc::ErrorCode::InvalidArgument, "{path}");
+    }
+    assert_eq!(f.opener.calls.lock().unwrap().len(), before);
 }

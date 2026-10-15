@@ -6,7 +6,7 @@ import { DropdownMenu } from "../../../components/ui/dropdown-menu";
 import { EmptyState } from "../../../components/ui/empty-state";
 import { SafeText } from "../../../components/ui/safe-text";
 import { SegmentedControl } from "../../../components/ui/segmented-control";
-import type { FileDiff, FileStatus } from "../../../ipc/bindings";
+import type { DiffTarget, FileDiff, FileStatus } from "../../../ipc/bindings";
 import { ipc, toAppError, unwrap } from "../../../ipc/client";
 import { useSettings } from "../../../ipc/queries";
 import { queryKeys } from "../../../ipc/query-keys";
@@ -133,6 +133,7 @@ function FileDiffPane({
             onLoadFull={() => setForce(true)}
             onOpenExternal={() => void actions.openExternalDiff(path)}
             onOpenDefault={() => void actions.openWith(path, "default")}
+            target={{ kind: "wc", wcId, path }}
           />
         )}
       </div>
@@ -155,6 +156,7 @@ export function DiffBody({
   onLoadFull,
   onOpenExternal,
   onOpenDefault,
+  target,
 }: {
   diff: FileDiff;
   file: FileStatus | null;
@@ -163,6 +165,8 @@ export function DiffBody({
   onLoadFull: () => void;
   onOpenExternal: () => void;
   onOpenDefault: () => void;
+  /** What was diffed; lets an Office diff open each version in its default app. */
+  target?: DiffTarget;
 }) {
   const d = useT(dialogStrings);
   const hasText = diff.left !== null || diff.right !== null;
@@ -232,7 +236,7 @@ export function DiffBody({
 
   return (
     <div className="flex h-full flex-col">
-      {diff.office && <OfficeNote office={diff.office} />}
+      {diff.office && <OfficeNote office={diff.office} diff={diff} target={target} />}
       <div className="min-h-0 flex-1">{content}</div>
       <PropChanges changes={diff.propChanges} />
     </div>

@@ -283,6 +283,14 @@ pub enum DiffTarget {
     },
 }
 
+/// One side of a diff: the older (`left`) or the newer (`right`) version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffSideKind {
+    Left,
+    Right,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub enum Eol {
     #[serde(rename = "LF")]

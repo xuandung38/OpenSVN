@@ -348,6 +348,7 @@ export function wcMockCommands(deps: MockDeps) {
       }
       return deps.ok(null);
     },
+    diffOpenVersion: () => ok(null),
     changelistSet: (wcId: string, paths: string[], name: string | null) => {
       setStatus(
         deps,

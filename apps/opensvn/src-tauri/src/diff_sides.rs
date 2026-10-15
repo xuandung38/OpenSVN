@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use opensvn_ipc::{AppError, DiffTarget};
+use opensvn_ipc::{AppError, DiffSideKind, DiffTarget};
 
 use crate::app_state::AppState;
 use crate::engine::{ExportedSides, OpContext, SideFiles};
@@ -75,4 +75,70 @@ pub(crate) async fn export_target(
             .await
             .map_err(|e| AppError::from(&e)),
     }
+}
+
+/// File name of a staged version: what it is (`base`, `working`, `r12`) plus the sanitized
+/// extension of the file. Nothing else from the repository reaches the name.
+pub(crate) fn version_file_name(target: &DiffTarget, side: DiffSideKind) -> String {
+    let left = side == DiffSideKind::Left;
+    let stem = match target {
+        DiffTarget::Wc { .. } => (if left { "base" } else { "working" }).to_owned(),
+        DiffTarget::WcVsRev { rev, .. } if left => format!("r{}", rev.0),
+        DiffTarget::WcVsRev { .. } => "working".to_owned(),
+        DiffTarget::Rev { rev, .. } if left => format!("r{}", rev.0.saturating_sub(1)),
+        DiffTarget::Rev { rev, .. } => format!("r{}", rev.0),
+        DiffTarget::Range { from, .. } if left => format!("r{}", from.0),
+        DiffTarget::Range { to, .. } => format!("r{}", to.0),
+    };
+    match crate::programs::external_diff::staged_extension(&target_path(target)) {
+        Some(ext) => format!("{stem}.{ext}"),
+        None => stem,
+    }
+}
+
+/// Writes one version of `target` as a read-only copy in the private external-diff folder and
+/// opens it with the default application (Word, Excel, Numbers...), e.g. to use Word's own
+/// Compare. Only the document types the default application may open at all are accepted
+/// (`os_integration`), checked before anything is downloaded and again on the copy.
+pub(crate) async fn open_version(
+    state: &AppState,
+    target: DiffTarget,
+    side: DiffSideKind,
+) -> Result<(), AppError> {
+    use crate::os_integration::{default_app_allowed, default_app_name_allowed};
+    use crate::programs::external_diff::{STALE_AFTER, make_read_only, new_stage_dir, sweep_stale};
+    let name = version_file_name(&target, side);
+    let refused = || {
+        crate::errors::invalid_argument(
+            "This type of file is not opened with the default app. Use the external diff tool instead.",
+        )
+        .with_path(target_path(&target))
+    };
+    if !default_app_name_allowed(&name) {
+        return Err(refused());
+    }
+    let root =
+        crate::preview::prepare_private_dir(&state.data_dir, crate::preview::EXTERNAL_DIFF_DIR)?;
+    sweep_stale(&root, STALE_AFTER);
+    let dest = new_stage_dir(&root)?.join(&name);
+    let (left, right) = match side {
+        DiffSideKind::Left => (Some(dest.clone()), None),
+        DiffSideKind::Right => (None, Some(dest.clone())),
+    };
+    let sides = export_target(state, &target, left, right).await?;
+    let exists = match side {
+        DiffSideKind::Left => sides.left.is_some(),
+        DiffSideKind::Right => sides.right.is_some(),
+    };
+    if !exists {
+        return Err(crate::errors::invalid_argument(
+            "The file does not exist in this version (it was added or deleted).",
+        )
+        .with_path(target_path(&target)));
+    }
+    make_read_only(&dest)?;
+    if !default_app_allowed(&dest) {
+        return Err(refused());
+    }
+    state.opener.open_default(&dest)
 }

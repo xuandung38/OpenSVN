@@ -50,6 +50,11 @@ export const commands = {
 	 *  diff is too complex or too large to show, or on request. Binary files are refused.
 	 */
 	diffExternal: (target: DiffTarget) => typedError<null, AppError>(__TAURI_INVOKE("diff_external", { target })),
+	/**
+	 *  Opens one version of `target` (the older or the newer side) with the default application, as
+	 *  a read-only copy. Only document types the default application may open are accepted.
+	 */
+	diffOpenVersion: (target: DiffTarget, side: DiffSideKind) => typedError<null, AppError>(__TAURI_INVOKE("diff_open_version", { target, side })),
 	changelistSet: (wcId: WcId, paths: string[], name: string | null) => typedError<null, AppError>(__TAURI_INVOKE("changelist_set", { wcId, paths, name })),
 	ignoreAdd: (request: IgnoreAddRequest) => typedError<null, AppError>(__TAURI_INVOKE("ignore_add", { request })),
 	markMove: (wcId: WcId, from: string, to: string) => typedError<null, AppError>(__TAURI_INVOKE("mark_move", { wcId, from, to })),
@@ -402,6 +407,9 @@ export type DiffGetRequest = {
 };
 
 export type DiffMode = "split" | "unified";
+
+/**  One side of a diff: the older (`left`) or the newer (`right`) version. */
+export type DiffSideKind = "left" | "right";
 
 /**  What to diff. Tagged by `kind`. */
 export type DiffTarget = 

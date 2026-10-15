@@ -1,8 +1,9 @@
 //! Working copy registry (3.1) and status / local changes (3.2).
 
 use opensvn_ipc::{
-    AppError, DiffGetRequest, DiffTarget, FileDiff, FileStatus, IgnoreAddRequest, NodeStatus,
-    OpResult, OperationHandle, OperationKind, PathGrantId, StatusGetRequest, WcId, WorkingCopy,
+    AppError, DiffGetRequest, DiffSideKind, DiffTarget, FileDiff, FileStatus, IgnoreAddRequest,
+    NodeStatus, OpResult, OperationHandle, OperationKind, PathGrantId, StatusGetRequest, WcId,
+    WorkingCopy,
 };
 use tauri::State;
 
@@ -206,6 +207,18 @@ pub async fn diff_get(
 #[specta::specta]
 pub async fn diff_external(state: State<'_, AppState>, target: DiffTarget) -> Result<(), AppError> {
     guard(open_external_diff(&state, target)).await
+}
+
+/// Opens one version of `target` (the older or the newer side) with the default application, as
+/// a read-only copy. Only document types the default application may open are accepted.
+#[tauri::command]
+#[specta::specta]
+pub async fn diff_open_version(
+    state: State<'_, AppState>,
+    target: DiffTarget,
+    side: DiffSideKind,
+) -> Result<(), AppError> {
+    guard(crate::diff_sides::open_version(&state, target, side)).await
 }
 
 pub(crate) async fn open_external_diff(
