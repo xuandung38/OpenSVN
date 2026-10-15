@@ -662,7 +662,7 @@ async fn a_download_whose_content_differs_when_asked_again_fails_and_never_mixes
         .get_file(&p("a.txt"), Some(Revnum(9)), &mut sink, &CancelToken::new())
         .await
         .unwrap_err();
-    assert_eq!(err.code, ErrorCode::Corrupt, "{err:?}");
+    assert_eq!(err.code, ErrorCode::ProtocolViolation, "{err:?}");
     assert_eq!(srv.count("GET"), 2);
 }
 

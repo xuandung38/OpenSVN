@@ -26,7 +26,7 @@ fn rejects_structurally_broken_paths() {
         RepoDisplayPath::parse("trunk/a")
             .expect_err("relative")
             .code,
-        ErrorCode::Corrupt
+        ErrorCode::ProtocolViolation
     );
     for p in ["/a/../b", "/a/./b", "//a", "/a//b", "/a/", "/a\0b", "/a\nb"] {
         assert_eq!(
