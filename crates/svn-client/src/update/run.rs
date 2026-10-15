@@ -59,11 +59,16 @@ const MAX_RESUMES: usize = 20;
 /// Whether a failed drive is resumed automatically: an update or checkout (not a switch, whose
 /// half-applied state is left for the user to finish) that broke off because the connection
 /// failed (see [`svn_types::ConnectionFailure`]).
-fn can_reconnect(kind: &UpdateKind, err: &SvnError) -> bool {
+fn can_reconnect(ctx: &ClientCtx, kind: &UpdateKind, err: &SvnError) -> bool {
     matches!(kind, UpdateKind::Update)
         && err.code != ErrorCode::Cancelled
-        && err.connection_failure().is_some()
+        && (err.connection_failure().is_some()
+            || (ctx.network_wait.is_some() && err.is_unreachable()))
 }
+
+/// Network outages in a row, without progress in between, that a drive waits out before it
+/// gives up: a server that drops off every time it is reached again is not waited for forever.
+const MAX_OUTAGES: usize = 5;
 
 /// Releases the working copy lock when dropped, also on error and cancellation.
 struct LockGuard {
@@ -280,6 +285,9 @@ pub async fn drive_update(
     let mut reconnects = 0usize;
     // Resumed drives in a row that committed nothing new.
     let mut stalled = 0usize;
+    // Resumes after a network outage was waited out, and outages in a row without progress.
+    let mut outage_resumes = 0usize;
+    let mut outages = 0usize;
     // Every node state committed by the drives so far: the high-water mark of the progress. A
     // resumed drive sends the nodes of unfinished directories again (and notifies them again),
     // so only node states beyond this set are progress.
@@ -344,7 +352,7 @@ pub async fn drive_update(
         let db2 = Arc::clone(&db);
         let _ = blocking(move || crate::wc::run_work_queue(&db2, &CancelToken::new()).map(|_| ()))
             .await;
-        if !can_reconnect(&params.kind, &e) || reconnects >= MAX_RESUMES {
+        if !can_reconnect(ctx, &params.kind, &e) || reconnects - outage_resumes >= MAX_RESUMES {
             return Err(e);
         }
         // The working copy is consistent: directories the broken drive did not finish are
@@ -363,6 +371,26 @@ pub async fn drive_update(
         };
         if reconnects > 0 {
             stalled = if progressed { 0 } else { stalled + 1 };
+        }
+        if progressed {
+            outages = 0;
+        }
+        // Is the server out of reach? Then wait for it rather than spend the resumes; once it
+        // answers, resume at the same revision with a fresh budget.
+        if let Some(wait) = ctx.network_wait.as_ref()
+            && outages < MAX_OUTAGES
+        {
+            match crate::netwait::wait_for_network(session, wait, cancel).await? {
+                crate::netwait::NetworkOutcome::Reachable => {}
+                crate::netwait::NetworkOutcome::Restored => {
+                    outages += 1;
+                    outage_resumes += 1;
+                    reconnects += 1;
+                    stalled = 0;
+                    continue;
+                }
+                crate::netwait::NetworkOutcome::GaveUp => return Err(e),
+            }
         }
         let Some(delay) = RECONNECT_DELAYS.get(stalled).copied() else {
             return Err(e);

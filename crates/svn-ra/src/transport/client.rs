@@ -303,6 +303,32 @@ impl HttpTransport {
         }
     }
 
+    /// Drops every idle connection: requests after this open new ones. Used after a network
+    /// outage or a system sleep, when pooled connections are most likely dead and a request on
+    /// one would wait for the read timeout. Certificate decisions, credentials and the
+    /// connection limits are kept; requests in flight finish on the connection they have.
+    pub fn reset_connections(&self) {
+        let mut map = self.origins.lock().unwrap_or_else(PoisonError::into_inner);
+        for entry in map.values_mut() {
+            let tls = &entry.tls;
+            let (Ok(client), Ok(writer), Ok(fresh)) = (
+                self.make_client(tls, Some(self.config.pool_idle_timeout)),
+                self.make_client(tls, Some(self.config.write_reuse_window)),
+                self.make_client(tls, None),
+            ) else {
+                continue;
+            };
+            *entry = Arc::new(OriginClient {
+                client,
+                writer,
+                fresh,
+                tls: Arc::clone(tls),
+                slots: Arc::clone(&entry.slots),
+                channel_binding: Mutex::new(entry.channel_binding()),
+            });
+        }
+    }
+
     fn origin_client(&self, url: &Url) -> Result<Arc<OriginClient>> {
         let key = HostKey::from_url(url)?;
         let mut map = self.origins.lock().unwrap_or_else(PoisonError::into_inner);

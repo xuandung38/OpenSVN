@@ -673,3 +673,59 @@ fn the_default_idle_timeout_is_below_common_keep_alive_timeouts() {
         svn_ra::transport::DEFAULT_POOL_IDLE_TIMEOUT
     );
 }
+
+/// A server that cannot be reached is told apart from a broken connection: nothing was sent,
+/// and a checkout or update may wait for the network. A write keeps its own rules (it is not a
+/// connection failure).
+#[tokio::test]
+async fn a_refused_connection_is_unreachable_not_a_connection_failure() {
+    let ca = TestCa::new();
+    let closed = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    let t = transport(&ca, |c| c.retry = RetryPolicy::none());
+    for m in ["OPTIONS", "MERGE"] {
+        let err = body_of(&t, m, &format!("https://{closed}/repo"))
+            .await
+            .expect_err("nothing listens");
+        assert!(err.is_unreachable(), "{m}: {err:?}");
+        assert!(err.is_connection_class(), "{m}: {err:?}");
+        assert_eq!(err.connection_failure(), None, "{m}: {err:?}");
+    }
+}
+
+/// A certificate the client does not trust is never "unreachable": it must not be waited out.
+#[tokio::test]
+async fn an_untrusted_certificate_is_not_unreachable() {
+    let ca = TestCa::new();
+    let server = RawServer::start(&ca, vec![]).await;
+    let other = TestCa::new();
+    let t = common::transport_trusting(
+        &other,
+        ScriptedPrompter::with_cert_decision(svn_ra_api::CertDecision::Reject),
+        |c| {
+            c.retry = RetryPolicy::none();
+        },
+    );
+    let err = body_of(&t, "OPTIONS", &server.url("/a"))
+        .await
+        .expect_err("untrusted");
+    assert!(!err.is_unreachable(), "{err:?}");
+    assert!(!err.is_connection_class(), "{err:?}");
+}
+
+/// After an outage or a sleep the pooled connections are dropped: the next request opens a
+/// new one instead of waiting on a dead one.
+#[tokio::test]
+async fn reset_connections_drops_the_idle_ones() {
+    let ca = TestCa::new();
+    let server = RawServer::start(&ca, vec![]).await;
+    let t = transport(&ca, |_| {});
+    assert_eq!(body_of(&t, "GET", &server.url("/a")).await.unwrap(), "ok");
+    assert_eq!(body_of(&t, "GET", &server.url("/b")).await.unwrap(), "ok");
+    assert_eq!(server.connections(), 1);
+    t.reset_connections();
+    assert_eq!(body_of(&t, "GET", &server.url("/c")).await.unwrap(), "ok");
+    assert_eq!(server.connections(), 2);
+}
