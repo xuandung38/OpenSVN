@@ -83,7 +83,7 @@ fn corrupt_working_copy_offers_cleanup() {
     ));
     assert_eq!(e.code, ErrorCode::WcNeedsCleanup);
     assert!(!e.retryable);
-    assert_eq!(e.actions, Some(vec![ErrorAction::Cleanup]));
+    assert_eq!(e.actions, Some(Box::new(vec![ErrorAction::Cleanup])));
     let v = serde_json::to_value(&e).unwrap();
     assert_eq!(v["code"], "wc-needs-cleanup");
     assert_eq!(v["actions"], serde_json::json!(["cleanup"]));
