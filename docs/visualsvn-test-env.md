@@ -121,6 +121,9 @@ reproduce this:
   - `--reset-after N`: the same, with a reset.
   - `--idle-reset S`: resets a connection that stayed idle for S seconds.
   - `--truncate-every K --truncate-at B`: cuts every K-th response bigger than B bytes mid-body.
+  - `--truncate-method M`: counts and cuts only responses to these methods (`REPORT,GET`). With
+    `--truncate-every 1` every such response is cut at the same offset: a server that always
+    breaks at the same point.
 
   ```sh
   D=/tmp/opensvn-visualsvn
@@ -135,6 +138,13 @@ reproduce this:
 `checkout_and_remote_status_at_the_same_time` runs a 1000-file checkout and repeated remote status
 checks at the same time over the app's shared transport. The whole conformance suite can also run
 through the proxy.
+
+`checkout_cut_at_the_same_offset_stops_after_two_stalled_resumes` starts its own proxy (it needs
+the certificates of `up` next to `OPENSVN_COMPAT_LOCAL_CA`) that cuts every `REPORT`/`GET` at
+256 KiB, inside a 2 MiB file. The checkout must give up after the first drive and two resumes
+that commit nothing new, and an update must finish it once the connection works again. It
+asserts the number of cuts, so run it against the server directly, not through another faulty
+proxy.
 
 ### App UI
 

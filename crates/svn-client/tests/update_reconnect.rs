@@ -200,8 +200,8 @@ async fn resumes_without_progress_are_bounded_and_the_working_copy_stays_resumab
         err.connection_failure(),
         Some(ConnectionFailure::TlsClosedUncleanly)
     );
-    // The drive that made progress, then two resumes that made none, and a third broken one.
-    assert_eq!(ra.update_revisions.lock().unwrap().len(), 4);
+    // The drive that made progress, then two resumes that made none.
+    assert_eq!(ra.update_revisions.lock().unwrap().len(), 3);
     {
         let db = open_db(&wc);
         assert!(db.work_items().expect("queue").is_empty());
@@ -215,6 +215,101 @@ async fn resumes_without_progress_are_bounded_and_the_working_copy_stays_resumab
         .await
         .expect("resume");
     assert_complete(&wc, 1, "");
+}
+
+/// A server that always cuts the answer at the same point (the reviewer's case on #157): every
+/// resumed drive is sent the same directories again and notifies them again (here a conflicted
+/// directory it skips), but commits nothing beyond the drives before it. Two such resumes end
+/// the drive, and the working copy stays resumable.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_always_breaks_at_the_same_point_stops_after_two_stalled_resumes() {
+    let s = seeded();
+    let sb = Sandbox::new();
+    let wc = sb.path("wc");
+    let ctx = ctx();
+    checkout(
+        &ctx,
+        &s,
+        &wc,
+        None,
+        Depth::Infinity,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("checkout");
+    // A property conflict on d1: every later update skips d1 and says so.
+    let db = open_db(&wc);
+    db.set_lock_owner(svn_wc::db::LockOwner {
+        store: std::sync::Arc::new(svn_types::MemoryLockOwnership::for_current_process("boot")),
+        pid: std::process::id(),
+        boot_id: "boot".to_owned(),
+    });
+    svn_client::local::propset(
+        &db,
+        &CancelToken::new(),
+        &rp("d1"),
+        "color",
+        Some(b"mine"),
+        svn_client::local::PropSetOptions::default(),
+    )
+    .expect("propset");
+    drop(db);
+    s.seed("bob", "r2", &[prop("d1", "color", Some("theirs"))])
+        .expect("r2");
+    update(&ctx, &s, &wc, None, Depth::Unknown, &CancelToken::new())
+        .await
+        .expect("update into the conflict");
+    let mut r3 = Vec::new();
+    for d in 0..3 {
+        for f in 0..4 {
+            r3.push(put(&format!("d{d}/f{f}.txt"), &format!("{d}.{f}\nr3\n")));
+        }
+    }
+    s.seed("bob", "r3", &r3).expect("r3");
+
+    let ra = RecRa::new(s.clone());
+    *ra.update_break_at.lock().unwrap() = Some((
+        "d2/f1.txt".to_owned(),
+        broken(ConnectionFailure::TlsClosedUncleanly),
+    ));
+    let err = update(&ctx, &ra, &wc, None, Depth::Unknown, &CancelToken::new())
+        .await
+        .expect_err("a drive that never gets past d2/f1.txt");
+    assert_eq!(
+        err.connection_failure(),
+        Some(ConnectionFailure::TlsClosedUncleanly),
+        "{err}"
+    );
+    // The first drive (d0 and d2/f0), then two resumes that committed nothing new; not the 20
+    // resumes their notifications (d1 skipped, every time) would have allowed.
+    assert_eq!(
+        *ra.update_revisions.lock().unwrap(),
+        [None, Some(Revnum(3)), Some(Revnum(3))]
+    );
+    assert_eq!(read(&wc.join("d0/f3.txt")), "0.3\nr3\n");
+    assert_eq!(read(&wc.join("d2/f0.txt")), "2.0\nr3\n");
+    assert_eq!(read(&wc.join("d2/f1.txt")), "2.1\n");
+    {
+        let db = open_db(&wc);
+        assert!(db.work_items().expect("queue").is_empty());
+        assert_eq!(
+            db.wc_lock_held(&rp("")).expect("lock"),
+            svn_wc::db::LockState::Free
+        );
+    }
+    // The server recovers: a plain update finishes the drive (d1 stays skipped until resolved).
+    *ra.update_break_at.lock().unwrap() = None;
+    update(&ctx, &ra, &wc, None, Depth::Unknown, &CancelToken::new())
+        .await
+        .expect("resume");
+    for f in 0..4 {
+        assert_eq!(
+            read(&wc.join(format!("d2/f{f}.txt"))),
+            format!("2.{f}\nr3\n")
+        );
+        assert_eq!(read(&wc.join(format!("d1/f{f}.txt"))), format!("1.{f}\n"));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

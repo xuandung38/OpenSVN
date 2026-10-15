@@ -900,3 +900,328 @@ async fn checkout_and_remote_status_at_the_same_time() {
     }
     assert_no_prompt();
 }
+
+/// Dump of one more revision that adds the directories `dirs` and the files `files`.
+fn add_dump(dirs: &[&str], files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let empty = "PROPS-END\n";
+    let rev_props = "K 10\nsvn:author\nV 5\nalice\nK 8\nsvn:date\nV 27\n\
+                     2026-01-02T00:00:00.000000Z\nK 7\nsvn:log\nV 5\nStall\nPROPS-END\n";
+    let mut out = format!(
+        "SVN-fs-dump-format-version: 2\n\nRevision-number: 2\nProp-content-length: {0}\n\
+         Content-length: {0}\n\n{rev_props}\n",
+        rev_props.len(),
+    )
+    .into_bytes();
+    for dir in dirs {
+        out.extend_from_slice(
+            format!(
+                "Node-path: {dir}\nNode-kind: dir\nNode-action: add\nProp-content-length: {0}\n\
+                 Content-length: {0}\n\n{empty}\n\n",
+                empty.len()
+            )
+            .as_bytes(),
+        );
+    }
+    for (path, text) in files {
+        out.extend_from_slice(
+            format!(
+                "Node-path: {path}\nNode-kind: file\nNode-action: add\n\
+                 Prop-content-length: {}\nText-content-length: {}\nContent-length: {}\n\n{empty}",
+                empty.len(),
+                text.len(),
+                empty.len() + text.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(text);
+        out.extend_from_slice(b"\n\n");
+    }
+    out
+}
+
+/// `len` incompressible bytes (svndiff compression must not shrink them below a cut offset).
+fn noise(len: usize) -> Vec<u8> {
+    let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        })
+        .collect()
+}
+
+/// `scripts/test-env/flaky-tls-proxy.py` in front of the local server; killed when dropped.
+struct FlakyProxy {
+    child: std::process::Child,
+    log: PathBuf,
+    port: u16,
+}
+
+impl FlakyProxy {
+    /// Starts the proxy on a free port in front of the server of `base` (an `https` URL of the
+    /// local server), with the fault arguments `faults`. `None` when the test certificates of
+    /// `scripts/test-env/visualsvn-like.sh` are not next to the CA.
+    fn start(base: &str, faults: &[&str], log: PathBuf) -> Option<Self> {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        Self::spawn(base, port, faults, log)
+    }
+
+    /// [`Self::start`] on `port`; `None` while the port is still taken.
+    fn start_on(base: &str, port: u16, faults: &[&str], log: PathBuf) -> Option<Self> {
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+            return None;
+        }
+        Self::spawn(base, port, faults, log)
+    }
+
+    fn spawn(base: &str, port: u16, faults: &[&str], log: PathBuf) -> Option<Self> {
+        let certs = ca_path().parent()?.to_path_buf();
+        let (cert, key) = (certs.join("server.crt"), certs.join("server.key"));
+        if !cert.exists() || !key.exists() {
+            return None;
+        }
+        let url = url::Url::parse(base).ok()?;
+        let upstream = format!("{}:{}", url.host_str()?, url.port_or_known_default()?);
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../scripts/test-env/flaky-tls-proxy.py");
+        let child = Command::new("python3")
+            .arg(script)
+            .args(["--listen", &port.to_string(), "--upstream", &upstream])
+            .arg("--cert")
+            .arg(&cert)
+            .arg("--key")
+            .arg(&key)
+            .arg("--ca")
+            .arg(ca_path())
+            .args(faults)
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .expect("python3 for the flaky proxy");
+        let started = std::time::Instant::now();
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the flaky proxy did not start"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Some(Self { child, log, port })
+    }
+
+    /// `base` with the proxy's port.
+    fn url(&self, base: &str) -> String {
+        let mut url = url::Url::parse(base).unwrap();
+        url.set_port(Some(self.port)).unwrap();
+        url.as_str().trim_end_matches('/').to_owned()
+    }
+
+    /// Responses the proxy cut off so far.
+    fn cuts(&self) -> usize {
+        std::fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("truncated a"))
+            .count()
+    }
+}
+
+impl Drop for FlakyProxy {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A proxy that always cuts the update at the same offset (inside a file bigger than the
+/// offset, so no attempt gets past it). The working copy has a conflicted directory that every
+/// drive is sent again and skips, so every resumed drive notifies something, but commits nothing
+/// new: two such resumes end the update with the connection error (counting notifications, it
+/// went on for 20). The working copy stays resumable: once the connection works, an update
+/// finishes it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
+async fn update_cut_at_the_same_offset_stops_after_two_stalled_resumes() {
+    const SMALL: usize = 12;
+    const BIG: usize = 2 << 20;
+    let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
+        eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
+        return;
+    };
+    let Host::Local { base, .. } = &host else {
+        unreachable!()
+    };
+    let h = harness(&host, "stall");
+    let e = h.engine();
+    h.scratch.load(&add_dump(
+        &["trunk/stall", "trunk/stall/aaa"],
+        &[("trunk/stall/aaa/a.txt".to_owned(), b"a\n".to_vec())],
+    ));
+    let logs = h.scratch_dir();
+    let Some(healthy) = FlakyProxy::start(base, &[], logs.join("proxy-1.log")) else {
+        eprintln!("SKIPPED: no server certificate next to the CA for the flaky proxy");
+        return;
+    };
+    let port = healthy.port;
+    let checkout = |name: &'static str, url: String| {
+        let plan = CheckoutPlan {
+            url,
+            path: h.work_dir().join(name),
+            rev: None,
+            depth: Depth::Infinity,
+            sparse: None,
+            format: WcFormat::V31,
+            store_pristine: true,
+            ignore_externals: false,
+        };
+        async move {
+            let info = e.checkout(&plan, &ctx()).await.expect("checkout");
+            WcRef {
+                id: WcId(name.to_owned()),
+                root: PathBuf::from(info.root_path),
+            }
+        }
+    };
+    let update_req = |wc: &WcRef| UpdateRequest {
+        wc_id: wc.id.clone(),
+        paths: None,
+        rev: None,
+        depth: None,
+    };
+    // `b` goes through the proxy, `a` straight to the server.
+    let b = checkout(
+        "b",
+        format!("{}/{}/trunk/stall", healthy.url(base), h.scratch.name),
+    )
+    .await;
+    let a = checkout("a", format!("{}/trunk/stall", h.repo_url())).await;
+    // A property conflict on `aaa` in `b`: every later update skips `aaa` and says so.
+    e.props_set(&a, "aaa", "color", Some("theirs"), &ctx())
+        .await
+        .expect("propset in a");
+    e.commit(
+        &a,
+        &CommitRequest {
+            wc_id: a.id.clone(),
+            paths: vec!["aaa".into()],
+            message: "color".into(),
+            keep_locks: false,
+            auto_add_remove: true,
+        },
+        &ctx(),
+    )
+    .await
+    .expect("commit from a");
+    e.props_set(&b, "aaa", "color", Some("mine"), &ctx())
+        .await
+        .expect("propset in b");
+    e.update(&b, &update_req(&b), &ctx())
+        .await
+        .expect("update into the conflict");
+    // A change in `aaa` (so the server sends `aaa` again on every drive), small files and,
+    // after them, a file bigger than the cut offset.
+    let mut files = vec![("trunk/stall/aaa/new.txt".to_owned(), b"new\n".to_vec())];
+    for f in 0..SMALL {
+        files.push((format!("trunk/stall/zzz/s{f:03}.txt"), vec![b'x'; 1024]));
+    }
+    files.push(("trunk/stall/zzz/z-big.bin".to_owned(), noise(BIG)));
+    h.scratch.load(&add_dump(&["trunk/stall/zzz"], &files));
+    drop(healthy);
+
+    let cutting = (0..50)
+        .find_map(|_| {
+            let p = FlakyProxy::start_on(
+                base,
+                port,
+                &[
+                    "--truncate-every",
+                    "1",
+                    "--truncate-at",
+                    "262144",
+                    "--truncate-method",
+                    "REPORT,GET",
+                ],
+                logs.join("proxy-2.log"),
+            );
+            if p.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            p
+        })
+        .expect("the cutting proxy on the same port");
+    let started = std::time::Instant::now();
+    let err = e
+        .update(&b, &update_req(&b), &ctx())
+        .await
+        .expect_err("an update that never gets past the cut");
+    assert!(
+        err.connection_failure().is_some(),
+        "connection failure expected: {err:?}"
+    );
+    // One cut per drive: the first drive, then the two resumes that committed nothing new.
+    assert_eq!(
+        cutting.cuts(),
+        3,
+        "{}",
+        std::fs::read_to_string(&cutting.log).unwrap_or_default()
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+    assert!(
+        !b.root.join("zzz/z-big.bin").exists(),
+        "no partial file in the working copy"
+    );
+    drop(cutting);
+
+    // The connection works again (same address, no faults): "Update to finish" completes it.
+    let _healthy = (0..50)
+        .find_map(|_| {
+            let p = FlakyProxy::start_on(base, port, &[], logs.join("proxy-3.log"));
+            if p.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            p
+        })
+        .expect("a plain proxy on the same port");
+    e.update(&b, &update_req(&b), &ctx())
+        .await
+        .expect("update finishes");
+    assert_eq!(
+        std::fs::metadata(b.root.join("zzz/z-big.bin"))
+            .unwrap()
+            .len(),
+        BIG as u64
+    );
+    assert_eq!(count_files(&b.root.join("zzz")), SMALL + 1);
+    let changed: Vec<_> = e
+        .status(
+            &b,
+            StatusQuery {
+                include_ignored: false,
+                include_unversioned: true,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("status")
+        .into_iter()
+        .filter(|s| {
+            s.text != opensvn_ipc::NodeStatus::Normal
+                || !matches!(
+                    s.props,
+                    opensvn_ipc::PropStatus::None | opensvn_ipc::PropStatus::Normal
+                )
+        })
+        .collect();
+    // Only the conflicted directory (still skipped until resolved) differs.
+    assert!(
+        changed.iter().all(|s| s.path.starts_with("aaa")),
+        "{changed:?}"
+    );
+    assert_no_prompt();
+}

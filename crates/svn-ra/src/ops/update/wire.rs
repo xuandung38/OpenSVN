@@ -16,6 +16,7 @@ use svn_protocol::{
 use svn_types::{CancelToken, ErrorCode, RelPath, RepoUrl, Result, SvnError};
 
 use crate::ops::read::ListLimits;
+use crate::ops::resume::ReadRetry;
 use crate::transport::{BufferedResponse, HttpRequest, HttpResponse, HttpTransport, RequestBody};
 
 /// Default number of parallel connections assumed when the caller does not say.
@@ -99,11 +100,15 @@ impl RaWire {
     ) -> Result<Self> {
         let req = options_request(&session_url)?;
         let body = buffered_body(&req)?;
-        let started = std::time::Instant::now();
-        let resp = send_with(&transport, req, body, unattended, cancel).await?;
-        let elapsed = started.elapsed();
-        let head = svn_protocol::ResponseHead::new(resp.status().as_u16(), headers_of(&resp));
-        let body = read_limited(resp, ParserLimits::default().max_error_body_bytes, cancel).await?;
+        let (head, body, elapsed) = send_read_limited(
+            &transport,
+            convert(req, body)?,
+            ParserLimits::default().max_error_body_bytes,
+            unattended,
+            cancel,
+            "OPTIONS",
+        )
+        .await?;
         // mod_dav_svn answers a bare 500 (no `D:error`) on an `SVNParentPath` location.
         if head.status == 500
             && svn_protocol::errors::parse_dav_error(&body).is_none()
@@ -364,21 +369,68 @@ async fn parent_path_check(
 ) -> Option<SvnError> {
     let req = svn_protocol::parent_listing_request(url).ok()?;
     let body = buffered_body(&req).ok()?;
-    let resp = match send_with(transport, req, body, unattended, cancel).await {
-        Ok(resp) => resp,
+    let req = convert(req, body).ok()?;
+    let (head, page) = match send_read_limited(
+        transport,
+        req,
+        PARENT_LISTING_LIMIT,
+        unattended,
+        cancel,
+        "repository list",
+    )
+    .await
+    {
+        Ok((head, page, _)) => (head, page),
         Err(err) if err.code == ErrorCode::Cancelled => return Some(err),
         Err(_) => return None,
     };
-    if !resp.status().is_success() {
+    if !(200..300).contains(&head.status) {
         return None;
     }
-    let page = match read_limited(resp, PARENT_LISTING_LIMIT, cancel).await {
-        Ok(page) => page,
-        Err(err) if err.code == ErrorCode::Cancelled => return Some(err),
-        Err(_) => return None,
-    };
     let names = svn_protocol::parent_path_listing(&page)?;
     Some(svn_protocol::parent_path_error(url, &names))
+}
+
+/// Sends a read-only request and reads at most `limit` bytes of its answer, like
+/// [`read_limited`]; also returns the head and how long the answer took to start. Nothing
+/// reaches a caller before the answer is in, so one that breaks off on a failed connection is
+/// asked for again (see [`crate::ops::resume`]).
+async fn send_read_limited(
+    transport: &HttpTransport,
+    mut req: HttpRequest,
+    limit: usize,
+    unattended: bool,
+    cancel: &CancelToken,
+    what: &'static str,
+) -> Result<(svn_protocol::ResponseHead, Bytes, std::time::Duration)> {
+    let mut retry = ReadRetry::with_delays(transport.retry_policy().delays.clone(), what);
+    loop {
+        let again = req.try_clone();
+        let attempt = async {
+            cancel.check()?;
+            let started = std::time::Instant::now();
+            let resp = if unattended {
+                transport.send_unattended(req, cancel).await?
+            } else {
+                transport.send(req, cancel).await?
+            };
+            let elapsed = started.elapsed();
+            let head = svn_protocol::ResponseHead::new(resp.status().as_u16(), headers_of(&resp));
+            let body = read_limited(resp, limit, cancel).await?;
+            Ok((head, body, elapsed))
+        }
+        .await;
+        match attempt {
+            Ok(got) => return Ok(got),
+            Err(e) => {
+                let Some(next) = again else {
+                    return Err(e);
+                };
+                retry.again(e, cancel).await?;
+                req = next;
+            }
+        }
+    }
 }
 
 /// Transport body for a protocol request that carries no stream.

@@ -12,6 +12,9 @@ close is a plain TCP close (FIN) or, where asked, a reset (RST). Faults, per cli
                      of a response the client stopped reading (not while the server works)
   --truncate-every K cut every K-th response bigger than --truncate-at bytes after that many
                      bytes and close without close_notify (a broken connection mid-body)
+  --truncate-method M  only count and cut responses to these methods (comma-separated, e.g.
+                     REPORT,GET); with --truncate-every 1 every such response is cut at the
+                     same offset (a server or proxy that always breaks at the same point)
 
   scripts/test-env/flaky-tls-proxy.py --listen 18450 --upstream svn.opensvn.test:18443 \
       --cert $VSVN_DIR/certs/server.crt --key $VSVN_DIR/certs/server.key \
@@ -101,6 +104,9 @@ class Conn:
         self.responding = False
         self.response_bytes = 0
         self.truncate_this = False
+        # Method of the request being answered (first word of the exchange's first bytes).
+        self.method = ""
+        self.started = False
         self.last_activity = time.monotonic()
         # A request was forwarded and no response byte came back yet (the server is working).
         self.awaiting = False
@@ -127,6 +133,10 @@ class Conn:
                     self.last_activity = time.monotonic()
                     self.awaiting = True
                     new_request = self.responding or self.exchanges == 0 and self.response_bytes == 0
+                    if self.responding or not self.started:
+                        # The first bytes of a request (not more of its body).
+                        self.started = True
+                        self.method = data.split(b" ", 1)[0].decode("ascii", "replace")
                     if self.responding:
                         self.responding = False
                         self.exchanges += 1
@@ -157,7 +167,8 @@ class Conn:
                         self.responding = True
                         self.response_bytes = 0
                         self.truncate_this = False
-                        if self.args.truncate_every:
+                        methods = self.args.truncate_method
+                        if self.args.truncate_every and (not methods or self.method in methods):
                             with COUNTER_LOCK:
                                 n = next(COUNTER)
                             self.truncate_this = n % self.args.truncate_every == 0
@@ -167,7 +178,7 @@ class Conn:
                 if cut:
                     keep = max(0, self.args.truncate_at - before)
                     self.client_io.sendall(data[:keep])
-                    self.close(False, f"truncated a response after {self.args.truncate_at} bytes")
+                    self.close(False, f"truncated a {self.method} response after {self.args.truncate_at} bytes")
                     return
                 self.client_io.sendall(data)
         except OSError:
@@ -247,6 +258,7 @@ def main():
     p.add_argument("--idle-reset", type=float, default=0.0)
     p.add_argument("--truncate-every", type=int, default=0)
     p.add_argument("--truncate-at", type=int, default=2048)
+    p.add_argument("--truncate-method", type=lambda v: [m.strip().upper() for m in v.split(",") if m.strip()], default=[])
     serve(p.parse_args())
 
 
