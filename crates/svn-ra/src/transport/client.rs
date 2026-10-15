@@ -179,7 +179,7 @@ impl HttpTransport {
         self.send_mode(req, cancel, Interaction::Forbidden).await
     }
 
-    /// Sends a request and reads its whole body, failing with `Corrupt` above `limit` bytes.
+    /// Sends a request and reads its whole body, failing with `ProtocolViolation` above `limit` bytes.
     ///
     /// Like [`Self::send`], and more: when the body of a read-only request ([`is_idempotent`]:
     /// `GET`, `PROPFIND`, `REPORT`, `OPTIONS`, `HEAD`) breaks off because the connection failed

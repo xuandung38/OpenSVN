@@ -246,13 +246,13 @@ impl HttpResponse {
         }
     }
 
-    /// Reads the whole body, failing with `Corrupt` when it exceeds `limit` bytes.
+    /// Reads the whole body, failing with `ProtocolViolation` when it exceeds `limit` bytes.
     pub async fn bytes(mut self, limit: usize) -> Result<Bytes> {
         let mut buf = BytesMut::new();
         while let Some(c) = self.chunk().await? {
             if buf.len() + c.len() > limit {
                 return Err(SvnError::new(
-                    ErrorCode::Corrupt,
+                    ErrorCode::ProtocolViolation,
                     format!("response body exceeds the {limit} byte limit"),
                 ));
             }

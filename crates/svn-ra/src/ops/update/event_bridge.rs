@@ -13,6 +13,7 @@ use svn_types::{
     CancelToken, Checksum, DirId, ErrorCode, FileId, PropChange, RelPath, Result, SvnError,
 };
 
+use super::super::read::server_svndiff;
 use super::fetch_scheduler::{DownloadTask, FetchScheduler};
 use super::wire::RaWire;
 
@@ -23,7 +24,7 @@ const ENTRY_LAST_AUTHOR: &str = "svn:entry:last-author";
 const ENTRY_UUID: &str = "svn:entry:uuid";
 
 fn corrupt(msg: impl Into<String>) -> SvnError {
-    SvnError::new(ErrorCode::Corrupt, msg)
+    SvnError::new(ErrorCode::ProtocolViolation, msg)
 }
 
 enum Node {
@@ -273,7 +274,7 @@ impl<'a> EventBridge<'a> {
             E::TxDeltaChunk { path, data } => {
                 let file = self.top_file(&path)?;
                 if let Some((decoder, sender)) = file.delta.as_mut() {
-                    for w in decoder.feed(&data)? {
+                    for w in decoder.feed(&data).map_err(server_svndiff)? {
                         sender.send(Some(w)).await?;
                     }
                 }
@@ -282,7 +283,7 @@ impl<'a> EventBridge<'a> {
             E::TxDeltaEnd { path } => {
                 let file = self.top_file(&path)?;
                 if let Some((mut decoder, sender)) = file.delta.take() {
-                    decoder.finish()?;
+                    decoder.finish().map_err(server_svndiff)?;
                     sender.send(None).await?;
                 }
                 Ok(())
