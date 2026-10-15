@@ -1083,3 +1083,128 @@ async fn get_locks_drops_locks_outside_the_requested_scope() {
         .unwrap();
     assert_eq!(paths(near), ["/trunk/d/a.txt"]);
 }
+
+fn segments_report(segments: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+         <S:get-location-segments-report xmlns:S=\"svn:\" xmlns:D=\"DAV:\">{segments}\
+         </S:get-location-segments-report>"
+    )
+}
+
+#[tokio::test]
+async fn location_segments_take_a_repository_path_and_follow_copies() {
+    let srv = server(Bulk::Prefer).await;
+    Mock::given(method("REPORT"))
+        .and(path("/svn/repo/!svn/rvr/9/branches/b"))
+        .and(body_string_contains("<S:peg-revision>9</S:peg-revision>"))
+        .and(body_string_contains(
+            "<S:start-revision>9</S:start-revision>",
+        ))
+        .and(body_string_contains("<S:end-revision>0</S:end-revision>"))
+        .respond_with(xml(
+            200,
+            segments_report(
+                "<S:location-segment path=\"branches/b\" range-start=\"7\" range-end=\"9\"/>\
+                 <S:location-segment range-start=\"6\" range-end=\"6\"/>\
+                 <S:location-segment path=\"trunk\" range-start=\"1\" range-end=\"5\"/>",
+            ),
+        ))
+        .mount(&srv)
+        .await;
+    // The session is rooted at trunk; the path is still taken from the repository root.
+    let s = session(&srv).await;
+    let got = s
+        .get_location_segments(
+            &p("branches/b"),
+            Some(Revnum(9)),
+            None,
+            None,
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap();
+    let got: Vec<_> = got
+        .into_iter()
+        .map(|s| {
+            (
+                s.path.map(|p| p.as_str().to_owned()),
+                s.range_start.0,
+                s.range_end.0,
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (Some("branches/b".to_owned()), 7, 9),
+            (None, 6, 6),
+            (Some("trunk".to_owned()), 1, 5),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn location_segments_out_of_order_or_out_of_range_are_corrupt() {
+    for bad in [
+        // Oldest first.
+        "<S:location-segment path=\"trunk\" range-start=\"1\" range-end=\"5\"/>\
+         <S:location-segment path=\"branches/b\" range-start=\"7\" range-end=\"9\"/>",
+        // Overlapping.
+        "<S:location-segment path=\"branches/b\" range-start=\"5\" range-end=\"9\"/>\
+         <S:location-segment path=\"trunk\" range-start=\"1\" range-end=\"5\"/>",
+        // Younger than the start revision.
+        "<S:location-segment path=\"branches/b\" range-start=\"7\" range-end=\"10\"/>",
+    ] {
+        let srv = server(Bulk::Prefer).await;
+        mount(
+            &srv,
+            "REPORT",
+            "/svn/repo/!svn/rvr/9/branches/b",
+            xml(200, segments_report(bad)),
+        )
+        .await;
+        let s = session(&srv).await;
+        let err = s
+            .get_location_segments(
+                &p("branches/b"),
+                Some(Revnum(9)),
+                None,
+                None,
+                &CancelToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Corrupt, "{bad}: {err}");
+    }
+}
+
+#[tokio::test]
+async fn location_segments_of_a_missing_node_is_path_not_found() {
+    let srv = server(Bulk::Prefer).await;
+    mount(
+        &srv,
+        "REPORT",
+        "/svn/repo/!svn/rvr/9/nowhere",
+        xml(
+            404,
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+             <D:error xmlns:D=\"DAV:\" xmlns:m=\"http://apache.org/dav/xmlns\" \
+             xmlns:C=\"svn:\"><C:error/><m:human-readable errcode=\"160013\">\
+             File not found: revision 9, path '/nowhere'</m:human-readable></D:error>",
+        ),
+    )
+    .await;
+    let s = session(&srv).await;
+    let err = s
+        .get_location_segments(
+            &p("nowhere"),
+            Some(Revnum(9)),
+            None,
+            None,
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PathNotFound, "{err}");
+}

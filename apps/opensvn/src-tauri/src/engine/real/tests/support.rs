@@ -369,6 +369,18 @@ impl RaSession for ScriptedSession {
             .file_revs(path, start, end, handler, cancel)
             .await
     }
+    async fn get_location_segments(
+        &self,
+        path: &RelPath,
+        peg: Option<Revnum>,
+        start: Option<Revnum>,
+        end: Option<Revnum>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<svn_ra_api::LocationSegment>, SvnError> {
+        self.inner
+            .get_location_segments(path, peg, start, end, cancel)
+            .await
+    }
     async fn do_update(
         &self,
         req: UpdateRequest,

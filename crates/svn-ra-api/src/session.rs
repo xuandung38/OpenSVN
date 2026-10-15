@@ -80,6 +80,21 @@ pub struct LogRequest {
     pub strict_node_history: bool,
 }
 
+/// One stretch of a node's history, as reported by
+/// [`RaSession::get_location_segments`]: the node lived at `path` in every revision of
+/// `range_start..=range_end`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocationSegment {
+    /// Oldest revision of the stretch.
+    pub range_start: Revnum,
+    /// Youngest revision of the stretch.
+    pub range_end: Revnum,
+    /// Repository-relative path of the node in these revisions; `None` for a gap, revisions in
+    /// which the node's history does not exist (between a copy and the revision it was copied
+    /// from).
+    pub path: Option<RelPath>,
+}
+
 /// One revision of a file as reported by `file_revs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileRev {
@@ -218,6 +233,24 @@ pub trait RaSession: Send + Sync {
         handler: &mut dyn FileRevHandler,
         cancel: &CancelToken,
     ) -> Result<()>;
+
+    /// History of the node at `path`@`peg` (`None` = HEAD) as location segments, youngest
+    /// first, like `svn_ra_get_location_segments`: the node at `path` and, through every copy,
+    /// the nodes it was copied from. Only the revisions in `end..=start` are reported (`start`
+    /// defaults to `peg`, `end` to 0); a segment that reaches beyond them is cropped.
+    ///
+    /// Unlike the other methods `path` is relative to the **repository root**, not to the
+    /// session URL: svn traces another location by reparenting its session, this traces any
+    /// location of the repository through the session it has. A node that does not exist at
+    /// `peg` fails with `PathNotFound`.
+    async fn get_location_segments(
+        &self,
+        path: &RelPath,
+        peg: Option<Revnum>,
+        start: Option<Revnum>,
+        end: Option<Revnum>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<LocationSegment>>;
 
     /// Update, switch or status: `report` builds the report, then the RA layer drives `editor`
     /// through an [`EditorWorker`](crate::EditorWorker) (editor runs on a blocking thread).

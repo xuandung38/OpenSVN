@@ -29,6 +29,9 @@ pub enum ErrorCode {
     RepositoryMoved,
     PristineNotHydrated,
     WcInvalidOperation,
+    /// A switch target shares no history with the working copy (svn E195012). Nothing changed;
+    /// the switch can be asked for again with `ignore_ancestry`.
+    UnrelatedResources,
     PathNotFound,
     DiskFull,
     PermissionDenied,
@@ -239,6 +242,8 @@ pub fn map_svn_error_code(code: SvnErrorCode) -> (ErrorCode, bool, &'static [Err
         S::RepositoryMoved => (ErrorCode::RepositoryMoved, false, &[]),
         S::PristineNotHydrated => (ErrorCode::PristineNotHydrated, false, &[]),
         S::WcInvalidOperation => (ErrorCode::WcInvalidOperation, false, &[]),
+        // Asking again gives the same answer: only the user can choose to ignore ancestry.
+        S::UnrelatedResources => (ErrorCode::UnrelatedResources, false, &[]),
         S::PathNotFound => (ErrorCode::PathNotFound, false, &[]),
         S::UnsafePath => (ErrorCode::Internal, false, &[]),
         S::DiskFull => (ErrorCode::DiskFull, false, &[]),

@@ -143,3 +143,17 @@ fn builders_reject_unusable_input() {
     };
     assert!(lock_request(&u, &p, &bad_comment).is_err());
 }
+
+#[test]
+fn location_segments() {
+    insta::assert_snapshot!(render(
+        &svn_protocol::location_segments::location_segments_request(
+            &urls(),
+            &rel("branches/b c"),
+            Revnum(9),
+            Revnum(9),
+            Revnum(0),
+        )
+        .unwrap()
+    ));
+}

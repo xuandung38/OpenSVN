@@ -692,7 +692,13 @@ pub async fn switch_to_a_branch(h: &dyn Harness) {
     .expect("copy");
     let (wc, _) = checkout(h, "switch", None).await;
     let reached = e
-        .switch(&wc, &format!("{url}/branches/switch-target"), None, &ctx())
+        .switch(
+            &wc,
+            &format!("{url}/branches/switch-target"),
+            None,
+            false,
+            &ctx(),
+        )
         .await
         .expect("switch");
     let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
@@ -755,7 +761,7 @@ pub async fn branch_detection_follows_a_switch(h: &dyn Harness) {
         .iter()
         .find(|n| n.kind == BranchKind::Branch && n.name == "feature-y")
         .expect("listed branch");
-    e.switch(&wc, &target.url, None, &ctx())
+    e.switch(&wc, &target.url, None, false, &ctx())
         .await
         .expect("switch");
     let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
@@ -774,7 +780,7 @@ pub async fn branch_detection_follows_a_switch(h: &dyn Harness) {
     );
     assert_eq!(current.url, target.url);
 
-    e.switch(&wc, &format!("{url}/lib-copy"), None, &ctx())
+    e.switch(&wc, &format!("{url}/lib-copy"), None, false, &ctx())
         .await
         .expect("switch outside the layout");
     let info = e.wc_info(&wc.root, &ctx()).await.expect("info");

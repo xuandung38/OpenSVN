@@ -75,7 +75,7 @@ export const commands = {
 	 *  the externals choice the user made. Fails when nothing is incomplete.
 	 */
 	wcContinue: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("wc_continue", { wcId })),
-	switch: (wcId: WcId, url: string, rev: number | null) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("switch", { wcId, url, rev })),
+	switch: (wcId: WcId, url: string, rev: number | null, ignoreAncestry: boolean) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("switch", { wcId, url, rev, ignoreAncestry })),
 	commit: (request: CommitRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("commit", { request })),
 	revert: (request: RevertRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("revert", { request })),
 	addPaths: (wcId: WcId, paths: string[]) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("add_paths", { wcId, paths })),
@@ -531,7 +531,12 @@ export type ErrorCode = "network" | "timeout" | "auth-required" |
  *  offers no Basic, the URL is plain http (SSO is https only), its mutual-authentication
  *  token was invalid, or the user chose SSO again after it had failed.
  */
-"negotiate-failed" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "hook-failed" | "repository-moved" | "pristine-not-hydrated" | "wc-invalid-operation" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | 
+"negotiate-failed" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "hook-failed" | "repository-moved" | "pristine-not-hydrated" | "wc-invalid-operation" | 
+/**
+ *  A switch target shares no history with the working copy (svn E195012). Nothing changed;
+ *  the switch can be asked for again with `ignore_ancestry`.
+ */
+"unrelated-resources" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | 
 /**  The request itself is invalid (bad value, expired path grant, unsupported option). */
 "invalid-argument" | "internal";
 

@@ -459,8 +459,12 @@ pub async fn copy_location(
                     let new_rev = engine
                         .copy_location(&request, source.as_ref(), &ctx)
                         .await?;
-                    // Switch the working copy to the location that was just created.
-                    engine.switch(&wc, &to_url, Some(new_rev), &ctx).await?;
+                    // Switch the working copy to the location that was just created. A copy of
+                    // the working copy's own location shares its history; anything else is
+                    // refused like any switch, after the copy.
+                    engine
+                        .switch(&wc, &to_url, Some(new_rev), false, &ctx)
+                        .await?;
                     Ok(OpResult::NewRev { new_rev })
                 },
             ),
