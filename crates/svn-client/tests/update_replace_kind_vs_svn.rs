@@ -8,6 +8,9 @@
 //! delete, a missing node. svn keeps every local change: as a copy above the new BASE with a tree
 //! conflict, or as an unversioned file or directory on disk.
 //!
+//! The same revision changes 40 files the drive visits first and adds one after: the update
+//! batches its commits, so the replacements are decided while those are not committed yet.
+//!
 //! The switch moves `A` to `B`, which holds the same tree as `A` after the replacement (the
 //! histories are unrelated, so both clients switch with ignore-ancestry semantics).
 //!
@@ -51,6 +54,16 @@ fn write_replaced(repo: &Repo, root: &Path) {
 /// `A` after the replacement; r2: `A/f` becomes a directory and `A/d` a file.
 fn build(repo: &Repo) {
     let seed = repo.checkout("seed");
+    // Neighbours the drive visits before `d` and `f` (and `z.txt` after them): they are still
+    // in the update's uncommitted batch when the replacements are decided.
+    for i in 0..40 {
+        write(&seed.join(format!("A/a/{i:02}.txt")), &format!("{i}\n"));
+        write(
+            &seed.join(format!("B/a/{i:02}.txt")),
+            &format!("{i} edited\n"),
+        );
+    }
+    write(&seed.join("B/z.txt"), "z\n");
     write(&seed.join("A/f"), "orig\n");
     write(&seed.join("A/d/in.txt"), "in\n");
     write(&seed.join("A/d/sub/y.txt"), "y\n");
@@ -66,6 +79,14 @@ fn build(repo: &Repo) {
     // Delete and add in one commit: one replacement each.
     repo.svn(&seed, &["rm", "-q", "A/f", "A/d"]);
     write_replaced(repo, &seed.join("A"));
+    for i in 0..40 {
+        write(
+            &seed.join(format!("A/a/{i:02}.txt")),
+            &format!("{i} edited\n"),
+        );
+    }
+    write(&seed.join("A/z.txt"), "z\n");
+    repo.svn(&seed, &["add", "-q", "A/z.txt"]);
     repo.svn(&seed, &["commit", "-q", "-m", "r2"]);
 }
 
