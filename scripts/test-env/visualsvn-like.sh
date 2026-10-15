@@ -278,7 +278,8 @@ LoadModule socache_shmcb_module $m/mod_socache_shmcb.so
 LoadModule ssl_module           $m/mod_ssl.so
 LoadModule setenvif_module      $m/mod_setenvif.so
 ErrorLog $VSVN_DIR/logs/error-$tag.log
-LogLevel warn auth_gssapi:debug
+# core:notice keeps "AH00052: child pid ... exit signal" (a crashed mod_dav_svn request).
+LogLevel warn core:notice auth_gssapi:debug
 # %I / %O: bytes received / sent (request and response, headers included).
 LogFormat "%h %u \"%r\" %>s in=%I out=%O %Dus" vsvn
 CustomLog $VSVN_DIR/logs/access-$tag.log vsvn
@@ -416,6 +417,8 @@ export OPENSVN_VSVN_SHORT_HOST='$SHORT_HOST'
 export NO_PROXY="\${NO_PROXY:+\$NO_PROXY,}$HOST,$SHORT_HOST" no_proxy="\${no_proxy:+\$no_proxy,}$HOST,$SHORT_HOST"
 export OPENSVN_VSVN_HTTPS_PORT='$HTTPS_PORT'
 export OPENSVN_VSVN_HTTP_PORT='$HTTP_PORT'
+# Error logs of the servers: the DAV suite fails when a request crashed a child.
+export OPENSVN_COMPAT_LOCAL_ERROR_LOGS='$VSVN_DIR/logs/error-14.log:$VSVN_DIR/logs/error-15.log'
 EOF
   if [ -e "$VSVN_DIR/httpd-15.conf" ]; then echo "export OPENSVN_VSVN_HTTPS115_PORT='$HTTPS115_PORT'"; fi
 }
