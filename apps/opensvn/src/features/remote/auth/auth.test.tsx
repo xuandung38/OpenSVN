@@ -176,16 +176,37 @@ test("sign-in submits trimmed username and the password, then Cancel answers can
   expect(onCancel).toHaveBeenCalled();
 });
 
-test("Windows SSO is not offered even when the server offered negotiate (no contract variant yet)", () => {
+test("Windows SSO is offered when the server offers negotiate and answers negotiate", async () => {
+  const onNegotiate = vi.fn();
+  const onSubmit = vi.fn();
   withLang(
     <SignInDialog
       prompt={creds({ offered: ["negotiate", "basic"] })}
+      onSubmit={onSubmit}
+      onNegotiate={onNegotiate}
+      onCancel={() => undefined}
+    />,
+  );
+  await user().click(screen.getByRole("button", { name: "Sign in with Windows account" }));
+  expect(onNegotiate).toHaveBeenCalledTimes(1);
+  expect(onSubmit).not.toHaveBeenCalled();
+  // Username/password stays available as the fallback.
+  expect(screen.getByLabelText("Username")).toBeTruthy();
+});
+
+test.each([
+  ["basic only", creds({ offered: ["basic"] })],
+  ["after Windows sign-in failed", creds({ offered: ["negotiate"], reason: "negotiate-failed" })],
+])("Windows SSO is not offered %s", (_, prompt) => {
+  withLang(
+    <SignInDialog
+      prompt={prompt}
       onSubmit={() => undefined}
+      onNegotiate={() => undefined}
       onCancel={() => undefined}
     />,
   );
   expect(screen.queryByRole("button", { name: /Windows/ })).toBeNull();
-  expect(screen.getByLabelText("Username")).toBeTruthy();
 });
 
 test("after 3 rejected attempts submitting is blocked", async () => {
@@ -316,14 +337,59 @@ test("host: certificate decisions map to auth_respond", async () => {
 test("auth_respond failure sends a compensating cancel so the engine is not left waiting", async () => {
   mockCalls.length = 0;
   // The mock rejects unknown variants like serde does for a variant that is not in the contract.
-  const err = await answerAuthPrompt("fail-1", { kind: "negotiate" } as never);
+  const err = await answerAuthPrompt("fail-1", { kind: "fingerprint" } as never);
   expect(err?.message).toMatch(/invalid args/);
   const sent = mockCalls.filter((c) => c.name === "authRespond").map((c) => c.args);
   expect(sent).toEqual([
-    ["fail-1", { kind: "negotiate" }],
+    ["fail-1", { kind: "fingerprint" }],
     ["fail-1", { kind: "cancel" }],
   ]);
   expect(mockAuthResponses.at(-1)).toEqual({ requestId: "fail-1", response: { kind: "cancel" } });
+});
+
+test("host: Sign in with Windows account answers negotiate", async () => {
+  renderApp(<AuthPromptHost />);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(20);
+  });
+  await act(async () => {
+    mockEmit("auth://prompt", {
+      requestId: "sso-1",
+      kind: "credentials",
+      realm: "r",
+      url: "https://h/",
+      cert: null,
+      reason: "initial",
+      attempt: 0,
+      offered: ["negotiate", "basic"],
+    });
+  });
+  await user().click(await screen.findByRole("button", { name: "Sign in with Windows account" }));
+  await waitFor(() => expect(mockAuthResponses.at(-1)?.requestId).toBe("sso-1"));
+  expect(mockAuthResponses.at(-1)?.response).toEqual({ kind: "negotiate" });
+});
+
+test("host: Replace pinned certificate answers replacePin, not acceptAlways", async () => {
+  renderApp(<AuthPromptHost />);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(20);
+  });
+  await act(async () => {
+    mockEmit("auth://prompt", {
+      requestId: "pin-1",
+      kind: "certificate",
+      realm: "r",
+      url: "https://h/",
+      cert: { ...CERT, failure: { changed: { oldSha256: "OLD:11", newSha256: "NEW:22" } } },
+    });
+  });
+  await user().click(await screen.findByLabelText(/I verified the new fingerprint/));
+  await user().click(screen.getByRole("button", { name: "Replace pinned certificate" }));
+  await waitFor(() => expect(mockAuthResponses.at(-1)?.requestId).toBe("pin-1"));
+  expect(mockAuthResponses.at(-1)?.response).toEqual({
+    kind: "certificate",
+    decision: "replacePin",
+  });
 });
 
 test("a failing cancel is not retried forever and the first error is returned", async () => {

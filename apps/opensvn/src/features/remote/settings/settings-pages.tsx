@@ -1,18 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
-import { Input, Select } from "../../../components/ui/fields";
+import { Input, Select, Textarea } from "../../../components/ui/fields";
 import { SafeText } from "../../../components/ui/safe-text";
 import { SegmentedControl } from "../../../components/ui/segmented-control";
 import { useToast } from "../../../components/ui/toast";
-import type { Settings } from "../../../ipc/bindings";
+import type { ProgramKind, Settings, TrustedCert } from "../../../ipc/bindings";
 import { ipc, unwrap } from "../../../ipc/client";
 import { queryKeys } from "../../../ipc/query-keys";
+import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
 import { ExtDiffTools } from "./ext-diff-tools";
 import {
   type Draft,
   type FieldError,
+  MAX_GLOBAL_IGNORES,
   type RangedKey,
   rangeOf,
   settingValue,
@@ -102,7 +104,14 @@ function NumberField({
   set,
 }: PageProps & {
   name: RangedKey;
-  label: "checkInterval" | "maxConnections" | "timeoutSec" | "reconnectWait" | "cacheMax";
+  label:
+    | "checkInterval"
+    | "maxConnections"
+    | "timeoutSec"
+    | "reconnectWait"
+    | "cacheMax"
+    | "fontSize"
+    | "tabWidth";
 }) {
   const t = useT(settingsStrings);
   const range = rangeOf(name);
@@ -123,6 +132,131 @@ function NumberField({
     </Field>
   );
 }
+
+/**
+ * Two-step action without a nested modal: the first click shows the question with Confirm and
+ * Cancel next to it (focus moves to Confirm), the second runs the action.
+ */
+function ConfirmAction({
+  label,
+  ariaLabel,
+  question,
+  disabled,
+  onConfirm,
+}: {
+  label: string;
+  ariaLabel?: string;
+  question: string;
+  disabled?: boolean;
+  onConfirm: () => void;
+}) {
+  const t = useT(settingsStrings);
+  const c = useT(commonStrings);
+  const [asking, setAsking] = useState(false);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  // Focus follows the step: Confirm when asking, back on the button afterwards (if it is still
+  // there: a removed row takes its button with it).
+  const answered = useRef(false);
+  useEffect(() => {
+    if (asking) confirmRef.current?.focus();
+    else if (answered.current) triggerRef.current?.focus();
+  }, [asking]);
+  const answer = (confirmed: boolean) => {
+    answered.current = true;
+    setAsking(false);
+    if (confirmed) onConfirm();
+  };
+  if (!asking) {
+    return (
+      <Button
+        ref={triggerRef}
+        aria-label={ariaLabel}
+        disabled={disabled}
+        onClick={() => setAsking(true)}
+      >
+        {label}
+      </Button>
+    );
+  }
+  return (
+    // biome-ignore lint/a11y/useSemanticElements: a fieldset would restyle the row; role="group" names it
+    <div role="group" aria-label={question} className="flex flex-wrap items-center gap-2">
+      <span className="text-[12px]">{question}</span>
+      <Button ref={confirmRef} variant="primary" disabled={disabled} onClick={() => answer(true)}>
+        {t("confirm")}
+      </Button>
+      <Button onClick={() => answer(false)}>{c("cancel")}</Button>
+    </div>
+  );
+}
+
+/**
+ * An external program setting. Rust shows the native file picker and the confirmation; the WebView
+ * never sends a path, only the arguments to keep.
+ */
+function ProgramField({
+  kind,
+  settings,
+  label,
+  hint,
+  defaultArgs,
+}: {
+  kind: ProgramKind;
+  settings: Settings;
+  label: string;
+  hint: string;
+  defaultArgs: string[];
+}) {
+  const t = useT(settingsStrings);
+  const toast = useToast();
+  const qc = useQueryClient();
+  const tool = settings[PROGRAM_SETTING[kind]];
+  const program = useMutation({
+    mutationFn: (choose: boolean) =>
+      unwrap(
+        choose
+          ? ipc().commands.programChoose(kind, tool?.args ?? defaultArgs)
+          : ipc().commands.programClear(kind),
+      ),
+    onSuccess: (next) => qc.setQueryData(queryKeys.settings, next),
+    onError: (e) => toast.show(e.message),
+  });
+  return (
+    <Field label={label} hint={hint}>
+      <div className="flex gap-2">
+        <Input
+          readOnly
+          value={tool ? `${tool.path} ${tool.args.join(" ")}`.trim() : t("noExternalTool")}
+          className="flex-1 font-mono text-[12px]"
+        />
+        <Button
+          aria-label={`${t("chooseProgram")} ${label}`}
+          disabled={program.isPending}
+          onClick={() => program.mutate(true)}
+        >
+          {t("chooseProgram")}
+        </Button>
+        {tool && (
+          <Button
+            aria-label={`${t("clearProgram")} ${label}`}
+            disabled={program.isPending}
+            onClick={() => program.mutate(false)}
+          >
+            {t("clearProgram")}
+          </Button>
+        )}
+      </div>
+    </Field>
+  );
+}
+
+const PROGRAM_SETTING = {
+  "diff-tool": "diff.externalTool",
+  "merge-tool": "diff.mergeTool",
+  editor: "tools.editor",
+  terminal: "tools.terminal",
+} as const satisfies Record<ProgramKind, keyof Settings>;
 
 export function GeneralPage({ settings, draft, errors, set }: PageProps) {
   const t = useT(settingsStrings);
@@ -162,6 +296,25 @@ export function GeneralPage({ settings, draft, errors, set }: PageProps) {
         >
           <option value="vi">{t("langVi")}</option>
           <option value="en">{t("langEn")}</option>
+        </Select>
+      </Field>
+      <Check
+        label={t("openLastWc")}
+        checked={v("general.openLastWc")}
+        onChange={(on) => set({ "general.openLastWc": on })}
+      />
+      <Field label={t("logLevel")} hint={t("logLevelHint")}>
+        <Select
+          value={v("general.logLevel")}
+          onChange={(e) =>
+            set({ "general.logLevel": e.target.value as Settings["general.logLevel"] })
+          }
+          className="w-72"
+        >
+          <option value="error">{t("logError")}</option>
+          <option value="warn">{t("logWarn")}</option>
+          <option value="info">{t("logInfo")}</option>
+          <option value="debug">{t("logDebug")}</option>
         </Select>
       </Field>
     </div>
@@ -220,17 +373,88 @@ export function AccountsPage() {
           </li>
         ))}
       </ul>
-      <section aria-label={t("trustedCerts")}>
-        <h3 className="m-0 mb-1 text-[10px] font-medium tracking-[.06em] text-muted-text uppercase">
-          {t("trustedCerts")}
-        </h3>
-        <p className="m-0 text-muted-text">{t("trustedCertsNote")}</p>
-      </section>
+      <TrustedCerts />
     </div>
   );
 }
 
-export function AppearancePage({ settings, draft, set }: PageProps) {
+/** `ab12…` as `AB:12:…`, the form certificate viewers show. */
+function fingerprintText(hex: string): string {
+  return (hex.toUpperCase().match(/.{1,2}/g) ?? []).join(":");
+}
+
+function TrustedCerts() {
+  const t = useT(settingsStrings);
+  const qc = useQueryClient();
+  const toast = useToast();
+  const certs = useQuery({
+    queryKey: queryKeys.trustedCerts,
+    queryFn: () => unwrap(ipc().commands.certsList()),
+  });
+  const remove = useMutation({
+    mutationFn: (c: TrustedCert) =>
+      unwrap(ipc().commands.certsRemove({ host: c.host, port: c.port, sha256: c.sha256 })),
+    onSuccess: () => toast.show(t("certRemoved")),
+    onError: (e) => toast.show(e.message),
+    onSettled: () => void qc.invalidateQueries({ queryKey: queryKeys.trustedCerts }),
+  });
+  return (
+    <section aria-labelledby="trusted-certs-title" className="flex flex-col gap-2">
+      <h3
+        id="trusted-certs-title"
+        className="m-0 mb-1 text-[10px] font-medium tracking-[.06em] text-muted-text uppercase"
+      >
+        {t("trustedCerts")}
+      </h3>
+      <p className="m-0 text-muted-text">{t("trustedCertsNote")}</p>
+      {certs.error && (
+        <p className="m-0 text-bad-text" role="alert">
+          {certs.error.message}
+        </p>
+      )}
+      {certs.data?.length === 0 && <p className="m-0">{t("noCerts")}</p>}
+      <ul className="m-0 flex list-none flex-col gap-2 p-0">
+        {certs.data?.map((c) => {
+          const origin = `${c.host}:${c.port}`;
+          return (
+            <li
+              key={`${origin}/${c.sha256}`}
+              className="flex items-center gap-3 rounded-md border border-line px-3 py-2"
+            >
+              <div className="min-w-0 flex-1">
+                <SafeText as="div" className="truncate font-semibold">
+                  {origin}
+                </SafeText>
+                {c.subject && (
+                  <SafeText as="div" className="truncate text-[12px] text-muted-text">
+                    {c.subject}
+                  </SafeText>
+                )}
+                <div className="text-[11px] text-muted-text">
+                  {c.expiresAt
+                    ? t("certExpires", { date: c.expiresAt.slice(0, 10) })
+                    : t("certNoExpiry")}
+                </div>
+                <div className="font-mono text-[11px] break-all text-muted-text">
+                  {t("certFingerprint")} {fingerprintText(c.sha256)}
+                </div>
+              </div>
+              <ConfirmAction
+                label={t("removeCert")}
+                ariaLabel={`${t("removeCert")}: ${origin}`}
+                question={t("removeCertConfirm", { host: origin })}
+                disabled={remove.isPending}
+                onConfirm={() => remove.mutate(c)}
+              />
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+export function AppearancePage({ settings, draft, errors, set }: PageProps) {
   const t = useT(settingsStrings);
   return (
     <div className="flex flex-col gap-3">
@@ -245,6 +469,21 @@ export function AppearancePage({ settings, draft, set }: PageProps) {
           { value: "dark", label: t("themeDark") },
         ]}
       />
+      <NumberField
+        name="appearance.fontSize"
+        label="fontSize"
+        {...{ settings, draft, errors, set }}
+      />
+      <span>{t("density")}</span>
+      <SegmentedControl<Settings["appearance.density"]>
+        label={t("density")}
+        value={settingValue(settings, draft, "appearance.density")}
+        onChange={(v) => set({ "appearance.density": v })}
+        options={[
+          { value: "comfortable", label: t("densityComfortable") },
+          { value: "compact", label: t("densityCompact") },
+        ]}
+      />
     </div>
   );
 }
@@ -252,22 +491,8 @@ export function AppearancePage({ settings, draft, set }: PageProps) {
 /** Default arguments for a newly chosen diff tool: the two copies, left then right. */
 const DEFAULT_DIFF_TOOL_ARGS = ["{left}", "{right}"];
 
-export function DiffMergePage({ settings, draft, set }: PageProps) {
+export function DiffMergePage({ settings, draft, errors, set }: PageProps) {
   const t = useT(settingsStrings);
-  const toast = useToast();
-  const qc = useQueryClient();
-  const tool = settings["diff.externalTool"];
-  // Rust shows the native file picker and the confirmation; the WebView never sends a path.
-  const program = useMutation({
-    mutationFn: (choose: boolean) =>
-      unwrap(
-        choose
-          ? ipc().commands.programChoose("diff-tool", tool?.args ?? DEFAULT_DIFF_TOOL_ARGS)
-          : ipc().commands.programClear("diff-tool"),
-      ),
-    onSuccess: (next) => qc.setQueryData(queryKeys.settings, next),
-    onError: (e) => toast.show(e.message),
-  });
   return (
     <div className="flex flex-col gap-3">
       <span>{t("diffMode")}</span>
@@ -285,24 +510,36 @@ export function DiffMergePage({ settings, draft, set }: PageProps) {
         checked={settingValue(settings, draft, "diff.ignoreWhitespace")}
         onChange={(v) => set({ "diff.ignoreWhitespace": v })}
       />
-      <Field label={t("externalTool")} hint={t("externalToolNote")}>
-        <div className="flex gap-2">
-          <Input
-            readOnly
-            value={tool ? `${tool.path} ${tool.args.join(" ")}` : t("noExternalTool")}
-            className="flex-1 font-mono text-[12px]"
-          />
-          <Button disabled={program.isPending} onClick={() => program.mutate(true)}>
-            {t("chooseProgram")}
-          </Button>
-          {tool && (
-            <Button disabled={program.isPending} onClick={() => program.mutate(false)}>
-              {t("clearProgram")}
-            </Button>
-          )}
-        </div>
-      </Field>
+      <NumberField name="diff.tabWidth" label="tabWidth" {...{ settings, draft, errors, set }} />
+      <ProgramField
+        kind="diff-tool"
+        settings={settings}
+        label={t("externalTool")}
+        hint={t("externalToolNote")}
+        defaultArgs={DEFAULT_DIFF_TOOL_ARGS}
+      />
       <ExtDiffTools settings={settings} />
+      <ProgramField
+        kind="merge-tool"
+        settings={settings}
+        label={t("mergeTool")}
+        hint={t("programNote")}
+        defaultArgs={[]}
+      />
+      <ProgramField
+        kind="editor"
+        settings={settings}
+        label={t("editor")}
+        hint={t("editorNote")}
+        defaultArgs={[]}
+      />
+      <ProgramField
+        kind="terminal"
+        settings={settings}
+        label={t("terminal")}
+        hint={t("terminalNote")}
+        defaultArgs={[]}
+      />
     </div>
   );
 }
@@ -405,6 +642,17 @@ export function NetworkPage({ settings, draft, errors, set }: PageProps) {
 
 export function AdvancedPage({ settings, draft, errors, set }: PageProps) {
   const t = useT(settingsStrings);
+  const toast = useToast();
+  const qc = useQueryClient();
+  const clear = useMutation({
+    mutationFn: () => unwrap(ipc().commands.cacheClear()),
+    onSuccess: () => {
+      toast.show(t("cacheCleared"));
+      // Status lists rescan instead of showing what was just removed.
+      void qc.invalidateQueries({ queryKey: queryKeys.statusAll });
+    },
+    onError: (e) => toast.show(e.message),
+  });
   return (
     <div className="flex flex-col gap-3">
       <Field label={t("wcFormat")}>
@@ -415,7 +663,37 @@ export function AdvancedPage({ settings, draft, errors, set }: PageProps) {
         checked={settingValue(settings, draft, "wc.readSubversionConfig")}
         onChange={(v) => set({ "wc.readSubversionConfig": v })}
       />
+      <Field
+        label={t("globalIgnores")}
+        hint={t("globalIgnoresHint")}
+        error={fieldError(
+          errors,
+          "wc.globalIgnores",
+          t("globalIgnoresInvalid", { max: MAX_GLOBAL_IGNORES }),
+          t("rejected"),
+        )}
+      >
+        <Textarea
+          rows={3}
+          spellCheck={false}
+          aria-invalid={errors["wc.globalIgnores"] ? true : undefined}
+          value={settingValue(settings, draft, "wc.globalIgnores")}
+          onChange={(e) => set({ "wc.globalIgnores": e.target.value })}
+          className="font-mono text-[12px]"
+        />
+      </Field>
       <NumberField name="cache.maxSizeGb" label="cacheMax" {...{ settings, draft, errors, set }} />
+      <div className="flex flex-col gap-1">
+        <div>
+          <ConfirmAction
+            label={t("clearCache")}
+            question={t("clearCacheConfirm")}
+            disabled={clear.isPending}
+            onConfirm={() => clear.mutate()}
+          />
+        </div>
+        <span className="text-[11px] text-muted-text">{t("clearCacheHint")}</span>
+      </div>
     </div>
   );
 }
