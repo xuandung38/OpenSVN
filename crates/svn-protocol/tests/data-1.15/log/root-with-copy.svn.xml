@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<log>
+<logentry
+   revision="6">
+<author>alice</author>
+<date>2026-10-15T15:12:59.042408Z</date>
+<paths>
+<path
+   prop-mods="false"
+   text-mods="true"
+   kind="file"
+   action="M">/trunk/a.txt</path>
+<path
+   action="A"
+   prop-mods="false"
+   text-mods="false"
+   kind="dir">/trunk/newdir</path>
+<path
+   action="A"
+   prop-mods="false"
+   text-mods="true"
+   kind="file">/trunk/newdir/n.txt</path>
+</paths>
+<msg>second commit: add dir &amp; edit</msg>
+</logentry>
+<logentry
+   revision="5">
+<author>alice</author>
+<date>2026-10-15T15:12:52.260251Z</date>
+<paths>
+<path
+   copyfrom-path="/trunk/src"
+   copyfrom-rev="4"
+   action="A"
+   prop-mods="false"
+   text-mods="false"
+   kind="dir">/branches/b1</path>
+</paths>
+<msg>branch b1 copy</msg>
+</logentry>
+<logentry
+   revision="4">
+<author>alice</author>
+<date>2026-10-15T15:12:51.865285Z</date>
+<paths>
+<path
+   prop-mods="false"
+   text-mods="false"
+   kind="file"
+   action="D">/trunk/docs/readme.md</path>
+</paths>
+<msg>delete readme</msg>
+</logentry>
+<logentry
+   revision="3">
+<author>alice</author>
+<date>2026-10-15T15:12:51.633372Z</date>
+<paths>
+<path
+   action="M"
+   prop-mods="false"
+   text-mods="true"
+   kind="file">/trunk/a.txt</path>
+</paths>
+<msg>edit a.txt</msg>
+</logentry>
+<logentry
+   revision="2">
+<author>alice</author>
+<date>2026-10-15T15:12:51.435464Z</date>
+<paths>
+<path
+   prop-mods="true"
+   text-mods="true"
+   kind="file"
+   action="A">/trunk/a.txt</path>
+<path
+   prop-mods="false"
+   text-mods="false"
+   kind="dir"
+   action="A">/trunk/docs</path>
+<path
+   prop-mods="false"
+   text-mods="true"
+   kind="file"
+   action="A">/trunk/docs/readme.md</path>
+<path
+   action="A"
+   prop-mods="false"
+   text-mods="false"
+   kind="dir">/trunk/src</path>
+<path
+   action="A"
+   prop-mods="true"
+   text-mods="true"
+   kind="file">/trunk/src/b.txt</path>
+<path
+   action="A"
+   prop-mods="false"
+   text-mods="false"
+   kind="dir">/trunk/src/deep</path>
+<path
+   action="A"
+   prop-mods="false"
+   text-mods="true"
+   kind="file">/trunk/src/deep/c.cfg</path>
+<path
+   action="A"
+   prop-mods="false"
+   text-mods="true"
+   kind="file">/trunk/unicodé file.txt</path>
+</paths>
+<msg>initial: files &amp; props &lt;&amp;&gt; unicode é</msg>
+</logentry>
+<logentry
+   revision="1">
+<author>alice</author>
+<date>2026-10-15T15:12:50.432705Z</date>
+<paths>
+<path
+   text-mods="false"
+   kind="dir"
+   action="A"
+   prop-mods="false">/branches</path>
+<path
+   text-mods="false"
+   kind="dir"
+   action="A"
+   prop-mods="false">/trunk</path>
+</paths>
+<msg>layout</msg>
+</logentry>
+</log>

@@ -5,6 +5,11 @@
 # Usage: fixtures/protocol/capture.sh [session...]      (default: all sessions)
 # Needs (native mode): svn, svnadmin, apache2 (httpd 2.4) with mod_dav_svn, htpasswd, python3,
 # openssl. On Debian/Ubuntu: apt-get install subversion apache2 libapache2-mod-svn.
+# Another server (e.g. mod_dav_svn 1.15.0 from docker/nix/subversion-1.15.nix):
+#   CAPTURE_HTTPD=/path/to/httpd  CAPTURE_HTTPD_MODULES=/path/to/modules  (Apache 2.4)
+#   CAPTURE_SVN_MODULES=/path/to/modules      (mod_dav_svn.so; default: CAPTURE_HTTPD_MODULES)
+#   CAPTURE_OUT=fixtures/protocol-1.15        (where the sessions go; default: this directory)
+# svn and svnadmin on PATH are used, so put that build first.
 # The server repository is fixtures/repos/make-basic.sh (hash-pinned), served at /svn/basic with
 # Basic auth; requests go through crates/svn-protocol/tools/capture/proxy.py, which logs every
 # exchange with identity encoding (no gzip) so bodies are readable.
@@ -23,7 +28,10 @@ SESSIONS=("$@")
 
 APACHE_PORT="${CAPTURE_APACHE_PORT:-18090}"
 PROXY_PORT="${CAPTURE_PROXY_PORT:-18091}"
-MODS=/usr/lib/apache2/modules
+HTTPD="${CAPTURE_HTTPD:-apache2}"
+MODS="${CAPTURE_HTTPD_MODULES:-/usr/lib/apache2/modules}"
+SVN_MODS="${CAPTURE_SVN_MODULES:-$MODS}"
+out="${CAPTURE_OUT:-$here}"; mkdir -p "$out"; out="$(cd "$out" && pwd)"
 work="$(mktemp -d)"; chmod 755 "$work"
 cleanup() {
   [ -n "${PROXY:-}" ] && kill "$PROXY" 2>/dev/null || true
@@ -39,6 +47,7 @@ htpasswd -bc "$work/htpasswd" tester tester-pass 2>/dev/null
 printf '#!/bin/sh\nexit 0\n' > "$work/repos/basic/hooks/pre-revprop-change"
 chmod +x "$work/repos/basic/hooks/pre-revprop-change"
 run_user=www-data
+id -u "$run_user" >/dev/null 2>&1 || run_user=nobody
 if [ "$(id -u)" != 0 ]; then run_user="$(id -un)"; fi
 [ "$(id -u)" = 0 ] && chown -R "$run_user" "$work/repos"
 cat > "$work/httpd.conf" <<EOF
@@ -54,8 +63,8 @@ LoadModule authn_file_module $MODS/mod_authn_file.so
 LoadModule authz_user_module $MODS/mod_authz_user.so
 LoadModule auth_basic_module $MODS/mod_auth_basic.so
 LoadModule dav_module $MODS/mod_dav.so
-LoadModule dav_svn_module $MODS/mod_dav_svn.so
-$( [ "$(id -u)" = 0 ] && printf 'LoadModule unixd_module %s/mod_unixd.so\nUser %s\nGroup %s\n' "$MODS" "$run_user" "$run_user" )
+LoadModule dav_svn_module $SVN_MODS/mod_dav_svn.so
+$( [ "$(id -u)" = 0 ] && printf 'LoadModule unixd_module %s/mod_unixd.so\nUser %s\nGroup %s\n' "$MODS" "$run_user" "$(id -gn "$run_user")" )
 <Location /svn>
   DAV svn
   SVNParentPath "$work/repos"
@@ -69,12 +78,12 @@ $( [ "$(id -u)" = 0 ] && printf 'LoadModule unixd_module %s/mod_unixd.so\nUser %
 </Location>
 EOF
 # mod_unixd is compiled in on some builds; drop the LoadModule line if it is.
-if apache2 -l 2>/dev/null | grep -q mod_unixd.c; then sed -i '/unixd_module/d' "$work/httpd.conf"; fi
-apache2 -f "$work/httpd.conf" -k start
+if "$HTTPD" -l 2>/dev/null | grep -q mod_unixd.c; then sed -i '/unixd_module/d' "$work/httpd.conf"; fi
+"$HTTPD" -f "$work/httpd.conf" -k start
 python3 "$proxy_py" "$PROXY_PORT" "$APACHE_PORT" "$work/cur.jsonl" & PROXY=$!
 for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:$PROXY_PORT/" && break; sleep 0.1; done
 
-server_version="$(apache2 -v | head -1 | sed 's/^Server version: //') / $(svnadmin --version --quiet)"
+server_version="$("$HTTPD" -v | head -1 | sed 's/^Server version: //') / $(svnadmin --version --quiet)"
 client_version="$(svn --version --quiet)"
 U="http://127.0.0.1:$PROXY_PORT/svn/basic"
 A=(--username tester --password tester-pass --non-interactive --no-auth-cache
@@ -85,8 +94,8 @@ record() { # record <session> <description> <command...>
   shift 2
   : > "$work/cur.jsonl"
   "$@" > "$work/$name.out" 2>&1 || { echo "$name: command failed" >&2; cat "$work/$name.out" >&2; exit 1; }
-  rm -rf "${here:?}/$name"
-  python3 "$here/normalize.py" "$work/cur.jsonl" "$here/$name" "$PROXY_PORT" \
+  rm -rf "${out:?}/$name"
+  python3 "$here/normalize.py" "$work/cur.jsonl" "$out/$name" "$PROXY_PORT" \
     "$desc" "$client_version" "$server_version" "$*"
 }
 
