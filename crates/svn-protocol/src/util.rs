@@ -115,7 +115,9 @@ impl Base64Stream {
         // byte per character, so the group boundary below is always a char boundary.
         for c in text.chars().filter(|c| !c.is_whitespace()) {
             if !c.is_ascii() {
-                return Err(corrupt(format!("invalid base64: non-ASCII character {c:?}")));
+                return Err(corrupt(format!(
+                    "invalid base64: non-ASCII character {c:?}"
+                )));
             }
             self.pending.push(c);
         }
