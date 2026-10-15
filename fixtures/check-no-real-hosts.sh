@@ -17,7 +17,7 @@ paths=(fixtures tests/compat/scenarios)
 disallowed_hosts() {
   sed -E 's|^[A-Za-z]+://||; s|[/\\?#].*$||; s|^.*@||; s|:([0-9]*\|\$[A-Za-z_]+\|\{[a-z]+\})$||' \
     | tr 'A-Z' 'a-z' \
-    | grep -Ev '^(([a-z0-9-]+\.)*(test|example|invalid|localhost|test\.local)\.?|([a-z0-9-]+\.)*example\.(com|org|net)\.?|localhost|127\.0\.0\.1|\[::1\]|\{[a-z]+\}.*)$' \
+    | grep -Ev '^(([a-z0-9-]+\.)*(test|example|invalid|localhost|test\.local)\.?|([a-z0-9-]+\.)*example\.(com|org|net)\.?|localhost|127\.0\.0\.1|\[::1\]|\{[a-z]+\})$' \
     || true
 }
 
@@ -58,7 +58,9 @@ self_test() {
     'https://qzxv-sample.co?svn.test.local' \
     'https://qzxv-sample.co#.test' \
     'http://svnhost/svn' \
-    'http://10.0.0.5:8080/svn'; do
+    'http://10.0.0.5:8080/svn' \
+    'http://{host}.qzxv-sample.co/svn' \
+    'HTTPS://SVN.Qzxv-Sample.CO/svn'; do
     got=$(printf '%s\n' "$url" | disallowed_hosts)
     if [ -z "$got" ]; then echo "self-test: $url should be refused" >&2; failed=1; fi
   done
@@ -75,8 +77,8 @@ self_test >/dev/null || { echo "host filter self-test failed; run with --self-te
 status=0
 # Any URL host that is not on the allowlist. XML namespace names (DAV/svn/XML Schema) are URIs,
 # not hosts anything connects to, so they are dropped first.
-bad_urls=$(grep -RIEho --exclude='check-no-real-hosts.sh' 'https?://[^[:space:]"'"'"')>]+' "${paths[@]}" 2>/dev/null \
-  | grep -Ev '^http://(subversion\.tigris\.org/xmlns/|apache\.org/dav/(props|propset)/|www\.w3\.org/)' \
+bad_urls=$(grep -RIEhoi --exclude='check-no-real-hosts.sh' 'https?://[^[:space:]"'"'"')>]+' "${paths[@]}" 2>/dev/null \
+  | grep -Evi '^http://(subversion\.tigris\.org/xmlns/|apache\.org/dav/(props|propset)/|www\.w3\.org/)' \
   | disallowed_hosts | sort -u || true)
 if [ -n "$bad_urls" ]; then
   echo "non-allowlisted hosts in fixtures/scenarios:" >&2
