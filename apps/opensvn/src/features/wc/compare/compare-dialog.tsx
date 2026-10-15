@@ -91,7 +91,11 @@ function CompareBody({ wc }: { wc: WorkingCopy }) {
         unwrap(ipc().commands.repoList(joinUrl(wc.url, path), null)),
         unwrap(ipc().commands.repoList(joinUrl(target as string, path), null)),
       ]);
-      return compareListings(left, right);
+      // Entries with unsafe names never reach the UI; only their count does.
+      return {
+        rows: compareListings(left.entries, right.entries),
+        hidden: left.hidden + right.hidden,
+      };
     },
   });
 
@@ -102,7 +106,8 @@ function CompareBody({ wc }: { wc: WorkingCopy }) {
     setPath("");
     setDiff(null);
   };
-  const rows = (listing.data ?? []).filter((r) => showSame || r.state !== "same");
+  const rows = (listing.data?.rows ?? []).filter((r) => showSame || r.state !== "same");
+  const hidden = listing.data?.hidden ?? 0;
   const folderLabel = path ? `/${path}` : t("root");
 
   return (
@@ -219,6 +224,11 @@ function CompareBody({ wc }: { wc: WorkingCopy }) {
                 ))}
               </tbody>
             </table>
+          )}
+          {hidden > 0 && (
+            <p className="m-0 text-[12px] text-muted-text">
+              {t("hiddenEntries", { count: hidden })}
+            </p>
           )}
           {diff && (
             <FileCompare
