@@ -77,6 +77,7 @@ Build bộ cài:
 | Fuzz hằng đêm (svn-protocol, svn-delta), proptest update so với svn 1.15, độ trễ watcher (~460 ms với 10k file), kiểm tra accessibility bằng axe (en/vi) | #168 |
 | `LogProgress::accept` chịu được entry merge lồng (`-g`): entry con không còn kéo lệch `last`, không bị bỏ hay lặp khi tải tiếp | #164 (follow-up) |
 | Mất mạng lâu khi checkout/update: chờ mạng (`network.reconnectWaitMin`, mặc định 10 phút) rồi tải tiếp đúng revision; "Tiếp tục checkout" sau khi hủy, đóng app hoặc crash (journal checkout); phát hiện ngủ/thức bằng đồng hồ boot, không theo giờ hệ thống | #172 |
+| Continue checkout do svn 1.15 bỏ dở: file svn đã đặt lên đĩa nhưng chưa kịp commit hàng BASE (bị kill giữa rename và commit) được nhận lại khi nội dung khớp, không còn tree-conflict và hàng `base-deleted`; file khác nội dung vẫn giữ nguyên làm vật cản | #172 (follow-up) |
 
 Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #144, #145, #146.
 
