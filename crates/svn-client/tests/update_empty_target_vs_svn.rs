@@ -54,23 +54,19 @@ fn build(repo: &Repo) {
 /// Local states of `A/E` before the update; each leaves `A/E` an empty directory on disk.
 #[derive(Debug, Clone, Copy)]
 enum Local {
-    /// The reviewer's case: deletes, an added file and a made directory, both gone from disk.
-    AddsGone,
-    /// As `AddsGone`, the added file with translation properties of its own.
-    TranslatedAddGone,
-    /// Only the added file and directory, nothing deleted.
-    OnlyAddsGone,
+    /// Local deletes, an added file and a made directory, both gone from disk.
+    WithDeletes,
+    /// As `WithDeletes`, the added file with translation properties of its own.
+    TranslatedAdd,
+    /// The added file and directory, nothing deleted: `x.txt` and `y.txt` are missing instead.
+    OnlyAdds,
 }
 
-const ALL: [Local; 3] = [
-    Local::AddsGone,
-    Local::TranslatedAddGone,
-    Local::OnlyAddsGone,
-];
+const ALL: [Local; 3] = [Local::WithDeletes, Local::TranslatedAdd, Local::OnlyAdds];
 
 fn prepare(repo: &Repo, wc: &Path, local: Local) {
     let e = wc.join("A/E");
-    if !matches!(local, Local::OnlyAddsGone) {
+    if !matches!(local, Local::OnlyAdds) {
         repo.svn(&e, &["rm", "-q", "x.txt", "y.txt"]);
     } else {
         // Nothing deleted: the versioned files leave the disk (missing), so `E` is empty.
@@ -81,7 +77,7 @@ fn prepare(repo: &Repo, wc: &Path, local: Local) {
     repo.svn(&e, &["add", "-q", "new.txt"]);
     repo.svn(&e, &["propset", "-q", "lp", "local prop", "new.txt"]);
     repo.svn(&e, &["changelist", "-q", "cl", "new.txt"]);
-    if let Local::TranslatedAddGone = local {
+    if let Local::TranslatedAdd = local {
         repo.svn(&e, &["propset", "-q", "svn:eol-style", "CRLF", "new.txt"]);
         repo.svn(&e, &["propset", "-q", "svn:keywords", "Rev", "new.txt"]);
     }
