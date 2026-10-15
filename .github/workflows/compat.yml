@@ -16,6 +16,7 @@ on:
       - "crates/svn-client/**"
       - "apps/opensvn/src-tauri/src/engine/**"
       - "apps/opensvn/src-tauri/tests/real_engine_dav.rs"
+      - "scripts/test-env/engine-wc-old-client.sh"
       - ".github/workflows/compat.yml"
   push:
     branches: [main]
@@ -30,6 +31,7 @@ on:
       - "crates/svn-client/**"
       - "apps/opensvn/src-tauri/src/engine/**"
       - "apps/opensvn/src-tauri/tests/real_engine_dav.rs"
+      - "scripts/test-env/engine-wc-old-client.sh"
       - ".github/workflows/compat.yml"
   schedule:
     - cron: "0 3 * * *"
@@ -88,6 +90,16 @@ jobs:
 
       - name: Harness self-check (svn15 vs svn15, svn14 vs svn15)
         run: cargo xtask compat run
+
+      # The engine (crash-worker: svn-ra + svn-client + svn-wc) checks out, commits and updates;
+      # then svn 1.14.5 (the compat client image) runs status, commit and update on the same
+      # working copy, and the engine takes it back. Server: a throwaway local mod_dav_svn.
+      - name: svn 1.14.5 client on engine-created working copies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends subversion apache2 libapache2-mod-svn
+          cargo build -p opensvn-crash --bin crash-worker --locked
+          scripts/test-env/engine-wc-old-client.sh target/debug/crash-worker
 
       - name: Docker-backed tests
         run: cargo test -p opensvn-compat --locked -- --ignored
