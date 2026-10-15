@@ -37,9 +37,9 @@ promptable); and every `update/` case delivered over the wire.
 
 ## Known gaps / not covered
 
-- No `docker/evil-server/` container yet: the scripted servers in the crate tests cover the same
-  answers without Docker. A hostile *repository* (file names / props containing `<script>`, SVG
-  with script, symlink `dir -> /tmp`) for UI and working-copy tests is not generated yet.
+- The evil server (`docker/evil-server/`) serves a real hostile *repository* through stock
+  mod_dav_svn; the malformed protocol answers above stay in the scripted servers of the crate
+  tests, since mod_dav_svn never sends them.
 
 ## Hostile repository and evil server
 
