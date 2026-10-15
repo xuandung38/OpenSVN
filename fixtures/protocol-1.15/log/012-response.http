@@ -1,0 +1,42 @@
+HTTP/1.1 200 OK
+Date: Mon, 01 Jan 2024 00:00:00 GMT
+Server: Apache
+DAV: 1,2
+DAV: version-control,checkout,working-resource
+DAV: merge,baseline,activity,version-controlled-collection
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+DAV: http://subversion.tigris.org/xmlns/dav/svn/atomic-revprops
+DAV: http://subversion.tigris.org/xmlns/dav/svn/partial-replay
+DAV: http://subversion.tigris.org/xmlns/dav/svn/inherited-props
+DAV: http://subversion.tigris.org/xmlns/dav/svn/inline-props
+DAV: http://subversion.tigris.org/xmlns/dav/svn/reverse-file-revs
+DAV: http://subversion.tigris.org/xmlns/dav/svn/list
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+MS-Author-Via: DAV
+Allow: OPTIONS,GET,HEAD,POST,DELETE,TRACE,PROPFIND,PROPPATCH,COPY,MOVE,PUT,LOCK,UNLOCK,CHECKOUT
+SVN-Youngest-Rev: 10
+SVN-Repository-UUID: 6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01
+SVN-Repository-MergeInfo: yes
+DAV: http://subversion.tigris.org/xmlns/dav/svn/replay-rev-resource
+SVN-Repository-Root: /svn/basic
+SVN-Me-Resource: /svn/basic/!svn/me
+SVN-Rev-Root-Stub: /svn/basic/!svn/rvr
+SVN-Rev-Stub: /svn/basic/!svn/rev
+SVN-Txn-Root-Stub: /svn/basic/!svn/txr
+SVN-Txn-Stub: /svn/basic/!svn/txn
+SVN-VTxn-Root-Stub: /svn/basic/!svn/vtxr
+SVN-VTxn-Stub: /svn/basic/!svn/vtxn
+SVN-Allow-Bulk-Updates: Prefer
+SVN-Supported-Posts: create-txn
+SVN-Supported-Posts: create-txn-with-props
+DAV: http://subversion.tigris.org/xmlns/dav/svn/ephemeral-txnprops
+DAV: http://subversion.tigris.org/xmlns/dav/svn/svndiff1
+DAV: http://subversion.tigris.org/xmlns/dav/svn/svndiff2
+DAV: http://subversion.tigris.org/xmlns/dav/svn/put-result-checksum
+Content-Type: text/xml; charset="utf-8"
+Content-Length: 189
+
+<?xml version="1.0" encoding="utf-8"?>
+<D:options-response xmlns:D="DAV:">
+<D:activity-collection-set><D:href>/svn/basic/!svn/act/</D:href></D:activity-collection-set></D:options-response>

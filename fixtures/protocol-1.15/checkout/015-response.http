@@ -1,0 +1,18 @@
+HTTP/1.1 207 Multi-Status
+Date: Mon, 01 Jan 2024 00:00:00 GMT
+Server: Apache
+Content-Type: text/xml; charset="utf-8"
+Content-Length: 308
+
+<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:ns0="DAV:">
+<D:response xmlns:lp1="DAV:">
+<D:href>/svn/basic/!svn/rvr/10/trunk/README.txt</D:href>
+<D:propstat>
+<D:prop>
+<lp1:resourcetype/>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+</D:response>
+</D:multistatus>

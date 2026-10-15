@@ -1,0 +1,9 @@
+HTTP/1.1 200 OK
+Date: Mon, 01 Jan 2024 00:00:00 GMT
+Server: Apache
+Content-Type: text/xml; charset="utf-8"
+Content-Length: 124
+
+<?xml version="1.0" encoding="utf-8"?>
+<S:inherited-props-report xmlns:S="svn:" xmlns:D="DAV:">
+</S:inherited-props-report>

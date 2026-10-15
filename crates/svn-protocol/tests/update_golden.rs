@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{load, run_split, urls};
+use common::{DATA_SETS, for_each_set, load, run_split, urls, use_set};
 use proptest::prelude::*;
 use svn_protocol::update::{UpdateEvent, UpdateParser, parse_update};
 use svn_protocol::{HrefKind, ResponseParser};
@@ -270,146 +270,160 @@ fn status_reports_have_empty_deltas() {
 
 #[test]
 fn synthetic_skelta_fetch_elements_and_late_checked_in() {
-    let doc = r#"<S:update-report xmlns:S="svn:" xmlns:D="DAV:" xmlns:V="http://subversion.tigris.org/xmlns/dav/">
-<S:target-revision rev="7"/>
-<S:open-directory rev="3">
- <S:fetch-props/>
- <S:add-file name="f.txt"><D:checked-in><D:href>/svn/repo/!svn/rvr/7/trunk/f.txt</D:href></D:checked-in>
-  <S:fetch-file base-checksum="d41d8cd98f00b204e9800998ecf8427e"/><S:fetch-props/>
-  <S:set-prop name="svn:mime-type" encoding="base64">dGV4dC9wbGFpbg==</S:set-prop><S:remove-prop name="gone"/>
-  <S:prop><V:md5-checksum>d41d8cd98f00b204e9800998ecf8427e</V:md5-checksum></S:prop></S:add-file>
- <S:absent-file name="secret.txt"/><S:absent-directory name="hidden"/>
- <S:unknown-future-thing><S:nested/></S:unknown-future-thing>
-</S:open-directory></S:update-report>"#;
-    let evs = parse_update(&urls(), doc.as_bytes()).unwrap();
-    assert_well_formed(&evs);
-    assert!(
-        evs.iter()
-            .any(|e| matches!(e, UpdateEvent::FetchProps { path, href: None } if path.is_root()))
-    );
-    assert!(evs.iter().any(|e| matches!(e, UpdateEvent::FetchFile { path, href: Some(_), base_checksum: Some(_) } if path.as_str() == "f.txt")));
-    assert!(evs.iter().any(|e| matches!(e, UpdateEvent::SetProp { name, value, .. } if name == "svn:mime-type" && value.as_ref() == b"text/plain")));
-    assert!(
-        evs.iter()
-            .any(|e| matches!(e, UpdateEvent::RemoveProp { name, .. } if name == "gone"))
-    );
-    assert!(
-        evs.iter().any(
+    for_each_set(|| {
+        let doc = r#"<S:update-report xmlns:S="svn:" xmlns:D="DAV:" xmlns:V="http://subversion.tigris.org/xmlns/dav/">
+    <S:target-revision rev="7"/>
+    <S:open-directory rev="3">
+     <S:fetch-props/>
+     <S:add-file name="f.txt"><D:checked-in><D:href>/svn/repo/!svn/rvr/7/trunk/f.txt</D:href></D:checked-in>
+      <S:fetch-file base-checksum="d41d8cd98f00b204e9800998ecf8427e"/><S:fetch-props/>
+      <S:set-prop name="svn:mime-type" encoding="base64">dGV4dC9wbGFpbg==</S:set-prop><S:remove-prop name="gone"/>
+      <S:prop><V:md5-checksum>d41d8cd98f00b204e9800998ecf8427e</V:md5-checksum></S:prop></S:add-file>
+     <S:absent-file name="secret.txt"/><S:absent-directory name="hidden"/>
+     <S:unknown-future-thing><S:nested/></S:unknown-future-thing>
+    </S:open-directory></S:update-report>"#;
+        let evs = parse_update(&urls(), doc.as_bytes()).unwrap();
+        assert_well_formed(&evs);
+        assert!(
+            evs.iter().any(
+                |e| matches!(e, UpdateEvent::FetchProps { path, href: None } if path.is_root())
+            )
+        );
+        assert!(evs.iter().any(|e| matches!(e, UpdateEvent::FetchFile { path, href: Some(_), base_checksum: Some(_) } if path.as_str() == "f.txt")));
+        assert!(evs.iter().any(|e| matches!(e, UpdateEvent::SetProp { name, value, .. } if name == "svn:mime-type" && value.as_ref() == b"text/plain")));
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, UpdateEvent::RemoveProp { name, .. } if name == "gone"))
+        );
+        assert!(evs.iter().any(
             |e| matches!(e, UpdateEvent::AbsentFile { path } if path.as_str() == "secret.txt")
-        )
-    );
-    assert!(
-        evs.iter()
-            .any(|e| matches!(e, UpdateEvent::AbsentDir { path } if path.as_str() == "hidden"))
-    );
-    assert!(
-        evs.iter()
-            .any(|e| matches!(e, UpdateEvent::CloseFile { md5: Some(_), .. }))
-    );
+        ));
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, UpdateEvent::AbsentDir { path } if path.as_str() == "hidden"))
+        );
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, UpdateEvent::CloseFile { md5: Some(_), .. }))
+        );
+    });
 }
 
 #[test]
 fn hostile_reports_are_rejected() {
-    let wrap = |inner: &str| {
-        format!(
-            r#"<S:update-report xmlns:S="svn:" xmlns:D="DAV:" xmlns:V="http://subversion.tigris.org/xmlns/dav/"><S:target-revision rev="1"/><S:open-directory rev="1">{inner}</S:open-directory></S:update-report>"#
-        )
-    };
-    let bad_names = [
-        "..", ".", ".svn", ".SVN", "a/b", "../x", "CON", "aux.txt", "a:b", "a\\b", "x ", "x.", "",
-    ];
-    for name in bad_names {
-        for tag in [
-            "add-file",
-            "add-directory",
-            "open-file",
-            "delete-entry",
-            "absent-file",
-        ] {
-            let doc = wrap(&format!(r#"<S:{tag} name="{name}"/>"#));
-            let err = parse_update(&urls(), doc.as_bytes()).err();
-            assert!(err.is_some(), "{tag} name={name:?} was accepted");
+    for_each_set(|| {
+        let wrap = |inner: &str| {
+            format!(
+                r#"<S:update-report xmlns:S="svn:" xmlns:D="DAV:" xmlns:V="http://subversion.tigris.org/xmlns/dav/"><S:target-revision rev="1"/><S:open-directory rev="1">{inner}</S:open-directory></S:update-report>"#
+            )
+        };
+        let bad_names = [
+            "..", ".", ".svn", ".SVN", "a/b", "../x", "CON", "aux.txt", "a:b", "a\\b", "x ", "x.",
+            "",
+        ];
+        for name in bad_names {
+            for tag in [
+                "add-file",
+                "add-directory",
+                "open-file",
+                "delete-entry",
+                "absent-file",
+            ] {
+                let doc = wrap(&format!(r#"<S:{tag} name="{name}"/>"#));
+                let err = parse_update(&urls(), doc.as_bytes()).err();
+                assert!(err.is_some(), "{tag} name={name:?} was accepted");
+            }
         }
-    }
-    let bad_hrefs = [
-        "http://evil.test/svn/repo/!svn/rvr/1/x",
-        "/svn/repo/!svn/rvr/1/../../../etc/passwd",
-        "/svn/repo/!svn/bc/1/trunk",
-        "/elsewhere/file",
-        "relative/path",
-    ];
-    for href in bad_hrefs {
-        let doc = wrap(&format!(
-            r#"<S:add-file name="f"><D:checked-in><D:href>{href}</D:href></D:checked-in></S:add-file>"#
-        ));
-        let err = parse_update(&urls(), doc.as_bytes()).unwrap_err();
-        assert_eq!(err.code, ErrorCode::UnsafePath, "{href}");
-    }
-    for inner in [
-        r#"<S:add-file name="f"><S:txdelta>!!!!</S:txdelta></S:add-file>"#,
-        r#"<S:add-file name="f"><S:txdelta>U1Z</S:txdelta></S:add-file>"#,
-        r#"<S:add-file name="f" sha1-checksum="xyz"/>"#,
-        r#"<S:add-file name="f"><S:set-prop name="p" encoding="base64">%%%</S:set-prop></S:add-file>"#,
-        r#"<S:set-prop>v</S:set-prop>"#,
-        r#"<S:add-file name="f"><V:md5-checksum>nothex</V:md5-checksum></S:add-file>"#,
-    ] {
-        assert!(
-            parse_update(&urls(), wrap(inner).as_bytes()).is_err(),
-            "{inner}"
-        );
-    }
-    assert!(parse_update(&urls(), b"<html/>").is_err());
-    // Truncated before the directory closes.
-    let truncated = br#"<S:update-report xmlns:S="svn:"><S:open-directory rev="1">"#;
-    assert!(parse_update(&urls(), truncated).is_err());
+        let bad_hrefs = [
+            "http://evil.test/svn/repo/!svn/rvr/1/x",
+            "/svn/repo/!svn/rvr/1/../../../etc/passwd",
+            "/svn/repo/!svn/bc/1/trunk",
+            "/elsewhere/file",
+            "relative/path",
+        ];
+        for href in bad_hrefs {
+            let doc = wrap(&format!(
+                r#"<S:add-file name="f"><D:checked-in><D:href>{href}</D:href></D:checked-in></S:add-file>"#
+            ));
+            let err = parse_update(&urls(), doc.as_bytes()).unwrap_err();
+            assert_eq!(err.code, ErrorCode::UnsafePath, "{href}");
+        }
+        for inner in [
+            r#"<S:add-file name="f"><S:txdelta>!!!!</S:txdelta></S:add-file>"#,
+            r#"<S:add-file name="f"><S:txdelta>U1Z</S:txdelta></S:add-file>"#,
+            r#"<S:add-file name="f" sha1-checksum="xyz"/>"#,
+            r#"<S:add-file name="f"><S:set-prop name="p" encoding="base64">%%%</S:set-prop></S:add-file>"#,
+            r#"<S:set-prop>v</S:set-prop>"#,
+            r#"<S:add-file name="f"><V:md5-checksum>nothex</V:md5-checksum></S:add-file>"#,
+        ] {
+            assert!(
+                parse_update(&urls(), wrap(inner).as_bytes()).is_err(),
+                "{inner}"
+            );
+        }
+        assert!(parse_update(&urls(), b"<html/>").is_err());
+        // Truncated before the directory closes.
+        let truncated = br#"<S:update-report xmlns:S="svn:"><S:open-directory rev="1">"#;
+        assert!(parse_update(&urls(), truncated).is_err());
+    });
 }
 
 #[test]
 fn nesting_beyond_the_limit_is_an_error() {
-    let mut doc = String::from(r#"<S:update-report xmlns:S="svn:">"#);
-    doc.push_str(r#"<S:open-directory rev="1">"#);
-    for _ in 0..300 {
-        doc.push_str(r#"<S:add-directory name="d">"#);
-    }
-    assert!(parse_update(&urls(), doc.as_bytes()).is_err());
+    for_each_set(|| {
+        let mut doc = String::from(r#"<S:update-report xmlns:S="svn:">"#);
+        doc.push_str(r#"<S:open-directory rev="1">"#);
+        for _ in 0..300 {
+            doc.push_str(r#"<S:add-directory name="d">"#);
+        }
+        assert!(parse_update(&urls(), doc.as_bytes()).is_err());
+    });
 }
 
 #[test]
 fn deltas_stream_before_the_document_ends() {
-    let f = load("update/checkout-send-all");
-    let mut p = UpdateParser::new(urls());
-    let cut = f.resp_body.len() / 2;
-    let early = p.feed(&f.resp_body[..cut]).unwrap();
-    assert!(
-        early
-            .iter()
-            .any(|e| matches!(e, UpdateEvent::AddFile { .. }))
-    );
-    p.feed(&f.resp_body[cut..]).unwrap();
-    p.finish().unwrap();
+    for_each_set(|| {
+        let f = load("update/checkout-send-all");
+        let mut p = UpdateParser::new(urls());
+        let cut = f.resp_body.len() / 2;
+        let early = p.feed(&f.resp_body[..cut]).unwrap();
+        assert!(
+            early
+                .iter()
+                .any(|e| matches!(e, UpdateEvent::AddFile { .. }))
+        );
+        p.feed(&f.resp_body[cut..]).unwrap();
+        p.finish().unwrap();
+    });
 }
 
 proptest! {
     #[test]
     fn chunking_never_changes_the_events(cuts in proptest::collection::vec(0usize..32768, 0..16)) {
-        for name in ["update/checkout-send-all", "update/update-rich", "update/checkout-skelta", "update/update-mixed"] {
-            let f = load(name);
-            let whole = coalesce(parse_update(&urls(), &f.resp_body).unwrap());
-            let split = coalesce(run_split(UpdateParser::new(urls()), &f.resp_body, &cuts));
-            prop_assert_eq!(whole, split);
+        for set in DATA_SETS {
+            use_set(set);
+            for name in ["update/checkout-send-all", "update/update-rich", "update/checkout-skelta", "update/update-mixed"] {
+                let f = load(name);
+                let whole = coalesce(parse_update(&urls(), &f.resp_body).unwrap());
+                let split = coalesce(run_split(UpdateParser::new(urls()), &f.resp_body, &cuts));
+                prop_assert_eq!(whole, split);
+            }
         }
     }
 
     #[test]
     fn one_byte_pieces_and_odd_base64_boundaries(step in 1usize..40) {
-        let f = load("update/update-rich");
-        let whole = coalesce(parse_update(&urls(), &f.resp_body).unwrap());
-        let mut p = UpdateParser::new(urls());
-        let mut got = Vec::new();
-        for piece in f.resp_body.chunks(step) {
-            got.extend(p.feed(piece).unwrap());
+        for set in DATA_SETS {
+            use_set(set);
+            let f = load("update/update-rich");
+            let whole = coalesce(parse_update(&urls(), &f.resp_body).unwrap());
+            let mut p = UpdateParser::new(urls());
+            let mut got = Vec::new();
+            for piece in f.resp_body.chunks(step) {
+                got.extend(p.feed(piece).unwrap());
+            }
+            got.extend(p.finish().unwrap());
+            prop_assert_eq!(whole, coalesce(got));
         }
-        got.extend(p.finish().unwrap());
-        prop_assert_eq!(whole, coalesce(got));
     }
 }

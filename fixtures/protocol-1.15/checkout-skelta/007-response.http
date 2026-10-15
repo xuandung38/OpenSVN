@@ -1,0 +1,151 @@
+HTTP/1.1 200 OK
+Date: Mon, 01 Jan 2024 00:00:00 GMT
+Server: Apache
+Content-Type: text/xml; charset="utf-8"
+Content-Length: 10144
+
+<?xml version="1.0" encoding="utf-8"?>
+<S:update-report xmlns:S="svn:" xmlns:V="http://subversion.tigris.org/xmlns/dav/" xmlns:D="DAV:"  inline-props="true">
+<S:target-revision rev="10"/>
+<S:open-directory rev="10">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/10/trunk</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">10</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T10:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:set-prop name="svn:ignore">*.o
+build
+*.tmp
+</S:set-prop>
+<S:add-file name="README.txt" sha1-checksum="6edab0dd118b91fcb4090ed5f23006ab3f2beb8e">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/3/trunk/README.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">3</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T03:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:set-prop name="svn:eol-style">native</S:set-prop>
+<S:prop><V:md5-checksum>ef1790e4eabdbb8fa63b4691f90055f9</V:md5-checksum></S:prop></S:add-file>
+<S:add-file name="crlf.txt" sha1-checksum="3e806d8d5ff37dc051e9f35ae40698f5341691a4">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/3/trunk/crlf.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">3</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T03:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:set-prop name="svn:eol-style">CRLF</S:set-prop>
+<S:prop><V:md5-checksum>07ec4700eea050e63582e8e9cdefb9e8</V:md5-checksum></S:prop></S:add-file>
+<S:add-directory name="data" bc-url="/svn/basic/!svn/bc/3/trunk/data">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/3/trunk/data</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">3</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T03:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:add-file name="blob.bin" sha1-checksum="8f81206b93adc11889e5834607797532596af844">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/2/trunk/data/blob.bin</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">2</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T02:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:set-prop name="svn:mime-type">application/octet-stream</S:set-prop>
+<S:prop><V:md5-checksum>a34e5866e4751e95b4ad6f05d4890fe9</V:md5-checksum></S:prop></S:add-file>
+<S:add-file name="image.png" sha1-checksum="976865352dea0f4921d0f97e133c0f4d36ddf6ae">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/3/trunk/data/image.png</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">3</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T03:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:set-prop name="svn:mime-type">image/png</S:set-prop>
+<S:prop><V:md5-checksum>70baeab46e30cc85bf52567e765d1559</V:md5-checksum></S:prop></S:add-file>
+</S:add-directory>
+<S:add-directory name="docs" bc-url="/svn/basic/!svn/bc/2/trunk/docs">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/2/trunk/docs</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">2</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T02:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:add-file name="index.md" sha1-checksum="30176afc4892c86a5d50288b310013894b5ef4b1">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/2/trunk/docs/index.md</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">2</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T02:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:prop><V:md5-checksum>65a03cb5feca5898639bfb590c4a2182</V:md5-checksum></S:prop></S:add-file>
+</S:add-directory>
+<S:add-file name="keywords.txt" sha1-checksum="a03bc0ff8cbe0664088101eb3d471026d1ce7724">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/3/trunk/keywords.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">3</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T03:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:set-prop name="svn:keywords">Id Rev</S:set-prop>
+<S:prop><V:md5-checksum>396a0ed82a93580316e9aeb7f3790d83</V:md5-checksum></S:prop></S:add-file>
+<S:add-file name="locked.txt" sha1-checksum="fed95cf704ac1f18ed6cac32627dcc2ccf9de90e">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/3/trunk/locked.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">3</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T03:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:set-prop name="svn:needs-lock">*</S:set-prop>
+<S:prop><V:md5-checksum>5130b4ada730bbdd9be2b40de8d9c311</V:md5-checksum></S:prop></S:add-file>
+<S:add-file name="many-props.txt" sha1-checksum="62046437295c1b8a3be29ff0d80089850673ed22">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/10/trunk/many-props.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">10</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T10:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:set-prop name="custom:beta">two</S:set-prop>
+<S:set-prop name="svn:needs-lock">*</S:set-prop>
+<S:set-prop name="custom:gamma">three</S:set-prop>
+<S:set-prop name="svn:mime-type">text/plain</S:set-prop>
+<S:set-prop name="svn:keywords">Id Rev Date</S:set-prop>
+<S:set-prop name="custom:alpha">one</S:set-prop>
+<S:set-prop name="custom:delta">four</S:set-prop>
+<S:set-prop name="svn:eol-style">native</S:set-prop>
+<S:prop><V:md5-checksum>f4d505593bad9d6bb4544e1f376f4e6f</V:md5-checksum></S:prop></S:add-file>
+<S:add-file name="mixed-eol.txt" sha1-checksum="4573ad183a78cf286ee3cc3c609df41b3f52a1b4">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/2/trunk/mixed-eol.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">2</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T02:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:prop><V:md5-checksum>19b74773151aec982b247d026dceea16</V:md5-checksum></S:prop></S:add-file>
+<S:add-file name="run.sh" sha1-checksum="7a021272a838dba8e2b182c3b46535a56b9f9274">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/3/trunk/run.sh</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">3</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T03:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:set-prop name="svn:executable">*</S:set-prop>
+<S:prop><V:md5-checksum>1877f028191c67b7f577422b8fbe4f2c</V:md5-checksum></S:prop></S:add-file>
+<S:add-directory name="src" bc-url="/svn/basic/!svn/bc/6/trunk/src">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/6/trunk/src</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">6</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T06:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:add-file name="app-copy.c" sha1-checksum="a2bf134917a635131f5a626ba31d8423b813d798">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/6/trunk/src/app-copy.c</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">6</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T06:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:prop><V:md5-checksum>3ab82c9dc5812e0e412e88921a6c9a73</V:md5-checksum></S:prop></S:add-file>
+<S:add-file name="app.c" sha1-checksum="a2bf134917a635131f5a626ba31d8423b813d798">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/5/trunk/src/app.c</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">5</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T05:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:prop><V:md5-checksum>3ab82c9dc5812e0e412e88921a6c9a73</V:md5-checksum></S:prop></S:add-file>
+</S:add-directory>
+<S:add-directory name="with-externals" bc-url="/svn/basic/!svn/bc/4/trunk/with-externals">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/4/trunk/with-externals</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">4</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T04:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:set-prop name="svn:externals">^/trunk/docs docs-ext
+^/trunk/README.txt readme-ext.txt
+</S:set-prop>
+</S:add-directory>
+</S:open-directory>
+</S:update-report>

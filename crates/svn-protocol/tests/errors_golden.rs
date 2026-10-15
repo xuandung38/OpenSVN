@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::load;
+use common::{for_each_set, load};
 use proptest::prelude::*;
 use svn_protocol::errors::parse_dav_error;
 use svn_protocol::{error_from_response, map_http_status};
@@ -11,40 +11,46 @@ use svn_types::ErrorCode;
 
 #[test]
 fn out_of_date_put_is_classified_from_the_errcode() {
-    let f = load("errors/out-of-date-409");
-    assert_eq!(f.status, 409);
-    let err = error_from_response(f.status, &f.resp_headers, &f.resp_body);
-    assert_eq!(err.code, ErrorCode::OutOfDate);
-    assert_eq!(err.svn_code, Some(170_004));
-    assert_eq!(err.message, "File '/trunk/a.txt' is out of date");
+    for_each_set(|| {
+        let f = load("errors/out-of-date-409");
+        assert_eq!(f.status, 409);
+        let err = error_from_response(f.status, &f.resp_headers, &f.resp_body);
+        assert_eq!(err.code, ErrorCode::OutOfDate);
+        assert_eq!(err.svn_code, Some(170_004));
+        assert_eq!(err.message, "File '/trunk/a.txt' is out of date");
+    });
 }
 
 #[test]
 fn lock_conflict_chain() {
-    let f = load("locks/lock-conflict-423");
-    let err = error_from_response(f.status, &f.resp_headers, &f.resp_body);
-    assert_eq!(
-        (err.code, err.svn_code),
-        (ErrorCode::LockedByOther, Some(160_035))
-    );
+    for_each_set(|| {
+        let f = load("locks/lock-conflict-423");
+        let err = error_from_response(f.status, &f.resp_headers, &f.resp_body);
+        assert_eq!(
+            (err.code, err.svn_code),
+            (ErrorCode::LockedByOther, Some(160_035))
+        );
+    });
 }
 
 #[test]
 fn html_error_pages_fall_back_to_the_http_status() {
-    let f = load("errors/auth-401-html");
-    assert_eq!(
-        error_from_response(f.status, &f.resp_headers, &f.resp_body).code,
-        ErrorCode::AuthRequired
-    );
-    assert!(parse_dav_error(&f.resp_body).is_none());
-    let f = load("errors/not-found-404-html");
-    let err = error_from_response(f.status, &f.resp_headers, &f.resp_body);
-    assert_eq!(err.code, ErrorCode::PathNotFound);
-    assert!(err.svn_code.is_none());
-    assert!(
-        !err.message.contains("<html"),
-        "the page body must not leak into the message"
-    );
+    for_each_set(|| {
+        let f = load("errors/auth-401-html");
+        assert_eq!(
+            error_from_response(f.status, &f.resp_headers, &f.resp_body).code,
+            ErrorCode::AuthRequired
+        );
+        assert!(parse_dav_error(&f.resp_body).is_none());
+        let f = load("errors/not-found-404-html");
+        let err = error_from_response(f.status, &f.resp_headers, &f.resp_body);
+        assert_eq!(err.code, ErrorCode::PathNotFound);
+        assert!(err.svn_code.is_none());
+        assert!(
+            !err.message.contains("<html"),
+            "the page body must not leak into the message"
+        );
+    });
 }
 
 #[test]

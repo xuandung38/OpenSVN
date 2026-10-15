@@ -1,0 +1,18 @@
+HTTP/1.1 207 Multi-Status
+Date: Mon, 01 Jan 2024 00:00:00 GMT
+Server: Apache
+Content-Type: text/xml; charset="utf-8"
+Content-Length: 454
+
+<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:ns3="http://subversion.tigris.org/xmlns/dav/" xmlns:ns2="http://subversion.tigris.org/xmlns/custom/" xmlns:ns1="http://subversion.tigris.org/xmlns/svn/" xmlns:ns0="DAV:">
+<D:response>
+<D:href>/svn/basic/!svn/txr/10-a/trunk/src/app.c</D:href>
+<D:propstat>
+<D:prop>
+<ns2:custom:capture/>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+</D:response>
+</D:multistatus>

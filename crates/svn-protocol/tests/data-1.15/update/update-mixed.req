@@ -1,0 +1,18 @@
+<S:update-report
+   xmlns:S="svn:"
+   send-all="true">
+<S:src-path>/svn/repo/trunk</S:src-path>
+<S:target-revision>11</S:target-revision>
+<S:depth>unknown</S:depth>
+<S:entry
+   depth="infinity"
+   rev="11"></S:entry>
+<S:entry
+   depth="infinity"
+   linkpath="/branches/b1"
+   rev="11">src</S:entry>
+<S:entry
+   depth="infinity"
+   lock-token="opaquelocktoken:ee553d40-c8aa-11f1-b487-af0d06e4a764"
+   rev="11">a.txt</S:entry>
+</S:update-report>

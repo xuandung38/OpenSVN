@@ -1,9 +1,18 @@
 # svn-protocol notes: what was verified against real traffic
 
 Scope of this file: facts about the Subversion HTTPv2 (mod_dav_svn) wire protocol that the
-`svn-protocol` goldens depend on. "Verified" means observed in a recording under `tests/data/`
-(Apache 2.4.68 + mod_dav_svn **1.14.5**, client **svn 1.15.0** / serf 1.3.10). Everything else is
-marked unverified. Behaviour of a 1.15 server and of VisualSVN is not yet recorded.
+`svn-protocol` goldens depend on. "Verified" means observed in both recording sets:
+
+| Set | Server | Client |
+|---|---|---|
+| `tests/data/` | Apache 2.4.68 (Debian) + mod_dav_svn **1.14.5** | svn 1.15.0 / serf 1.3.10 |
+| `tests/data-1.15/` | Apache 2.4.69 + mod_dav_svn **1.15.0** (`docker/nix/subversion-1.15.nix`) | svn 1.15.0 / serf 1.3.10 |
+| `fixtures/protocol/` | Apache 2.4.58 (Ubuntu) + mod_dav_svn **1.14.3** | svn 1.14.3 |
+| `fixtures/protocol-1.15/` | Apache 2.4.69 + mod_dav_svn **1.15.0** | svn 1.15.0 / serf 1.3.10 |
+
+Every `*_golden.rs` test runs once per `tests/` set (`common::for_each_set`), and
+`svn-ra/tests/fixture_replay.rs` replays every session of both `fixtures/` sets. Everything else is
+marked unverified. Behaviour of VisualSVN is not yet recorded.
 
 ## How fixtures are captured
 
@@ -20,6 +29,20 @@ crates/svn-protocol/tools/capture/run.sh /tmp/raw          # needs docker, svn, 
 python3 crates/svn-protocol/tools/capture/extract.py /tmp/raw crates/svn-protocol/tests/data
 ```
 
+The 1.15 sets were recorded without docker, from a native Apache and the nix build of 1.15.0:
+
+```
+nix-build docker/nix/subversion-1.15.nix --arg httpServer true -o target/svn-1.15-http
+nix-build '<nixpkgs>' -A apacheHttpd -o target/httpd
+export PATH=$PWD/target/svn-1.15-http/bin:$PWD/target/httpd/bin:$PATH
+export CAPTURE_HTTPD=$PWD/target/httpd/bin/httpd CAPTURE_HTTPD_MODULES=$PWD/target/httpd/modules \
+       CAPTURE_SVN_MODULES=$PWD/target/svn-1.15-http/modules
+crates/svn-protocol/tools/capture/run.sh /tmp/raw-115
+python3 crates/svn-protocol/tools/capture/extract.py /tmp/raw-115 crates/svn-protocol/tests/data-1.15
+CAPTURE_OUT=fixtures/protocol-1.15 fixtures/protocol/capture.sh
+fixtures/check-no-real-hosts.sh                            # also scans tests/data and tests/data-1.15
+```
+
 * `proxy.py` forwards plain HTTP, forces `Accept-Encoding: identity` upstream and logs decoded
   request/response bodies (chunked request bodies are re-assembled).
 * `extract.py` rewrites `127.0.0.1:18081` to `svn.test.local`, drops `Authorization`, `Date`,
@@ -32,7 +55,10 @@ python3 crates/svn-protocol/tools/capture/extract.py /tmp/raw crates/svn-protoco
 * `list-depth1` was produced with `curl` using the exact PROPFIND body svn sends for stat,
   because svn 1.15 lists directories with `S:list-report` against a server that advertises `list`.
 * Quirk: server answers listings in hash order, not sorted.
-* P06 will provide the official harness and a 1.15 server; this tooling is deliberately minimal.
+* `run.sh` is one scenario, so both `tests/` sets hold the same exchanges at the same revision
+  numbers and the golden assertions (`size == 17`, `copyfrom-rev == 4`, ...) hold for both.
+  `commit-control-chars` used to edit `src/b.txt`, which `commit-full` deletes; it now edits
+  `src/deep/c.cfg` (r12 in `data-1.15`). The `data/` set predates that fix.
 
 ### Fuzzing
 
@@ -164,7 +190,7 @@ not.** The builders follow this (test `wire_parity`).
   the report and is covered by synthetic tests only.
 * The errcode table in `errors.rs` was generated from `svn_error_codes.h` of 1.15.0.
 
-### update-report (verified with svn 1.15.0 against 1.14.5)
+### update-report (verified with svn 1.15.0 against 1.14.5 and 1.15.0)
 
 * `REPORT !svn/me`. Body: optional `send-all="true"` attribute, `S:include-props yes` (skelta
   only), `S:src-path` (server path of the session URL), `S:target-revision` (omitted for HEAD),
@@ -211,6 +237,26 @@ not.** The builders follow this (test `wire_parity`).
 (empty). Answer: `S:file-rev@path,@rev` containing `S:rev-prop@name`, `S:set-prop@name`,
 `S:txdelta` (base64 svndiff against the previous version). `include-merged-revisions` position
 and `S:merged-revision` / `S:remove-prop` are from the client source.
+
+## mod_dav_svn 1.15.0 compared with 1.14
+
+Recorded with the same client (svn 1.15.0) and the same scenario, then compared after masking
+UUIDs, timestamps, lock tokens and the `User-Agent`. No parser change was needed.
+
+* **OPTIONS:** the same headers, the same `DAV:` capability tokens (no new 1.15 token), the same
+  `SVN-Allow-Bulk-Updates`, `SVN-Supported-Posts` and stub headers, and the same body.
+* **Every other answer** (PROPFIND, GET, log/get-locks/list/file-revs/update reports, LOCK/UNLOCK,
+  POST/MKCOL/PUT/COPY/PROPPATCH/DELETE/MERGE, 401/404/409/423 errors) carries the same elements and
+  values. The only differences are orders the parsers already must not depend on:
+  * element order inside `S:log-item` (`D:creator-displayname`, `S:date`, `D:comment`) and of
+    `S:rev-prop` inside `S:file-rev`;
+  * `S:set-prop` order inside an update drive (property hash order).
+* Differences that come from Apache or its configuration, not from mod_dav_svn: the 401/201 HTML
+  pages of Apache 2.4.69 use an HTML 4.01 doctype and carry no `<address>` signature line, and
+  `allprop` has no `D:getcontenttype` when `mod_mime` is not loaded (the native capture server
+  loads only the modules it needs).
+* Client-side orders (`S:entry` attribute and entry order, `create-txn-with-props` property order)
+  differ between runs as before; the request tests compare them as XML or as skel lists.
 
 ## Capabilities and fallbacks (mod_dav_svn 1.8 - 1.15, HTTPv2)
 
@@ -295,7 +341,7 @@ stream (usable as a debug assertion in the driver and as the fuzz oracle).
 
 ## Not verified yet
 
-* Behaviour of a Subversion **1.15 server** (needs P06 image) and of **VisualSVN**.
+* Behaviour of **VisualSVN** (only mod_dav_svn 1.14.3, 1.14.5 and 1.15.0 are recorded).
 * `Timeout` header semantics on LOCK, HTTP status for a failed `If:` precondition (assumed 412 ->
   `LockTokenInvalid`), `Negotiate` challenge headers.
 * `strict-node-history` element position; `mergeinfo-report` and `get-location-segments` bodies.

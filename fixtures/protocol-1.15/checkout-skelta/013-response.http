@@ -1,0 +1,12 @@
+HTTP/1.1 200 OK
+Date: Mon, 01 Jan 2024 00:00:00 GMT
+Server: Apache
+Cache-Control: max-age=604800
+ETag: "3//trunk/keywords.txt"
+Accept-Ranges: bytes
+Content-Type: text/plain
+Content-Length: 24
+
+$Id$
+$Rev$
+keyword file

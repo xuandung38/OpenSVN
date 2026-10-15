@@ -1,0 +1,20 @@
+HTTP/1.1 200 OK
+Date: Mon, 01 Jan 2024 00:00:00 GMT
+Server: Apache
+Content-Type: text/xml; charset="utf-8"
+Content-Length: 971
+
+<?xml version="1.0" encoding="utf-8"?>
+<S:update-report xmlns:S="svn:" xmlns:V="http://subversion.tigris.org/xmlns/dav/" xmlns:D="DAV:" send-all="true" inline-props="true">
+<S:target-revision rev="10"/>
+<S:open-directory rev="0">
+<S:add-file name="readme-ext.txt" sha1-checksum="6edab0dd118b91fcb4090ed5f23006ab3f2beb8e">
+<D:checked-in><D:href>/svn/basic/!svn/rvr/3/trunk/README.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">3</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2024-01-01T03:00:00.000000Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">fixture</S:set-prop>
+<S:set-prop name="svn:entry:uuid">6d9f2c1e-0b1a-4c5e-9a31-0a5f2e1d7b01</S:set-prop>
+<S:set-prop name="svn:eol-style">native</S:set-prop>
+<S:txdelta>U1ZOAAAAJQElpUhlbGxvIE9wZW5TVk4Kc2Vjb25kIGxpbmUKdGhpcmQgbGluZQo=</S:txdelta><S:prop><V:md5-checksum>ef1790e4eabdbb8fa63b4691f90055f9</V:md5-checksum></S:prop></S:add-file>
+</S:open-directory>
+</S:update-report>
