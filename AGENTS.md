@@ -74,6 +74,7 @@ Build bộ cài:
 | Thao tác ghi không đi vào kết nối đã chết; không bao giờ gửi một thao tác ghi hai lần | #166 |
 | Tree-conflict và thay file↔thư mục khớp svn 1.15 | #162, #165 |
 | Obstruction trong status, WcBusy, symlink | #147, #152 |
+| Browse báo số mục bị ẩn vì tên không an toàn, không còn hiện "thư mục trống" (chỉ gửi số đếm qua IPC) | #176 |
 
 Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #144, #145, #146.
 
