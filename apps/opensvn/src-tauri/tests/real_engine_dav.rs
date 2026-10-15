@@ -762,6 +762,25 @@ async fn commit_with_changes_below_a_switched_subtree() {
 
 // ---- update and second switch of a switched folder (#170 review) ----
 
+/// Lines of the servers' error logs (`OPENSVN_COMPAT_LOCAL_ERROR_LOGS`, separated by `:`) that
+/// show a crashed child: Apache's `AH00052 ... exit signal` (logged at `core:notice`) and a
+/// failed assertion the child wrote to stderr. `None` without the variable (no local server).
+fn crashed_children() -> Option<usize> {
+    let logs = std::env::var("OPENSVN_COMPAT_LOCAL_ERROR_LOGS").ok()?;
+    Some(
+        logs.split(':')
+            .filter(|p| !p.is_empty())
+            .map(|p| {
+                std::fs::read_to_string(p)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|l| l.contains("AH00052") || l.contains("Assertion"))
+                    .count()
+            })
+            .sum(),
+    )
+}
+
 /// A folder switched away from its parent's URL, with an excluded child, a child at another
 /// revision and a nested switched child, is updated and switched again over a session at the
 /// working copy root. The drive must be anchored at the folder (svn's actual-target split): a
@@ -773,6 +792,10 @@ async fn update_and_switch_again_of_a_switched_folder_with_mixed_children() {
     use opensvn_lib::engine::real::SessionConnector as _;
     use svn_types::{CancelToken, RepoUrl, Revnum};
     use svn_wc::db::Presence;
+    let crashed_before = crashed_children();
+    if crashed_before.is_none() {
+        eprintln!("OPENSVN_COMPAT_LOCAL_ERROR_LOGS is not set: server crashes are not checked");
+    }
     for (version, host) in servers() {
         eprintln!("server {version}");
         let h = harness(&host, "switched-again");
@@ -960,6 +983,13 @@ async fn update_and_switch_again_of_a_switched_folder_with_mixed_children() {
             "b on the branch\n"
         );
     }
+    // The requests must not have crashed the server: a malformed report can make svn_repos
+    // read freed memory and abort the child while the client sees a retried success.
+    assert_eq!(
+        crashed_children(),
+        crashed_before,
+        "a request crashed a mod_dav_svn child (see the server's error log)"
+    );
     assert_no_prompt();
 }
 
