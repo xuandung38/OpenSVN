@@ -191,34 +191,39 @@ async fn list_one(
             let resp = wire.send_ok(req, cancel).await?;
             let mut own = None;
             let mut children = Vec::new();
-            // A repeated entry would make a recursive listing walk its subtree again at every level.
+            // A repeated entry would make a recursive listing walk its subtree again at every
+            // level.
             let mut seen = HashSet::new();
             let mut parser = MultiStatusParser::new();
             stream_items(resp, &mut parser, cancel, |e: PropfindEntry| {
-            match propfind::dir_entry_from(wire.urls(), &e) {
-                Ok((p, entry)) if &p == dir => own = Some(entry),
-                Ok((p, entry)) if p.parent().as_ref() == Some(dir) => {
-                    if seen.insert(p.clone()) {
-                        if children.len() >= budget {
-                            return Err(too_many_entries(max));
+                match propfind::dir_entry_from(wire.urls(), &e) {
+                    Ok((p, entry)) if &p == dir => own = Some(entry),
+                    Ok((p, entry)) if p.parent().as_ref() == Some(dir) => {
+                        if seen.insert(p.clone()) {
+                            if children.len() >= budget {
+                                return Err(too_many_entries(max));
+                            }
+                            children.push((p, entry));
+                        } else {
+                            tracing::warn!("skipping a repeated listing entry");
                         }
-                        children.push((p, entry));
-                    } else {
-                        tracing::warn!("skipping a repeated listing entry");
+                    }
+                    Ok((p, _)) => {
+                        return Err(corrupt(format!(
+                            "listing of {dir} contains unrelated path {p}"
+                        )));
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            code = ?err.code,
+                            "skipping a listing entry: {}",
+                            err.message
+                        );
                     }
                 }
-                Ok((p, _)) => {
-                    return Err(corrupt(format!(
-                        "listing of {dir} contains unrelated path {p}"
-                    )));
-                }
-                Err(err) => {
-                    tracing::warn!(code = ?err.code, "skipping a listing entry: {}", err.message);
-                }
-            }
-            Ok(())
-        })
-        .await?;
+                Ok(())
+            })
+            .await?;
             Ok((own, children))
         }
         .await;
