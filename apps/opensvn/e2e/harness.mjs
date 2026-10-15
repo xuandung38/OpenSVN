@@ -11,7 +11,15 @@
 // dialog, like a user would.
 
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -52,7 +60,9 @@ export class ScratchRepo {
 
   svnadmin(args) {
     if (this.server.kind === "local") {
-      execFileSync("svnadmin", [...args, join(this.server.repos, this.name)]);
+      // A wrapper that runs svnadmin as Apache's user (scripts/test-env/visualsvn-like.sh as root).
+      const svnadmin = process.env.OPENSVN_COMPAT_LOCAL_SVNADMIN ?? "svnadmin";
+      execFileSync(svnadmin, [...args, join(this.server.repos, this.name)]);
     } else {
       execFileSync("docker", [
         "exec",
@@ -151,9 +161,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** The app under test with its own home, data and config folders. */
 export class App {
-  /** `extraEnv` is merged last (e.g. a `PATH` with recording stand-ins for OS launchers). */
-  static async start(tag, extraEnv = {}) {
-    const home = mkdtempSync(join(tmpdir(), `opensvn-e2e-${tag}-`));
+  /**
+   * `extraEnv` is merged last (e.g. a `PATH` with recording stand-ins for OS launchers). `home`
+   * reuses the profile of an earlier run (relaunch after a crash); `stop({ keepHome: true })` or
+   * `kill()` leaves it in place.
+   */
+  static async start(tag, extraEnv = {}, { home } = {}) {
+    home ??= mkdtempSync(join(tmpdir(), `opensvn-e2e-${tag}-`));
     const env = {
       ...process.env,
       HOME: home,
@@ -213,12 +227,54 @@ export class App {
     return this.s.exec(script, ...args);
   }
 
-  async stop() {
+  async stop({ keepHome = false } = {}) {
     try {
       await this.s.delete();
     } catch {
       // the app may already be gone
     }
+    await this.endGroup();
+    if (!keepHome) rmSync(this.home, { recursive: true, force: true });
+  }
+
+  /**
+   * Kills the app's process group (driver, WebKitWebDriver, the app and its WebKit processes)
+   * with SIGKILL, like a crash or a power cut: nothing gets to clean up. The profile stays.
+   */
+  async kill() {
+    try {
+      process.kill(-this.driver.pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+    const deadline = Date.now() + 10_000;
+    while (groupPids(this.driver.pid).length && Date.now() < deadline) await sleep(50);
+    this.driver.stdout.destroy();
+    this.driver.stderr.destroy();
+    this.driver.unref();
+  }
+
+  /** Pid of the app binary (a child of WebKitWebDriver in the driver's process group). */
+  appPid() {
+    return groupPids(this.driver.pid).find((pid) => exeOf(pid) === APP) ?? null;
+  }
+
+  /** Resident memory of the app and every process below it (WebKit web/network processes). */
+  treeMemory() {
+    const root = this.appPid();
+    if (root === null) return null;
+    const pids = [root, ...descendants(root)];
+    let rssKb = 0;
+    let pssKb = 0;
+    for (const pid of pids) {
+      rssKb += statusKb(pid, "VmRSS");
+      pssKb += rollupKb(pid, "Pss");
+    }
+    return { pids: pids.length, rssKb, pssKb, appRssKb: statusKb(root, "VmRSS") };
+  }
+
+  /** Ends the driver's process group: SIGTERM, then SIGKILL. */
+  async endGroup() {
     // An app the session did not close would keep the driver's pipes, and this process, alive.
     for (const signal of ["SIGTERM", "SIGKILL"]) {
       try {
@@ -231,7 +287,6 @@ export class App {
     this.driver.stdout.destroy();
     this.driver.stderr.destroy();
     this.driver.unref();
-    rmSync(this.home, { recursive: true, force: true });
   }
 
   /** Polls `fn` until it returns a truthy value. */
@@ -329,6 +384,78 @@ export class App {
   async screenshot(path) {
     const png = await this.s.screenshot();
     writeFileSync(path, Buffer.from(png, "base64"));
+  }
+}
+
+/** Live processes (not zombies) of process group `pgid`. */
+function groupPids(pgid) {
+  const out = [];
+  for (const name of readdirSync("/proc")) {
+    if (!/^\d+$/.test(name)) continue;
+    const stat = procStat(name);
+    if (stat && stat.pgrp === pgid && stat.state !== "Z") out.push(Number(name));
+  }
+  return out;
+}
+
+/** Fields of /proc/<pid>/stat after the command name. */
+function procStat(pid) {
+  try {
+    const raw = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const f = raw.slice(raw.lastIndexOf(")") + 2).split(" ");
+    return { state: f[0], ppid: Number(f[1]), pgrp: Number(f[2]) };
+  } catch {
+    return null;
+  }
+}
+
+function exeOf(pid) {
+  try {
+    return readlinkSync(`/proc/${pid}/exe`);
+  } catch {
+    return null;
+  }
+}
+
+function descendants(root) {
+  const children = new Map();
+  for (const name of readdirSync("/proc")) {
+    if (!/^\d+$/.test(name)) continue;
+    const stat = procStat(name);
+    if (!stat || stat.state === "Z") continue;
+    if (!children.has(stat.ppid)) children.set(stat.ppid, []);
+    children.get(stat.ppid).push(Number(name));
+  }
+  const out = [];
+  const queue = [root];
+  while (queue.length) {
+    for (const c of children.get(queue.shift()) ?? []) {
+      out.push(c);
+      queue.push(c);
+    }
+  }
+  return out;
+}
+
+function statusKb(pid, field) {
+  try {
+    const m = readFileSync(`/proc/${pid}/status`, "utf8").match(
+      new RegExp(`^${field}:\\s+(\\d+) kB`, "m"),
+    );
+    return m ? Number(m[1]) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function rollupKb(pid, field) {
+  try {
+    const m = readFileSync(`/proc/${pid}/smaps_rollup`, "utf8").match(
+      new RegExp(`^${field}:\\s+(\\d+) kB`, "m"),
+    );
+    return m ? Number(m[1]) : 0;
+  } catch {
+    return 0;
   }
 }
 

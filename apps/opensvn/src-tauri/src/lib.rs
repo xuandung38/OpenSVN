@@ -9,6 +9,8 @@ mod boundary;
 mod command_names;
 mod command_registry;
 mod commands;
+#[cfg(feature = "failpoints")]
+mod crash_hook;
 mod db;
 mod diagnostics;
 mod diff_sides;
@@ -224,6 +226,8 @@ fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
 
 /// Starts the Tauri application.
 pub fn run() {
+    #[cfg(feature = "failpoints")]
+    crash_hook::install();
     let builder = builder::<tauri::Wry>();
     let context = app_context::<tauri::Wry>();
     // The updater plugin fails to start without its `plugins.updater` config (public key and
