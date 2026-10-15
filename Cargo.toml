@@ -33,6 +33,7 @@ svn-diff = { path = "crates/svn-diff" }
 svn-wc = { path = "crates/svn-wc" }
 svn-client = { path = "crates/svn-client" }
 secure-store = { path = "crates/secure-store" }
+office-text = { path = "crates/office-text" }
 
 # runtime and async
 tokio = { version = "=1.53.2", default-features = false }
@@ -56,6 +57,8 @@ quick-xml = "=0.42.0"
 base64 = "=0.23.1"
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 lz4_flex = "=0.14.0"
+# Reading Office Open XML packages (.docx/.xlsx); deflate only, through flate2's Rust backend.
+zip = { version = "=4.6.1", default-features = false, features = ["deflate-flate2"] }
 md-5 = "=0.11.0"
 sha1 = "=0.11.0"
 
