@@ -2,6 +2,7 @@ import { memo } from "react";
 import { cn } from "../../lib/cn";
 import type { StatusCode } from "../../lib/status";
 import { LockBadge } from "../ui/lock-badge";
+import { RowCheck } from "../ui/row-check";
 import { SafeText } from "../ui/safe-text";
 import { StatusGlyph } from "../ui/status-glyph";
 
@@ -24,7 +25,7 @@ export interface FileRowProps {
 
 /**
  * Working-copy file row: grid `18px 20px 1fr auto` (design-guidelines 6). Paths render as text only.
- * The row is an `option` and is never focusable itself; the checkbox is a mouse affordance whose state
+ * The row is an `option` and is never focusable itself; the tick box is a mouse affordance whose state
  * is exposed through the option's `aria-checked` (keyboard: Space on the listbox).
  */
 export const FileRow = memo(function FileRow({
@@ -61,17 +62,10 @@ export const FileRow = memo(function FileRow({
           "group-focus-visible:outline-2 group-focus-visible:-outline-offset-2 group-focus-visible:outline-accent",
       )}
     >
-      <input
-        type="checkbox"
-        tabIndex={-1}
-        aria-hidden="true"
+      <RowCheck
         checked={checked}
-        onClick={(e) => {
-          e.stopPropagation();
-          onPointerActivate?.();
-        }}
-        onChange={() => onToggle?.(path)}
-        className="m-0 h-[14px] w-[14px] accent-[var(--accent)]"
+        onToggle={() => onToggle?.(path)}
+        onPointerActivate={onPointerActivate}
       />
       <StatusGlyph code={status} />
       <span className="min-w-0 truncate font-mono text-[12px]" title={path}>

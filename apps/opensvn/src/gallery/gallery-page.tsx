@@ -164,7 +164,7 @@ function AllComponents() {
               Right-click here
             </div>
           </ContextMenu>
-          <Popover trigger={<Button>Popover</Button>}>
+          <Popover trigger={<Button>Popover</Button>} label="Popover">
             <Input aria-label="Search" placeholder="Search" />
             <PopoverGroup>Recent</PopoverGroup>
             <Button>game-client</Button>
