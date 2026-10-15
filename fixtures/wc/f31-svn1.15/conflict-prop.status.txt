@@ -1,0 +1,31 @@
+# svn status -v
+                12       12 fixture      .
+                12       11 fixture      README.txt
+                12        3 fixture      crlf.txt
+                12        3 fixture      data
+                12        2 fixture      data/blob.bin
+                12        3 fixture      data/image.png
+                12        2 fixture      docs
+                12        2 fixture      docs/index.md
+                12        3 fixture      keywords.txt
+                12        3 fixture      locked.txt
+                12       10 fixture      many-props.txt
+                12        2 fixture      mixed-eol.txt
+                12        3 fixture      run.sh
+                12       12 fixture      src
+                12        6 fixture      src/app-copy.c
+ C              12       12 fixture      src/app.c
+?                                        src/app.c.prej
+                12        4 fixture      with-externals
+X                                        with-externals/docs-ext
+    X           14       11 fixture      with-externals/readme-ext.txt
+
+Performing status on external item at 'with-externals/docs-ext':
+                14       13 fixture      with-externals/docs-ext
+Summary of conflicts:
+  Property conflicts: 1
+# svn info (subset)
+dir
+12
+infinity
+^/trunk

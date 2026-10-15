@@ -44,8 +44,45 @@ cargo +nightly fuzz build                 # compile all targets
 cargo +nightly fuzz run multistatus -- -max_total_time=3600
 ```
 
-The 1h-per-target run belongs to the nightly CI job; the stable test suite covers the same
-entry points with `tests/mutation_smoke.rs`.
+The 1h-per-target run belongs to `.github/workflows/fuzz.yml` (nightly and manual). It runs every
+file in `fuzz/fuzz_targets/` here and in `crates/svn-delta/fuzz/`, and uploads `artifacts/<target>/`
+as `fuzz-crashes-<target>`. Both fuzz crates commit their `Cargo.lock`. The stable test suite covers
+the same entry points with `tests/mutation_smoke.rs`. It also replays every past crash input from
+`tests/data/fuzz-regressions/<target>/` with `tests/fuzz_regressions.rs`.
+
+#### Local run, 2026-10-15
+
+Setup: `cargo +nightly fuzz run <target> corpus/<target> -- -max_total_time=960`, using
+cargo-fuzz 0.13.2 and nightly rustc. Four targets ran at a time on a 4-core container, so exec/s
+is lower than on an idle machine. Each svn-protocol target except `href_vetting` started from the
+recorded `tests/data/**/*.resp` bodies. `cov` is libFuzzer's edge coverage at the end of the run.
+
+| Target | Time | Execs | exec/s | cov | ft | Corpus | Crash |
+|---|---|---|---|---|---|---|---|
+| svn-protocol `error_body` | 16 min | 7,978,997 | 8,302 | 1,849 | 8,692 | 1,854 | none |
+| svn-protocol `file_revs` (before the fix) | 11 min | 2,065,109 | 3,148 | 2,940 | 12,425 | 2,063 | **panic** (see below) |
+| svn-protocol `file_revs` (after the fix) | 16 min | 5,083,217 | 5,289 | 3,287 | 15,245 | 2,424 | none |
+| svn-protocol `get_locks` | 16 min | 8,300,395 | 8,637 | 2,019 | 8,776 | 1,751 | none |
+| svn-protocol `href_vetting` | 16 min | 2,433,734 | 2,532 | 3,416 | 12,078 | 2,436 | none |
+| svn-protocol `log_parser` | 16 min | 10,752,665 | 11,189 | 2,485 | 10,990 | 2,109 | none |
+| svn-protocol `multistatus` | 16 min | 12,004,190 | 12,491 | 2,065 | 10,266 | 2,087 | none |
+| svn-protocol `update_parser` | 16 min | 1,483,296 | 1,543 | 4,379 | 15,205 | 1,798 | none |
+| svn-protocol `update_parser` (after the fix) | 16 min | 1,627,887 | 1,693 | 4,644 | 16,858 | 1,926 | none |
+| svn-protocol `xml_reader` | 16 min | 7,245,789 | 7,539 | 1,528 | 8,184 | 1,512 | none |
+| svn-delta `decode` | 16 min | 28,507,905 | 29,664 | 1,135 | 3,977 | 825 | none |
+| svn-delta `roundtrip` | 16 min | 5,158,568 | 5,367 | 1,547 | 5,117 | 880 | none |
+
+**Crash found and fixed:** `file_revs` panicked with `assertion failed: self.is_char_boundary(at)`
+in `util::Base64Stream::push`. The stream kept every non-whitespace character and split its
+buffer at a multiple of 4 *bytes*. A multi-byte character inside `S:txdelta` (the input had a
+U+FEFF) put that split point inside the character, and `String::split_off` panicked. The same
+stream also decodes `S:txdelta` in the update-report parser. The base64 alphabet is ASCII, so a
+non-ASCII character is now a corrupt response (`invalid base64: non-ASCII character`), which
+keeps the buffer at one byte per character. The input is
+`tests/data/fuzz-regressions/file_revs/crash-bb93c394…`. Regression tests: unit test
+`util::tests::base64_stream_rejects_non_ascii_instead_of_splitting_a_char`, and
+`tests/fuzz_regressions.rs`, which replays the artifact and checks every split point reports the
+response as corrupt. Both reruns marked "after the fix" ran on the fixed code.
 
 ## Verified facts
 

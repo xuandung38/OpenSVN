@@ -34,8 +34,8 @@ use svn_types::{CancelToken, ErrorCode, LockOwnershipStore, RelPath, RepoUrl, Sv
 
 use super::context::OpContext;
 use super::facade::{
-    CheckoutPlan, DiffOptions, EngineFacade, EngineResult, LockScope, LogScope, RemoteEditPlan,
-    RemoteScan, StatusQuery, WcInfo, WcOpened, WcRef,
+    CheckoutPlan, DiffOptions, EngineFacade, EngineResult, ExportedSides, LockScope, LogScope,
+    RemoteEditPlan, RemoteScan, SideFiles, StatusQuery, WcInfo, WcOpened, WcRef,
 };
 
 mod blame;
@@ -49,6 +49,7 @@ mod progress;
 mod recovery;
 mod remote;
 mod remote_edit;
+mod side_export;
 mod sync;
 mod text;
 mod wc_map;
@@ -97,6 +98,16 @@ pub trait SessionConnector: Send + Sync {
         let _ = options;
         self.connect(url, cancel).await
     }
+
+    /// How long a checkout or update waits for a lost connection before it stops (the
+    /// `network.reconnectWaitMin` setting); `None` does not wait (in-memory test connectors).
+    fn reconnect_wait(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    /// The system woke up from sleep: reads in flight and pooled connections are most likely
+    /// dead (see [`svn_ra::transport::HttpTransport::interrupt_reads`]).
+    fn system_woke(&self) {}
 }
 
 /// Where a session opened by [`SessionConnector::connect_with`] is anchored.
@@ -340,6 +351,17 @@ impl EngineFacade for RealEngine {
         self.do_diff_wc(wc, path, against, opts, ctx).await
     }
 
+    async fn export_wc_sides(
+        &self,
+        wc: &WcRef,
+        path: &str,
+        against: Option<Rev>,
+        to: SideFiles<'_>,
+        ctx: &OpContext,
+    ) -> EngineResult<ExportedSides> {
+        self.do_export_wc_sides(wc, path, against, to, ctx).await
+    }
+
     async fn changelist_set(
         &self,
         wc: &WcRef,
@@ -393,7 +415,27 @@ impl EngineFacade for RealEngine {
     }
 
     async fn update(&self, wc: &WcRef, req: &UpdateRequest, ctx: &OpContext) -> EngineResult<Rev> {
-        self.do_update(wc, req, ctx).await
+        self.do_update(wc, req, false, ctx).await
+    }
+
+    async fn resume(
+        &self,
+        wc: &WcRef,
+        rev: Rev,
+        ignore_externals: bool,
+        ctx: &OpContext,
+    ) -> EngineResult<Rev> {
+        let req = UpdateRequest {
+            wc_id: wc.id.clone(),
+            paths: None,
+            rev: Some(rev),
+            depth: None,
+        };
+        self.do_update(wc, &req, ignore_externals, ctx).await
+    }
+
+    fn system_woke(&self) {
+        self.connector.system_woke();
     }
 
     async fn switch(
@@ -502,6 +544,17 @@ impl EngineFacade for RealEngine {
         ctx: &OpContext,
     ) -> EngineResult<FileDiff> {
         self.do_diff_rev(url, from, to, opts, ctx).await
+    }
+
+    async fn export_rev_sides(
+        &self,
+        url: &str,
+        from: Option<Rev>,
+        to_rev: Rev,
+        to: SideFiles<'_>,
+        ctx: &OpContext,
+    ) -> EngineResult<ExportedSides> {
+        self.do_export_rev_sides(url, from, to_rev, to, ctx).await
     }
 
     async fn log(

@@ -4,6 +4,7 @@
 
 mod app_db;
 mod cache_db;
+mod checkout_journal;
 mod clock;
 mod data_dir;
 mod migrations;
@@ -17,6 +18,7 @@ use rusqlite::Connection;
 
 pub use app_db::{AccountRecord, AppDb, SavedAccount};
 pub use cache_db::CacheDb;
+pub use checkout_journal::CheckoutJournal;
 pub use clock::now_iso;
 pub use data_dir::{Os, current_data_dir};
 pub use wc_rows::WcRow;

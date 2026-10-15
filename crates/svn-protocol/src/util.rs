@@ -52,6 +52,27 @@ pub(crate) fn decode_text_field(text: String, encoding: Option<&str>) -> Result<
     }
 }
 
+/// Decodes a free-text value meant only for display (a log message, an author, a lock comment).
+/// svn stores such values as given when a repository was loaded with
+/// `--bypass-prop-validation` or converted from another system, and serves them base64-encoded;
+/// svn shows them with the invalid bytes escaped. Invalid UTF-8 becomes U+FFFD here, so one bad
+/// revision does not make a whole log unreadable. Paths, dates and revisions stay strict.
+pub(crate) fn decode_display_field(
+    text: String,
+    encoding: Option<&str>,
+) -> Result<String, SvnError> {
+    match encoding {
+        None => Ok(text),
+        Some(_) => {
+            let bytes = decode_bytes_field(text, encoding)?;
+            Ok(match String::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+            })
+        }
+    }
+}
+
 /// Decodes bytes of a value that may be base64-encoded.
 pub(crate) fn decode_bytes_field(
     text: String,
@@ -112,8 +133,16 @@ pub(crate) struct Base64Stream {
 impl Base64Stream {
     /// Adds text (whitespace ignored) and returns every byte that is now decodable.
     pub(crate) fn push(&mut self, text: &str) -> Result<Vec<u8>, SvnError> {
-        self.pending
-            .extend(text.chars().filter(|c| !c.is_whitespace()));
+        // The base64 alphabet is ASCII. Rejecting anything else up front also keeps `pending` one
+        // byte per character, so the group boundary below is always a char boundary.
+        for c in text.chars().filter(|c| !c.is_whitespace()) {
+            if !c.is_ascii() {
+                return Err(corrupt(format!(
+                    "invalid base64: non-ASCII character {c:?}"
+                )));
+            }
+            self.pending.push(c);
+        }
         let usable = self.pending.len() / 4 * 4;
         if usable == 0 {
             return Ok(Vec::new());
@@ -214,6 +243,20 @@ pub fn parse_timestamp(s: &str) -> Result<Timestamp, SvnError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_stream_rejects_non_ascii_instead_of_splitting_a_char() {
+        // Found by the file_revs fuzz target: a BOM after 3 base64 characters put the group
+        // boundary inside the multi-byte character and `String::split_off` panicked.
+        let mut s = Base64Stream::default();
+        assert!(s.push("QUJD\u{feff}=").is_err());
+        let mut s = Base64Stream::default();
+        assert_eq!(s.push("QU").unwrap(), b"");
+        assert!(s.push("J\u{e9}D").is_err());
+        let mut s = Base64Stream::default();
+        assert_eq!(s.push("QU JD\n").unwrap(), b"ABC");
+        s.finish().unwrap();
+    }
 
     #[test]
     fn timestamp_with_micros() {

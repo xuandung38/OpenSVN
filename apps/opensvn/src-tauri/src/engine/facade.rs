@@ -61,6 +61,10 @@ pub struct WcInfo {
     /// Some folder is recorded as incomplete: a checkout or update stopped before it finished.
     /// An update of the working copy finishes it.
     pub incomplete: bool,
+    /// The revision the interrupted checkout or update was reaching, as wc.db records it on the
+    /// incomplete folders (the highest when they differ); `None` when nothing is incomplete.
+    /// Continuing at this revision finishes the working copy exactly as it was asked for.
+    pub resume_rev: Option<Rev>,
 }
 
 /// A checkout with its destination already resolved from a path grant.
@@ -158,6 +162,26 @@ pub struct DiffOptions {
     pub full_text: bool,
 }
 
+/// Files that `export_*_sides` writes the two sides of a diff to; `None` skips that side. The
+/// files must not exist yet (they are created, never overwritten).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SideFiles<'a> {
+    /// Destination of the older side.
+    pub left: Option<&'a Path>,
+    /// Destination of the newer side.
+    pub right: Option<&'a Path>,
+}
+
+/// Labels of the sides `export_*_sides` wrote. `None`: that side was not asked for, or the file
+/// does not exist there (added or deleted); no file was written for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExportedSides {
+    /// Label of the older side, as `FileDiff` would show it.
+    pub left: Option<String>,
+    /// Label of the newer side.
+    pub right: Option<String>,
+}
+
 /// Outcome of a remote status check.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteScan {
@@ -232,6 +256,18 @@ pub trait EngineFacade: Send + Sync {
         opts: DiffOptions,
         ctx: &OpContext,
     ) -> EngineResult<FileDiff>;
+    /// Writes the two sides `diff_wc` compares to files, whatever their size or content: the
+    /// pristine text (or the revision read from the repository) and the working file exactly as
+    /// it is on disk. Streams, never holds a file in memory. Directories are refused. A failed
+    /// call may leave partly written destination files; the caller owns and removes them.
+    async fn export_wc_sides(
+        &self,
+        wc: &WcRef,
+        path: &str,
+        against: Option<Rev>,
+        to: SideFiles<'_>,
+        ctx: &OpContext,
+    ) -> EngineResult<ExportedSides>;
 
     // ---- working copy: short writes
     /// Assigns (`Some`) or removes (`None`) a changelist.
@@ -276,6 +312,29 @@ pub trait EngineFacade: Send + Sync {
     async fn status_remote(&self, wc: &WcRef, ctx: &OpContext) -> EngineResult<RemoteScan>;
     /// Updates; returns the revision reached.
     async fn update(&self, wc: &WcRef, req: &UpdateRequest, ctx: &OpContext) -> EngineResult<Rev>;
+    /// Finishes an interrupted checkout or update of the whole working copy at `rev`, the
+    /// revision it was reaching ([`WcInfo::resume_rev`]), with the recorded depths and with
+    /// externals unless `ignore_externals` (the choice of the interrupted checkout).
+    async fn resume(
+        &self,
+        wc: &WcRef,
+        rev: Rev,
+        ignore_externals: bool,
+        ctx: &OpContext,
+    ) -> EngineResult<Rev> {
+        let _ = ignore_externals;
+        let req = UpdateRequest {
+            wc_id: wc.id.clone(),
+            paths: None,
+            rev: Some(rev),
+            depth: None,
+        };
+        self.update(wc, &req, ctx).await
+    }
+    /// The system woke up from sleep: connections in use are most likely dead. Reads waiting
+    /// on them fail at once (as a broken connection, which a checkout or update resumes) and
+    /// idle connections are dropped. The default does nothing.
+    fn system_woke(&self) {}
     /// Switches to `url`; returns the revision reached.
     async fn switch(
         &self,
@@ -363,6 +422,15 @@ pub trait EngineFacade: Send + Sync {
         opts: DiffOptions,
         ctx: &OpContext,
     ) -> EngineResult<FileDiff>;
+    /// Writes the two sides `diff_rev` compares to files (see [`Self::export_wc_sides`]).
+    async fn export_rev_sides(
+        &self,
+        url: &str,
+        from: Option<Rev>,
+        to_rev: Rev,
+        to: SideFiles<'_>,
+        ctx: &OpContext,
+    ) -> EngineResult<ExportedSides>;
     /// Reads one page of the log.
     async fn log(
         &self,

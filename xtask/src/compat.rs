@@ -20,9 +20,19 @@ cargo xtask compat <command>
                     healthy; --legacy also starts the 1.10.8, 1.9.12 and 1.8.19 containers
   down [--purge]    stop and remove containers and volumes (--purge also deletes target/compat)
   status            show container state
-  fixtures [--legacy]
-                    create the fixture repos (basic, nolayout) on both servers and verify hashes
-                    (--update-hash records new expected hashes; --large [N] adds the perf repo)
+  fixtures [--repos] [--wc] [--protocol] [--hostile] [--svn <path>] [--legacy]
+                    run the fixture generators; with no selection flag, all of them:
+                    --repos     create the fixture repos (basic, nolayout) on the running servers
+                                and verify hashes (--update-hash records new expected hashes;
+                                --large [N] adds the perf repo)
+                    --wc        regenerate the WC state tarballs (fixtures/wc/make-wc-fixtures.sh):
+                                format 31, plus format 32 when the client is svn 1.15+
+                    --protocol  re-capture the protocol transcripts (fixtures/protocol/capture.sh;
+                                native Apache + mod_dav_svn)
+                    --hostile   build the hostile repository (fixtures/evil/make-hostile-repo.sh)
+                                into target/compat/hostile
+                    --svn <path>  svn client for --wc/--protocol/--hostile (default: svn on PATH;
+                                its directory is put first on PATH so svnadmin etc. match)
   run [--legacy] [paths...]
                     run scenario files/dirs (default: tests/compat/scenarios/harness; --legacy
                     includes the harness/legacy smoke scenarios for 1.8-1.10)";
@@ -142,7 +152,117 @@ fn down(root: &Path, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Which generators `compat fixtures` runs.
+#[derive(Debug, PartialEq, Eq)]
+struct FixtureSteps {
+    repos: bool,
+    wc: bool,
+    protocol: bool,
+    hostile: bool,
+}
+
+impl FixtureSteps {
+    /// No selection flag means every generator.
+    fn from_args(args: &[String]) -> Self {
+        let has = |f: &str| args.iter().any(|a| a == f);
+        let any = ["--repos", "--wc", "--protocol", "--hostile"]
+            .iter()
+            .any(|f| has(f));
+        Self {
+            repos: !any || has("--repos"),
+            wc: !any || has("--wc"),
+            protocol: !any || has("--protocol"),
+            hostile: !any || has("--hostile"),
+        }
+    }
+}
+
+/// Value after `flag` (`--svn <path>`).
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Result<Option<&'a str>> {
+    match args.iter().position(|a| a == flag) {
+        None => Ok(None),
+        Some(i) => match args.get(i + 1) {
+            Some(v) if !v.starts_with("--") => Ok(Some(v.as_str())),
+            _ => bail!("{flag} expects a value"),
+        },
+    }
+}
+
 fn fixtures(root: &Path, args: &[String]) -> Result<()> {
+    let steps = FixtureSteps::from_args(args);
+    let svn = flag_value(args, "--svn")?;
+    if steps.wc {
+        wc_fixtures(root, svn)?;
+    }
+    if steps.protocol {
+        println!("== protocol captures");
+        exec(
+            native(root, svn).arg(root.join("fixtures/protocol/capture.sh")),
+            "protocol capture",
+        )?;
+    }
+    if steps.hostile {
+        let out = state_dir(root).join("hostile");
+        println!("== hostile repository -> {}", out.display());
+        exec(
+            native(root, svn)
+                .arg(root.join("fixtures/evil/make-hostile-repo.sh"))
+                .arg(out.join("repo")),
+            "hostile repository",
+        )?;
+    }
+    if steps.repos {
+        server_repos(root, args)?;
+    }
+    Ok(())
+}
+
+/// `bash <script>` from the repository root, with the directory of `svn` (if given) first on
+/// PATH so the generators use its svnadmin/svnlook/svnmucc/svnserve too.
+fn native(root: &Path, svn: Option<&str>) -> Command {
+    let mut cmd = Command::new("bash");
+    cmd.current_dir(root);
+    if let Some(svn) = svn {
+        let svn = Path::new(svn);
+        if let Some(dir) = svn.parent().filter(|d| !d.as_os_str().is_empty()) {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let mut dirs = vec![dir.to_path_buf()];
+            dirs.extend(std::env::split_paths(&path));
+            if let Ok(joined) = std::env::join_paths(dirs) {
+                cmd.env("PATH", joined);
+            }
+        }
+        cmd.env("SVN", svn);
+    }
+    cmd
+}
+
+fn wc_fixtures(root: &Path, svn: Option<&str>) -> Result<()> {
+    let version = Command::new(svn.unwrap_or("svn"))
+        .args(["--version", "--quiet"])
+        .output()
+        .context("wc fixtures: failed to run svn --version")?;
+    let version = String::from_utf8_lossy(&version.stdout).trim().to_string();
+    let script = root.join("fixtures/wc/make-wc-fixtures.sh");
+    let mut formats = vec!["31"];
+    if wc_format_32_supported(&version) {
+        formats.push("32");
+    }
+    for fmt in formats {
+        println!("== WC fixtures, format {fmt} (svn {version})");
+        exec(native(root, svn).arg(&script).arg(fmt), "wc fixtures")?;
+    }
+    Ok(())
+}
+
+/// Format 32 (`--compatible-version 1.15`) exists from svn 1.15 on.
+fn wc_format_32_supported(version: &str) -> bool {
+    let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    (major, minor) >= (1, 15)
+}
+
+fn server_repos(root: &Path, args: &[String]) -> Result<()> {
     let update = args.iter().any(|a| a == "--update-hash");
     let large = args.iter().position(|a| a == "--large").map(|i| {
         args.get(i + 1)
@@ -198,4 +318,68 @@ fn run_scenarios(root: &Path, args: &[String]) -> Result<()> {
         cmd.arg(root.join("tests/compat/scenarios/harness"));
     }
     exec(&mut cmd, "compat-run")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn no_selection_runs_every_generator() {
+        let all = FixtureSteps {
+            repos: true,
+            wc: true,
+            protocol: true,
+            hostile: true,
+        };
+        assert_eq!(FixtureSteps::from_args(&[]), all);
+        assert_eq!(FixtureSteps::from_args(&args(&["--legacy"])), all);
+    }
+
+    #[test]
+    fn selection_flags_pick_generators() {
+        assert_eq!(
+            FixtureSteps::from_args(&args(&["--wc", "--protocol"])),
+            FixtureSteps {
+                repos: false,
+                wc: true,
+                protocol: true,
+                hostile: false,
+            }
+        );
+        assert_eq!(
+            FixtureSteps::from_args(&args(&["--repos", "--large", "10"])),
+            FixtureSteps {
+                repos: true,
+                wc: false,
+                protocol: false,
+                hostile: false,
+            }
+        );
+    }
+
+    #[test]
+    fn svn_flag_needs_a_value() {
+        assert_eq!(
+            flag_value(&args(&["--svn", "/x/svn"]), "--svn").unwrap(),
+            Some("/x/svn")
+        );
+        assert!(flag_value(&args(&["--svn"]), "--svn").is_err());
+        assert!(flag_value(&args(&["--svn", "--wc"]), "--svn").is_err());
+        assert_eq!(flag_value(&args(&["--wc"]), "--svn").unwrap(), None);
+    }
+
+    #[test]
+    fn format_32_needs_svn_1_15() {
+        assert!(wc_format_32_supported("1.15.0"));
+        assert!(wc_format_32_supported("1.16.1"));
+        assert!(!wc_format_32_supported("1.14.3"));
+        assert!(!wc_format_32_supported("1.8.19"));
+        assert!(!wc_format_32_supported(""));
+    }
 }

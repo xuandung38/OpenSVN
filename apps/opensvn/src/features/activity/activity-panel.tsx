@@ -7,6 +7,7 @@ import { ipc, toAppError, unwrap } from "../../ipc/client";
 import { type OpState, removeOp } from "../../ipc/events";
 import { useT } from "../../lib/i18n/i18n";
 import { activityStrings } from "./activity-strings";
+import { ConnectionWaitNotice } from "./connection-wait";
 import { errorText } from "./error-text";
 import { OpDetails } from "./op-details";
 import { stageKey } from "./op-log";
@@ -73,19 +74,24 @@ export function ActivityPanel({
         const err = o.appError ? errorText(o.appError) : null;
         const message = err ? (err.key ? t(err.key) : err.message) : o.error;
         return (
-          <ActivityRow
-            key={o.handle.opId}
-            title={o.handle.title}
-            message={message}
-            detail={err?.detail ?? null}
-            detailLabel={t("errorDetails")}
-            percent={o.state === "done" ? 100 : percent}
-            state={o.state}
-            onOpen={() => setOpenId(o.handle.opId)}
-            openLabel={t("showDetails", { title: o.handle.title })}
-            onCancel={onCancel ? () => onCancel(o.handle.opId) : undefined}
-            cancelLabel={t("cancel")}
-          />
+          <div key={o.handle.opId}>
+            <ActivityRow
+              title={o.handle.title}
+              message={message}
+              detail={err?.detail ?? null}
+              detailLabel={t("errorDetails")}
+              percent={o.state === "done" ? 100 : percent}
+              state={o.state}
+              onOpen={() => setOpenId(o.handle.opId)}
+              openLabel={t("showDetails", { title: o.handle.title })}
+              onCancel={onCancel ? () => onCancel(o.handle.opId) : undefined}
+              cancelLabel={t("cancel")}
+            />
+            <ConnectionWaitNotice
+              op={o}
+              onCancel={onCancel ? () => onCancel(o.handle.opId) : undefined}
+            />
+          </div>
         );
       })}
       {backgroundFailed.length > 0 && (
@@ -132,6 +138,7 @@ export function ActivityPanel({
         <OpDetails
           op={open}
           onClose={() => setOpenId(null)}
+          onCancel={onCancel ? () => onCancel(open.handle.opId) : undefined}
           onCopy={async (text) => {
             try {
               await navigator.clipboard.writeText(text);

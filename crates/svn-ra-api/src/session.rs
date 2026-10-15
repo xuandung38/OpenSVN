@@ -126,6 +126,16 @@ pub trait RaSession: Send + Sync {
     /// Authenticates (prompting through `AuthPrompter` if needed). Call BEFORE taking the
     /// working-copy lock so no prompt happens while a lock is held.
     async fn ensure_authenticated(&self, cancel: &CancelToken) -> Result<()>;
+    /// Checks that the server answers at all (an `OPTIONS` on the repository root over DAV),
+    /// used to tell a network outage from a server that breaks a response. Credentials the
+    /// session already has are used; the default asks [`RaSession::ensure_authenticated`].
+    async fn probe(&self, cancel: &CancelToken) -> Result<()> {
+        self.ensure_authenticated(cancel).await
+    }
+    /// Drops the idle connections this session would reuse: after a network outage or a
+    /// system sleep they are most likely dead. Requests in flight are not affected; settings,
+    /// credentials and certificate decisions are kept. The default does nothing.
+    fn reset_connections(&self) {}
     /// Newest revision.
     async fn youngest_rev(&self, cancel: &CancelToken) -> Result<Revnum>;
     /// Kind of node at `path`.

@@ -155,6 +155,6 @@ test("Settings: Network refuses 16 connections inline and saves 8 through the re
     await app.exec(
       `return [...document.querySelectorAll('dialog[open] input[type=number]')].map((i) => i.value).join(',')`,
     ),
-    "8,60",
+    "8,60,10",
   );
 });

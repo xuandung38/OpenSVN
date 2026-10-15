@@ -135,9 +135,39 @@ fn app_error_wire_shape() {
             "retryable": false,
             "actions": ["update"],
             "lockConflicts": null,
+            "incompleteCheckout": null,
+            "repositories": null,
         })
     );
     assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), e);
+}
+
+#[test]
+fn an_interrupted_checkout_rides_on_the_error_with_its_action_first() {
+    let e = AppError::from_code(SvnErrorCode::Timeout, "the server took too long")
+        .with_incomplete_checkout(opensvn_ipc::IncompleteCheckout {
+            wc_id: opensvn_ipc::WcId("wc-1".into()),
+            rev: opensvn_ipc::Rev(1200),
+            root_path: "/w/project".into(),
+        });
+    let v = serde_json::to_value(&e).unwrap();
+    assert_eq!(
+        v["actions"],
+        serde_json::json!(["continue-checkout", "retry", "open-settings"])
+    );
+    assert_eq!(
+        v["incompleteCheckout"],
+        serde_json::json!({"wcId": "wc-1", "rev": 1200, "rootPath": "/w/project"})
+    );
+    // Older payloads without the key still parse.
+    let mut old = v.clone();
+    old.as_object_mut().unwrap().remove("incompleteCheckout");
+    assert_eq!(
+        serde_json::from_value::<AppError>(old)
+            .unwrap()
+            .incomplete_checkout,
+        None
+    );
 }
 
 #[test]
@@ -170,6 +200,33 @@ fn lock_conflicts_ride_on_the_error_only_when_known() {
     assert_eq!(v["lockConflicts"], serde_json::Value::Null);
     v.as_object_mut().unwrap().remove("lockConflicts");
     assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), none);
+}
+
+#[test]
+fn parent_path_repositories_ride_on_the_error() {
+    let listed = SvnError::new(SvnErrorCode::PathNotFound, "a list of repositories")
+        .with_repositories(vec![svn_types::ParentRepo {
+            name: "Dự án".into(),
+            url: "https://svn.example.test/svn/D%E1%BB%B1%20%C3%A1n".into(),
+        }]);
+    // Found through a wrapping error too.
+    let e = AppError::from(&SvnError::new(SvnErrorCode::PathNotFound, "open").with_child(listed));
+    assert_eq!(e.code, ErrorCode::PathNotFound);
+    let v = serde_json::to_value(&e).unwrap();
+    assert_eq!(
+        v["repositories"],
+        serde_json::json!([{
+            "name": "Dự án",
+            "url": "https://svn.example.test/svn/D%E1%BB%B1%20%C3%A1n",
+        }])
+    );
+    assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), e);
+    // Any other error carries none, and payloads without the field still read.
+    let plain = AppError::from(&SvnError::new(SvnErrorCode::AuthRequired, "sign in"));
+    assert!(plain.repositories.is_none());
+    let mut v = serde_json::to_value(&plain).unwrap();
+    v.as_object_mut().unwrap().remove("repositories");
+    assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), plain);
 }
 
 #[test]

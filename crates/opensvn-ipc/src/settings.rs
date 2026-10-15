@@ -37,6 +37,17 @@ pub struct ExternalDiffTool {
     pub args: Vec<String>,
 }
 
+/// External diff tool for one file extension, used instead of `diff.externalTool` for files with
+/// that extension (like TortoiseSVN's per-extension diff viewers). Binary files are handed to it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtDiffTool {
+    /// Lowercase extension without the dot (`docx`).
+    pub ext: String,
+    pub path: String,
+    pub args: Vec<String>,
+}
+
 /// Settings that make the app launch a program. They are changed only through a native file
 /// picker plus confirmation (`program_choose` / `program_clear`), never through `settings_set`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
@@ -142,6 +153,10 @@ settings_structs! {
         /// Range: `SETTING_RANGES` (validator in the app crate).
         network_max_connections: u8 = "network.maxConnections",
         network_timeout_sec: u32 = "network.timeoutSec",
+        /// How long a checkout or update waits for a lost connection to come back before it
+        /// stops (the working copy then stays incomplete and can be continued).
+        /// Range: `SETTING_RANGES`.
+        network_reconnect_wait_min: u32 = "network.reconnectWaitMin",
         network_proxy: ProxySetting = "network.proxy",
         /// Kerberos single sign-on (Negotiate) when the server offers it; off falls back to a
         /// user name and password.
@@ -167,6 +182,8 @@ settings_structs! {
         tools_editor: ExternalDiffTool = "tools.editor",
         /// Terminal used by "open terminal here". `null` when not configured.
         tools_terminal: ExternalDiffTool = "tools.terminal",
+        /// Diff tools by file extension (`program_choose_for_extension`). `null` when none.
+        diff_tools_by_extension: Vec<ExtDiffTool> = "diff.toolsByExtension",
     }
 }
 

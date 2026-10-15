@@ -20,6 +20,8 @@ import { useWcEntries } from "../../../ipc/queries";
 import { cn } from "../../../lib/cn";
 import { relativeTime } from "../../../lib/format";
 import { useT } from "../../../lib/i18n/i18n";
+import { resumeStrings } from "../resume/resume-strings";
+import { useResumeActions } from "../resume/use-resume-actions";
 import { shortcutLabel } from "../shortcuts";
 import { useWcSession } from "../wc-session";
 import { useAddExistingWorkingCopy } from "../welcome/welcome-screen";
@@ -51,6 +53,8 @@ export function RepoPicker({
   const { openDialog } = useWcSession();
   const addExisting = useAddExistingWorkingCopy();
   const actions = useRepoActions(onSelect);
+  const resumeActions = useResumeActions();
+  const rs = useT(resumeStrings);
   const entriesQ = useWcEntries(open);
   const listId = useId();
   const [query, setQuery] = useState("");
@@ -132,6 +136,20 @@ export function RepoPicker({
     };
     const rename = { label: r("rename"), onSelect: later(() => openRepoDialog("repo-rename", e)) };
     const remove = { label: r("remove"), onSelect: later(() => openRepoDialog("repo-remove", e)) };
+    const resume = !e.missing && e.incomplete && e.resume ? e.resume : null;
+    const continueItems: MenuEntries = resume
+      ? [
+          {
+            label: rs(resume.checkout ? "continueCheckout" : "continueUpdate"),
+            onSelect: later(() => void resumeActions.continueWc(e.id)),
+          },
+          {
+            label: rs("updateLatest"),
+            onSelect: later(() => void resumeActions.updateLatest(e.id)),
+          },
+          "separator",
+        ]
+      : [];
     return e.missing
       ? [
           { label: r("locate"), onSelect: later(() => void actions.locate(e)) },
@@ -140,6 +158,7 @@ export function RepoPicker({
           remove,
         ]
       : [
+          ...continueItems,
           { label: r("reveal"), onSelect: () => void actions.reveal(e) },
           { label: r("copyUrl"), onSelect: () => void actions.copyUrl(e) },
           "separator",
@@ -217,11 +236,15 @@ export function RepoPicker({
                 )}
                 {!e.missing && e.incomplete && (
                   <span
-                    title={r("incompleteHint")}
+                    title={
+                      e.resume ? rs("incompleteHint", { rev: e.resume.rev }) : r("incompleteHint")
+                    }
                     className="flex shrink-0 items-center gap-0.5 rounded bg-warn-soft px-1 text-[11px]"
                   >
                     <TriangleAlert size={12} aria-hidden="true" />
-                    {r("incomplete")}
+                    {e.resume
+                      ? rs(e.resume.checkout ? "checkoutIncomplete" : "updateIncomplete")
+                      : r("incomplete")}
                   </span>
                 )}
               </span>

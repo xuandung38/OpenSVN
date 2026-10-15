@@ -45,24 +45,43 @@ export const commands = {
 	statusRemote: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("status_remote", { wcId })),
 	diffGet: (request: DiffGetRequest) => typedError<FileDiff, AppError>(__TAURI_INVOKE("diff_get", { request })),
 	/**
-	 *  Opens `target` in the configured external diff tool (`diff.externalTool`): both sides are
-	 *  written as read-only copies into a private folder and the tool is started on them. Used when a
-	 *  diff is too complex or too large to show, or on request. Binary files are refused.
+	 *  Opens `target` in the configured external diff tool: both sides are written as read-only
+	 *  copies into a private folder and the tool is started on them. Used when a diff is too complex
+	 *  or too large to show, or on request. A tool set for the file's extension
+	 *  (`diff.toolsByExtension`) gets the files as they are, binary ones included; `diff.externalTool`
+	 *  gets text only and binary files are refused.
 	 */
 	diffExternal: (target: DiffTarget) => typedError<null, AppError>(__TAURI_INVOKE("diff_external", { target })),
+	/**
+	 *  Opens one version of `target` (the older or the newer side) with the default application, as
+	 *  a read-only copy. Only document types the default application may open are accepted.
+	 */
+	diffOpenVersion: (target: DiffTarget, side: DiffSideKind) => typedError<null, AppError>(__TAURI_INVOKE("diff_open_version", { target, side })),
 	changelistSet: (wcId: WcId, paths: string[], name: string | null) => typedError<null, AppError>(__TAURI_INVOKE("changelist_set", { wcId, paths, name })),
 	ignoreAdd: (request: IgnoreAddRequest) => typedError<null, AppError>(__TAURI_INVOKE("ignore_add", { request })),
 	markMove: (wcId: WcId, from: string, to: string) => typedError<null, AppError>(__TAURI_INVOKE("mark_move", { wcId, from, to })),
 	/**
 	 *  Checks out into a new folder (`dest_name`) inside the granted parent folder, or into the granted
-	 *  folder itself. The target must not exist or be an empty folder. On success the working copy is
+	 *  folder itself. The target must not exist or be an empty folder, unless it holds an interrupted
+	 *  checkout of the same URL: then the checkout is refused with
+	 *  [`AppError::incomplete_checkout`] set, so the UI offers "Continue checkout" instead.
+	 * 
+	 *  The choices of the checkout are journaled before it starts and dropped when it finishes, so a
+	 *  checkout interrupted in any way (connection lost for longer than the wait, cancelled, app
+	 *  closed or killed) can be continued exactly ([`wc_continue`]). On success the working copy is
 	 *  registered and its id returned in `OpResult::CheckedOut`. When the checkout fails or is cancelled
 	 *  after it created the working copy, the partial working copy is registered anyway (listed as
-	 *  incomplete; an update finishes it); otherwise a folder this checkout created is removed again
-	 *  while it is still empty.
+	 *  incomplete, with "Continue checkout"); otherwise a folder this checkout created is removed again
+	 *  while it is still empty. Nothing else is ever removed.
 	 */
 	checkout: (request: CheckoutRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("checkout", { request })),
 	update: (request: UpdateRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("update", { request })),
+	/**
+	 *  Finishes an interrupted checkout or update of the whole working copy at the revision it was
+	 *  reaching (recorded in the working copy), with the depths it records and, for a checkout,
+	 *  the externals choice the user made. Fails when nothing is incomplete.
+	 */
+	wcContinue: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("wc_continue", { wcId })),
 	switch: (wcId: WcId, url: string, rev: number | null) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("switch", { wcId, url, rev })),
 	commit: (request: CommitRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("commit", { request })),
 	revert: (request: RevertRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("revert", { request })),
@@ -102,6 +121,11 @@ export const commands = {
 	layoutDetect: (repoRootUrl: string, url: string) => typedError<LayoutDetection, AppError>(__TAURI_INVOKE("layout_detect", { repoRootUrl, url })),
 	copyLocation: (request: CopyLocationRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("copy_location", { request })),
 	opCancel: (opId: OpId) => typedError<null, AppError>(__TAURI_INVOKE("op_cancel", { opId })),
+	/**
+	 *  "Retry now" on an operation that waits for a lost connection: it tries again at once
+	 *  instead of at the end of its countdown. Ignored by an operation that is not waiting.
+	 */
+	opRetryNow: (opId: OpId) => typedError<null, AppError>(__TAURI_INVOKE("op_retry_now", { opId })),
 	opList: () => typedError<OperationHandle[], AppError>(__TAURI_INVOKE("op_list")),
 	authRespond: (requestId: string, response: AuthResponse) => typedError<null, AppError>(__TAURI_INVOKE("auth_respond", { requestId, response })),
 	accountsList: () => typedError<Account[], AppError>(__TAURI_INVOKE("accounts_list")),
@@ -124,6 +148,13 @@ export const commands = {
 	programChoose: (kind: ProgramKind, args: string[]) => typedError<Settings, AppError>(__TAURI_INVOKE("program_choose", { kind, args })),
 	/**  Removes a configured program. */
 	programClear: (kind: ProgramKind) => typedError<Settings, AppError>(__TAURI_INVOKE("program_clear", { kind })),
+	/**
+	 *  Like `program_choose` for the diff tool of one file extension (`docx` or `.docx`). The tool
+	 *  is used instead of `diff.externalTool` for those files, binary ones included.
+	 */
+	programChooseForExtension: (ext: string, args: string[]) => typedError<Settings, AppError>(__TAURI_INVOKE("program_choose_for_extension", { ext, args })),
+	/**  Removes the diff tool of one file extension. */
+	programClearForExtension: (ext: string) => typedError<Settings, AppError>(__TAURI_INVOKE("program_clear_for_extension", { ext })),
 	/**
 	 *  Shows a native file or folder dialog and returns an opaque, single-use grant for the choice
 	 *  (`None` when cancelled). Commands that need a local path outside a working copy take the grant.
@@ -189,7 +220,7 @@ export const events = {
 };
 
 /* Constants */
-export const SETTING_RANGES = {"cache.maxSizeGb":{"max":4096,"min":1},"general.checkIntervalMin":{"max":1440,"min":1},"network.maxConnections":{"max":8,"min":1},"network.timeoutSec":{"max":3600,"min":5}} as const;
+export const SETTING_RANGES = {"cache.maxSizeGb":{"max":4096,"min":1},"general.checkIntervalMin":{"max":1440,"min":1},"network.maxConnections":{"max":8,"min":1},"network.reconnectWaitMin":{"max":120,"min":1},"network.timeoutSec":{"max":3600,"min":5}} as const;
 
 /* Types */
 /**  Credential metadata only; never contains a password. */
@@ -229,6 +260,17 @@ export type AppError = {
 	 *  server reports them now. `None` when the engine could not ask (or for other codes).
 	 */
 	lockConflicts?: LockConflict[] | null,
+	/**
+	 *  For `path-not-found` on a server URL that is the repository list of an `SVNParentPath`
+	 *  location (VisualSVN Server's `https://host/svn/`): the repositories it lists, so the UI
+	 *  can offer them. `None` for any other error.
+	 */
+	repositories?: ParentRepo[] | null,
+	/**
+	 *  A checkout found its target folder holding an interrupted checkout of the same location
+	 *  (or a checkout stopped and left one): the UI offers "Continue checkout".
+	 */
+	incompleteCheckout?: IncompleteCheckout | null,
 };
 
 /**  Authentication scheme the server offers. */
@@ -377,6 +419,21 @@ export type CommitRequest = {
 	autoAddRemove: boolean,
 };
 
+/**  Timing of [`OpStage::WaitingForConnection`]. */
+export type ConnectionWait = {
+	/**  Seconds until the next attempt ("Retry now" tries at once). */
+	retryInSecs: number,
+	/**  Seconds since the connection was lost. */
+	waitedSecs: number,
+	/**
+	 *  Seconds the operation waits in total before it stops; the working copy then stays
+	 *  incomplete and can be continued.
+	 */
+	maxWaitSecs: number,
+	/**  Attempts made so far. */
+	attempt: number,
+};
+
 export type CopyFrom = {
 	path: string,
 	rev: Rev,
@@ -431,6 +488,9 @@ export type DiffGetRequest = {
 
 export type DiffMode = "split" | "unified";
 
+/**  One side of a diff: the older (`left`) or the newer (`right`) version. */
+export type DiffSideKind = "left" | "right";
+
 /**  What to diff. Tagged by `kind`. */
 export type DiffTarget = 
 /**  base <-> working */
@@ -478,7 +538,9 @@ export type Eol = "LF" | "CRLF" | "mixed";
 
 export type ErrorAction = "retry" | "update" | "cleanup" | "sign-in" | "trust-cert" | "open-lock-dialog" | "open-settings" | 
 /**  The default app was refused for this item; show it in the file manager instead. */
-"reveal-in-file-manager";
+"reveal-in-file-manager" | 
+/**  An interrupted checkout can be finished: see [`AppError::incomplete_checkout`]. */
+"continue-checkout";
 
 export type ErrorCode = "network" | "timeout" | "auth-required" | 
 /**
@@ -494,6 +556,17 @@ export type ErrorCode = "network" | "timeout" | "auth-required" |
 "server-protocol-error" | 
 /**  The request itself is invalid (bad value, expired path grant, unsupported option). */
 "invalid-argument" | "internal";
+
+/**
+ *  External diff tool for one file extension, used instead of `diff.externalTool` for files with
+ *  that extension (like TortoiseSVN's per-extension diff viewers). Binary files are handed to it.
+ */
+export type ExtDiffTool = {
+	/**  Lowercase extension without the dot (`docx`). */
+	ext: string,
+	path: string,
+	args: string[],
+};
 
 export type ExternalDiffTool = {
 	path: string,
@@ -526,6 +599,11 @@ export type FileDiff = {
 	 *  external diff tool (`diff_external`) instead; it never retries the display diff.
 	 */
 	tooComplex: boolean | null,
+	/**
+	 *  Set for Word and Excel files: the sides are the text extracted from the documents (not
+	 *  their formatting), or, when `extracted` is false, why no text could be extracted.
+	 */
+	office: OfficeText | null,
 };
 
 export type FileKind = "file" | "dir" | "symlink";
@@ -578,6 +656,14 @@ export type Incoming = {
 	wcId: WcId,
 	count: number,
 	latestRev: Rev,
+};
+
+/**  An interrupted checkout the user can continue (`wc_continue`). */
+export type IncompleteCheckout = {
+	wcId: WcId,
+	/**  Revision the checkout was reaching. */
+	rev: Rev,
+	rootPath: string,
 };
 
 export type Language = "vi" | "en";
@@ -658,7 +744,26 @@ export type LogPage = {
 /**  Where a log query reads from. */
 export type LogTarget = { kind: "url"; url: string } | { kind: "wc"; wcId: WcId; path: string };
 
-export type NodeStatus = "normal" | "modified" | "added" | "deleted" | "replaced" | "unversioned" | "missing" | "conflicted" | "ignored" | "obstructed" | "external";
+export type NodeStatus = "normal" | "modified" | "added" | "deleted" | "replaced" | "unversioned" | "missing" | "conflicted" | "ignored" | "obstructed" | "external" | 
+/**
+ *  A folder an interrupted checkout or update did not finish (svn's `!` on a directory):
+ *  not a local change and not an error; continuing the checkout or update finishes it.
+ */
+"incomplete";
+
+/**  Office document families the diff knows. */
+export type OfficeKind = "word" | "excel";
+
+/**  How an Office file was diffed. */
+export type OfficeText = {
+	kind: OfficeKind,
+	/**
+	 *  The text sides were extracted from the documents. When false the diff is the plain
+	 *  (usually binary) one and `reason` says why: a 97-2003 file, a protected or damaged one.
+	 */
+	extracted: boolean,
+	reason: string | null,
+};
 
 export type OpFailed = {
 	opId: OpId,
@@ -700,7 +805,12 @@ export type OpStage =
 /**  Receiving the tree and file contents and writing them to the working copy. */
 "fetching" | 
 /**  The server drive is over; recording the result (externals, working copy info). */
-"finishing";
+"finishing" | 
+/**
+ *  The connection was lost and the server cannot be reached: the operation probes it and
+ *  resumes on its own once it answers ([`Progress::connection_wait`] has the timing).
+ */
+"waiting-for-connection";
 
 export type OpStarted = OperationHandle;
 
@@ -731,6 +841,14 @@ export type OperationKind = "checkout" | "update" | "switch" | "commit" | "rever
 "copy" | 
 /**  Download of a repository file to disk (`repo_save`). */
 "save";
+
+/**  A repository listed by an `SVNParentPath` location. */
+export type ParentRepo = {
+	/**  Name for display. */
+	name: string,
+	/**  Repository URL, percent-encoded. */
+	url: string,
+};
 
 /**  What happened to one path, as `svn` prints it in the first column (`A`, `U`, `D`, ...). */
 export type PathAction = 
@@ -799,6 +917,8 @@ export type Progress = {
 	entries: ProgressEntry[],
 	entriesDropped: number,
 	counts: ActionCounts | null,
+	/**  Set while `stage` is [`OpStage::WaitingForConnection`]. */
+	connectionWait?: ConnectionWait | null,
 };
 
 /**  One line of an operation's path log. */
@@ -874,6 +994,16 @@ export type ResolvedRepoUrl = {
 };
 
 /**
+ *  An interrupted checkout or update, as the working copy records it: `wc_continue` finishes it
+ *  at `rev`, the revision it was reaching.
+ */
+export type ResumeInfo = {
+	rev: Rev,
+	/**  The working copy was never complete: a checkout was interrupted (otherwise an update). */
+	checkout: boolean,
+};
+
+/**
  *  Repository revision. Wire value is a JSON number (u64, safe below 2^53); the TS type is
  *  declared as `number` via a `u32` override because specta rejects u64/f64 without nulls.
  */
@@ -907,6 +1037,12 @@ export type Settings = {
 	/**  Range: `SETTING_RANGES` (validator in the app crate). */
 	"network.maxConnections": number,
 	"network.timeoutSec": number,
+	/**
+	 *  How long a checkout or update waits for a lost connection to come back before it
+	 *  stops (the working copy then stays incomplete and can be continued).
+	 *  Range: `SETTING_RANGES`.
+	 */
+	"network.reconnectWaitMin": number,
 	"network.proxy": ProxySetting,
 	/**
 	 *  Kerberos single sign-on (Negotiate) when the server offers it; off falls back to a
@@ -931,6 +1067,8 @@ export type Settings = {
 	"tools.editor": ExternalDiffTool | null,
 	/**  Terminal used by "open terminal here". `null` when not configured. */
 	"tools.terminal": ExternalDiffTool | null,
+	/**  Diff tools by file extension (`program_choose_for_extension`). `null` when none. */
+	"diff.toolsByExtension": ExtDiffTool[] | null,
 };
 
 /**
@@ -956,6 +1094,12 @@ export type SettingsPatch_Deserialize = {
 	/**  Range: `SETTING_RANGES` (validator in the app crate). */
 	"network.maxConnections"?: number | null,
 	"network.timeoutSec"?: number | null,
+	/**
+	 *  How long a checkout or update waits for a lost connection to come back before it
+	 *  stops (the working copy then stays incomplete and can be continued).
+	 *  Range: `SETTING_RANGES`.
+	 */
+	"network.reconnectWaitMin"?: number | null,
 	"network.proxy"?: ProxySetting | null,
 	/**
 	 *  Kerberos single sign-on (Negotiate) when the server offers it; off falls back to a
@@ -984,6 +1128,12 @@ export type SettingsPatch_Serialize = {
 	/**  Range: `SETTING_RANGES` (validator in the app crate). */
 	"network.maxConnections"?: number | null,
 	"network.timeoutSec"?: number | null,
+	/**
+	 *  How long a checkout or update waits for a lost connection to come back before it
+	 *  stops (the working copy then stays incomplete and can be continued).
+	 *  Range: `SETTING_RANGES`.
+	 */
+	"network.reconnectWaitMin"?: number | null,
 	"network.proxy"?: ProxySetting | null,
 	/**
 	 *  Kerberos single sign-on (Negotiate) when the server offers it; off falls back to a
@@ -1088,10 +1238,12 @@ export type WcEntry = {
 	/**  Why the working copy cannot be read (only when `missing`). */
 	problem: string | null,
 	/**
-	 *  A checkout or update stopped before it finished; the UI shows "Incomplete — Update to
-	 *  finish". Always `false` when `missing`.
+	 *  A checkout or update stopped before it finished; the UI offers to continue it. Always
+	 *  `false` when `missing`.
 	 */
 	incomplete: boolean,
+	/**  See [`WorkingCopy::resume`]. */
+	resume?: ResumeInfo | null,
 };
 
 /**  Working-copy format; only 31 and 32 are valid (validated on deserialize; `number` in TS). */
@@ -1128,6 +1280,11 @@ export type WorkingCopy = {
 	 *  are recorded as incomplete. Updating the working copy finishes it.
 	 */
 	incomplete: boolean,
+	/**
+	 *  How to finish an incomplete working copy at the revision it was reaching (`None` when it
+	 *  is complete).
+	 */
+	resume?: ResumeInfo | null,
 };
 
 /* Tauri Specta runtime */

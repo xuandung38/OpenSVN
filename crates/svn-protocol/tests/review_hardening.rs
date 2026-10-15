@@ -65,9 +65,18 @@ fn bad_encodings_are_protocol_errors() {
             "{attr}"
         );
     }
-    let not_utf8 = STANDARD.encode([0xff, 0xfe]);
+    // Invalid UTF-8 is not an encoding error: svn serves such log messages and authors (loaded
+    // with --bypass-prop-validation) and shows them escaped; the invalid bytes become U+FFFD.
+    let not_utf8 = STANDARD.encode(b"bad \xff\xfe log");
     let doc = log_doc(&format!(
-        r#"<D:version-name>5</D:version-name><D:comment encoding="base64">{not_utf8}</D:comment>"#
+        r#"<D:version-name>5</D:version-name><D:comment encoding="base64">{not_utf8}</D:comment><D:creator-displayname encoding="base64">{not_utf8}</D:creator-displayname>"#
+    ));
+    let e = &parse_log(doc.as_bytes()).unwrap()[0].entry;
+    assert_eq!(e.message.as_deref(), Some("bad \u{fffd}\u{fffd} log"));
+    assert_eq!(e.author.as_deref(), Some("bad \u{fffd}\u{fffd} log"));
+    // A date is still strict.
+    let doc = log_doc(&format!(
+        r#"<D:version-name>5</D:version-name><S:date encoding="base64">{not_utf8}</S:date>"#
     ));
     assert!(parse_log(doc.as_bytes()).is_err());
 }

@@ -361,3 +361,63 @@ describe("lock banner", () => {
     expect(relatedPaths("C:\\Work\\Repo", "c:/work/repo/")).toBe(true);
   });
 });
+
+describe("waiting for a lost connection", () => {
+  const waiting = (retryInSecs: number, now: number): OpState =>
+    applyProgress(
+      newOpState(handle(), 0),
+      progress({
+        stage: "waiting-for-connection",
+        entries: [],
+        connectionWait: { retryInSecs, waitedSecs: 64, maxWaitSecs: 600, attempt: 3 },
+      }),
+      now,
+    );
+
+  test("the next attempt is due after the announced delay; another stage clears it", () => {
+    const op = waiting(8, 1000);
+    expect(op.retryAt).toBe(9000);
+    expect(
+      applyProgress(op, progress({ stage: "fetching", entries: [] }), 2000).retryAt,
+    ).toBeNull();
+  });
+
+  for (const [lang, text, retry, cancel] of [
+    ["en", "Connection lost, retrying in 8s…", "Retry now", "Cancel"],
+    ["vi", "Mất kết nối, thử lại sau 8 giây…", "Thử lại ngay", "Hủy"],
+  ] as const) {
+    test(`${lang}: the panel counts down, retries now and cancels`, async () => {
+      const cancelled: string[] = [];
+      const qc = new QueryClient();
+      render(
+        <QueryClientProvider client={qc}>
+          <I18nProvider lang={lang}>
+            <ToastProvider>
+              <ActivityPanel ops={[waiting(8, Date.now())]} onCancel={(id) => cancelled.push(id)} />
+            </ToastProvider>
+          </I18nProvider>
+        </QueryClientProvider>,
+      );
+      const notice = screen.getByTestId("connection-wait");
+      expect(within(notice).getByRole("status").textContent).toBe(text);
+      await userEvent.click(within(notice).getByRole("button", { name: retry }));
+      expect(mockCalls.filter((c) => c.name === "opRetryNow").map((c) => c.args)).toEqual([
+        ["op1"],
+      ]);
+      await userEvent.click(within(notice).getByRole("button", { name: cancel }));
+      expect(cancelled).toEqual(["op1"]);
+    });
+  }
+
+  test("once the countdown is over it says it is retrying", () => {
+    renderPanel([waiting(0, Date.now())]);
+    expect(screen.getByTestId("connection-wait").textContent).toContain(
+      "Connection lost, retrying…",
+    );
+  });
+
+  test("an operation that is not waiting shows no notice", () => {
+    renderPanel([applyProgress(newOpState(handle(), 0), progress(), 1000)]);
+    expect(screen.queryByTestId("connection-wait")).toBeNull();
+  });
+});

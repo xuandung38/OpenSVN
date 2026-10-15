@@ -20,6 +20,8 @@ import { mockSettings } from "./data";
 import {
   MOCK_REPO_ROOT,
   MOCK_REPO_UUID,
+  MOCK_SERVER_REPOS,
+  MOCK_SERVER_URL,
   MOCK_YOUNGEST,
   mockBlame,
   mockBranches,
@@ -63,10 +65,32 @@ const errCode = (code: AppError["code"], message: string, detail: string | null 
     } satisfies AppError,
   });
 
+/** The backend's answer for a server URL that lists repositories instead of being one. */
+const isServerUrl = (url: string) => url.replace(/\/+$/, "") === MOCK_SERVER_URL;
+const serverListError = () =>
+  Promise.resolve({
+    status: "error" as const,
+    error: {
+      code: "path-not-found",
+      message: `${MOCK_SERVER_URL} is the list of repositories on this server, not a repository; add a repository name to the URL`,
+      detail: null,
+      path: null,
+      retryable: false,
+      actions: null,
+      repositories: MOCK_SERVER_REPOS,
+    } satisfies AppError,
+  });
+
 /** A setting the mock backend refuses on Save (a backend-only rule; tests). */
 let refusedSetting: string | null = null;
 export function setMockRefusedSetting(key: string | null): void {
   refusedSetting = key;
+}
+
+/** When set, `logGet` rejects with this message, as an engine refusing a server log would (tests). */
+let logFailure: string | null = null;
+export function setMockLogFailure(message: string | null): void {
+  logFailure = message;
 }
 
 let opSeq = 0;
@@ -196,6 +220,8 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     });
     return ok(null);
   },
+  // Nothing in the mock waits for a lost connection.
+  opRetryNow: () => ok(null),
   settingsGet: () => ok(mockSettings),
   // Like the fake engine; the checkout dialog explains when an engine does not fetch externals.
   engineCapabilities: () => ok({ ...engineCaps }),
@@ -224,14 +250,17 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     });
   },
   repoInfo: (url: string) =>
-    ok({
-      repoRootUrl: MOCK_REPO_ROOT,
-      repoUuid: MOCK_REPO_UUID,
-      youngestRev: MOCK_YOUNGEST,
-      kind: "dir" as const,
-      url,
-    }),
+    isServerUrl(url)
+      ? serverListError()
+      : ok({
+          repoRootUrl: MOCK_REPO_ROOT,
+          repoUuid: MOCK_REPO_UUID,
+          youngestRev: MOCK_YOUNGEST,
+          kind: "dir" as const,
+          url,
+        }),
   repoList: (url: string) => {
+    if (isServerUrl(url)) return serverListError();
     const list = mockList(url);
     return list ? ok(list) : errCode("path-not-found", `Path not found: ${url}`);
   },
@@ -243,6 +272,16 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
       label: url.split("/").pop() ?? "",
     }),
   logGet: (req: LogGetRequest) => {
+    if (logFailure !== null) {
+      return Promise.reject({
+        code: "internal",
+        message: logFailure,
+        detail: null,
+        path: null,
+        retryable: false,
+        actions: null,
+      } satisfies AppError);
+    }
     const all = mockLogWithPaths;
     const q = req.filter?.toLowerCase();
     const filtered = q
@@ -318,6 +357,20 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
   },
   programClear: (kind: ProgramKind) => {
     Object.assign(mockSettings, { [PROGRAM_KEYS[kind]]: null });
+    return ok({ ...mockSettings });
+  },
+  programChooseForExtension: (ext: string, args: string[]) => {
+    const key = ext.replace(/^\./, "").toLowerCase();
+    const rest = (mockSettings["diff.toolsByExtension"] ?? []).filter((t) => t.ext !== key);
+    Object.assign(mockSettings, {
+      "diff.toolsByExtension": [...rest, { ext: key, path: "/usr/bin/meld", args }],
+    });
+    return ok({ ...mockSettings });
+  },
+  programClearForExtension: (ext: string) => {
+    const key = ext.replace(/^\./, "").toLowerCase();
+    const rest = (mockSettings["diff.toolsByExtension"] ?? []).filter((t) => t.ext !== key);
+    Object.assign(mockSettings, { "diff.toolsByExtension": rest.length > 0 ? rest : null });
     return ok({ ...mockSettings });
   },
   // The real backend shows the native folder dialog; the mock pretends the user chose a folder.

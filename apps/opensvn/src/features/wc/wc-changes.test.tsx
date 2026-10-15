@@ -2,7 +2,7 @@ import { configure, screen, waitFor, within } from "@testing-library/react";
 import { beforeAll, beforeEach, expect, test, vi } from "vitest";
 import { AppShell } from "../../app/app-shell";
 import type { FileStatus } from "../../ipc/bindings";
-import { mockCalls, setMockOpDuration } from "../../ipc/mock/adapter";
+import { mockCalls, setMockLogFailure, setMockOpDuration } from "../../ipc/mock/adapter";
 import { MOCK_WC_ID, mockWorkingCopies } from "../../ipc/mock/data";
 import { resetWcMock } from "../../ipc/mock/wc-mock-commands";
 import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../test-utils";
@@ -107,7 +107,9 @@ test("commit box warns about foreign locks, long summaries and blocks on conflic
   await option(/crate\.fbx/);
   expect(await screen.findByText("1 file(s) are locked by another user.")).toBeTruthy();
   await user().click(await option(/physics\.ts/)); // select only
-  await user().click(within(await option(/physics\.ts/)).getByRole("checkbox", { hidden: true }));
+  const tick = (await option(/physics\.ts/)).querySelector<HTMLElement>("[data-row-check]");
+  if (!tick) throw new Error("no tick box in the physics.ts row");
+  await user().click(tick);
   expect(await screen.findByText(/Resolve conflicts in 1 selected file/)).toBeTruthy();
   const summary = screen.getByRole("textbox", { name: "Summary (required)" });
   await user().type(summary, "x".repeat(73));
@@ -191,6 +193,28 @@ test("keyboard: Ctrl+2 opens History, Ctrl+Shift+U updates, Ctrl+Shift+K checks 
   await waitFor(() => expect(mockCalls.some((c) => c.name === "update")).toBe(true));
   await user().keyboard("{Control>}{Shift>}k{/Shift}{/Control}");
   await waitFor(() => expect(mockCalls.some((c) => c.name === "statusRemote")).toBe(true));
+});
+
+test("sidebar history shows a log error with Retry, then the revisions once it loads", async () => {
+  setMockLogFailure("Malformed log entry from the server");
+  try {
+    renderApp(<AppShell />);
+    const sections = await screen.findByRole("tablist", { name: "Sidebar sections" });
+    const tab = within(sections).getByRole("tab", { name: "History" });
+    await user().click(tab);
+    const panelId = tab.getAttribute("aria-controls") ?? "";
+    const panel = () => within(document.getElementById(panelId) as HTMLElement);
+    expect(await panel().findByText("Could not load history")).toBeTruthy();
+    expect(panel().getByText("Malformed log entry from the server")).toBeTruthy();
+
+    setMockLogFailure(null);
+    await user().click(panel().getByRole("button", { name: "Retry" }));
+    const list = await panel().findByRole("listbox", { name: "History" });
+    expect(within(list).getAllByRole("option").length).toBeGreaterThan(0);
+    expect(panel().queryByText("Could not load history")).toBeNull();
+  } finally {
+    setMockLogFailure(null);
+  }
 });
 
 test("incoming tab lists the revisions that are not in the working copy yet", async () => {

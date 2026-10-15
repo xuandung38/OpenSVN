@@ -54,6 +54,8 @@ pub enum ErrorAction {
     OpenSettings,
     /// The default app was refused for this item; show it in the file manager instead.
     RevealInFileManager,
+    /// An interrupted checkout can be finished: see [`AppError::incomplete_checkout`].
+    ContinueCheckout,
 }
 
 /// Error returned by every command. `message` is user-displayable; never a bare string error.
@@ -66,13 +68,48 @@ pub struct AppError {
     pub detail: Option<String>,
     pub path: Option<String>,
     pub retryable: bool,
-    pub actions: Option<Vec<ErrorAction>>,
+    // A thin box, like the lists below: `AppError` stays small.
+    #[allow(clippy::box_collection)]
+    pub actions: Option<Box<Vec<ErrorAction>>>,
     /// For `locked-by-other`: the locks held by someone else on the requested paths, as the
     /// server reports them now. `None` when the engine could not ask (or for other codes).
-    // A boxed slice keeps `AppError` (returned by every command) small.
+    // Thin boxes (one pointer each) keep `AppError`, returned by every command, small.
+    #[allow(clippy::box_collection)]
     #[serde(default)]
     #[specta(optional)]
-    pub lock_conflicts: Option<Box<[LockConflict]>>,
+    pub lock_conflicts: Option<Box<Vec<LockConflict>>>,
+    /// For `path-not-found` on a server URL that is the repository list of an `SVNParentPath`
+    /// location (VisualSVN Server's `https://host/svn/`): the repositories it lists, so the UI
+    /// can offer them. `None` for any other error.
+    #[allow(clippy::box_collection)]
+    #[serde(default)]
+    #[specta(optional)]
+    pub repositories: Option<Box<Vec<ParentRepo>>>,
+    /// A checkout found its target folder holding an interrupted checkout of the same location
+    /// (or a checkout stopped and left one): the UI offers "Continue checkout".
+    #[serde(default)]
+    #[specta(optional)]
+    pub incomplete_checkout: Option<Box<IncompleteCheckout>>,
+}
+
+/// A repository listed by an `SVNParentPath` location.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentRepo {
+    /// Name for display.
+    pub name: String,
+    /// Repository URL, percent-encoded.
+    pub url: String,
+}
+
+/// An interrupted checkout the user can continue (`wc_continue`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct IncompleteCheckout {
+    pub wc_id: crate::WcId,
+    /// Revision the checkout was reaching.
+    pub rev: crate::Rev,
+    pub root_path: String,
 }
 
 /// A lock held by someone else that refused a lock request (doc 01 §10.4: the lock dialog shows
@@ -101,8 +138,10 @@ impl AppError {
             detail: None,
             path: None,
             retryable,
-            actions: (!actions.is_empty()).then(|| actions.to_vec()),
+            actions: (!actions.is_empty()).then(|| Box::new(actions.to_vec())),
             lock_conflicts: None,
+            incomplete_checkout: None,
+            repositories: None,
         }
     }
 
@@ -128,9 +167,19 @@ impl AppError {
         self
     }
 
+    /// Attaches an interrupted checkout to continue, and offers the action.
+    pub fn with_incomplete_checkout(mut self, info: IncompleteCheckout) -> Self {
+        self.incomplete_checkout = Some(Box::new(info));
+        let actions = self.actions.get_or_insert_with(Box::default);
+        if !actions.contains(&ErrorAction::ContinueCheckout) {
+            actions.insert(0, ErrorAction::ContinueCheckout);
+        }
+        self
+    }
+
     /// Attaches the locks that refused a lock request; an empty list attaches nothing.
     pub fn with_lock_conflicts(mut self, conflicts: Vec<LockConflict>) -> Self {
-        self.lock_conflicts = (!conflicts.is_empty()).then(|| conflicts.into_boxed_slice());
+        self.lock_conflicts = (!conflicts.is_empty()).then(|| Box::new(conflicts));
         self
     }
 }
@@ -139,6 +188,17 @@ impl From<&SvnError> for AppError {
     /// Maps an engine error: `detail` carries the svn code (`E160028`) and the cause chain.
     fn from(err: &SvnError) -> Self {
         let mut out = AppError::from_code(err.code, err.message.clone());
+        out.repositories = err.parent_repositories().map(|repos| {
+            Box::new(
+                repos
+                    .iter()
+                    .map(|r| ParentRepo {
+                        name: r.name.clone(),
+                        url: r.url.clone(),
+                    })
+                    .collect(),
+            )
+        });
         let mut parts = Vec::new();
         let mut cur = Some(err);
         while let Some(e) = cur {

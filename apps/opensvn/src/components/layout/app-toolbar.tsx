@@ -8,8 +8,9 @@ export interface AppToolbarProps {
   workingCopyLabel?: string;
   /** Shortcut that opens the picker, for `aria-keyshortcuts` (e.g. "Control+T"). */
   workingCopyShortcut?: string;
+  /** Localised "Branch" or "Location" label above the value. */
+  locationLabel: string;
   /** Branch name, or the in-repo location when the repo has no trunk/branches/tags layout. */
-  locationLabel: "Branch" | "Location";
   locationValue: string;
   incoming: number;
   updating: boolean;

@@ -1,6 +1,8 @@
 //! Semantic validation of a complete settings value.
 
-use opensvn_ipc::{AppError, ExternalDiffTool, ProxySetting, SettingRange, Settings, WcFormat};
+use opensvn_ipc::{
+    AppError, ExtDiffTool, ExternalDiffTool, ProxySetting, SettingRange, Settings, WcFormat,
+};
 use serde_json::Value;
 
 /// Every numeric setting and its inclusive range. This table is the only definition: [`validate`]
@@ -11,14 +13,20 @@ use serde_json::Value;
 /// - `network.maxConnections`: the HTTP transport supports 1..=8 per host
 ///   (`svn_ra::transport::config::MAX_CONNECTIONS`); default 4, like svn.
 /// - `network.timeoutSec`: below 5 s a slow TLS handshake already fails.
+/// - `network.reconnectWaitMin`: how long a checkout or update waits for a lost connection;
+///   up to 2 hours (a long outage, a laptop closed for a meeting).
 /// - `cache.maxSizeGb`: up to 4 TB.
-pub const SETTING_RANGES: [(&str, SettingRange); 4] = [
+pub const SETTING_RANGES: [(&str, SettingRange); 5] = [
     (
         "general.checkIntervalMin",
         SettingRange { min: 1, max: 1440 },
     ),
     ("network.maxConnections", SettingRange { min: 1, max: 8 }),
     ("network.timeoutSec", SettingRange { min: 5, max: 3600 }),
+    (
+        "network.reconnectWaitMin",
+        SettingRange { min: 1, max: 120 },
+    ),
     ("cache.maxSizeGb", SettingRange { min: 1, max: 4096 }),
 ];
 
@@ -126,6 +134,7 @@ pub fn validate(s: &Settings) -> Result<(), AppError> {
         u32::from(s.network_max_connections),
     )?;
     check_range("network.timeoutSec", s.network_timeout_sec)?;
+    check_range("network.reconnectWaitMin", s.network_reconnect_wait_min)?;
     check_range("cache.maxSizeGb", s.cache_max_size_gb)?;
     if s.wc_default_format != WcFormat::V31 {
         return Err(invalid("wc.defaultFormat", "only format 31 can be written"));
@@ -145,6 +154,38 @@ pub fn validate(s: &Settings) -> Result<(), AppError> {
         if let Some(t) = tool {
             check_program(key, t)?;
         }
+    }
+    check_ext_tools(s.diff_tools_by_extension.as_deref().unwrap_or_default())
+}
+
+/// Most per-extension diff tools.
+pub const MAX_EXT_TOOLS: usize = 32;
+
+/// Whether `ext` is a stored extension: lowercase ASCII letters and digits, 1 to 16 of them (the
+/// extensions the staged copies keep).
+pub fn valid_ext(ext: &str) -> bool {
+    (1..=16).contains(&ext.len())
+        && ext
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
+fn check_ext_tools(tools: &[ExtDiffTool]) -> Result<(), AppError> {
+    const KEY: &str = "diff.toolsByExtension";
+    if tools.len() > MAX_EXT_TOOLS {
+        return Err(invalid(KEY, "too many extensions"));
+    }
+    for (i, t) in tools.iter().enumerate() {
+        if !valid_ext(&t.ext) || tools[..i].iter().any(|o| o.ext == t.ext) {
+            return Err(invalid(KEY, "extension is invalid or listed twice"));
+        }
+        check_program(
+            KEY,
+            &ExternalDiffTool {
+                path: t.path.clone(),
+                args: t.args.clone(),
+            },
+        )?;
     }
     Ok(())
 }
@@ -166,6 +207,7 @@ mod tests {
                         s.network_max_connections = u8::try_from(v).unwrap();
                     }
                     "network.timeoutSec" => s.network_timeout_sec = v,
+                    "network.reconnectWaitMin" => s.network_reconnect_wait_min = v,
                     "cache.maxSizeGb" => s.cache_max_size_gb = v,
                     other => panic!("no field for ranged key {other}"),
                 }

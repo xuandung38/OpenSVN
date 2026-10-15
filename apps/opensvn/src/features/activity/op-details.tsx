@@ -8,6 +8,7 @@ import { cn } from "../../lib/cn";
 import { formatBytes } from "../../lib/format";
 import { useT } from "../../lib/i18n/i18n";
 import { activityStrings } from "./activity-strings";
+import { ConnectionWaitNotice } from "./connection-wait";
 import { errorText } from "./error-text";
 import {
   ACTION_LETTER,
@@ -42,9 +43,12 @@ export function OpDetails({
   onClose,
   onCopy,
   onOpenFolder,
+  onCancel,
 }: {
   op: OpState;
   onClose: () => void;
+  /** Cancels the running operation (offered while it waits for a lost connection). */
+  onCancel?: () => void;
   /** Copies the given text; resolves when done. */
   onCopy: (text: string) => Promise<void> | void;
   /** Shows the working copy folder in the file manager; omitted when there is none. */
@@ -96,6 +100,7 @@ export function OpDetails({
       <header className="border-b border-line px-4 py-3 text-[15px] font-semibold">
         <SafeText>{op.handle.title}</SafeText>
       </header>
+      <ConnectionWaitNotice op={op} onCancel={onCancel} />
       <div className="px-4 py-2">
         {/* Announced politely: stage changes and the end, not every path. */}
         <p role="status" aria-live="polite" className="sr-only">

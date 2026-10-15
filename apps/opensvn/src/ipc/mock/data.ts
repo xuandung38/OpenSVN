@@ -112,6 +112,7 @@ export const mockSettings: Settings = {
   "diff.ignoreWhitespace": false,
   "network.maxConnections": 4,
   "network.timeoutSec": 60,
+  "network.reconnectWaitMin": 10,
   "network.proxy": { mode: "system" },
   "network.negotiate": true,
   "wc.defaultFormat": 32,
@@ -123,4 +124,5 @@ export const mockSettings: Settings = {
   "diff.mergeTool": null,
   "tools.editor": null,
   "tools.terminal": null,
+  "diff.toolsByExtension": null,
 };
