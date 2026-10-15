@@ -69,16 +69,12 @@ export function SwitchDialog({ onClose }: { onClose: () => void }) {
   const trimmed = url.trim().replace(/\/+$/, "");
   const webLink = useWebLinkConversion(url, (converted, pegRev) => {
     setUrl(converted);
-    if (pegRev !== null) setRevText((cur) => (cur.trim() === "" ? String(pegRev) : cur));
+    if (pegRev !== null) setRevText(String(pegRev));
   });
   const inRepo =
     isCheckoutUrl(trimmed) &&
     !hasQueryOrFragment(trimmed) &&
     (trimmed === root || trimmed.startsWith(`${root}/`));
-  const revFilled =
-    webLink.kind === "converted" && webLink.pegRev !== null && revText === String(webLink.pegRev)
-      ? webLink.pegRev
-      : null;
   const same = trimmed === (wc?.url ?? "").replace(/\/+$/, "");
 
   return (
@@ -106,7 +102,7 @@ export function SwitchDialog({ onClose }: { onClose: () => void }) {
       <UrlFieldNote
         url={url}
         state={webLink}
-        revFilled={revFilled}
+        revText={revText}
         fallback={inRepo ? null : d("switchUrlInvalid", { root })}
       />
       <label className="flex flex-col gap-1">

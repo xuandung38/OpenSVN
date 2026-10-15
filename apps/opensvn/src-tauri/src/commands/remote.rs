@@ -36,7 +36,8 @@ pub async fn repo_info(state: State<'_, AppState>, url: String) -> Result<RepoIn
 
 /// Turns a VisualSVN web-interface link (`https://host/!/#Repo/view/head/trunk`) into the
 /// repository URL it shows (`https://host/svn/Repo/trunk`), confirmed by asking the server.
-/// Any other input comes back unchanged so the usual URL checks report it.
+/// Any other input comes back unchanged so the usual URL checks report it. For an `r<N>` link
+/// the server is asked about the path at revision N (peg revision), not at HEAD.
 ///
 /// The probe goes to the scheme, host and port the user typed (the parser never changes them)
 /// through the normal connect path: the user's sign-in prompts and certificate trust apply.
@@ -58,9 +59,12 @@ pub async fn repo_resolve_url(
         };
         let link = parsed.map_err(web_link_err)?;
         let candidate = link.repo_url.to_string();
+        let peg_rev = link.peg_rev.map(|r| Rev(r.0));
+        // An `r<N>` link shows the path as it was at N: probe it there, since it may have been
+        // deleted or replaced since.
         state
             .engine
-            .repo_info(&candidate, &OpContext::detached())
+            .repo_info_at(&candidate, peg_rev, &OpContext::detached())
             .await
             .map_err(|e| match e.code {
                 svn_types::ErrorCode::Cancelled => engine_err(e),
@@ -69,7 +73,7 @@ pub async fn repo_resolve_url(
         Ok(ResolvedRepoUrl {
             url: candidate,
             converted: true,
-            peg_rev: link.peg_rev.map(|r| Rev(r.0)),
+            peg_rev,
         })
     })
     .await

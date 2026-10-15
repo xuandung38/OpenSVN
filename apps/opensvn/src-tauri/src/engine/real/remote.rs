@@ -119,10 +119,15 @@ async fn add_locks(
 }
 
 impl RealEngine {
-    pub(super) async fn do_repo_info(&self, url: &str, ctx: &OpContext) -> EngineResult<RepoInfo> {
+    pub(super) async fn do_repo_info(
+        &self,
+        url: &str,
+        peg: Option<Rev>,
+        ctx: &OpContext,
+    ) -> EngineResult<RepoInfo> {
         let (session, path) = self.locate(url, ctx).await?;
         let youngest = session.youngest_rev(&ctx.cancel).await?;
-        let kind = match session.check_path(&path, None, &ctx.cancel).await? {
+        let kind = match session.check_path(&path, revnum(peg), &ctx.cancel).await? {
             NodeKind::Dir => opensvn_ipc::EntryKind::Dir,
             NodeKind::File => opensvn_ipc::EntryKind::File,
             _ => {

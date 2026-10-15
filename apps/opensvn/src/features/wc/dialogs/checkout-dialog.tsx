@@ -105,16 +105,12 @@ export function CheckoutDialog({
   const trimmedUrl = url.trim();
   const rev = parseRevision(revText);
   // A pasted VisualSVN web link is replaced by the repository URL once the server confirms it;
-  // the revision it names fills an empty revision field.
+  // an `r<N>` link names the path as it was at N, so N replaces the revision field.
   const webLink = useWebLinkConversion(url, (converted, pegRev) => {
     setUrl(converted);
-    if (pegRev !== null) setRevText((cur) => (cur.trim() === "" ? String(pegRev) : cur));
+    if (pegRev !== null) setRevText(String(pegRev));
   });
   const urlOk = isCheckoutUrl(trimmedUrl) && !hasQueryOrFragment(trimmedUrl);
-  const revFilled =
-    webLink.kind === "converted" && webLink.pegRev !== null && revText === String(webLink.pegRev)
-      ? webLink.pegRev
-      : null;
   // The folder name follows the URL until the user edits it.
   const folderName = name ?? suggestFolderName(trimmedUrl);
   const nameError = validateFolderName(folderName);
@@ -280,7 +276,7 @@ export function CheckoutDialog({
           <UrlFieldNote
             url={url}
             state={webLink}
-            revFilled={revFilled}
+            revText={revText}
             fallback={urlOk ? null : d("urlInvalid")}
           />
           {browseFor !== null &&

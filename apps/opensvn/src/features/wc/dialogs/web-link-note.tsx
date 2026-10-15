@@ -11,13 +11,13 @@ import { dialogStrings } from "./dialog-strings";
 export function UrlFieldNote({
   url,
   state,
-  revFilled,
+  revText,
   fallback,
 }: {
   url: string;
   state: WebLinkState;
-  /** Revision taken from the link and put in the revision field, if any. */
-  revFilled: number | null;
+  /** Current text of the revision field, compared with the revision the link names. */
+  revText: string;
   fallback: string | null;
 }) {
   const d = useT(dialogStrings);
@@ -34,7 +34,8 @@ export function UrlFieldNote({
           <SafeText as="p" className="m-0 break-words text-[12px] text-muted-text">
             <span role="status">
               {d("webLinkConverted", { url: state.to })}
-              {revFilled !== null && ` ${d("webLinkRev", { rev: revFilled })}`}
+              {state.pegRev !== null &&
+                ` ${d(revText.trim() === String(state.pegRev) ? "webLinkRev" : "webLinkRevOther", { rev: state.pegRev })}`}
             </span>
           </SafeText>
           {fallback !== null && (

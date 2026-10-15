@@ -27,7 +27,8 @@ use async_trait::async_trait;
 use opensvn_ipc::{CommitRequest, Depth, UpdateRequest, WcFormat, WcId};
 use opensvn_lib::engine::real::{ClientRecovery, HttpConnector, RealEngine, RealEngineConfig};
 use opensvn_lib::engine::{
-    CheckoutPlan, EngineFacade, LockScope, LogScope, OpContext, StatusQuery, WcRef,
+    CheckoutPlan, EditOp, EngineFacade, LockScope, LogScope, OpContext, RemoteEditPlan,
+    StatusQuery, WcRef,
 };
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject as _;
@@ -554,6 +555,69 @@ async fn web_interface_links_convert_to_repository_urls() {
         .await
         .expect_err("raw web link");
     assert!(err.message.contains("Copy URL to clipboard"), "{err:?}");
+}
+
+/// An `r<N>` web link names the path as it was at N: a folder deleted after N is still found
+/// there (peg revision), and checking it out at N gives its content at N.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the VisualSVN-like server (scripts/test-env/visualsvn-like.sh)"]
+async fn web_link_to_an_old_revision_finds_a_path_deleted_since() {
+    let e = sso();
+    let repo = Repo::new("web-link-rev");
+    let wc = checkout(&e, &repo.url(), "web-link-rev").await;
+    write(&wc.root, "trunk/gone/a.txt", "kept at r1\n");
+    let r1 = commit(&e, &wc, "add gone").await.expect("commit r1");
+    let gone = format!("{}/trunk/gone", repo.url());
+    e.engine
+        .remote_edit(
+            &RemoteEditPlan {
+                ops: vec![EditOp::Delete { url: gone.clone() }],
+                message: "delete gone".into(),
+            },
+            &ctx(),
+        )
+        .await
+        .expect("delete");
+
+    let link = format!("{}#{}/view/r{}/trunk/gone/", base("!/"), repo.name, r1.0);
+    let parsed = svn_types::parse_visualsvn_web_link(&link)
+        .expect("web link")
+        .expect("parses");
+    assert_eq!(parsed.repo_url.to_string(), gone);
+    assert_eq!(parsed.peg_rev.map(|r| r.0), Some(r1.0));
+    let peg = parsed.peg_rev.map(|r| opensvn_ipc::Rev(r.0));
+
+    // At HEAD the folder is gone; at the link's revision it is there.
+    let head = e.engine.repo_info(&gone, &ctx()).await.expect_err("HEAD");
+    assert_eq!(head.code, ErrorCode::PathNotFound, "{head:?}");
+    let info = e
+        .engine
+        .repo_info_at(&gone, peg, &ctx())
+        .await
+        .expect("repo_info at the link revision");
+    assert_eq!(info.kind, opensvn_ipc::EntryKind::Dir);
+    assert_eq!(info.youngest_rev.0, r1.0 + 1);
+
+    // A checkout of `gone@r1` at r1, as the checkout dialog sends it.
+    let old = e
+        .engine
+        .checkout(
+            &CheckoutPlan {
+                url: gone.clone(),
+                path: e.tmp.path().join("gone-at-r1"),
+                rev: peg,
+                depth: Depth::Infinity,
+                sparse: None,
+                format: WcFormat::V31,
+                store_pristine: true,
+                ignore_externals: false,
+            },
+            &ctx(),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("checkout {gone}@{}: {err:?}", r1.0));
+    let content = std::fs::read_to_string(Path::new(&old.root_path).join("a.txt")).unwrap();
+    assert_eq!(content, "kept at r1\n");
 }
 
 fn encode_path(path: &str) -> String {
