@@ -1,8 +1,9 @@
 # Deployment guide: building, packaging and updating OpenSVN
 
 Everything here runs **locally**; `.github/workflows/release.yml` runs the same steps on GitHub
-Actions and attaches unsigned installers to a draft release (see `docs/INSTALL-TEST.md`). Signing is
-optional: without any signing variable set, every script produces a working **unsigned** installer.
+Actions, gated by the environment `release`, and publishes to `OpenSVN-releases` once the owner has
+configured it (`docs/RELEASE-SETUP.md`); without credentials it attaches unsigned installers to a
+draft release (see `docs/INSTALL-TEST.md`). Signing is optional: without any signing variable set, every script produces a working **unsigned** installer.
 Installers are built with the cargo feature `release` (the real engine); `OPENSVN_FEATURES`
 overrides the feature list, an empty value builds the fake engine only.
 
@@ -122,11 +123,11 @@ runbooks. Test the whole client path offline with `scripts/release/test-updater-
 Production endpoints must be `https`: the plugin refuses plain `http` in release builds (the local
 test uses a debug build of the harness).
 
-`createUpdaterArtifacts` is off by default so that anyone can build without keys. Once the app
-registers the updater plugin (contract change listed in the updater README), set `OPENSVN_UPDATER=1`
-plus `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` and `OPENSVN_UPDATER_PUBKEY`
-to produce signed `.app.tar.gz` / `.sig` update artifacts. Until then a build with
-`OPENSVN_UPDATER=1` fails by design (verified), and artifacts cannot self-update.
+`createUpdaterArtifacts` is off by default so that anyone can build without keys. Set
+`OPENSVN_UPDATER=1` plus `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` and
+`OPENSVN_UPDATER_PUBKEY` to produce signed update artifacts (`.app.tar.gz`, `.msi`, `-setup.exe`,
+`.AppImage`, each with its `.sig`); the release workflow does this automatically when the key and
+public key exist in the environment `release`.
 
 The updater sends the token, so its TLS is never relaxed: `build.rs` fails the build if any
 `tauri*.conf.json` sets a `plugins.updater.dangerous*` option (`dangerousAcceptInvalidCerts`,
