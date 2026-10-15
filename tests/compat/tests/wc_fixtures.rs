@@ -1,4 +1,5 @@
-//! Checks the committed working-copy fixtures (`fixtures/wc/f31`, `fixtures/wc/f32`):
+//! Checks the committed working-copy fixtures (`fixtures/wc/f31` from svn 1.14.3,
+//! `fixtures/wc/f31-svn1.15` and `fixtures/wc/f32` from svn 1.15.0):
 //! the manifest is complete, every tarball unpacks to a wc.db of the declared format, the state
 //! it claims is really recorded in wc.db, no work queue is left behind, and the harness wc.db
 //! dumper reads it.
@@ -87,10 +88,10 @@ fn assert_state(fmt: i64, name: &str, db: &Connection) {
     let c = |sql: &str| count(db, sql);
     let conflicts = "SELECT count(*) FROM ACTUAL_NODE WHERE conflict_data IS NOT NULL";
     match name {
-        "conflict-text" | "conflict-prop" | "conflict-tree" | "obstructed" => {
+        n if n.starts_with("conflict") || n.starts_with("obstructed") => {
             assert!(c(conflicts) >= 1, "{name}: no conflict recorded")
         }
-        "locked" => assert_eq!(c("SELECT count(*) FROM LOCK"), 1, "{name}"),
+        "locked" | "lock-stolen" => assert_eq!(c("SELECT count(*) FROM LOCK"), 1, "{name}"),
         "moved-file" | "moved-dir" => assert!(
             c("SELECT count(*) FROM NODES WHERE moved_to IS NOT NULL") >= 1,
             "{name}: no move recorded"
@@ -106,6 +107,34 @@ fn assert_state(fmt: i64, name: &str, db: &Connection) {
                 .unwrap();
             assert_eq!(root, depth, "{name}");
         }
+        "sparse-mixed" => {
+            let depth = |rel: &str| -> String {
+                db.query_row(
+                    "SELECT depth FROM NODES WHERE local_relpath=?1 AND op_depth=0",
+                    [rel],
+                    |r| r.get(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(depth(""), "infinity", "{name}");
+            assert_eq!(depth("src"), "empty", "{name}");
+            assert_eq!(depth("docs"), "files", "{name}");
+        }
+        "incomplete" => assert!(
+            c("SELECT count(*) FROM NODES WHERE presence='incomplete'") >= 1,
+            "{name}: no incomplete node"
+        ),
+        "server-excluded" => assert!(
+            c("SELECT count(*) FROM NODES WHERE presence='server-excluded'") >= 1,
+            "{name}: no server-excluded node"
+        ),
+        "switched-file" => assert_eq!(
+            c(
+                "SELECT count(*) FROM NODES WHERE op_depth=0 AND local_relpath='README.txt' AND repos_path='branches/feature-x/README.txt'"
+            ),
+            1,
+            "{name}"
+        ),
         "excluded" => assert_eq!(
             c("SELECT count(*) FROM NODES WHERE presence='excluded'"),
             1,
@@ -129,7 +158,7 @@ fn assert_state(fmt: i64, name: &str, db: &Connection) {
             "{name}"
         ),
         "externals" => assert!(c("SELECT count(*) FROM EXTERNALS") >= 2, "{name}"),
-        "added" | "copied" | "unicode-paths" | "replaced" => assert!(
+        "added" | "copied" | "unicode-paths" | "replaced" | "replaced-dir" => assert!(
             c("SELECT count(*) FROM NODES WHERE op_depth > 0") >= 1,
             "{name}: no working node"
         ),
@@ -148,7 +177,7 @@ fn assert_state(fmt: i64, name: &str, db: &Connection) {
         }
         _ => {}
     }
-    if !name.starts_with("conflict") && name != "obstructed" {
+    if !name.starts_with("conflict") && !name.starts_with("obstructed") {
         assert_eq!(c(conflicts), 0, "{name}: unexpected conflict");
     }
 }
@@ -210,6 +239,13 @@ fn format_31_fixtures_cover_at_least_25_states() {
 }
 
 #[test]
-fn format_32_fixtures_are_valid() {
-    check_format("f32", 32, 8);
+fn format_31_fixtures_from_svn_1_15_cover_at_least_42_states() {
+    assert!(manifest("f31-svn1.15").svn_version.starts_with("1.15."));
+    check_format("f31-svn1.15", 31, 42);
+}
+
+#[test]
+fn format_32_fixtures_cover_at_least_43_states() {
+    assert!(manifest("f32").svn_version.starts_with("1.15."));
+    check_format("f32", 32, 43);
 }

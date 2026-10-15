@@ -51,6 +51,27 @@ pub(crate) fn decode_text_field(text: String, encoding: Option<&str>) -> Result<
     }
 }
 
+/// Decodes a free-text value meant only for display (a log message, an author, a lock comment).
+/// svn stores such values as given when a repository was loaded with
+/// `--bypass-prop-validation` or converted from another system, and serves them base64-encoded;
+/// svn shows them with the invalid bytes escaped. Invalid UTF-8 becomes U+FFFD here, so one bad
+/// revision does not make a whole log unreadable. Paths, dates and revisions stay strict.
+pub(crate) fn decode_display_field(
+    text: String,
+    encoding: Option<&str>,
+) -> Result<String, SvnError> {
+    match encoding {
+        None => Ok(text),
+        Some(_) => {
+            let bytes = decode_bytes_field(text, encoding)?;
+            Ok(match String::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+            })
+        }
+    }
+}
+
 /// Decodes bytes of a value that may be base64-encoded.
 pub(crate) fn decode_bytes_field(
     text: String,
