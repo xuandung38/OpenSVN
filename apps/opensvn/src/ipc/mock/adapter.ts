@@ -87,6 +87,12 @@ export function setMockRefusedSetting(key: string | null): void {
   refusedSetting = key;
 }
 
+/** When set, `logGet` rejects with this message, as an engine refusing a server log would (tests). */
+let logFailure: string | null = null;
+export function setMockLogFailure(message: string | null): void {
+  logFailure = message;
+}
+
 let opSeq = 0;
 let opDurationMs = 2000;
 /** Length of a simulated operation (tests shorten it; the dev server keeps it visible). */
@@ -266,6 +272,16 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
       label: url.split("/").pop() ?? "",
     }),
   logGet: (req: LogGetRequest) => {
+    if (logFailure !== null) {
+      return Promise.reject({
+        code: "internal",
+        message: logFailure,
+        detail: null,
+        path: null,
+        retryable: false,
+        actions: null,
+      } satisfies AppError);
+    }
     const all = mockLogWithPaths;
     const q = req.filter?.toLowerCase();
     const filtered = q
