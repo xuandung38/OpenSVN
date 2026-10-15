@@ -11,7 +11,9 @@ use svn_client::local::revert::RevertOptions;
 use svn_client::{ClientCtx, StatusOptions};
 use svn_ra::ops::HttpRaSession;
 use svn_ra::transport::{HttpTransport, MemoryTrustStore, ProxyConfig, TransportConfig};
-use svn_ra_api::{AuthPrompter, CertDecision, CertInfo, CredentialRequest, Credentials};
+use svn_ra_api::{
+    AuthPrompter, CertDecision, CertInfo, CredentialRequest, Credentials, LogRequest, RaSession,
+};
 use svn_types::{CancelToken, Depth, RepoUrl, Result, Revnum, WcStatus};
 use svn_wc::WcDb;
 use svn_wc::db::LockOwner;
@@ -133,6 +135,29 @@ impl Engine {
         Ok(sum.revision)
     }
 
+    /// `svn switch target wc/rel` to HEAD (a subtree switch, like `svn switch ^/branch wc/dir`),
+    /// over a session at `url`, the working copy root's URL (the drive is anchored there).
+    pub async fn switch(
+        &self,
+        url: &str,
+        wc: &Path,
+        rel: &str,
+        target: &str,
+    ) -> Result<Option<Revnum>> {
+        let s = self.session(url).await?;
+        let sum = svn_client::switch(
+            &self.ctx,
+            &s,
+            &wc.join(rel),
+            &RepoUrl::parse(target)?,
+            None,
+            Depth::Unknown,
+            &CancelToken::new(),
+        )
+        .await?;
+        Ok(sum.revision)
+    }
+
     /// The app's "Continue checkout": after a restart (stale locks of the dead process
     /// recovered), an update of the whole working copy to the revision its incomplete folders
     /// record. `None` when nothing is incomplete.
@@ -175,6 +200,43 @@ impl Engine {
             svn_client::commit::commit(&db, &cctx, &[wc.to_path_buf()], &CommitOptions::new(msg))
                 .await?;
         Ok(r.map(|r| r.revision))
+    }
+
+    /// `svn log [-v] [-l limit] url/path` (newest first, HEAD to r0): returns how many entries
+    /// and changed paths the server sent.
+    pub async fn log(
+        &self,
+        url: &str,
+        path: &str,
+        limit: Option<u32>,
+        verbose: bool,
+    ) -> Result<(usize, usize)> {
+        let s = self.session(url).await?;
+        let paths = if path.is_empty() {
+            vec![svn_types::RelPath::root()]
+        } else {
+            vec![svn_types::RelPath::new(path)?]
+        };
+        let req = LogRequest {
+            paths,
+            start: None,
+            end: None,
+            limit,
+            discover_changed_paths: verbose,
+            strict_node_history: false,
+        };
+        let (mut entries, mut changed) = (0, 0);
+        s.log(
+            &req,
+            &mut |e| {
+                entries += 1;
+                changed += e.changed_paths.len();
+                Ok(())
+            },
+            &CancelToken::new(),
+        )
+        .await?;
+        Ok((entries, changed))
     }
 
     /// `svn revert -R wc`; returns how many paths were reverted.
