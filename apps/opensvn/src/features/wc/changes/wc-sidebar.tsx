@@ -4,11 +4,13 @@ import { RevisionRow } from "../../../components/list/revision-row";
 import { VirtualList } from "../../../components/list/virtual-list";
 import { Button } from "../../../components/ui/button";
 import { DropdownMenu, type MenuEntries } from "../../../components/ui/dropdown-menu";
+import { EmptyState } from "../../../components/ui/empty-state";
 import { Tabs } from "../../../components/ui/tabs";
 import { useLog } from "../../../ipc/queries";
 import { relativeTime } from "../../../lib/format";
 import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
+import { historyStrings } from "../../remote/history/history-strings";
 import { shortcutLabel } from "../shortcuts";
 import { useWcActions } from "../use-wc-actions";
 import { changedFiles } from "../wc-model";
@@ -25,6 +27,7 @@ export function WcSidebar() {
   const { wc, files, openDialog } = useWcSession();
   const t = useT(wcStrings);
   const c = useT(commonStrings);
+  const h = useT(historyStrings);
   const actions = useWcActions();
   const log = useLog(wc?.id ?? null);
   const [tab, setTab] = useState<Tab>("changes");
@@ -87,7 +90,17 @@ export function WcSidebar() {
         ]}
         panels={{
           changes: <ChangesList />,
-          history: (
+          history: log.isLoading ? (
+            <p className="m-0 p-3 text-muted-text">{h("loadingHistory")}</p>
+          ) : log.error ? (
+            <EmptyState
+              title={h("loadFailed")}
+              description={log.error.message}
+              actions={<Button onClick={() => void log.refetch()}>{c("retry")}</Button>}
+            />
+          ) : entries.length === 0 ? (
+            <EmptyState title={h("noHistory")} description={h("noHistoryHint")} />
+          ) : (
             <VirtualList
               label={t("tabHistory")}
               className="h-full"

@@ -149,6 +149,25 @@ test("withoutUnchanged compares objects deeply", () => {
   ).toEqual({ "network.timeoutSec": 5 });
 });
 
+test("a diff tool per file type is chosen through Rust and can be removed", async () => {
+  renderApp(<SettingsSheet open onClose={() => undefined} />);
+  const dialog = await screen.findByRole("dialog", { name: "Settings", hidden: true });
+  await user().click(within(dialog).getByRole("button", { name: "Diff & Merge" }));
+  const section = await within(dialog).findByRole("region", { name: "Diff tools by file type" });
+  const choose = within(section).getByRole("button", { name: "Choose program…" });
+  expect((choose as HTMLButtonElement).disabled).toBe(true);
+  await user().type(within(section).getByLabelText("File extension"), ".docx");
+  await user().click(choose);
+  const call = mockCalls.filter((c) => c.name === "programChooseForExtension").at(-1);
+  expect(call?.args).toEqual(["docx", ["{left}", "{right}"]]);
+  expect(await within(section).findByText(".docx")).toBeTruthy();
+  await user().click(within(section).getByRole("button", { name: "Remove" }));
+  expect(await within(section).findByText("No file type has its own tool.")).toBeTruthy();
+  expect(mockCalls.some((c) => c.name === "programClearForExtension" && c.args[0] === "docx")).toBe(
+    true,
+  );
+});
+
 // The ranges of the Rust validator (settings/validate.rs SETTING_RANGES), as the bindings carry
 // them. A Rust test checks the bindings against the validator; this pins what the UI enforces.
 const BACKEND_RANGES = {

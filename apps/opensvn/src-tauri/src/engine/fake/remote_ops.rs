@@ -243,6 +243,7 @@ impl FakeEngine {
                 image: None,
                 too_large: None,
                 too_complex: None,
+                office: None,
             });
         }
         let (left, left_props) = match against {
