@@ -106,7 +106,7 @@ export const commands = {
 	 *  the UI can tell the user to copy the repository URL from VisualSVN instead.
 	 */
 	repoResolveUrl: (url: string) => typedError<ResolvedRepoUrl, AppError>(__TAURI_INVOKE("repo_resolve_url", { url })),
-	repoList: (url: string, rev: number | null) => typedError<RepoEntry[], AppError>(__TAURI_INVOKE("repo_list", { url, rev })),
+	repoList: (url: string, rev: number | null) => typedError<RepoListing, AppError>(__TAURI_INVOKE("repo_list", { url, rev })),
 	repoCat: (url: string, rev: number | null) => typedError<TextSide, AppError>(__TAURI_INVOKE("repo_cat", { url, rev })),
 	repoSave: (url: string, rev: number | null, grant: PathGrantId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("repo_save", { url, rev, grant })),
 	logGet: (request: LogGetRequest) => typedError<LogPage, AppError>(__TAURI_INVOKE("log_get", { request })),
@@ -549,6 +549,11 @@ export type ErrorCode = "network" | "timeout" | "auth-required" |
  *  token was invalid, or the user chose SSO again after it had failed.
  */
 "negotiate-failed" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "hook-failed" | "repository-moved" | "pristine-not-hydrated" | "wc-invalid-operation" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | 
+/**
+ *  The server sent a malformed response (bad XML or encoding, an impossible editor drive).
+ *  Nothing local is damaged, so cleanup is not offered; the message names what was wrong.
+ */
+"server-protocol-error" | 
 /**  The request itself is invalid (bad value, expired path grant, unsupported option). */
 "invalid-argument" | "internal";
 
@@ -965,6 +970,18 @@ export type RepoInfo = {
 	repoUuid: string,
 	youngestRev: Rev,
 	kind: EntryKind,
+};
+
+/**  One directory listing. */
+export type RepoListing = {
+	/**  Children the app can show. */
+	entries: RepoEntry[],
+	/**
+	 *  Children the server listed whose names the app refuses (hostile, Windows-reserved or
+	 *  otherwise unsafe). They are not in `entries` and their names are not sent: only the count,
+	 *  so the folder is not shown as empty when it is not.
+	 */
+	hidden: number,
 };
 
 export type ResolveChoice = "mine" | "theirs" | "working" | "base";
