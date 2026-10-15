@@ -358,28 +358,31 @@ impl UpdateEditor {
         let path = wc.clone();
         let shadow = f.shadow;
         let had_base = old.is_some();
-        self.defer(Box::new(move |t| {
-            if let Some(record) = &new_pristine {
-                t.record_pristine(record)?;
-            }
-            t.base_add(&path, &node)?;
-            if let Some(ext) = &file_external {
-                t.mark_file_external(&path)?;
-                t.external_add(&path, ext)?;
-            }
-            if let Some(op_depth) = shadow.filter(|d| *d > 0) {
-                t.mark_base_deleted_at(&path, NodeKind::File, op_depth)?;
-            } else if obstructed {
-                t.mark_base_deleted(&path, NodeKind::File)?;
-            }
-            if !shadowed && (had_base || overlay.is_some()) {
-                t.set_actual_props(&path, overlay.as_ref())?;
-            }
-            if !conflicts.is_empty() {
-                conflict_record::record(t, &path, &info, conflicts)?;
-            }
-            t.queue_work(&work)
-        }))?;
+        self.defer(
+            &wc,
+            Box::new(move |t| {
+                if let Some(record) = &new_pristine {
+                    t.record_pristine(record)?;
+                }
+                t.base_add(&path, &node)?;
+                if let Some(ext) = &file_external {
+                    t.mark_file_external(&path)?;
+                    t.external_add(&path, ext)?;
+                }
+                if let Some(op_depth) = shadow.filter(|d| *d > 0) {
+                    t.mark_base_deleted_at(&path, NodeKind::File, op_depth)?;
+                } else if obstructed {
+                    t.mark_base_deleted(&path, NodeKind::File)?;
+                }
+                if !shadowed && (had_base || overlay.is_some()) {
+                    t.set_actual_props(&path, overlay.as_ref())?;
+                }
+                if !conflicts.is_empty() {
+                    conflict_record::record(t, &path, &info, conflicts)?;
+                }
+                t.queue_work(&work)
+            }),
+        )?;
         if f.shadow.is_some() {
             // Shadowed by an obstruction: only BASE changed, nothing to report.
             return Ok(());

@@ -34,6 +34,8 @@ use svn_wc::db::WcTxn;
 use svn_wc::workqueue::Unsettled;
 use tempfile::TempPath;
 
+use super::state::CommittedNode;
+
 /// The database side of one node: everything its transaction writes.
 pub(super) type Op = Box<dyn FnOnce(&WcTxn<'_>) -> Result<()> + Send>;
 
@@ -53,6 +55,8 @@ pub(super) struct Batch {
     keep: Vec<TempPath>,
     /// Paths removed by pending nodes.
     removed: HashSet<RelPath>,
+    /// Node states the pending nodes commit.
+    nodes: Vec<CommittedNode>,
     since: Option<Instant>,
     text_bytes: u64,
     /// Pristine texts were placed without their own sync.
@@ -60,9 +64,10 @@ pub(super) struct Batch {
 }
 
 impl Batch {
-    /// Adds a node; `true` when the batch is due for a flush.
-    pub(super) fn push(&mut self, op: Op) -> bool {
+    /// Adds a node, which commits `node`; `true` when the batch is due for a flush.
+    pub(super) fn push(&mut self, node: CommittedNode, op: Op) -> bool {
         self.ops.push(op);
+        self.nodes.push(node);
         self.since.get_or_insert_with(Instant::now);
         self.is_full()
     }
@@ -105,6 +110,7 @@ impl Batch {
         let taken = std::mem::take(self);
         Pending {
             removed: taken.removed,
+            nodes: taken.nodes,
             ops: taken.ops,
             keep: taken.keep,
             unsynced: taken.unsynced,
@@ -121,6 +127,8 @@ pub(super) struct Pending {
     /// Paths the nodes remove; until they are committed (and their removal ran), the drive
     /// must not look at these paths again (see [`Batch::touches`]).
     pub(super) removed: HashSet<RelPath>,
+    /// Node states the transaction commits.
+    pub(super) nodes: Vec<CommittedNode>,
 }
 
 /// A batch waiting for its durability barrier, which runs on another thread while the editor

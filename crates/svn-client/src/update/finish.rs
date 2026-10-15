@@ -61,13 +61,16 @@ impl UpdateEditor {
         };
         if !base.presence.is_present() {
             let path = wc.clone();
-            self.defer(Box::new(move |t| {
-                t.base_remove(&path)?;
-                if let Some(m) = &marker {
-                    t.base_add(&path, m)?;
-                }
-                Ok(())
-            }))?;
+            self.defer(
+                wc,
+                Box::new(move |t| {
+                    t.base_remove(&path)?;
+                    if let Some(m) = &marker {
+                        t.base_add(&path, m)?;
+                    }
+                    Ok(())
+                }),
+            )?;
             self.batch.removed(wc.clone());
             return Ok(());
         }
@@ -100,22 +103,25 @@ impl UpdateEditor {
             );
             let path = wc.clone();
             let recorded = reason.clone();
-            self.defer(Box::new(move |t| {
-                if keep_as_working {
-                    t.convert_base_to_copy(&path)?;
-                } else {
-                    t.base_remove(&path)?;
-                }
-                if let Some(m) = &marker {
-                    t.base_add(&path, m)?;
-                }
-                conflict_record::record(
-                    t,
-                    &path,
-                    &info,
-                    vec![NewConflict::Tree(recorded, TreeAction::Delete)],
-                )
-            }))?;
+            self.defer(
+                wc,
+                Box::new(move |t| {
+                    if keep_as_working {
+                        t.convert_base_to_copy(&path)?;
+                    } else {
+                        t.base_remove(&path)?;
+                    }
+                    if let Some(m) = &marker {
+                        t.base_add(&path, m)?;
+                    }
+                    conflict_record::record(
+                        t,
+                        &path,
+                        &info,
+                        vec![NewConflict::Tree(recorded, TreeAction::Delete)],
+                    )
+                }),
+            )?;
             self.batch.removed(wc.clone());
             self.skipped.push(wc.clone());
             self.deletion_conflicts.insert(wc.clone(), (base, reason));
@@ -125,13 +131,16 @@ impl UpdateEditor {
         let mut items = Vec::new();
         removal_items(&db, wc, &mut items)?;
         let path = wc.clone();
-        self.defer(Box::new(move |t| {
-            t.base_remove(&path)?;
-            if let Some(m) = &marker {
-                t.base_add(&path, m)?;
-            }
-            t.queue_work(&items)
-        }))?;
+        self.defer(
+            wc,
+            Box::new(move |t| {
+                t.base_remove(&path)?;
+                if let Some(m) = &marker {
+                    t.base_add(&path, m)?;
+                }
+                t.queue_work(&items)
+            }),
+        )?;
         self.batch.removed(wc.clone());
         self.emit(wc, kind, UpdateAction::Delete);
         Ok(())
@@ -254,16 +263,19 @@ impl UpdateEditor {
         }
         let path = d.wc.clone();
         let had_base = d.base.is_some();
-        self.defer(Box::new(move |t| {
-            t.base_add(&path, &node)?;
-            if !shadowed && (had_base || overlay.is_some()) {
-                t.set_actual_props(&path, overlay.as_ref())?;
-            }
-            if !conflicts.is_empty() {
-                conflict_record::record(t, &path, &info, conflicts)?;
-            }
-            t.queue_work(&work)
-        }))?;
+        self.defer(
+            &d.wc,
+            Box::new(move |t| {
+                t.base_add(&path, &node)?;
+                if !shadowed && (had_base || overlay.is_some()) {
+                    t.set_actual_props(&path, overlay.as_ref())?;
+                }
+                if !conflicts.is_empty() {
+                    conflict_record::record(t, &path, &info, conflicts)?;
+                }
+                t.queue_work(&work)
+            }),
+        )?;
         if let Some(a) = action
             && (!shadowed || d.tree_conflict.is_some())
         {

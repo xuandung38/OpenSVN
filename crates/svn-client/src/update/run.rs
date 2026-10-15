@@ -1,5 +1,6 @@
 //! Orchestration of one update, switch or checkout drive.
 
+use std::collections::HashSet;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use svn_wc::db::{ObtainMode, WcDb};
 use super::editor::UpdateEditor;
 use super::reporter::build_report;
 use super::restore;
-use super::state::UpdateSetup;
+use super::state::{CommittedNode, UpdateSetup};
 use crate::ctx::{ClientCtx, UpdateAction, UpdateEvent, UpdateSummary};
 use crate::wc;
 
@@ -45,13 +46,14 @@ pub struct UpdateParams {
 }
 
 /// Delays before asking again after a connection failure that left nothing done: a remote
-/// status check (which writes nothing) or an update drive that broke off before it changed the
-/// working copy. The length is how many such attempts in a row are made.
+/// status check (which writes nothing), or an update drive whose resumes commit nothing new to
+/// the working copy. The length is how many such attempts in a row are made: a drive whose last
+/// two resumes made no progress is not resumed again.
 pub(crate) const RECONNECT_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
 
-/// Most automatic resumes of one update drive. A drive that broke off after it changed the
-/// working copy made progress, so the next resume waits only the first delay and does not count
-/// against [`RECONNECT_DELAYS`]; this cap bounds a connection that keeps breaking anyway.
+/// Most automatic resumes of one update drive. A resume that committed nodes no drive before it
+/// had committed made progress, so the next resume waits only the first delay and does not
+/// count against [`RECONNECT_DELAYS`]; this cap bounds a connection that keeps breaking anyway.
 const MAX_RESUMES: usize = 20;
 
 /// Whether a failed drive is resumed automatically: an update or checkout (not a switch, whose
@@ -273,8 +275,12 @@ pub async fn drive_update(
     // Notifications of drives that broke off on a failed connection.
     let mut earlier_events: Vec<UpdateEvent> = Vec::new();
     let mut reconnects = 0usize;
-    // Broken drives in a row that changed nothing.
+    // Resumed drives in a row that committed nothing new.
     let mut stalled = 0usize;
+    // Every node state committed by the drives so far: the high-water mark of the progress. A
+    // resumed drive sends the nodes of unfinished directories again (and notifies them again),
+    // so only node states beyond this set are progress.
+    let mut committed: HashSet<CommittedNode> = HashSet::new();
     let outcome = loop {
         let setup = UpdateSetup {
             db: Arc::clone(&db),
@@ -340,10 +346,16 @@ pub async fn drive_update(
             let out = outcome.lock().unwrap_or_else(PoisonError::into_inner);
             revision = revision.or(out.revision);
             earlier_events.extend(out.events.iter().cloned());
-            !out.events.is_empty()
+            let mut new = false;
+            for node in &out.committed {
+                new |= committed.insert(node.clone());
+            }
+            new
         };
-        stalled = if progressed { 0 } else { stalled + 1 };
-        let Some(delay) = RECONNECT_DELAYS.get(stalled.saturating_sub(1)).copied() else {
+        if reconnects > 0 {
+            stalled = if progressed { 0 } else { stalled + 1 };
+        }
+        let Some(delay) = RECONNECT_DELAYS.get(stalled).copied() else {
             return Err(e);
         };
         reconnects += 1;

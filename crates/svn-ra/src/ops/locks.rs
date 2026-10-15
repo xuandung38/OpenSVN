@@ -12,6 +12,7 @@ use svn_protocol::{ResponseHead, error_from_response, map_http_status};
 use svn_types::{CancelToken, Depth, ErrorCode, LockInfo, RelPath, Result, Revnum, SvnError};
 
 use super::read::stream_items;
+use super::resume::ReadRetry;
 use super::update::{RaWire, buffered_headers, error_of, headers_of};
 
 /// Classification of a failed `LOCK`/`UNLOCK` that carried no classified Subversion error.
@@ -55,25 +56,38 @@ pub(crate) async fn get_locks(
     cancel: &CancelToken,
 ) -> Result<Vec<LockInfo>> {
     let repo = wire.repo_path(path)?;
-    let req = get_locks_request(wire.urls(), &repo, depth)?;
-    let resp = wire.send(req, cancel).await?;
-    // A path that is not in HEAD answers 404; it has no locks (libsvn_ra_serf does the same).
-    if resp.status().as_u16() == 404 {
-        return Ok(Vec::new());
-    }
-    let resp = RaWire::require_success(resp, cancel).await?;
-    let mut locks = Vec::new();
-    let mut parser = GetLocksParser::new();
-    stream_items(resp, &mut parser, cancel, |l: LockInfo| {
-        if in_scope(&repo, depth, l.path.as_str()) {
-            locks.push(l);
-        } else {
-            tracing::warn!("skipping a lock outside the requested scope");
+    // Nothing reaches the caller before the whole answer is in: a report that breaks off is
+    // asked for again from the start.
+    let mut retry = ReadRetry::new(wire, "lock report");
+    loop {
+        let req = get_locks_request(wire.urls(), &repo, depth)?;
+        let attempt = async {
+            let resp = wire.send(req, cancel).await?;
+            // A path that is not in HEAD answers 404; it has no locks (libsvn_ra_serf does the
+            // same).
+            if resp.status().as_u16() == 404 {
+                return Ok(Vec::new());
+            }
+            let resp = RaWire::require_success(resp, cancel).await?;
+            let mut locks = Vec::new();
+            let mut parser = GetLocksParser::new();
+            stream_items(resp, &mut parser, cancel, |l: LockInfo| {
+                if in_scope(&repo, depth, l.path.as_str()) {
+                    locks.push(l);
+                } else {
+                    tracing::warn!("skipping a lock outside the requested scope");
+                }
+                Ok(())
+            })
+            .await?;
+            Ok(locks)
         }
-        Ok(())
-    })
-    .await?;
-    Ok(locks)
+        .await;
+        match attempt {
+            Ok(locks) => return Ok(locks),
+            Err(e) => retry.again(e, cancel).await?,
+        }
+    }
 }
 
 /// Locks `path`. `base_rev` makes the server refuse the lock when the file changed since.
