@@ -31,7 +31,7 @@ fn create_txn_answer_is_validated() {
     let head = ResponseHead::new(201, Headers::new());
     assert_eq!(
         parse_create_txn_response(&head, b"").unwrap_err().code,
-        ErrorCode::Corrupt
+        ErrorCode::ProtocolViolation
     );
     let virt = ResponseHead::new(201, Headers::from_pairs([("SVN-VTxn-Name", "ab-12")]));
     assert_eq!(

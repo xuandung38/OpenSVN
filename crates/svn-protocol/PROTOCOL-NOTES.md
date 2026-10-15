@@ -311,10 +311,10 @@ and 1.10 servers once the compat images exist; no behaviour was verified against
   16 MiB, log message 16 MiB (raise it per parser), 10k elements per property value, 1024
   properties and 64 MiB of property text per `D:response`, 1M changed paths per log item, error
   message 4 KiB (control characters stripped, `…` marks the cut), error body 64 KiB. Exceeding a
-  cap is `ErrorCode::Corrupt`. Text inside elements a parser does not know is never buffered.
+  cap is `ErrorCode::ProtocolViolation`. Text inside elements a parser does not know is never buffered.
 * We always send `S:encode-binary-props`, so log fields (author, date, message, custom revprops)
   and get-locks fields can arrive with `encoding="base64"`. They are decoded (UTF-8 required for
-  text fields); any other encoding value is `Corrupt`. Verified for a commit message containing
+  text fields); any other encoding value is `ProtocolViolation`. Verified for a commit message containing
   ESC (`log/control-chars`). svn refuses control characters in lock comments, so lock fields are
   covered by synthetic tests only.
 * The XML reader rejects what expat rejects: characters outside XML 1.0 `Char` (also as
@@ -328,7 +328,7 @@ and 1.10 servers once the compat images exist; no behaviour was verified against
 `UpdateParser` accepts exactly one anonymous root `open-directory`, entries only below
 directories, `txdelta`/`fetch-file` only below a file and at most once, property changes only
 below a node, and nothing after the root closes; end tags must match the open element by
-namespace and name. Every violation is `Corrupt`. `DriveChecker` re-checks a finished event
+namespace and name. Every violation is `ProtocolViolation`. `DriveChecker` re-checks a finished event
 stream (usable as a debug assertion in the driver and as the fuzz oracle).
 
 * The first event is `ReportStart { send_all, inline_props }`. In skelta (`send_all` false) a

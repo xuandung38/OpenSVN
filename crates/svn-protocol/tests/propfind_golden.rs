@@ -94,7 +94,22 @@ fn listing_of_the_wrong_directory_is_corrupt() {
         let f = load("propfind/list-depth1");
         let err =
             parse_list(&urls(), &RelPath::new("branches").unwrap(), &f.resp_body).unwrap_err();
-        assert_eq!(err.code, ErrorCode::Corrupt);
+        assert_eq!(err.code, ErrorCode::ProtocolViolation);
+    });
+}
+
+/// A server answer that is not UTF-8 is the server's fault: `ProtocolViolation`, never the
+/// `Corrupt` that marks a damaged working copy (and would offer Cleanup in the app).
+#[test]
+fn invalid_utf8_in_a_server_answer_is_a_protocol_violation() {
+    for_each_set(|| {
+        let mut body = br#"<?xml version="1.0"?>
+<D:multistatus xmlns:D="DAV:"><D:response><D:href>/svn/repo/!svn/rvr/5/trunk/"#
+            .to_vec();
+        body.extend_from_slice(b"\xff\xfe");
+        body.extend_from_slice(br#"</D:href><D:propstat><D:prop><D:resourcetype/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>"#);
+        let err = parse_stat(&urls(), &body).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolViolation, "{err:?}");
     });
 }
 
@@ -102,14 +117,14 @@ fn listing_of_the_wrong_directory_is_corrupt() {
 fn hostile_names_are_rejected_individually_not_silently() {
     for_each_set(|| {
         let body = br#"<?xml version="1.0"?>
-    <D:multistatus xmlns:D="DAV:">
-    <D:response><D:href>/svn/repo/!svn/rvr/5/trunk/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
-    <D:response><D:href>/svn/repo/!svn/rvr/5/trunk/ok.txt</D:href><D:propstat><D:prop><D:resourcetype/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
-    <D:response><D:href>/svn/repo/!svn/rvr/5/trunk/.svn</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
-    <D:response><D:href>http://evil.test/svn/repo/!svn/rvr/5/trunk/x</D:href><D:propstat><D:prop><D:resourcetype/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
-    <D:response><D:href>/svn/repo/!svn/rvr/5/trunk/%2e%2e/%2e%2e/etc</D:href><D:propstat><D:prop><D:resourcetype/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
-    <D:response><D:href>/svn/repo/!svn/rvr/5/trunk/CON</D:href><D:propstat><D:prop><D:resourcetype/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
-    </D:multistatus>"#;
+<D:multistatus xmlns:D="DAV:">
+<D:response><D:href>/svn/repo/!svn/rvr/5/trunk/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+<D:response><D:href>/svn/repo/!svn/rvr/5/trunk/ok.txt</D:href><D:propstat><D:prop><D:resourcetype/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+<D:response><D:href>/svn/repo/!svn/rvr/5/trunk/.svn</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+<D:response><D:href>http://evil.test/svn/repo/!svn/rvr/5/trunk/x</D:href><D:propstat><D:prop><D:resourcetype/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+<D:response><D:href>/svn/repo/!svn/rvr/5/trunk/%2e%2e/%2e%2e/etc</D:href><D:propstat><D:prop><D:resourcetype/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+<D:response><D:href>/svn/repo/!svn/rvr/5/trunk/CON</D:href><D:propstat><D:prop><D:resourcetype/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+</D:multistatus>"#;
         let (_, children, rejected) =
             parse_list(&urls(), &RelPath::new("trunk").unwrap(), body).unwrap();
         assert_eq!(children.len(), 1);

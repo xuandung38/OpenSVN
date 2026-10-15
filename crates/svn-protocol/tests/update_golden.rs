@@ -272,16 +272,16 @@ fn status_reports_have_empty_deltas() {
 fn synthetic_skelta_fetch_elements_and_late_checked_in() {
     for_each_set(|| {
         let doc = r#"<S:update-report xmlns:S="svn:" xmlns:D="DAV:" xmlns:V="http://subversion.tigris.org/xmlns/dav/">
-    <S:target-revision rev="7"/>
-    <S:open-directory rev="3">
-     <S:fetch-props/>
-     <S:add-file name="f.txt"><D:checked-in><D:href>/svn/repo/!svn/rvr/7/trunk/f.txt</D:href></D:checked-in>
-      <S:fetch-file base-checksum="d41d8cd98f00b204e9800998ecf8427e"/><S:fetch-props/>
-      <S:set-prop name="svn:mime-type" encoding="base64">dGV4dC9wbGFpbg==</S:set-prop><S:remove-prop name="gone"/>
-      <S:prop><V:md5-checksum>d41d8cd98f00b204e9800998ecf8427e</V:md5-checksum></S:prop></S:add-file>
-     <S:absent-file name="secret.txt"/><S:absent-directory name="hidden"/>
-     <S:unknown-future-thing><S:nested/></S:unknown-future-thing>
-    </S:open-directory></S:update-report>"#;
+<S:target-revision rev="7"/>
+<S:open-directory rev="3">
+ <S:fetch-props/>
+ <S:add-file name="f.txt"><D:checked-in><D:href>/svn/repo/!svn/rvr/7/trunk/f.txt</D:href></D:checked-in>
+  <S:fetch-file base-checksum="d41d8cd98f00b204e9800998ecf8427e"/><S:fetch-props/>
+  <S:set-prop name="svn:mime-type" encoding="base64">dGV4dC9wbGFpbg==</S:set-prop><S:remove-prop name="gone"/>
+  <S:prop><V:md5-checksum>d41d8cd98f00b204e9800998ecf8427e</V:md5-checksum></S:prop></S:add-file>
+ <S:absent-file name="secret.txt"/><S:absent-directory name="hidden"/>
+ <S:unknown-future-thing><S:nested/></S:unknown-future-thing>
+</S:open-directory></S:update-report>"#;
         let evs = parse_update(&urls(), doc.as_bytes()).unwrap();
         assert_well_formed(&evs);
         assert!(

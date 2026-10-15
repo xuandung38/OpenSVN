@@ -100,10 +100,10 @@ fn incomplete_lock_responses_are_corrupt() {
         }
         let err =
             parse_lock_response(&rel("a"), &ResponseHead::new(200, h), &f.resp_body).unwrap_err();
-        assert_eq!(err.code, ErrorCode::Corrupt);
+        assert_eq!(err.code, ErrorCode::ProtocolViolation);
         let err =
             parse_lock_response(&rel("a"), &f.head(), b"<D:prop xmlns:D='DAV:'/>").unwrap_err();
-        assert_eq!(err.code, ErrorCode::Corrupt);
+        assert_eq!(err.code, ErrorCode::ProtocolViolation);
     });
 }
 
