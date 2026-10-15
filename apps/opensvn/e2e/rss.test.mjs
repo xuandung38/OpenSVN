@@ -73,11 +73,66 @@ test(`app RSS on a ${FILES}-file working copy stays under ${LIMIT_MB} MB`, async
   const steps = [];
   let busyRetries = 0;
   let busyMs = 0;
+  let current = null;
   const timed = async (phase, fn) => {
     sampler.mark(phase);
-    const t0 = Date.now();
+    current = { phase, t0: Date.now() };
     await fn();
-    steps.push({ phase, ms: Date.now() - t0 });
+    steps.push({ phase, ms: Date.now() - current.t0 });
+    current = null;
+  };
+  /** Writes rss-report.{json,md} from the samples so far; returns the report. */
+  const writeReport = (outcome) => {
+    sampler.stop();
+    const peakMb = mb(sampler.peak.rssKb);
+    const report = {
+      date: new Date().toISOString(),
+      outcome,
+      app: APP,
+      appEnv: APP_ENV,
+      files: FILES,
+      burst: BURST,
+      refreshBusyRetries: busyRetries,
+      refreshBusyMs: busyMs,
+      limitMb: LIMIT_MB,
+      peak: {
+        treeRssMb: peakMb,
+        treePssMb: mb(sampler.peak.pssKb),
+        appRssMb: mb(sampler.peak.appRssKb),
+        processes: sampler.peak.pids,
+      },
+      steps: steps.map((s) => {
+        const p = sampler.phasePeaks.get(s.phase.replace(" (not finished)", ""));
+        return {
+          ...s,
+          treeRssMb: mb(p?.rssKb ?? 0),
+          treePssMb: mb(p?.pssKb ?? 0),
+          appRssMb: mb(p?.appRssKb ?? 0),
+        };
+      }),
+    };
+    writeArtifact("rss-report.json", `${JSON.stringify(report, null, 2)}\n`);
+    writeArtifact(
+      "rss-report.md",
+      [
+        `# App RSS, ${FILES} files${Object.keys(APP_ENV).length ? ` (${process.env.OPENSVN_RSS_APP_ENV})` : ""}`,
+        "",
+        `Outcome: ${outcome}.`,
+        "",
+        `Peak of the app process tree: RSS ${peakMb} MB (PSS ${report.peak.treePssMb} MB), app process alone ${report.peak.appRssMb} MB; limit ${LIMIT_MB} MB.`,
+        "",
+        `The refresh found the working copy busy for ${(busyMs / 1000).toFixed(1)} s after the restart (${busyRetries} refused attempts).`,
+        "",
+        "| Step | Time | Tree RSS peak | Tree PSS peak | App RSS peak |",
+        "|---|---|---|---|---|",
+        ...report.steps.map(
+          (s) =>
+            `| ${s.phase} | ${(s.ms / 1000).toFixed(1)} s | ${s.treeRssMb} MB | ${s.treePssMb} MB | ${s.appRssMb} MB |`,
+        ),
+        "",
+      ].join("\n"),
+    );
+    return report;
   };
   try {
     const seedStart = Date.now();
@@ -125,6 +180,7 @@ test(`app RSS on a ${FILES}-file working copy stays under ${LIMIT_MB} MB`, async
           `the refresh failed: ${JSON.stringify(end.failed)}`,
         );
         busyRetries++;
+        busyMs = Date.now() - busySince;
         assert.ok(Date.now() - busySince < BUSY_WAIT_MS, "the working copy stayed busy");
         await sleep(1000);
       }
@@ -155,54 +211,18 @@ test(`app RSS on a ${FILES}-file working copy stays under ${LIMIT_MB} MB`, async
     const status = svn(["status", "-q"], wc);
     assert.equal(status.trim().split("\n").length, BURST, "svn status: the burst edits only");
 
-    const peakMb = mb(sampler.peak.rssKb);
-    const report = {
-      date: new Date().toISOString(),
-      app: APP,
-      appEnv: APP_ENV,
-      files: FILES,
-      burst: BURST,
-      refreshBusyRetries: busyRetries,
-      refreshBusyMs: busyMs,
-      limitMb: LIMIT_MB,
-      peak: {
-        treeRssMb: peakMb,
-        treePssMb: mb(sampler.peak.pssKb),
-        appRssMb: mb(sampler.peak.appRssKb),
-        processes: sampler.peak.pids,
-      },
-      steps: steps.map((s) => {
-        const p = sampler.phasePeaks.get(s.phase);
-        return {
-          ...s,
-          treeRssMb: mb(p?.rssKb ?? 0),
-          treePssMb: mb(p?.pssKb ?? 0),
-          appRssMb: mb(p?.appRssKb ?? 0),
-        };
-      }),
-    };
-    writeArtifact("rss-report.json", `${JSON.stringify(report, null, 2)}\n`);
-    writeArtifact(
-      "rss-report.md",
-      [
-        `# App RSS, ${FILES} files${Object.keys(APP_ENV).length ? ` (${process.env.OPENSVN_RSS_APP_ENV})` : ""}`,
-        "",
-        `Peak of the app process tree: RSS ${peakMb} MB (PSS ${report.peak.treePssMb} MB), app process alone ${report.peak.appRssMb} MB; limit ${LIMIT_MB} MB.`,
-        "",
-        `The refresh found the working copy busy for ${(busyMs / 1000).toFixed(1)} s after the restart (${busyRetries} refused attempts).`,
-        "",
-        "| Step | Time | Tree RSS peak | Tree PSS peak | App RSS peak |",
-        "|---|---|---|---|---|",
-        ...report.steps.map(
-          (s) =>
-            `| ${s.phase} | ${(s.ms / 1000).toFixed(1)} s | ${s.treeRssMb} MB | ${s.treePssMb} MB | ${s.appRssMb} MB |`,
-        ),
-        "",
-      ].join("\n"),
-    );
+    const report = writeReport("finished");
     console.log(JSON.stringify(report, null, 2));
-    assert.ok(peakMb < LIMIT_MB, `peak RSS of the app tree ${peakMb} MB >= ${LIMIT_MB} MB`);
+    assert.ok(
+      report.peak.treeRssMb < LIMIT_MB,
+      `peak RSS of the app tree ${report.peak.treeRssMb} MB >= ${LIMIT_MB} MB`,
+    );
   } catch (e) {
+    // The steps that ran still tell how much memory they took.
+    if (sampler && current) {
+      steps.push({ phase: `${current.phase} (not finished)`, ms: Date.now() - current.t0 });
+      writeReport(`stopped in ${current.phase}: ${String(e.message).split("\n")[0]}`);
+    }
     if (app) await saveFailure(app, "rss");
     throw e;
   } finally {

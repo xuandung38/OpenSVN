@@ -87,6 +87,7 @@ Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #
 | #171 `feat/parent-path-repo-list` | URL server VisualSVN `https://host/svn/` hiện danh sách repo để chọn | #133 | Đang review |
 | #169 `ci/release-gating-publish` | Quy trình phát hành: environment có duyệt, ký số tùy chọn, tự đẩy sang `OpenSVN-releases` | #22 | Đang review |
 | #170 `perf/bench-100k-crash-soak` | Benchmark 100k file với svn 1.15, crash test cho switch, soak 2 giờ, test chạy đồng thời với svn CLI | #121, #21 | Đang code |
+| #192 `test/app-crash-rss-soak` | Crash e2e qua app thật (SIGKILL cả process group, relaunch cùng profile), RSS với 100k file, soak 10 phút/2 giờ; svn 1.15 cho nightly; svn 1.14.5 dùng WC do engine tạo. Kèm 2 bản sửa: WC biến mất sau crash lúc commit, không có watcher sau khi mở lại app | #20, #21 | Draft |
 | #167 `test/fixtures-hostile-repo` | Fixture WC format 31 từ svn 1.15 (42 trạng thái) và f32 (43 trạng thái); repo "độc" + evil server chạy không cần Docker; e2e `hostile.test.mjs`; `xtask compat fixtures` chạy các generator; log/author có UTF-8 hỏng hiển thị bằng U+FFFD | #8, #18 | Đang review |
 
 Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: xem/diff file Word/Excel, hiển thị %/ETA khi checkout, giữ nguyên byte đường dẫn (NFC/NFD), build Mac. Hỏi chủ repo trước khi làm những mảng này.
@@ -100,14 +101,15 @@ Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo,
 3. **Hiệu năng macOS/Windows (#121).** Hai nền tảng này vẫn fsync từng file (`BATCHED_SYNC` trong `crates/svn-wc/src/durable.rs`). Cần đo trên máy thật và tìm cách gộp (F_FULLFSYNC/FlushFileBuffers theo lô).
 4. **Watcher và menu native (#11).** Kiểm tay menu trên macOS và Windows.
 5. **Spike WebView (#12).** Chạy trên Linux (Intel/AMD/NVIDIA) và Windows 11 theo `plans/**/reports/from-dev-p09-webview-perf-spike-report.md`, rồi bỏ trạng thái "conditional" trong ADR-002.
-6. **Crash test qua app thật (#20, #21).** Dùng tauri-driver: kill app lúc commit hoặc update, mở lại, app phải tự phục hồi. Sau đó bật `real-engine` làm feature mặc định.
-7. **RAM của app (#21).** Kiểm dưới 400 MB với working copy 100k file. Ngoài ra còn ma trận compat đầy đủ, bộ test bảo mật và một tuần dùng thật (dogfood).
+6. **Bật `real-engine` làm feature mặc định (#20, #21).** Crash test qua app thật đã có (`e2e/crash.test.mjs`, #192). Còn bật feature mặc định, cùng ma trận compat đầy đủ, bộ test bảo mật và một tuần dùng thật (dogfood).
+7. **RAM của app (#21).** Đo bằng `e2e/rss.test.mjs`, `e2e/soak.test.mjs` (#192). Dưới Xvfb, cả cây tiến trình đã 582 MB RSS khi app vừa mở, trong đó `WebKitWebProcess` chiếm 344 MB. `WEBKIT_DISABLE_DMABUF_RENDERER=1` hạ còn 389 MB. Cần đo trên máy có GPU và quyết định mặc định cho Linux, gắn với spike WebView (#12).
 8. **Lỗi log ở thanh bên History bị nuốt (#167, follow-up).** `wc-sidebar.tsx` hiện danh sách rỗng khi `log_get` lỗi, không có thông báo hay nút Thử lại. Màn History chính đã làm đúng; thanh bên cần làm giống vậy.
 9. **Lỗi giao thức của server bị gắn mã `wc-needs-cleanup` (#167, follow-up).** Khi server trả XML hỏng (`ErrorCode::Corrupt` trong svn-protocol), app báo cần Cleanup working copy. Cần mã lỗi riêng cho lỗi phía server.
 10. **Browse giấu tên không an toàn mà không báo (#167, follow-up).** Mục bị `RelPath::from_server` từ chối (`<`, `:`, `|`, `CON`…) bị bỏ đi, nên thư mục hiện "This folder is empty". Cần báo "N mục bị ẩn"; repo "độc" (`names/`) tái hiện được.
 11. **"Retry now" bấm khi thao tác chưa chờ mạng (#172, follow-up).** `OperationManager::retry_now` gọi `Notify::notify_one`, nên một lần bấm (hoặc một lần thức dậy) khi thao tác đang chạy bình thường để lại permit; lần mất mạng sau bỏ qua khoảng chờ đầu tiên. Vô hại nhưng nên chỉ đánh thức khi đang chờ.
 12. **Đếm ngược "thử lại sau Ns" đọc lại mỗi giây (#172, follow-up).** `connection-wait.tsx` đặt `role="status"` lên đoạn chữ đổi mỗi giây, nên trình đọc màn hình đọc liên tục. Nên để vùng live chỉ báo "Mất kết nối" và ẩn phần đếm ngược khỏi vùng live.
 13. **"Update lên bản mới nhất" của checkout dở bỏ qua lựa chọn ignore-externals (#172, follow-up).** Nút này chạy update thường, nên tải cả externals dù checkout ban đầu chọn bỏ qua. Nên đọc journal checkout như `wc_continue`.
+14. **`log_get` giữ khóa đọc working copy suốt lời gọi mạng (#192, follow-up).** `commands/remote.rs` chạy `engine.log` cho `LogTarget::Wc` bên trong `wc_read`. Thanh History tải log ngay khi mở app. Một revision có nhiều đường dẫn thay đổi (import 50k–100k file, Apache có authz) làm REPORT log mất 40–90 s và được gọi lại liên tục. Trong lúc đó, một thao tác ghi xếp hàng (mở WC, Update) chặn mọi lần đọc, nên refresh và danh sách báo busy. Update trong soak 50k file không bao giờ bắt đầu. Cần chỉ tra vị trí node dưới khóa đọc, rồi gọi log qua mạng ngoài khóa.
 
 ## 6. Việc cần người thật (không tự động được)
 
