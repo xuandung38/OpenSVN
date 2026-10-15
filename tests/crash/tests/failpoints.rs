@@ -4,9 +4,13 @@
 //! hit k is "mid-update with local edits" after k files; `commit.after_merge_before_finalize`
 //! is "after MERGE").
 //!
+//! Every failpoint gets at least `CRASH_FP_ITERS` kills, spread over the operations that reach
+//! it. An operation that hits a failpoint fewer times than its share is killed at each hit, then
+//! again at random hits (thread timing differs from run to run) until the share is used up.
+//!
 //! `cargo test -p opensvn-crash --features failpoints --test failpoints -- --ignored --nocapture`
-//! Knobs: `CRASH_FP_ITERS` (kills per reachable failpoint and operation, default 3), plus those
-//! of the sigkill suite.
+//! Knobs: `CRASH_FP_ITERS` (kills per reachable failpoint, default 50), plus those of the sigkill
+//! suite.
 #![cfg(all(target_os = "linux", feature = "failpoints"))]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -26,25 +30,25 @@ fn failpoint_suite() {
     else {
         return;
     };
-    let iters = env_count("CRASH_FP_ITERS", 3) as u64;
+    let iters = env_count("CRASH_FP_ITERS", 50) as u64;
     let mut report = Report {
         seed,
         ..Report::default()
     };
-    for op in Op::ALL {
-        for fp in FAILPOINTS {
+    for fp in FAILPOINTS {
+        let mut reach = Vec::new();
+        for op in Op::ALL {
             let n = fx.count_hits(op, fp).expect("count hits");
             report.coverage.insert((op, (*fp).to_owned()), n);
-            if n == 0 {
-                continue;
+            if n > 0 {
+                reach.push((op, n));
             }
-            let mut hits = BTreeSet::from([1, n]);
-            let mut guard = 0;
-            while (hits.len() as u64) < iters.min(n) && guard < 1000 {
-                hits.insert(1 + rng.below(n));
-                guard += 1;
-            }
-            for hit in hits {
+        }
+        for (i, (op, n)) in reach.iter().copied().enumerate() {
+            // This operation's share of the kills; the first ones take the remainder.
+            let share =
+                iters / reach.len() as u64 + u64::from((i as u64) < iters % reach.len() as u64);
+            for hit in kill_hits(&mut rng, n, share.max(1)) {
                 let kill = Kill::Failpoint {
                     name: (*fp).to_owned(),
                     hit,
@@ -67,4 +71,20 @@ fn failpoint_suite() {
         report.cases.len(),
         path.display()
     );
+}
+
+/// `want` hits to kill at among `1..=n`: the first and the last hit, distinct random ones, then
+/// (when `n < want`) random repeats.
+fn kill_hits(rng: &mut Rng, n: u64, want: u64) -> Vec<u64> {
+    let mut distinct = BTreeSet::from([1, n]);
+    let mut guard = 0;
+    while (distinct.len() as u64) < want.min(n) && guard < 10_000 {
+        distinct.insert(1 + rng.below(n));
+        guard += 1;
+    }
+    let mut hits: Vec<u64> = distinct.into_iter().take(want as usize).collect();
+    while (hits.len() as u64) < want {
+        hits.push(1 + rng.below(n));
+    }
+    hits
 }

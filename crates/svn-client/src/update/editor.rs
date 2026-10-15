@@ -254,7 +254,10 @@ impl UpdateEditor {
                 let barrier = Barrier::start(root.to_path_buf(), settle.elsewhere.clone());
                 self.await_barrier(&barrier)?;
             }
-            self.s.db.with_txn(|t| t.complete_work(&settle))?;
+            self.s.db.with_txn(|t| {
+                t.verify_wc_lock()?;
+                t.complete_work(&settle)
+            })?;
         }
         Ok(())
     }
@@ -301,7 +304,13 @@ impl UpdateEditor {
             }
             if has_ops || !staged.settle.is_empty() {
                 let settle = staged.settle;
+                // Another client's `svn cleanup` between two batches (it breaks our lock,
+                // vacuums pristines and empties `.svn/tmp`): the vacuum test sits here.
+                #[cfg(feature = "failpoints")]
+                fail::fail_point!("update.before_batch_txn");
                 self.s.db.with_txn(|t| {
+                    // Nothing is written once the lock this drive relies on is gone.
+                    t.verify_wc_lock()?;
                     t.complete_work(&settle)?;
                     for op in p.ops {
                         op(t)?;

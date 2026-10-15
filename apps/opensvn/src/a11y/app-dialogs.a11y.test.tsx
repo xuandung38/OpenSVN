@@ -151,6 +151,17 @@ const DIALOGS: [string, () => ReactElement][] = [
   ["copy to location", () => branchDialog("location")],
   ["sign in", () => <SignInDialog prompt={creds()} onSubmit={noop} onCancel={noop} />],
   [
+    "sign in with Windows account offered",
+    () => (
+      <SignInDialog
+        prompt={creds({ offered: ["negotiate", "basic"] })}
+        onSubmit={noop}
+        onNegotiate={noop}
+        onCancel={noop}
+      />
+    ),
+  ],
+  [
     "sign in (rejected)",
     () => (
       <SignInDialog
@@ -390,6 +401,36 @@ for (const lang of ["en", "vi"] as Lang[]) {
       await screen.findAllByRole("listitem");
       await settle();
       await expectNoSeriousA11yViolations(`welcome (${lang})`);
+    });
+
+    test("settings: remove-certificate and clear-cache confirmations", async () => {
+      const user = userEvent.setup();
+      renderApp(<SettingsSheet open onClose={noop} />);
+      const sheet = await screen.findByRole("dialog", { hidden: true });
+      const nav = within(sheet).getByRole("navigation", { hidden: true });
+      const [, accounts] = within(nav).getAllByRole("button", { hidden: true });
+      await user.click(accounts ?? (undefined as never));
+      const certs = await within(sheet).findByRole("region", {
+        name: lang === "vi" ? "Chứng chỉ đã tin cậy" : "Trusted certificates",
+        hidden: true,
+      });
+      await user.click(
+        await within(certs).findByRole("button", { name: /svn\.example\.com:443/, hidden: true }),
+      );
+      await settle();
+      expect(within(certs).getByRole("group", { hidden: true })).toBeTruthy();
+      await expectNoSeriousA11yViolations(`settings: remove certificate confirm (${lang})`);
+      const pages = within(nav).getAllByRole("button", { hidden: true });
+      await user.click(pages.at(-1) ?? (undefined as never));
+      await user.click(
+        await within(sheet).findByRole("button", {
+          name: lang === "vi" ? "Xóa cache" : "Clear cache",
+          hidden: true,
+        }),
+      );
+      await settle();
+      expect(within(sheet).getByRole("group", { hidden: true })).toBeTruthy();
+      await expectNoSeriousA11yViolations(`settings: clear cache confirm (${lang})`);
     });
 
     test("activity panel with running, failed and finished operations", async () => {

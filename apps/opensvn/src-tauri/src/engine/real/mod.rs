@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use opensvn_ipc::{
     BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
     EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage,
-    RepoEntry, RepoInfo, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
+    RepoInfo, RepoListing, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
 };
 use svn_ra_api::RaSession;
 use svn_types::{CancelToken, ErrorCode, LockOwnershipStore, RelPath, RepoUrl, SvnError};
@@ -214,6 +214,18 @@ impl RealEngine {
     /// [`default_subversion_config_dir`] while `wc.readSubversionConfig` is on.
     pub fn set_subversion_config_dir(&self, dir: Option<PathBuf>) {
         self.svn_config.set_dir(dir);
+    }
+
+    /// `global-ignores` patterns used instead of the configured ones (`None`: the configuration's
+    /// own list). The app passes the `wc.globalIgnores` setting when it is not empty.
+    pub fn set_global_ignores(&self, patterns: Option<Vec<String>>) {
+        self.svn_config.set_global_ignores(patterns);
+    }
+
+    /// `global-ignores` the next local operation uses (before the working copy's local list).
+    #[cfg(test)]
+    pub(crate) fn effective_global_ignores(&self) -> Vec<String> {
+        self.svn_config.add_config().global_ignores
     }
 
     /// Directory set by [`RealEngine::set_subversion_config_dir`].
@@ -443,9 +455,10 @@ impl EngineFacade for RealEngine {
         wc: &WcRef,
         url: &str,
         rev: Option<Rev>,
+        ignore_ancestry: bool,
         ctx: &OpContext,
     ) -> EngineResult<Rev> {
-        self.do_switch(wc, url, rev, ctx).await
+        self.do_switch(wc, url, rev, ignore_ancestry, ctx).await
     }
 
     async fn commit(&self, wc: &WcRef, req: &CommitRequest, ctx: &OpContext) -> EngineResult<Rev> {
@@ -529,7 +542,7 @@ impl EngineFacade for RealEngine {
         url: &str,
         rev: Option<Rev>,
         ctx: &OpContext,
-    ) -> EngineResult<Vec<RepoEntry>> {
+    ) -> EngineResult<RepoListing> {
         self.do_repo_list(url, rev, ctx).await
     }
 

@@ -397,7 +397,7 @@ async fn truncated_report_is_corrupt_and_aborts_the_editor() {
     )
     .await
     .unwrap_err();
-    assert_eq!(err.code, ErrorCode::Corrupt);
+    assert_eq!(err.code, ErrorCode::ProtocolViolation);
     assert!(log.is_aborted());
     assert!(!log.is_closed());
 }

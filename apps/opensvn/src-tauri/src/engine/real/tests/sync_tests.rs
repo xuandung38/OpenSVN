@@ -163,6 +163,24 @@ fn assert_monotonic(samples: &[ProgressUpdate], phase: &str) {
     assert!(samples.iter().all(|u| u.phase == phase));
 }
 
+/// A checkout killed between creating `.svn` and `.svn/tmp` leaves a folder holding only an
+/// empty `.svn`: the app offers that folder again (`checkout_target::is_checkout_skeleton`), and
+/// the next checkout builds the working copy in it.
+#[tokio::test(flavor = "multi_thread")]
+async fn checkout_into_the_empty_admin_dir_of_a_killed_checkout() {
+    let s = setup();
+    let wc = s.tmp.path().join("wc");
+    std::fs::create_dir_all(wc.join(".svn")).unwrap();
+    let info =
+        s.f.engine
+            .checkout(&plan(&format!("{URL}/trunk"), &wc), &ctx())
+            .await
+            .unwrap();
+    assert_eq!(read(&wc.join("README.md")), "hello\n");
+    assert!(wc.join(".svn/wc.db").is_file());
+    assert!(info.base_rev.0 > 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn checkout_then_update_follows_the_repository() {
     let s = setup();
@@ -259,9 +277,34 @@ async fn switch_moves_the_working_copy_within_the_repository_only() {
         .await
         .unwrap();
 
+    // The branch was added on its own, not copied from trunk: it shares no history with the
+    // working copy, so a switch is refused (svn E195012) and changes nothing...
+    let err =
+        s.f.engine
+            .switch(
+                &wc_ref(&wc),
+                &format!("{URL}/branches/b1"),
+                None,
+                false,
+                &ctx(),
+            )
+            .await
+            .unwrap_err();
+    assert_eq!(err.code, ErrorCode::UnrelatedResources, "{err}");
+    assert_eq!(err.svn_code, Some(195_012), "{err}");
+    assert_eq!(read(&wc.join("README.md")), "hello\n");
+    let info = s.f.engine.wc_info(&wc, &ctx()).await.unwrap();
+    assert_eq!(info.url, format!("{URL}/trunk"));
+    // ...unless the ancestry check is turned off.
     let rev =
         s.f.engine
-            .switch(&wc_ref(&wc), &format!("{URL}/branches/b1"), None, &ctx())
+            .switch(
+                &wc_ref(&wc),
+                &format!("{URL}/branches/b1"),
+                None,
+                true,
+                &ctx(),
+            )
             .await
             .unwrap();
     assert_eq!(rev, Rev(2));
@@ -284,7 +327,13 @@ async fn switch_moves_the_working_copy_within_the_repository_only() {
     // Back to trunk at a fixed revision.
     let rev =
         s.f.engine
-            .switch(&wc_ref(&wc), &format!("{URL}/trunk"), Some(Rev(1)), &ctx())
+            .switch(
+                &wc_ref(&wc),
+                &format!("{URL}/trunk"),
+                Some(Rev(1)),
+                true,
+                &ctx(),
+            )
             .await
             .unwrap();
     assert_eq!(rev, Rev(1));
@@ -297,7 +346,7 @@ async fn switch_moves_the_working_copy_within_the_repository_only() {
     ] {
         let err =
             s.f.engine
-                .switch(&wc_ref(&wc), other, None, &ctx())
+                .switch(&wc_ref(&wc), other, None, false, &ctx())
                 .await
                 .unwrap_err();
         assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{other}: {err}");
@@ -829,6 +878,18 @@ impl RaSession for GatedSession {
     ) -> Result<(), SvnError> {
         self.inner
             .file_revs(path, start, end, handler, cancel)
+            .await
+    }
+    async fn get_location_segments(
+        &self,
+        path: &RelPath,
+        peg: Option<Revnum>,
+        start: Option<Revnum>,
+        end: Option<Revnum>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<svn_ra_api::LocationSegment>, SvnError> {
+        self.inner
+            .get_location_segments(path, peg, start, end, cancel)
             .await
     }
     async fn do_update(

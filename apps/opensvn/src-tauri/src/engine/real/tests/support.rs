@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use svn_ra_api::fake::{FakeChange, FakeRaSession};
 use svn_ra_api::{
-    CommitEditor, CommitObserver, FileMeta, FileRevHandler, LogRequest, RaSession, ReportFn,
-    TxnAbort, UpdateRequest,
+    CommitEditor, CommitObserver, DirListing, FileMeta, FileRevHandler, LogRequest, RaSession,
+    ReportFn, TxnAbort, UpdateRequest,
 };
 use svn_types::{
     CancelToken, DeltaEditor, Depth, DirEntry, ErrorCode, LockInfo, LockOwnershipStore, LogEntry,
@@ -237,6 +237,8 @@ pub(super) struct ScriptedSession {
     pub(super) connects: std::sync::Mutex<Vec<bool>>,
     /// When set, `lock` and `unlock` never answer (a server that hangs).
     pub(super) hang_locks: std::sync::atomic::AtomicBool,
+    /// Entries every listing reports as refused, like names the HTTP session will not accept.
+    pub(super) refused_in_listings: std::sync::atomic::AtomicUsize,
 }
 
 impl ScriptedSession {
@@ -247,6 +249,7 @@ impl ScriptedSession {
             calls: std::sync::Mutex::new(Vec::new()),
             connects: std::sync::Mutex::new(Vec::new()),
             hang_locks: std::sync::atomic::AtomicBool::new(false),
+            refused_in_listings: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -304,6 +307,20 @@ impl RaSession for ScriptedSession {
         cancel: &CancelToken,
     ) -> Result<Vec<DirEntry>, SvnError> {
         self.inner.list(path, rev, depth, cancel).await
+    }
+    async fn list_counted(
+        &self,
+        path: &RelPath,
+        rev: Option<Revnum>,
+        depth: Depth,
+        cancel: &CancelToken,
+    ) -> Result<DirListing, SvnError> {
+        Ok(DirListing {
+            entries: self.inner.list(path, rev, depth, cancel).await?,
+            rejected: self
+                .refused_in_listings
+                .load(std::sync::atomic::Ordering::SeqCst),
+        })
     }
     async fn get_file(
         &self,
@@ -367,6 +384,18 @@ impl RaSession for ScriptedSession {
     ) -> Result<(), SvnError> {
         self.inner
             .file_revs(path, start, end, handler, cancel)
+            .await
+    }
+    async fn get_location_segments(
+        &self,
+        path: &RelPath,
+        peg: Option<Revnum>,
+        start: Option<Revnum>,
+        end: Option<Revnum>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<svn_ra_api::LocationSegment>, SvnError> {
+        self.inner
+            .get_location_segments(path, peg, start, end, cancel)
             .await
     }
     async fn do_update(

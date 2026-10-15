@@ -422,6 +422,7 @@ impl RealEngine {
         wc: &WcRef,
         url: &str,
         rev: Option<Rev>,
+        ignore_ancestry: bool,
         ctx: &OpContext,
     ) -> EngineResult<Rev> {
         ctx.check()?;
@@ -449,6 +450,7 @@ impl RealEngine {
             &target,
             Some(rev),
             svn_types::Depth::Unknown,
+            ignore_ancestry,
             &ctx.cancel,
         )
         .await?;

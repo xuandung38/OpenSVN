@@ -235,6 +235,15 @@ enum Who {
     Engine,
 }
 
+impl Who {
+    fn name(self) -> &'static str {
+        match self {
+            Who::Svn => "svn",
+            Who::Engine => "engine",
+        }
+    }
+}
+
 impl Bench {
     fn url(&self, repo: &str) -> String {
         format!("http://127.0.0.1:{}/svn/{repo}", self.proxy.port)
@@ -267,16 +276,18 @@ impl Bench {
     fn commit(&self, who: Who, name: &str, wc: &Path, msg: &str) -> Result<(Duration, u64)> {
         let w = wc.to_string_lossy().into_owned();
         self.proxy.take();
-        let d = match who {
-            Who::Svn => time(
-                self.svn.cmd().args(["commit", "-q", "-m", msg, &w]),
-                "svn commit",
-            )?,
-            Who::Engine => time(
-                &mut self.engine(&["commit", &self.url(name), &w, msg]),
-                "engine commit",
-            )?,
+        let cmd = match who {
+            Who::Svn => {
+                let mut c = self.svn.cmd();
+                c.args(["commit", "-q", "-m", msg, &w]);
+                c
+            }
+            Who::Engine => self.engine(&["commit", &self.url(name), &w, msg]),
         };
+        let d = time(
+            &mut crate::machine::wrap(cmd),
+            &format!("{} commit", who.name()),
+        )?;
         let bytes = self.proxy.take();
         let st = self.svn.run_in(wc, &["status", "-q"])?;
         if !st.trim().is_empty() {
@@ -420,12 +431,14 @@ fn run(a: &Args) -> Result<()> {
     let rows = [add, modify, big];
     let mut md = String::from("# Benchmark: commit, OpenSVN engine vs svn CLI\n\n");
     md.push_str(&format!(
-        "- svn CLI {}; server Apache + mod_dav_svn over HTTP on 127.0.0.1\n- {} CPUs, build: {}, repetitions: {} (median, min in brackets)\n- bytes: what the client sent to the server during the commit (median)\n\n",
+        "- svn CLI {}; server: {}, HTTP on 127.0.0.1\n- machine: {}\n- filesystem of the working copies: {}\n- build: {}, repetitions: {} (median, min in brackets)\n- bytes: what the client sent to the server during the commit (median)\n\n",
         {
             let (x, y, z) = b.svn.version();
             format!("{x}.{y}.{z}")
         },
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+        crate::machine::server(&b.apache.url("")),
+        crate::machine::machine(),
+        crate::machine::filesystem(&b.scratch),
         if cfg!(debug_assertions) { "DEBUG (not representative)" } else { "release" },
         a.reps
     ));
@@ -442,6 +455,21 @@ fn run(a: &Args) -> Result<()> {
             r.ratio(),
             median(&r.svn_bytes),
             median(&r.engine_bytes)
+        ));
+    }
+    md.push_str("\n## Every repetition\n\n| operation | svn CLI | engine |\n|---|---|---|\n");
+    let all = |v: &[Duration]| {
+        v.iter()
+            .map(|d| format!("{:.2}", d.as_secs_f64()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    for r in &rows {
+        md.push_str(&format!(
+            "| {} | {} | {} |\n",
+            r.name,
+            all(&r.svn),
+            all(&r.engine)
         ));
     }
     if let Some(p) = a.out.parent() {

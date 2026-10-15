@@ -24,7 +24,8 @@ async fn repository_reads_over_the_demo_repository() {
 
     let entries = commands::repo_list(f.state(), url("trunk"), None)
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     assert_eq!(entries[0].kind, EntryKind::Dir);
     assert!(
         entries
@@ -163,7 +164,8 @@ async fn remote_edit_copy_and_url_locks() {
     );
     let listed = commands::repo_list(f.state(), url("trunk/tools"), None)
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     assert_eq!(listed[0].name, "guide.md");
     assert!(
         commands::repo_cat(f.state(), url("trunk/docs/guide.md"), None)
@@ -221,7 +223,8 @@ async fn remote_edit_copy_and_url_locks() {
     f.wait_op(&h).await.unwrap();
     let listed = commands::repo_list(f.state(), url("trunk"), None)
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     assert!(
         listed
             .iter()

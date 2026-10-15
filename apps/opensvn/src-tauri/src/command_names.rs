@@ -38,6 +38,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "menu_set_layout",
     "certs_list",
     "certs_remove",
+    "cache_clear",
     "reveal_in_os",
     "open_external",
     "diagnostics_export",

@@ -60,6 +60,12 @@ impl StatusPublisher {
         Ok(self.cache.status_snapshot_get(wc_id)?)
     }
 
+    /// Drops the snapshots of every working copy. Nothing else is stored in the cache, so this is
+    /// all "Clear cache" removes; remote check results return with the next check.
+    pub fn clear_cache(&self) -> Result<(), AppError> {
+        Ok(self.cache.status_snapshot_clear_all()?)
+    }
+
     /// Drops everything remembered about a working copy.
     pub fn forget(&self, wc_id: &WcId) {
         if let Err(e) = self.cache.status_snapshot_clear(wc_id) {

@@ -94,7 +94,7 @@ export function BrowseScreen({
   const [pendingSelect, setPendingSelect] = useState<string | null>(null);
 
   const list = useRepoList(dirUrl, rev);
-  const entries = list.data ?? [];
+  const entries = list.data?.entries ?? [];
 
   // Jump requested from another tab.
   useEffect(() => {
@@ -110,7 +110,7 @@ export function BrowseScreen({
   useEffect(() => {
     if (!pendingSelect || !list.data) return;
     const name = baseName(pendingSelect);
-    const entry = list.data.find((e) => e.name === name);
+    const entry = list.data.entries.find((e) => e.name === name);
     if (entry) setSelected({ url: pendingSelect, entry });
     setPendingSelect(null);
   }, [pendingSelect, list.data]);
@@ -297,6 +297,7 @@ export function BrowseScreen({
             <DirTable
               dirUrl={dirUrl}
               entries={entries}
+              hidden={list.data?.hidden ?? 0}
               selectedUrl={selected?.url ?? null}
               handlers={handlers}
               onSelect={setSelected}

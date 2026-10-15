@@ -1,0 +1,7 @@
+REQUEST PROPFIND /svn/repo/!svn/rvr/5/trunk
+> User-Agent: curl/8.5.0
+> Accept: */*
+> Depth: 1
+> Content-Type: text/xml
+RESPONSE 207
+< Content-Type: text/xml; charset="utf-8"

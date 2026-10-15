@@ -51,12 +51,13 @@ export const historyStrings = defineStrings({
     comparePickOther: "Select another revision to compare with it.",
     compareReady: "Compare r{from} with r{to}",
     compareClear: "Clear comparison",
-    compareKeyHint: "Space marks the active revision for comparison.",
     compareTitle: "Changes from r{from} to r{to}",
     compareFilesTitle: "Compare r{from} with r{to}",
     compareFilesHint:
       "Files changed by the loaded revisions after r{from} up to r{to}. Pick one to see its diff.",
     compareNoFiles: "None of the loaded revisions in this range changed a file.",
+    noHistory: "No revisions yet",
+    noHistoryHint: "The server has no history for this working copy.",
   },
   vi: {
     title: "Lịch sử",
@@ -108,11 +109,12 @@ export const historyStrings = defineStrings({
     comparePickOther: "Chọn một revision khác để so sánh.",
     compareReady: "So sánh r{from} với r{to}",
     compareClear: "Bỏ so sánh",
-    compareKeyHint: "Phím Space đánh dấu revision đang chọn để so sánh.",
     compareTitle: "Thay đổi từ r{from} đến r{to}",
     compareFilesTitle: "So sánh r{from} với r{to}",
     compareFilesHint:
       "Các file thay đổi trong những revision đã tải, sau r{from} đến r{to}. Chọn một file để xem diff.",
     compareNoFiles: "Không revision nào đã tải trong khoảng này thay đổi file.",
+    noHistory: "Chưa có revision",
+    noHistoryHint: "Server không có lịch sử cho working copy này.",
   },
 });
