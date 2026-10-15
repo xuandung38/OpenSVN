@@ -1,0 +1,18 @@
+# Local edits made by one client are reverted by the other.
+name: op-revert
+repo: basic
+steps:
+  - { on: engine, wc: e, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: s, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/trunk", "."] }
+  - { on: engine, wc: e, svn: [propset, custom:x, "1", README.txt] }
+  - { on: engine, wc: e, svn: [delete, crlf.txt] }
+  - { on: svn15, wc: e, sh: "printf 'edit\\n' >> src/app.c" }
+  - { on: svn14, wc: e, svn: [revert, -R, "."] }
+  - { on: svn15, wc: s, svn: [propset, custom:x, "1", README.txt] }
+  - { on: svn15, wc: s, svn: [delete, crlf.txt] }
+  - { on: svn15, wc: s, sh: "printf 'edit\\n' >> src/app.c" }
+  - { on: engine, wc: s, svn: [revert, README.txt, crlf.txt, src/app.c] }
+compare:
+  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: s, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }

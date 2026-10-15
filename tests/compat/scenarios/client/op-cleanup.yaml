@@ -1,0 +1,18 @@
+# Cleanup by the other client: unversioned/ignored removal and pristine vacuum.
+name: op-cleanup
+repo: basic
+steps:
+  - { on: engine, wc: e, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: s, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: e, sh: "printf 'u\\n' > stray.txt && printf 'o\\n' > obj.o" }
+  - { on: svn15, wc: s, sh: "printf 'u\\n' > stray.txt && printf 'o\\n' > obj.o" }
+  - { on: svn14, wc: e, svn: [cleanup] }
+  - { on: svn15, wc: e, svn: [cleanup, --remove-unversioned, --remove-ignored, --vacuum-pristines] }
+  - { on: engine, wc: s, svn: [cleanup] }
+  - { on: engine, wc: s, svn: [cleanup, --remove-unversioned, --remove-ignored, --vacuum-pristines] }
+  - { on: engine, wc: e, svn: [cleanup] }
+  - { on: svn14, wc: s, svn: [cleanup] }
+compare:
+  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: s, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }

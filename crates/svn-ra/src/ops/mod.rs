@@ -7,6 +7,7 @@
 pub mod blame;
 pub mod commit;
 pub mod file_revs;
+pub mod iprops;
 pub mod locks;
 pub mod log;
 pub mod open;

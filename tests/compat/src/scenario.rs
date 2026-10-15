@@ -151,6 +151,18 @@ pub struct Compare {
     /// format-32 working copies are never read by 1.14).
     #[serde(default = "default_reader")]
     pub reader: SvnVersion,
+    /// `wcdb` differences accepted on purpose (default: none).
+    #[serde(default)]
+    pub ignore: Vec<Ignored>,
+}
+
+/// A `wc.db` difference a comparison accepts on purpose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ignored {
+    /// `NODES.dav_cache`: svn's ra_serf caches `svn:wc:ra_dav:version-url` there, the engine
+    /// leaves it empty (svn asks the server when the cache is empty).
+    DavCache,
 }
 
 fn default_reader() -> SvnVersion {

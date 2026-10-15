@@ -246,6 +246,13 @@ pub async fn drive_update(
         blocking(move || crate::wc::run_work_queue(&db, &cancel).map(|_| ())).await?;
     }
 
+    // Nodes whose inherited-properties cache the drive refreshes (svn collects them before it
+    // drives, `svn_client__get_inheritable_props`); the target itself is decided afterwards.
+    let mut iprop_paths = super::iprops::targets(&db, &target_wc, params.depth)?;
+    if !iprop_paths.contains(&target_wc) {
+        iprop_paths.insert(0, target_wc.clone());
+    }
+
     // Decided before anything is restored, like svn (`is_empty_wc` runs before the crawl).
     let mut clean = Some(clean_target(&db, &target_wc, &params.kind)?);
 
@@ -429,6 +436,16 @@ pub async fn drive_update(
                 return Err(e);
             }
             tracing::warn!("could not record children outside the update depth: {e}");
+        }
+    }
+    if let Some(rev) = reached {
+        // Like the markers above: the update succeeded, a cache that cannot be read only stays
+        // as it was; svn refreshes it on its next update.
+        if let Err(e) = super::iprops::refresh(session, &db, &iprop_paths, rev, cancel).await {
+            if e.code == ErrorCode::Cancelled {
+                return Err(e);
+            }
+            tracing::warn!("could not cache inherited properties: {e}");
         }
     }
     let out = outcome.lock().unwrap_or_else(PoisonError::into_inner);

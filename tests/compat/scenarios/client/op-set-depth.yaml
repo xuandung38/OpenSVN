@@ -1,0 +1,19 @@
+# Sparse working copies: the engine changes depths svn recorded, and the reverse.
+name: op-set-depth
+repo: basic
+steps:
+  - { on: engine, wc: e, svn: [checkout, "{url}/trunk", ".", --depth, immediates] }
+  - { on: svn15, wc: s, svn: [checkout, "{url}/trunk", ".", --depth, immediates] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/trunk", ".", --depth, immediates] }
+  - { on: svn14, wc: e, svn: [update, --set-depth, infinity, src] }
+  - { on: engine, wc: s, svn: [update, --set-depth, infinity, src] }
+  - { on: svn15, wc: o, svn: [update, --set-depth, infinity, src] }
+  - { on: engine, wc: e, svn: [update, --set-depth, files, data] }
+  - { on: svn14, wc: s, svn: [update, --set-depth, files, data] }
+  - { on: svn15, wc: o, svn: [update, --set-depth, files, data] }
+  - { on: svn15, wc: e, svn: [update, --set-depth, empty, docs] }
+  - { on: engine, wc: s, svn: [update, --set-depth, empty, docs] }
+  - { on: svn15, wc: o, svn: [update, --set-depth, empty, docs] }
+compare:
+  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: s, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }

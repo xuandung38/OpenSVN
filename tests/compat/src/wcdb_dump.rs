@@ -10,6 +10,11 @@
 //!   completed operation left the queue empty.
 //!
 //! Server-sourced dates (`changed_date`, `lock_date`) are intentionally kept.
+//!
+//! [`DumpOptions::mask_dav_cache`] (scenario `ignore: [dav_cache]`) also renders
+//! `NODES.dav_cache` as `MASKED`: the RA layer's wcprop cache, which svn's ra_serf fills with
+//! `svn:wc:ra_dav:version-url` and the OpenSVN engine leaves empty; svn fetches whatever it
+//! needs from the server when the cache is empty.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -39,9 +44,21 @@ fn listed(list: &[(&str, &str)], table: &str, column: &str) -> bool {
         .any(|(t, c)| t.eq_ignore_ascii_case(table) && c.eq_ignore_ascii_case(column))
 }
 
+/// What a dump leaves out besides the fixed normalisations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DumpOptions {
+    /// Render `NODES.dav_cache` as `MASKED`.
+    pub mask_dav_cache: bool,
+}
+
 /// Dump `<wc>/.svn/wc.db` to normalised text.
 pub fn dump_wc_db(wc_root: &Path) -> Result<String> {
-    dump_sqlite(&wc_root.join(".svn").join("wc.db"))
+    dump_wc_db_with(wc_root, DumpOptions::default())
+}
+
+/// [`dump_wc_db`] with options.
+pub fn dump_wc_db_with(wc_root: &Path, opts: DumpOptions) -> Result<String> {
+    dump_sqlite_with(&wc_root.join(".svn").join("wc.db"), opts)
 }
 
 fn open_read_only(db_path: &Path) -> Result<Connection> {
@@ -61,6 +78,10 @@ pub fn work_queue_rows(wc_root: &Path) -> Result<u64> {
 
 /// Dump any SQLite database file to normalised text (read-only open).
 pub fn dump_sqlite(db_path: &Path) -> Result<String> {
+    dump_sqlite_with(db_path, DumpOptions::default())
+}
+
+fn dump_sqlite_with(db_path: &Path, opts: DumpOptions) -> Result<String> {
     let conn = open_read_only(db_path)?;
     let mut out = String::new();
     let user_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -118,7 +139,14 @@ pub fn dump_sqlite(db_path: &Path) -> Result<String> {
         while let Some(row) = cursor.next()? {
             let mut cells = Vec::with_capacity(columns.len());
             for (idx, column) in columns.iter().enumerate() {
-                cells.push(render_cell(table, column, row.get_ref(idx)?));
+                if opts.mask_dav_cache
+                    && table.eq_ignore_ascii_case("NODES")
+                    && column.eq_ignore_ascii_case("dav_cache")
+                {
+                    cells.push("MASKED".into());
+                } else {
+                    cells.push(render_cell(table, column, row.get_ref(idx)?));
+                }
             }
             rows.push(cells.join("|"));
         }

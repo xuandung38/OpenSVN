@@ -9,7 +9,7 @@ use super::events::{Md5, Sha1, UpdateEvent};
 use crate::caps::{AcceptedHref, UrlBuilder};
 use crate::http::{ResponseParser, parse_chunked};
 use crate::limits::ParserLimits;
-use crate::util::{Base64Stream, corrupt, parse_hex, parse_revnum};
+use crate::util::{Base64Stream, corrupt, parse_hex, parse_optional_revnum, parse_revnum};
 use crate::xml::{Ns, StartTag, XmlEvent, XmlReader};
 
 /// Deepest directory nesting accepted.
@@ -350,7 +350,11 @@ impl UpdateParser {
                 out.push(match tag.name.local.as_str() {
                     "delete-entry" => UpdateEvent::DeleteEntry {
                         path,
-                        rev: tag.attr("rev").map(parse_revnum).transpose()?,
+                        rev: tag
+                            .attr("rev")
+                            .map(parse_optional_revnum)
+                            .transpose()?
+                            .flatten(),
                     },
                     "absent-file" => UpdateEvent::AbsentFile { path },
                     _ => UpdateEvent::AbsentDir { path },

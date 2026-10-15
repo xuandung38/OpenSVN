@@ -13,6 +13,7 @@ pub mod errors;
 pub mod file_revs;
 pub mod get;
 pub mod http;
+pub mod iprops;
 pub mod limits;
 pub mod list_report;
 pub mod locks;

@@ -105,6 +105,16 @@ pub trait FileRevHandler: Send {
     fn revision(&mut self, rev: FileRev) -> Result<Option<Box<dyn WindowSink>>>;
 }
 
+/// Properties one parent passes down: its repository-relative path (`""` for the root) and its
+/// `(name, value)` pairs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InheritedItem {
+    /// Repository-relative path of the parent.
+    pub repos_relpath: String,
+    /// Properties of the parent.
+    pub props: Vec<(String, Vec<u8>)>,
+}
+
 /// Repository session. All methods honor `cancel` at the next await point.
 #[async_trait]
 pub trait RaSession: Send + Sync {
@@ -218,6 +228,24 @@ pub trait RaSession: Send + Sync {
         handler: &mut dyn FileRevHandler,
         cancel: &CancelToken,
     ) -> Result<()>;
+
+    /// Properties `repos_relpath` (relative to the repository ROOT, unlike the other paths of
+    /// this trait) inherits in `rev`: one item per parent that has properties, the repository
+    /// root first, the node itself not included (`svn_ra_get_inherited_props`). The working
+    /// copy caches them on its root and on switched nodes. The default reports
+    /// `ServerUnsupported`, and callers then leave the cache alone.
+    async fn inherited_props(
+        &self,
+        repos_relpath: &RelPath,
+        rev: Revnum,
+        cancel: &CancelToken,
+    ) -> Result<Vec<InheritedItem>> {
+        let _ = (repos_relpath, rev, cancel);
+        Err(SvnError::new(
+            ErrorCode::ServerUnsupported,
+            "this session cannot read inherited properties",
+        ))
+    }
 
     /// Update, switch or status: `report` builds the report, then the RA layer drives `editor`
     /// through an [`EditorWorker`](crate::EditorWorker) (editor runs on a blocking thread).

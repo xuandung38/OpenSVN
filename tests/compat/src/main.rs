@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use opensvn_compat::runner::{DockerBackend, Runner};
+use opensvn_compat::local::LocalBackend;
+use opensvn_compat::runner::{Backend, DockerBackend, Runner};
 use opensvn_compat::scenario::Scenario;
 use opensvn_compat::{default_work_root, repo_root};
 
@@ -48,8 +49,14 @@ fn run() -> Result<bool> {
         bail!("no .yaml scenarios found");
     }
     let root = repo_root();
-    let backend = DockerBackend::new(&root);
-    let runner = Runner::new(&backend, default_work_root());
+    // `OPENSVN_COMPAT_BACKEND=local`: servers and clients on the host (see README).
+    let local = std::env::var("OPENSVN_COMPAT_BACKEND").is_ok_and(|b| b == "local");
+    let backend: Box<dyn Backend> = if local {
+        Box::new(LocalBackend::from_env(&default_work_root().join(".svn-config"))?)
+    } else {
+        Box::new(DockerBackend::new(&root))
+    };
+    let runner = Runner::new(backend.as_ref(), default_work_root());
     let mut all_ok = true;
     for file in files {
         let scn = Scenario::load(&file)?;

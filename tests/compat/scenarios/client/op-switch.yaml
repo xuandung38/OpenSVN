@@ -1,0 +1,13 @@
+# Switch trunk -> branches/feature-x -> back, taking turns.
+name: op-switch
+repo: basic
+steps:
+  - { on: engine, wc: e, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: s, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn14, wc: e, svn: [switch, "{url}/branches/feature-x", "."] }
+  - { on: engine, wc: s, svn: [switch, "{url}/branches/feature-x"] }
+  - { on: svn15, wc: o, svn: [switch, "{url}/branches/feature-x", "."] }
+compare:
+  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: s, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }

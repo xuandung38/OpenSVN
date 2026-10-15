@@ -1,0 +1,33 @@
+# Inherited properties: svn caches them on the working copy root and on switched nodes, and
+# reads svn:global-ignores from that cache. The engine must write the same cache.
+name: op-iprops
+repo: basic
+fresh_repo: true
+steps:
+  - { on: svn15, wc: r, svn: [checkout, "{url}", ".", --depth, immediates] }
+  - { on: svn15, wc: r, svn: [propset, svn:global-ignores, "*.bak", "."] }
+  - { on: svn15, wc: r, svn: [propset, custom:team, core, trunk] }
+  - { on: svn15, wc: r, svn: [commit, -m, "inheritable properties"] }
+  # A sub-tree checkout caches what / and /trunk pass down.
+  - { on: engine, wc: e, svn: [checkout, "{url}/trunk/src", "."] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/trunk/src", "."] }
+  # svn applies the repository's global-ignores from the engine's cache.
+  - { on: svn15, wc: e, sh: "printf 'x\\n' > old.bak" }
+  - { on: svn15, wc: o, sh: "printf 'x\\n' > old.bak" }
+  # A switched sub-tree caches its own location's; svn switches, the engine updates.
+  - { on: engine, wc: e2, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: o2, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn14, wc: e2, svn: [switch, "{url}/branches/feature-x/src", src] }
+  - { on: svn15, wc: o2, svn: [switch, "{url}/branches/feature-x/src", src] }
+  - { on: engine, wc: e2, svn: [update] }
+  - { on: svn15, wc: o2, svn: [update] }
+  # The engine switches its whole working copy (to the branch: svn refuses unrelated targets).
+  - { on: engine, wc: e3, svn: [checkout, "{url}/trunk/src", "."] }
+  - { on: svn15, wc: o3, svn: [checkout, "{url}/trunk/src", "."] }
+  - { on: engine, wc: e3, svn: [switch, "{url}/branches/feature-x/src"] }
+  - { on: svn15, wc: o3, svn: [switch, "{url}/branches/feature-x/src", "."] }
+compare:
+  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e, right: o, checks: [status], reader: svn14 }
+  - { left: e2, right: o2, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e3, right: o3, checks: [tree, status, info, wcdb], ignore: [dav_cache] }

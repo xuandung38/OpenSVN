@@ -39,6 +39,17 @@ pub(crate) fn parse_revnum(s: &str) -> Result<Revnum, SvnError> {
         .map_err(|_| corrupt(format!("invalid revision number {s:?}")))
 }
 
+/// Parses a revision attribute in which `-1` stands for "no revision" (`SVN_INVALID_REVNUM`):
+/// mod_dav_svn sends `<S:delete-entry rev="-1"/>` when the editor gives no revision, as a switch
+/// does for every entry it deletes. ra_serf reads it with `SVN_STR_TO_REV` into an invalid
+/// revision; any other negative or malformed value stays corrupt.
+pub(crate) fn parse_optional_revnum(s: &str) -> Result<Option<Revnum>, SvnError> {
+    if s.trim() == "-1" {
+        return Ok(None);
+    }
+    parse_revnum(s).map(Some)
+}
+
 /// Decodes a text value that the server may have base64-encoded (`encoding="base64"`, sent when
 /// `S:encode-binary-props` is requested and the value is not XML-safe). The result must be UTF-8.
 pub(crate) fn decode_text_field(text: String, encoding: Option<&str>) -> Result<String, SvnError> {
