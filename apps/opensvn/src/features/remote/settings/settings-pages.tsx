@@ -9,6 +9,7 @@ import type { Settings } from "../../../ipc/bindings";
 import { ipc, unwrap } from "../../../ipc/client";
 import { queryKeys } from "../../../ipc/query-keys";
 import { useT } from "../../../lib/i18n/i18n";
+import { ExtDiffTools } from "./ext-diff-tools";
 import {
   type Draft,
   type FieldError,
@@ -101,7 +102,7 @@ function NumberField({
   set,
 }: PageProps & {
   name: RangedKey;
-  label: "checkInterval" | "maxConnections" | "timeoutSec" | "cacheMax";
+  label: "checkInterval" | "maxConnections" | "timeoutSec" | "reconnectWait" | "cacheMax";
 }) {
   const t = useT(settingsStrings);
   const range = rangeOf(name);
@@ -301,6 +302,7 @@ export function DiffMergePage({ settings, draft, set }: PageProps) {
           )}
         </div>
       </Field>
+      <ExtDiffTools settings={settings} />
     </div>
   );
 }
@@ -357,6 +359,11 @@ export function NetworkPage({ settings, draft, errors, set }: PageProps) {
       <NumberField
         name="network.timeoutSec"
         label="timeoutSec"
+        {...{ settings, draft, errors, set }}
+      />
+      <NumberField
+        name="network.reconnectWaitMin"
+        label="reconnectWait"
         {...{ settings, draft, errors, set }}
       />
       <Field label={t("proxy")}>

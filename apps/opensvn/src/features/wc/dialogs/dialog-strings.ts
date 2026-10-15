@@ -32,6 +32,9 @@ export const dialogStrings = defineStrings({
     hideBrowse: "Hide folders",
     browseLabel: "Repository folders",
     browseLoading: "Connecting to the repository…",
+    serverRepos:
+      "This URL is the server's list of repositories. Pick a repository, or a folder in one.",
+    serverReposLabel: "Repositories on the server",
     parentFolder: "Parent folder",
     changeParent: "Change…",
     defaultParent: "default",
@@ -230,6 +233,9 @@ export const dialogStrings = defineStrings({
     hideBrowse: "Ẩn thư mục",
     browseLabel: "Thư mục trong repository",
     browseLoading: "Đang kết nối repository…",
+    serverRepos:
+      "URL này là danh sách repository trên server. Chọn một repository, hoặc một thư mục bên trong.",
+    serverReposLabel: "Repository trên server",
     parentFolder: "Thư mục cha",
     changeParent: "Đổi…",
     defaultParent: "mặc định",

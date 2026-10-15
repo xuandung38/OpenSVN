@@ -424,6 +424,55 @@ impl AppState {
 
     /// Runs recovery for every registered working copy (app start). A failure is logged and does
     /// not stop the others.
+    /// At start-up: the working copies of checkouts that were interrupted while the app was
+    /// closed or killed (their journal rows are still there) are registered, so they are listed
+    /// with "Continue checkout" even though the checkout never got to register them. A row whose
+    /// folder holds no working copy (the checkout stopped before it created one) or a complete
+    /// one is dropped. Nothing on disk is touched.
+    pub async fn recover_checkouts(&self) {
+        let rows = match self.db.checkout_journal_list() {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read the checkout journal");
+                return;
+            }
+        };
+        for j in rows {
+            let root = std::path::PathBuf::from(&j.root_path);
+            let keep = match self.wcs.add_unfinished(&root).await {
+                Some(wc) if wc.incomplete => {
+                    tracing::info!(wc = %wc.id.0, "an interrupted checkout can be continued");
+                    true
+                }
+                _ => false,
+            };
+            if !keep && let Err(e) = self.db.checkout_journal_remove(&j.root_path) {
+                tracing::warn!(error = %e, "could not update the checkout journal");
+            }
+        }
+    }
+
+    /// Watches for the system waking up from sleep ([`crate::wake`]): the engine fails reads
+    /// waiting on connections that died during the sleep, and every operation that waits for a
+    /// lost connection tries again at once.
+    pub fn start_wake_watch(&self) {
+        let (engine, ops) = (Arc::clone(&self.engine), self.ops.clone());
+        tauri::async_runtime::spawn(async move {
+            let mut detector = crate::wake::WakeDetector::new(
+                std::time::Instant::now(),
+                crate::wake::boot_clock(),
+            );
+            loop {
+                tokio::time::sleep(crate::wake::TICK).await;
+                if detector.tick(std::time::Instant::now(), crate::wake::boot_clock()) {
+                    tracing::info!("the system woke up; reconnecting");
+                    engine.system_woke();
+                    ops.retry_all_now();
+                }
+            }
+        });
+    }
+
     pub async fn recover_all(&self) {
         for id in self.wcs.ids().unwrap_or_default() {
             if let Err(e) = self.open_wc(&id).await {

@@ -456,6 +456,36 @@ async fn an_unfinished_checkout_is_registered_as_resumable_only_when_its_working
 }
 
 #[tokio::test]
+async fn start_up_keeps_only_the_journal_of_checkouts_that_left_a_working_copy() {
+    use crate::db::CheckoutJournal;
+
+    let f = Fixture::new(Duration::ZERO).await;
+    let parent = tempfile::tempdir().unwrap();
+    // Killed before the working copy existed: only the user's folder, which stays as it is.
+    let none = parent.path().join("never-started");
+    std::fs::create_dir(&none).unwrap();
+    std::fs::write(none.join("notes.txt"), "mine").unwrap();
+    for root in [&none, &parent.path().join("gone")] {
+        f.state()
+            .db
+            .checkout_journal_put(&CheckoutJournal {
+                root_path: root.to_string_lossy().into_owned(),
+                url: format!("{DEMO_REPO_URL}/trunk"),
+                depth: "infinity".into(),
+                ignore_externals: false,
+            })
+            .unwrap();
+    }
+    f.state().recover_checkouts().await;
+    assert!(f.state().db.checkout_journal_list().unwrap().is_empty());
+    assert!(commands::wc_entries(f.state()).await.unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(none.join("notes.txt")).unwrap(),
+        "mine"
+    );
+}
+
+#[tokio::test]
 async fn engine_capabilities_come_from_the_engine() {
     let f = Fixture::new(Duration::ZERO).await;
     let caps = commands::engine_capabilities(f.state()).await.unwrap();

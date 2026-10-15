@@ -6,7 +6,9 @@ use crate::caps::{UrlBuilder, advertise_caps};
 use crate::display_path::RepoDisplayPath;
 use crate::http::{HttpRequest, Method, ResponseParser, parse_chunked};
 use crate::limits::ParserLimits;
-use crate::util::{corrupt, decode_text_field, parse_timestamp, validate_lock_token};
+use crate::util::{
+    corrupt, decode_display_field, decode_text_field, parse_timestamp, validate_lock_token,
+};
 use crate::xml::{Ns, XmlEvent, XmlReader, XmlWriter};
 
 /// Builds `REPORT` on the public URL of `path`. `depth` limits how far below `path` locks are
@@ -133,7 +135,13 @@ impl GetLocksParser {
         let (Some((field, encoding)), Some(lock)) = (self.field.take(), self.lock.as_mut()) else {
             return Ok(());
         };
-        let text = decode_text_field(std::mem::take(&mut self.text), encoding.as_deref())?;
+        let raw = std::mem::take(&mut self.text);
+        let enc = encoding.as_deref();
+        let text = if matches!(field, "owner" | "comment") {
+            decode_display_field(raw, enc)?
+        } else {
+            decode_text_field(raw, enc)?
+        };
         match field {
             "path" => lock.path = Some(text.trim().to_owned()),
             "token" => lock.token = Some(text.trim().to_owned()),

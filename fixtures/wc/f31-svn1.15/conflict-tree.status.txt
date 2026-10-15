@@ -1,0 +1,31 @@
+# svn status -v
+                13       13 fixture      .
+                13       11 fixture      README.txt
+                13        3 fixture      crlf.txt
+                13        3 fixture      data
+                13        2 fixture      data/blob.bin
+                13        3 fixture      data/image.png
+                13       13 fixture      docs
+A  +  C          -        2 fixture      docs/index.md
+      >   local file edit, incoming file delete or move upon update
+                13        3 fixture      keywords.txt
+                13        3 fixture      locked.txt
+                13       10 fixture      many-props.txt
+                13        2 fixture      mixed-eol.txt
+                13        3 fixture      run.sh
+                13       12 fixture      src
+                13        6 fixture      src/app-copy.c
+                13       12 fixture      src/app.c
+                13        4 fixture      with-externals
+X                                        with-externals/docs-ext
+    X           14       11 fixture      with-externals/readme-ext.txt
+
+Performing status on external item at 'with-externals/docs-ext':
+                14       13 fixture      with-externals/docs-ext
+Summary of conflicts:
+  Tree conflicts: 1
+# svn info (subset)
+dir
+13
+infinity
+^/trunk

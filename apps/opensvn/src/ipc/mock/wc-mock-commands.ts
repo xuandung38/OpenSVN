@@ -115,6 +115,7 @@ function entryOf(w: WorkingCopy): WcEntry {
     missing: false,
     problem: null,
     incomplete: w.incomplete,
+    resume: w.resume ?? null,
   };
 }
 
@@ -139,10 +140,16 @@ export function clearMockWorkingCopies(): void {
   state.wcs = [];
 }
 
-/** Marks a sample working copy as left behind by a checkout that stopped half-way (tests). */
-export function markMockWcIncomplete(wcId: string): void {
+/**
+ * Marks a sample working copy as left behind by a checkout (or, with `checkout` false, an update)
+ * that stopped half-way at `rev` (tests).
+ */
+export function markMockWcIncomplete(wcId: string, rev = 1200, checkout = true): void {
   const wc = state.wcs.find((w) => w.id === wcId);
-  if (wc) wc.incomplete = true;
+  if (wc) {
+    wc.incomplete = true;
+    wc.resume = { rev, checkout };
+  }
 }
 
 const FOLDER_NAMES = ["game-assets", "tools-sandbox", "level-editor", "audio-bank"];
@@ -299,6 +306,29 @@ export function wcMockCommands(deps: MockDeps) {
       const parent = consumeGrant(req.dest);
       if (!parent) return fail("invalid-argument", BAD_GRANT);
       const folder = name ?? parent;
+      // Like the backend: the folder holds an interrupted checkout of this URL.
+      const unfinished = state.wcs.find(
+        (w) => baseName(w.rootPath) === folder && w.resume?.checkout && w.url === req.url,
+      );
+      if (unfinished?.resume) {
+        return Promise.resolve({
+          status: "error" as const,
+          error: {
+            code: "invalid-argument",
+            message:
+              "The checkout folder already exists and is not empty. Choose another name or an empty folder.",
+            detail: null,
+            path: unfinished.rootPath,
+            retryable: false,
+            actions: ["continue-checkout"],
+            incompleteCheckout: {
+              wcId: unfinished.id,
+              rev: unfinished.resume.rev,
+              rootPath: unfinished.rootPath,
+            },
+          } satisfies AppError,
+        });
+      }
       if (OCCUPIED_NAMES.has(folder)) {
         return fail(
           "invalid-argument",
@@ -353,6 +383,7 @@ export function wcMockCommands(deps: MockDeps) {
       }
       return deps.ok(null);
     },
+    diffOpenVersion: () => ok(null),
     changelistSet: (wcId: string, paths: string[], name: string | null) => {
       setStatus(
         deps,
@@ -516,6 +547,26 @@ export function wcMockCommands(deps: MockDeps) {
         { kind: "newRev", newRev: rev },
       );
     },
+    wcContinue: (wcId: string) => {
+      const wc = wcOf(wcId);
+      if (!wc?.resume) {
+        return fail(
+          "wc-invalid-operation",
+          "There is nothing to continue: the working copy is complete.",
+        );
+      }
+      const target = wc.resume.rev;
+      return op(
+        "update",
+        `Continue checkout ${wc.name}`,
+        wcId,
+        () => {
+          patchWc(wcId, { baseRev: target, incomplete: false, resume: null });
+          deps.emit("wc://revision-changed", { wcId, baseRev: target, revRange: null });
+        },
+        { kind: "newRev", newRev: target },
+      );
+    },
     update: (req: UpdateRequest) => {
       const target = req.rev ?? state.youngest;
       return op(
@@ -528,7 +579,8 @@ export function wcMockCommands(deps: MockDeps) {
             req.wcId,
             statusOf(req.wcId).map((f) => (f.remote ? { ...f, remote: null } : f)),
           );
-          patchWc(req.wcId, { baseRev: target, incoming: 0 });
+          // An update at any revision also finishes an interrupted checkout.
+          patchWc(req.wcId, { baseRev: target, incoming: 0, incomplete: false, resume: null });
           deps.emit("wc://revision-changed", { wcId: req.wcId, baseRev: target, revRange: null });
         },
         { kind: "newRev", newRev: target },

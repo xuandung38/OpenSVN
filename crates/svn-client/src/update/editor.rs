@@ -466,6 +466,30 @@ impl UpdateEditor {
         Ok(Some(layer))
     }
 
+    /// Reason of the tree conflict an incoming add raises on the working node `e` it finds at
+    /// `wc` (svn's `check_tree_conflict` after `scan_addition`): `moved-here` when `e` belongs
+    /// to the destination of a move whose source still exists, `added` for a plain add, a copy,
+    /// or a move this drive already broke by deleting its source.
+    fn local_add_reason(&mut self, wc: &RelPath, e: &Node) -> Result<TreeReason> {
+        if !e.moved_here {
+            return Ok(TreeReason::Added);
+        }
+        // The deletion of the source may still sit in the batch.
+        self.drain()?;
+        let depth = usize::try_from(e.op_depth).unwrap_or(usize::MAX);
+        let root = wc
+            .as_str()
+            .split('/')
+            .take(depth)
+            .collect::<Vec<_>>()
+            .join("/");
+        Ok(if self.s.db.moved_from(&RelPath::new(&root)?)?.is_some() {
+            TreeReason::MovedHere
+        } else {
+            TreeReason::Added
+        })
+    }
+
     fn base_node_for(
         &self,
         kind: NodeKind,
@@ -863,7 +887,7 @@ impl DeltaEditor for UpdateEditor {
         } else {
             Depth::Infinity
         };
-        let mut skipped = p.skipped;
+        let skipped = p.skipped;
         let mut was_incomplete = false;
         let mut shadow = p.shadow;
         let mut obstructed = false;
@@ -897,28 +921,24 @@ impl DeltaEditor for UpdateEditor {
                     }
                 }
                 (Some(e), _) if e.op_depth > 0 && e.presence == Presence::Normal => {
-                    self.record_tree_conflict(
-                        &wc,
-                        None,
-                        &new_repos,
-                        NodeKind::Dir,
-                        TreeReason::Added,
-                        TreeAction::Add,
-                        false,
-                    )?;
-                    skipped = true;
+                    // A local add, copy or move destination in the way: the server's tree
+                    // still goes into BASE, shadowed by the working layer (svn's `shadowed`
+                    // `add_directory`), with a tree conflict "local add, incoming add".
+                    shadow = Some(e.op_depth);
+                    tree_conflict = Some(PendingTreeConflict {
+                        reason: self.local_add_reason(&wc, e)?,
+                        action: TreeAction::Add,
+                    });
                 }
                 _ if matches!(disk, Some(NodeKind::File | NodeKind::Symlink)) => {
-                    self.record_tree_conflict(
-                        &wc,
-                        None,
-                        &new_repos,
-                        NodeKind::Dir,
-                        TreeReason::Unversioned,
-                        TreeAction::Add,
-                        false,
-                    )?;
-                    skipped = true;
+                    // An unversioned file or symlink in the way: like an unversioned directory
+                    // (below), the server's tree goes into BASE under a `base-deleted` layer
+                    // and the disk stays as it is.
+                    shadow = Some(relpath_depth(&wc));
+                    tree_conflict = Some(PendingTreeConflict {
+                        reason: TreeReason::Unversioned,
+                        action: TreeAction::Add,
+                    });
                 }
                 _ if disk == Some(NodeKind::Dir) && !self.s.allow_unversioned_obstructions => {
                     // An unversioned directory in the way: the server's tree goes into BASE
@@ -1285,20 +1305,17 @@ impl UpdateEditor {
                     )));
                 }
                 (None, true) => {
-                    if cur
+                    if let Some(c) = cur
                         .as_ref()
-                        .is_some_and(|c| c.op_depth > 0 && c.presence == Presence::Normal)
+                        .filter(|c| c.op_depth > 0 && c.presence == Presence::Normal)
                     {
-                        self.record_tree_conflict(
-                            &wc,
-                            None,
-                            &new_repos,
-                            NodeKind::File,
-                            TreeReason::Added,
-                            TreeAction::Add,
-                            false,
-                        )?;
-                        skipped = true;
+                        // A local add, copy or move destination in the way: the server's file
+                        // still becomes BASE, shadowed by the working node (svn's `shadowed`
+                        // `add_file`); the working node and the disk stay as they are.
+                        tree_conflict = Some(PendingTreeConflict {
+                            reason: self.local_add_reason(&wc, c)?,
+                            action: TreeAction::Add,
+                        });
                     } else if self.disk_kind(&wc)?.is_some() {
                         if self.s.allow_unversioned_obstructions {
                             adopt_existing = true;

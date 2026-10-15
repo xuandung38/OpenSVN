@@ -17,6 +17,14 @@ pub async fn op_cancel(state: State<'_, AppState>, op_id: OpId) -> Result<(), Ap
     guard(async { state.ops.cancel(&op_id) }).await
 }
 
+/// "Retry now" on an operation that waits for a lost connection: it tries again at once
+/// instead of at the end of its countdown. Ignored by an operation that is not waiting.
+#[tauri::command]
+#[specta::specta]
+pub async fn op_retry_now(state: State<'_, AppState>, op_id: OpId) -> Result<(), AppError> {
+    guard(async { state.ops.retry_now(&op_id) }).await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn op_list(state: State<'_, AppState>) -> Result<Vec<OperationHandle>, AppError> {
@@ -141,6 +149,28 @@ pub async fn program_choose(
     args: Vec<String>,
 ) -> Result<Settings, AppError> {
     guard(state.programs.choose(kind, args)).await
+}
+
+/// Like `program_choose` for the diff tool of one file extension (`docx` or `.docx`). The tool
+/// is used instead of `diff.externalTool` for those files, binary ones included.
+#[tauri::command]
+#[specta::specta]
+pub async fn program_choose_for_extension(
+    state: State<'_, AppState>,
+    ext: String,
+    args: Vec<String>,
+) -> Result<Settings, AppError> {
+    guard(state.programs.choose_for_extension(&ext, args)).await
+}
+
+/// Removes the diff tool of one file extension.
+#[tauri::command]
+#[specta::specta]
+pub async fn program_clear_for_extension(
+    state: State<'_, AppState>,
+    ext: String,
+) -> Result<Settings, AppError> {
+    guard(async { state.programs.clear_for_extension(&ext) }).await
 }
 
 /// Removes a configured program.

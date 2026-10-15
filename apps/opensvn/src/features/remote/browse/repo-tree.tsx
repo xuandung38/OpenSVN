@@ -1,8 +1,8 @@
 import { useQueries } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Folder } from "lucide-react";
+import { ChevronDown, ChevronRight, Database, Folder } from "lucide-react";
 import { type KeyboardEvent, useEffect, useId, useMemo, useState } from "react";
 import { SafeText } from "../../../components/ui/safe-text";
-import type { RepoEntry } from "../../../ipc/bindings";
+import type { ParentRepo, RepoEntry } from "../../../ipc/bindings";
 import { ipc, unwrap } from "../../../ipc/client";
 import { queryKeys } from "../../../ipc/query-keys";
 import { cn } from "../../../lib/cn";
@@ -27,6 +27,15 @@ export function flattenTree(
   expanded: ReadonlySet<string>,
   lists: ReadonlyMap<string, RepoEntry[] | "loading">,
 ): TreeRow[] {
+  return flattenForest([{ url: rootUrl, name: baseName(rootUrl) || rootUrl }], expanded, lists);
+}
+
+/** Like {@link flattenTree} with several top-level rows (the repositories of a server URL). */
+export function flattenForest(
+  roots: readonly { url: string; name: string }[],
+  expanded: ReadonlySet<string>,
+  lists: ReadonlyMap<string, RepoEntry[] | "loading">,
+): TreeRow[] {
   const rows: TreeRow[] = [];
   const walk = (url: string, name: string, depth: number, parent: number) => {
     const isOpen = expanded.has(url);
@@ -45,16 +54,20 @@ export function flattenTree(
         if (c.kind === "dir") walk(joinUrl(url, c.name), c.name, depth + 1, idx);
     }
   };
-  walk(rootUrl, baseName(rootUrl) || rootUrl, 0, -1);
+  for (const r of roots) walk(r.url, r.name, 0, -1);
   return rows;
 }
 
 /**
  * Lazy folder tree (ARIA tree, `aria-activedescendant` on one tab stop). Up/Down move, Right
  * expands or enters, Left collapses or goes to the parent, Home/End jump, Enter selects.
+ *
+ * With `repositories` (a server URL that lists repositories, VisualSVN Server's
+ * `https://host/svn/`) the top level is those repositories, collapsed, instead of `rootUrl`.
  */
 export function RepoTree({
   rootUrl,
+  repositories,
   rev,
   selectedUrl,
   onSelect,
@@ -62,6 +75,7 @@ export function RepoTree({
   className,
 }: {
   rootUrl: string;
+  repositories?: readonly ParentRepo[];
   rev: number | null;
   selectedUrl: string;
   onSelect: (url: string) => void;
@@ -69,9 +83,19 @@ export function RepoTree({
   className?: string;
 }) {
   const baseId = useId();
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set([rootUrl]));
+  const listsRepos = repositories !== undefined && repositories.length > 0;
+  const roots = useMemo(
+    () =>
+      repositories && repositories.length > 0
+        ? repositories.map((r) => ({ url: r.url, name: r.name }))
+        : [{ url: rootUrl, name: baseName(rootUrl) || rootUrl }],
+    [rootUrl, repositories],
+  );
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() =>
+    listsRepos ? new Set() : new Set([rootUrl]),
+  );
   // Active row is tracked by folder URL, not index: expanding/collapsing or refetching shifts indices.
-  const [activeUrl, setActiveUrl] = useState(rootUrl);
+  const [activeUrl, setActiveUrl] = useState(roots[0]?.url ?? rootUrl);
 
   const expandedUrls = useMemo(() => [...expanded], [expanded]);
   const results = useQueries({
@@ -87,8 +111,8 @@ export function RepoTree({
       const r = results[i];
       lists.set(url, r?.data ?? "loading");
     });
-    return flattenTree(rootUrl, expanded, lists);
-  }, [rootUrl, expanded, expandedUrls, results]);
+    return flattenForest(roots, expanded, lists);
+  }, [roots, expanded, expandedUrls, results]);
 
   const found = rows.findIndex((r) => r.url === activeUrl);
   const activeIdx = found >= 0 ? found : 0;
@@ -188,7 +212,11 @@ export function RepoTree({
           >
             {r.expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </button>
-          <Folder size={14} aria-hidden="true" className="text-muted-text" />
+          {listsRepos && r.depth === 0 ? (
+            <Database size={14} aria-hidden="true" className="text-muted-text" />
+          ) : (
+            <Folder size={14} aria-hidden="true" className="text-muted-text" />
+          )}
           <SafeText className="min-w-0 truncate">{r.name}</SafeText>
           {r.loading && <span className="text-[11px] text-muted-text">…</span>}
         </div>

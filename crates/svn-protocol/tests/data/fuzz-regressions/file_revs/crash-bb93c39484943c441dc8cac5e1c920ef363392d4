@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:file-revs-report xmlns:S="svn:" xmlns:D="DAV:">
+<S:file-rev path="/trunk/a.txt" rev="2">
+<S:rev-prop name="s">alice</S:rev-prop>
+<S:set-prop name="custom:tag">v&lt;0&gt;&amp;"q"</S:set-prop>
+<S:txdelta>EEEEEEEEEEEEEEEEEEEEEEExmlns:ns0EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEa>UEEEEEEEEEEEEEEEEEEEEEEEEEU0ZOAAAADAEMjGhlbGxvCndvcmxk﻿=</S:txdelta>>
+<S:filet>

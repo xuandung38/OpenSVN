@@ -77,6 +77,21 @@ pub struct WorkingCopy {
     /// A checkout or update stopped before it finished (cancelled, connection lost): some folders
     /// are recorded as incomplete. Updating the working copy finishes it.
     pub incomplete: bool,
+    /// How to finish an incomplete working copy at the revision it was reaching (`None` when it
+    /// is complete).
+    #[serde(default)]
+    #[specta(optional)]
+    pub resume: Option<ResumeInfo>,
+}
+
+/// An interrupted checkout or update, as the working copy records it: `wc_continue` finishes it
+/// at `rev`, the revision it was reaching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeInfo {
+    pub rev: Rev,
+    /// The working copy was never complete: a checkout was interrupted (otherwise an update).
+    pub checkout: bool,
 }
 
 /// One row of the repository manager (`wc_entries`): every registered working copy, including
@@ -98,9 +113,13 @@ pub struct WcEntry {
     pub missing: bool,
     /// Why the working copy cannot be read (only when `missing`).
     pub problem: Option<String>,
-    /// A checkout or update stopped before it finished; the UI shows "Incomplete — Update to
-    /// finish". Always `false` when `missing`.
+    /// A checkout or update stopped before it finished; the UI offers to continue it. Always
+    /// `false` when `missing`.
     pub incomplete: bool,
+    /// See [`WorkingCopy::resume`].
+    #[serde(default)]
+    #[specta(optional)]
+    pub resume: Option<ResumeInfo>,
 }
 
 /// What the running engine supports, so the UI can hide or explain options it would ignore
@@ -132,6 +151,9 @@ pub enum NodeStatus {
     Ignored,
     Obstructed,
     External,
+    /// A folder an interrupted checkout or update did not finish (svn's `!` on a directory):
+    /// not a local change and not an error; continuing the checkout or update finishes it.
+    Incomplete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -283,6 +305,14 @@ pub enum DiffTarget {
     },
 }
 
+/// One side of a diff: the older (`left`) or the newer (`right`) version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffSideKind {
+    Left,
+    Right,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub enum Eol {
     #[serde(rename = "LF")]
@@ -349,6 +379,28 @@ pub struct FileDiff {
     /// (`svn_diff::DISPLAY_MAX_COST`). `left`/`right` are then omitted and the UI offers the
     /// external diff tool (`diff_external`) instead; it never retries the display diff.
     pub too_complex: Option<bool>,
+    /// Set for Word and Excel files: the sides are the text extracted from the documents (not
+    /// their formatting), or, when `extracted` is false, why no text could be extracted.
+    pub office: Option<OfficeText>,
+}
+
+/// Office document families the diff knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum OfficeKind {
+    Word,
+    Excel,
+}
+
+/// How an Office file was diffed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficeText {
+    pub kind: OfficeKind,
+    /// The text sides were extracted from the documents. When false the diff is the plain
+    /// (usually binary) one and `reason` says why: a 97-2003 file, a protected or damaged one.
+    pub extracted: bool,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -448,6 +500,24 @@ pub enum OpStage {
     Fetching,
     /// The server drive is over; recording the result (externals, working copy info).
     Finishing,
+    /// The connection was lost and the server cannot be reached: the operation probes it and
+    /// resumes on its own once it answers ([`Progress::connection_wait`] has the timing).
+    WaitingForConnection,
+}
+
+/// Timing of [`OpStage::WaitingForConnection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionWait {
+    /// Seconds until the next attempt ("Retry now" tries at once).
+    pub retry_in_secs: u32,
+    /// Seconds since the connection was lost.
+    pub waited_secs: u32,
+    /// Seconds the operation waits in total before it stops; the working copy then stays
+    /// incomplete and can be continued.
+    pub max_wait_secs: u32,
+    /// Attempts made so far.
+    pub attempt: u32,
 }
 
 /// What happened to one path, as `svn` prints it in the first column (`A`, `U`, `D`, ...).
@@ -534,6 +604,10 @@ pub struct Progress {
     pub entries: Vec<ProgressEntry>,
     pub entries_dropped: u32,
     pub counts: Option<ActionCounts>,
+    /// Set while `stage` is [`OpStage::WaitingForConnection`].
+    #[serde(default)]
+    #[specta(optional)]
+    pub connection_wait: Option<ConnectionWait>,
 }
 
 /// SVN has no real branches/tags: layout is a naming convention that may not exist.

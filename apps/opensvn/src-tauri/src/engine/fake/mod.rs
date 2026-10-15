@@ -10,6 +10,7 @@ mod conformance_tests;
 mod local_ops;
 mod remote_ops;
 mod seed;
+mod side_export;
 mod state;
 mod sync_ops;
 #[cfg(test)]
@@ -33,8 +34,8 @@ use svn_types::{ErrorCode, RelPath, SvnError};
 use self::state::FakeWc;
 use super::context::OpContext;
 use super::facade::{
-    CheckoutPlan, DiffOptions, EngineFacade, EngineResult, LockScope, LogScope, RecoveryReport,
-    RemoteEditPlan, RemoteScan, StatusQuery, WcInfo, WcOpened, WcRef,
+    CheckoutPlan, DiffOptions, EngineFacade, EngineResult, ExportedSides, LockScope, LogScope,
+    RecoveryReport, RemoteEditPlan, RemoteScan, SideFiles, StatusQuery, WcInfo, WcOpened, WcRef,
 };
 
 pub use seed::{DEMO_REPO_URL, demo_repo, demo_wc_root};
@@ -95,6 +96,31 @@ impl FakeEngine {
             }
             let decoded = super::text::percent_decode(rest.trim_matches('/'));
             return Ok((repo.clone(), RelPath::new(&decoded)?));
+        }
+        // Like an `SVNParentPath` location (VisualSVN Server's `https://host/svn/`): the folder
+        // that holds repositories lists them instead of being one.
+        let here = parsed.to_string();
+        let repos: Vec<svn_types::ParentRepo> = self
+            .repos
+            .iter()
+            .filter_map(|repo| {
+                let root = repo.repos_root().to_string();
+                let (parent, name) = root.rsplit_once('/')?;
+                (parent == here).then(|| svn_types::ParentRepo {
+                    name: super::text::percent_decode(name),
+                    url: root.clone(),
+                })
+            })
+            .collect();
+        if !repos.is_empty() {
+            return Err(SvnError::new(
+                ErrorCode::PathNotFound,
+                format!(
+                    "{here} is the list of repositories on this server, not a repository; add a \
+                     repository name to the URL"
+                ),
+            )
+            .with_repositories(repos));
         }
         Err(SvnError::new(
             ErrorCode::Network,
@@ -199,6 +225,17 @@ impl EngineFacade for FakeEngine {
         ctx: &OpContext,
     ) -> EngineResult<FileDiff> {
         self.do_diff_wc(wc, path, against, opts, ctx).await
+    }
+
+    async fn export_wc_sides(
+        &self,
+        wc: &WcRef,
+        path: &str,
+        against: Option<Rev>,
+        to: SideFiles<'_>,
+        ctx: &OpContext,
+    ) -> EngineResult<ExportedSides> {
+        self.do_export_wc_sides(wc, path, against, to, ctx).await
     }
 
     async fn changelist_set(
@@ -375,6 +412,17 @@ impl EngineFacade for FakeEngine {
         ctx: &OpContext,
     ) -> EngineResult<FileDiff> {
         self.do_diff_rev(url, from, to, opts, ctx).await
+    }
+
+    async fn export_rev_sides(
+        &self,
+        url: &str,
+        from: Option<Rev>,
+        to_rev: Rev,
+        to: SideFiles<'_>,
+        ctx: &OpContext,
+    ) -> EngineResult<ExportedSides> {
+        self.do_export_rev_sides(url, from, to_rev, to, ctx).await
     }
 
     async fn log(

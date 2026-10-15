@@ -100,6 +100,22 @@ fn is_empty_dir(path: &Path) -> bool {
     std::fs::read_dir(path).is_ok_and(|mut d| d.next().is_none())
 }
 
+/// Holds nothing but a `.svn` without `wc.db`: the skeleton of a checkout that was killed
+/// before its working copy database was in place. The engine's working copy creation takes such
+/// a skeleton over after checking it holds nothing else, and rejects it otherwise; nothing is
+/// ever deleted here.
+fn is_checkout_skeleton(path: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+    let names: Vec<_> = entries.flatten().map(|e| e.file_name()).collect();
+    let adm = path.join(".svn");
+    names.len() == 1
+        && names[0] == ".svn"
+        && std::fs::symlink_metadata(&adm).is_ok_and(|m| m.is_dir())
+        && !adm.join("wc.db").exists()
+}
+
 /// Refuses anything but a missing path or an empty, real folder.
 fn check_existing(path: &Path, meta: &std::fs::Metadata) -> Result<(), AppError> {
     let shown = path.to_string_lossy().into_owned();
@@ -115,7 +131,7 @@ fn check_existing(path: &Path, meta: &std::fs::Metadata) -> Result<(), AppError>
                 .with_path(shown),
         );
     }
-    if !is_empty_dir(path) {
+    if !is_empty_dir(path) && !is_checkout_skeleton(path) {
         return Err(invalid_argument(
             "The checkout folder already exists and is not empty. Choose another name or an empty folder.",
         )
@@ -360,6 +376,23 @@ mod tests {
         // the folder itself as target: a missing folder is fine, an empty one too
         assert!(prepare(&dir.path().join("new"), None).is_ok());
         assert!(prepare(&dir.path().join("empty"), None).is_ok());
+    }
+
+    #[test]
+    fn the_skeleton_of_a_killed_checkout_is_reused_but_a_working_copy_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let skel = dir.path().join("skel");
+        std::fs::create_dir_all(skel.join(".svn/tmp")).unwrap();
+        std::fs::write(skel.join(".svn/tmp/wc.db.creating.lock"), b"").unwrap();
+        let t = prepare(dir.path(), Some("skel")).unwrap();
+        assert!(!t.created);
+        // A working copy database, or anything next to `.svn`, is refused.
+        std::fs::write(skel.join(".svn/wc.db"), b"").unwrap();
+        prepare(dir.path(), Some("skel")).unwrap_err();
+        std::fs::remove_file(skel.join(".svn/wc.db")).unwrap();
+        std::fs::write(skel.join("notes.txt"), b"mine").unwrap();
+        prepare(dir.path(), Some("skel")).unwrap_err();
+        assert_eq!(std::fs::read(skel.join("notes.txt")).unwrap(), b"mine");
     }
 
     #[test]

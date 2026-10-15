@@ -206,7 +206,7 @@ function ShellBody({
             workingCopyName={current?.name ?? r("noRepo")}
             workingCopyLabel={r("currentRepo")}
             workingCopyShortcut={isMac() ? "Meta+T" : "Control+T"}
-            locationLabel={current?.branch ? "Branch" : "Location"}
+            locationLabel={current?.branch ? sh("branch") : sh("location")}
             locationValue={current?.branch?.name ?? current?.pathInRepo ?? "-"}
             incoming={current?.incoming ?? 0}
             updating={ops.some((o) => o.handle.kind === "update" && o.state === "running")}
@@ -218,7 +218,12 @@ function ShellBody({
             wrapLocation={
               current
                 ? (item) => (
-                    <Popover trigger={item} open={locationOpen} onOpenChange={setLocationOpen}>
+                    <Popover
+                      trigger={item}
+                      open={locationOpen}
+                      onOpenChange={setLocationOpen}
+                      label={current.branch ? sh("branch") : sh("location")}
+                    >
                       <BranchPopoverContent wc={current} onCreate={setCreateKind} />
                       <BranchSwitchList
                         wc={current}

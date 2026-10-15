@@ -3502,6 +3502,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "office-text"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "quick-xml",
+ "zip",
+]
+
+[[package]]
 name = "oid-registry"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3554,6 +3563,7 @@ dependencies = [
  "libc",
  "md-5",
  "notify",
+ "office-text",
  "opensvn-ipc",
  "opensvn-svn-oracle",
  "proptest",
@@ -3561,6 +3571,7 @@ dependencies = [
  "reqwest",
  "rfd",
  "rusqlite",
+ "rustix",
  "rustls",
  "secrecy",
  "secure-store",
@@ -5105,6 +5116,7 @@ dependencies = [
  "fail",
  "md-5",
  "opensvn-svn-oracle",
+ "proptest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -7302,6 +7314,7 @@ checksum = "caa8cd6af31c3b31c6631b8f483848b91589021b28fffe50adada48d4f4d2ed1"
 dependencies = [
  "arbitrary",
  "crc32fast",
+ "flate2",
  "indexmap 2.14.2",
  "memchr",
 ]

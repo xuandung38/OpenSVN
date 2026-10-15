@@ -7,7 +7,10 @@ use crate::display_path::RepoDisplayPath;
 
 use crate::http::{ResponseParser, parse_chunked};
 use crate::limits::ParserLimits;
-use crate::util::{corrupt, decode_bytes_field, decode_text_field, parse_revnum, parse_timestamp};
+use crate::util::{
+    corrupt, decode_bytes_field, decode_display_field, decode_text_field, parse_revnum,
+    parse_timestamp,
+};
 use crate::xml::{Ns, StartTag, XmlEvent, XmlReader};
 
 /// A log entry with its position in the merge hierarchy.
@@ -192,9 +195,9 @@ impl LogParser {
                     item.rev = Some(parse_revnum(&text)?);
                 }
             }
-            Field::Author => item.entry.author = Some(decode_text_field(text, enc)?),
+            Field::Author => item.entry.author = Some(decode_display_field(text, enc)?),
             Field::Date => item.entry.date = Some(parse_timestamp(&decode_text_field(text, enc)?)?),
-            Field::Comment => item.entry.message = Some(decode_text_field(text, enc)?),
+            Field::Comment => item.entry.message = Some(decode_display_field(text, enc)?),
             Field::RevProp => {
                 let name = self
                     .revprop_name

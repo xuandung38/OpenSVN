@@ -407,9 +407,13 @@ pub(crate) fn op_add(
             format!("'{path}' is already under version control"),
         ));
     }
+    // Replacing the delete layer of a node moved away keeps the move (svn's `moved_to` stays
+    // on the row at that depth, now the replacement).
     super::connection::cached_exec(conn,
         "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, presence, \
-         kind, depth, symlink_target, changed_date) VALUES (?1, ?2, ?3, ?4, 'normal', ?5, ?6, ?7, 0)",
+         kind, depth, symlink_target, changed_date, moved_to) VALUES (?1, ?2, ?3, ?4, 'normal', ?5, \
+         ?6, ?7, 0, (SELECT moved_to FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+         AND op_depth = ?3))",
         params![
             wc_id,
             path.as_str(),
@@ -443,6 +447,34 @@ pub(crate) fn op_delete(conn: &Connection, wc_id: i64, path: &RelPath) -> Result
     }
     let d = relpath_depth(path);
     let scope = scope_sql();
+    // A node below that was moved away to somewhere outside this subtree stays moved away: its
+    // move goes to the delete layer made here, as in svn. Its old layer lets go of it first so
+    // that removing that layer does not detach the destination.
+    let transferred: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare_cached(&format!(
+                "SELECT local_relpath, moved_to FROM nodes WHERE wc_id = ?1 AND {scope} \
+                 AND op_depth >= ?3 AND moved_to IS NOT NULL \
+                 AND moved_to <> ?2 AND NOT {}",
+                strict_descendant("moved_to", "?2")
+            ))
+            .map_err(sql_err)?;
+        stmt.query_map(params![wc_id, path.as_str(), d], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .map_err(sql_err)?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(sql_err)?
+    };
+    for (src, _) in &transferred {
+        exec_cached(
+            conn,
+            "UPDATE nodes SET moved_to = NULL WHERE wc_id = ?1 AND local_relpath = ?2 \
+             AND op_depth >= ?3",
+            params![wc_id, src, d],
+        )
+        .map_err(sql_err)?;
+    }
     detach_moves(conn, wc_id, path, d)?;
     // Layers at or above the delete are subsumed by it (added files below, earlier deletes ...).
     super::connection::cached_exec(
@@ -464,6 +496,15 @@ pub(crate) fn op_delete(conn: &Connection, wc_id: i64, path: &RelPath) -> Result
         params![wc_id, path.as_str(), d],
     )
     .map_err(sql_err)?;
+    for (src, dst) in &transferred {
+        exec_cached(
+            conn,
+            "UPDATE nodes SET moved_to = ?3 WHERE wc_id = ?1 AND local_relpath = ?2 \
+             AND op_depth = ?4",
+            params![wc_id, src, dst, d],
+        )
+        .map_err(sql_err)?;
+    }
     // Local property changes and conflicts die with the node; changelist membership stays.
     actual::clear_modifications(conn, wc_id, path, true)?;
     actual::drop_orphans(conn, wc_id, path)
@@ -646,13 +687,15 @@ pub(crate) fn op_copy(
             .map_err(sql_err)?;
             continue;
         }
+        // A replaced delete layer keeps its move, as in `op_add`.
         super::connection::cached_exec(conn,
             "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, repos_id, \
              repos_path, revision, presence, depth, kind, changed_revision, changed_date, \
              changed_author, checksum, properties, symlink_target, moved_here, translated_size, \
-             last_mod_time) \
+             last_mod_time, moved_to) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?17, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-             ?18, ?19)",
+             ?18, ?19, (SELECT moved_to FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
+             AND op_depth = ?3))",
             params![
                 wc_id,
                 p.target.as_str(),
@@ -679,12 +722,25 @@ pub(crate) fn op_copy(
         .map_err(sql_err)?;
         for del in &p.carried_deletes {
             let shifted = del.op_depth - src_depth + dst_depth;
+            // A move takes the moves of its descendants along: the carried delete layer is now
+            // the source of the descendant's move, as in svn. The old layer lets go of it first,
+            // or removing that layer (the source's delete) would detach the destination.
+            let moved_to = del.moved_to.as_ref().filter(|_| moved_here);
             super::connection::cached_exec(conn,
-                "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, presence, kind, changed_date) \
-                 VALUES (?1, ?2, ?3, ?4, 'base-deleted', ?5, 0)",
-                params![wc_id, p.target.as_str(), shifted, parent_text(&p.target), kind_word(del.kind)],
+                "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, presence, kind, changed_date, moved_to) \
+                 VALUES (?1, ?2, ?3, ?4, 'base-deleted', ?5, 0, ?6)",
+                params![wc_id, p.target.as_str(), shifted, parent_text(&p.target), kind_word(del.kind), moved_to.map(RelPath::as_str)],
             )
             .map_err(sql_err)?;
+            if moved_to.is_some() {
+                super::connection::cached_exec(
+                    conn,
+                    "UPDATE nodes SET moved_to = NULL WHERE wc_id = ?1 AND local_relpath = ?2 \
+                     AND op_depth = ?3",
+                    params![wc_id, del.relpath.as_str(), del.op_depth],
+                )
+                .map_err(sql_err)?;
+            }
         }
         // Local property edits of the source travel as local edits of the copy.
         if let Some(local) = actual::read_props(conn, wc_id, &node.relpath)?
