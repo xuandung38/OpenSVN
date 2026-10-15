@@ -2,8 +2,10 @@
 # Used to generate fixtures and run the svn oracle without Docker:
 #   nix-build docker/nix/subversion-1.15.nix -o target/svn-1.15
 #   SVN=target/svn-1.15/bin/svn fixtures/wc/make-wc-fixtures.sh 31
-{ pkgs ? import <nixpkgs> { } }:
-pkgs.subversion.overrideAttrs (old: rec {
+# With `--arg httpServer true` it also builds mod_dav_svn/mod_authz_svn (lib/modules) against
+# nixpkgs' apacheHttpd, for the DAV suite against a 1.15.0 server.
+{ pkgs ? import <nixpkgs> { }, httpServer ? false }:
+(pkgs.subversion.override { inherit httpServer; }).overrideAttrs (old: rec {
   version = "1.15.0";
   src = pkgs.fetchurl {
     url = "https://archive.apache.org/dist/subversion/subversion-${version}.tar.bz2";
