@@ -681,6 +681,111 @@ async fn parent_path_url_names_the_repositories() {
     assert!(e.prompts.seen().is_empty(), "{:?}", e.prompts.seen());
 }
 
+/// The repository list of the parent path rides on the error (issue #133): every listed URL is
+/// percent-encoded and opens its repository, through SSO and through Basic alike.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the VisualSVN-like server (scripts/test-env/visualsvn-like.sh)"]
+async fn parent_path_url_lists_repositories_that_open() {
+    let sso = sso();
+    let basic = env_with(Some(("tester", "tester-pass")));
+    for (e, location) in [(&sso, "svn"), (&sso, "svn-sso"), (&basic, "svn-basic")] {
+        let url = format!("{}/", base(location));
+        let err = e
+            .engine
+            .repo_list(&url, None, &ctx())
+            .await
+            .expect_err("the parent path is not a repository");
+        assert_eq!(err.code, ErrorCode::PathNotFound, "{url}: {err:?}");
+        let repos = err
+            .parent_repositories()
+            .unwrap_or_else(|| panic!("{url}: no repositories on {err:?}"));
+        let find = |name: &str| {
+            repos
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("{url}: {name} missing from {repos:?}"))
+        };
+        for name in ["MyRepo", "My Project", "Dự án Tiếng Việt"] {
+            let repo = find(name);
+            assert_eq!(
+                repo.url,
+                format!("{}/{}", base(location), encode(name)),
+                "{name}"
+            );
+            let info = e
+                .engine
+                .repo_info(&repo.url, &ctx())
+                .await
+                .unwrap_or_else(|err| panic!("{}: {err:?}", repo.url));
+            assert_eq!(
+                info.repo_root_url.trim_end_matches('/'),
+                repo.url,
+                "{name} opens as its own root"
+            );
+        }
+        // Each listed URL is spelled once, without the trailing slash of the listing.
+        assert!(repos.iter().all(|r| !r.url.ends_with('/')), "{repos:?}");
+    }
+    assert!(sso.prompts.seen().is_empty(), "{:?}", sso.prompts.seen());
+    assert_eq!(basic.prompts.seen().len(), 1, "one Basic sign-in");
+}
+
+/// Without a ticket and with the prompt refused, the parent path reports the sign-in, not a
+/// repository list it could not read.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the VisualSVN-like server (scripts/test-env/visualsvn-like.sh)"]
+async fn parent_path_url_without_a_sign_in_reports_the_sign_in() {
+    if rerun_without_ticket("parent_path_url_without_a_sign_in_reports_the_sign_in") {
+        return;
+    }
+    let e = sso();
+    let err = e
+        .engine
+        .repo_list(&format!("{}/", base("svn")), None, &ctx())
+        .await
+        .expect_err("no ticket, prompt refused");
+    assert!(
+        matches!(
+            err.code,
+            ErrorCode::AuthRequired | ErrorCode::NegotiateFailed
+        ),
+        "{err:?}"
+    );
+    assert!(err.parent_repositories().is_none(), "{err:?}");
+}
+
+/// A server certificate the user has not trusted stays a certificate error on the parent path:
+/// the listing is never read past it (default deny).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the VisualSVN-like server (scripts/test-env/visualsvn-like.sh)"]
+async fn parent_path_url_with_an_untrusted_certificate_stays_a_certificate_error() {
+    let prompts = Arc::new(Prompts::default());
+    let (_settings, rx) = watch::channel(opensvn_lib::settings::defaults(None));
+    let (_invalidate, inv) = watch::channel(0u64);
+    let connector = Arc::new(HttpConnector::with_config_tweak(
+        prompts.clone() as Arc<dyn AuthPrompter>,
+        Arc::new(MemoryTrustStore::new()),
+        rx,
+        inv,
+        |c| c.proxy = ProxyConfig::Disabled,
+    ));
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = RealEngine::new(RealEngineConfig {
+        connector,
+        lock_ownership: Arc::new(MemoryLockOwnership::for_current_process(BOOT))
+            as Arc<dyn LockOwnershipStore>,
+        boot_id: BOOT.to_owned(),
+        state_dir: tmp.path().to_owned(),
+        recovery: Arc::new(ClientRecovery),
+    });
+    let err = engine
+        .repo_list(&format!("{}/", base("svn")), None, &ctx())
+        .await
+        .expect_err("the test CA is not trusted here");
+    assert_eq!(err.code, ErrorCode::TlsUntrusted, "{err:?}");
+    assert!(err.parent_repositories().is_none(), "{err:?}");
+}
+
 /// VisualSVN-style authz (`[groups]`, global `[/]`, a repository-specific denied folder).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the VisualSVN-like server (scripts/test-env/visualsvn-like.sh)"]

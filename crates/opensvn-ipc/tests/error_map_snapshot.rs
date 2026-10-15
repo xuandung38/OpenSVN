@@ -33,6 +33,7 @@ fn all_codes() -> Vec<SvnErrorCode> {
         FileInUse,
         Cancelled,
         CommitOutcomeUnknown,
+        WriteOutcomeUnknown,
         LimitExceeded,
         Corrupt,
         ServerUnsupported,
@@ -44,9 +45,8 @@ fn all_codes() -> Vec<SvnErrorCode> {
             | WcFormatUnsupported | NotAWorkingCopy | ConflictBlocksCommit | HookFailed
             | RepositoryMoved | PristineNotHydrated | WcInvalidOperation | PathNotFound
             | UnsafePath | DiskFull | PermissionDenied | FileInUse | Cancelled
-            | CommitOutcomeUnknown | LimitExceeded | Corrupt | ServerUnsupported | Internal => {
-                v.push(c)
-            }
+            | CommitOutcomeUnknown | WriteOutcomeUnknown | LimitExceeded | Corrupt
+            | ServerUnsupported | Internal => v.push(c),
         }
     }
     v
@@ -105,6 +105,7 @@ fn app_error_wire_shape() {
             "retryable": false,
             "actions": ["update"],
             "lockConflicts": null,
+            "repositories": null,
         })
     );
     assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), e);
@@ -140,6 +141,33 @@ fn lock_conflicts_ride_on_the_error_only_when_known() {
     assert_eq!(v["lockConflicts"], serde_json::Value::Null);
     v.as_object_mut().unwrap().remove("lockConflicts");
     assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), none);
+}
+
+#[test]
+fn parent_path_repositories_ride_on_the_error() {
+    let listed = SvnError::new(SvnErrorCode::PathNotFound, "a list of repositories")
+        .with_repositories(vec![svn_types::ParentRepo {
+            name: "Dự án".into(),
+            url: "https://svn.example.test/svn/D%E1%BB%B1%20%C3%A1n".into(),
+        }]);
+    // Found through a wrapping error too.
+    let e = AppError::from(&SvnError::new(SvnErrorCode::PathNotFound, "open").with_child(listed));
+    assert_eq!(e.code, ErrorCode::PathNotFound);
+    let v = serde_json::to_value(&e).unwrap();
+    assert_eq!(
+        v["repositories"],
+        serde_json::json!([{
+            "name": "Dự án",
+            "url": "https://svn.example.test/svn/D%E1%BB%B1%20%C3%A1n",
+        }])
+    );
+    assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), e);
+    // Any other error carries none, and payloads without the field still read.
+    let plain = AppError::from(&SvnError::new(SvnErrorCode::AuthRequired, "sign in"));
+    assert!(plain.repositories.is_none());
+    let mut v = serde_json::to_value(&plain).unwrap();
+    v.as_object_mut().unwrap().remove("repositories");
+    assert_eq!(serde_json::from_value::<AppError>(v).unwrap(), plain);
 }
 
 #[test]

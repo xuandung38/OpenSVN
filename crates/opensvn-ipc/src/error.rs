@@ -66,10 +66,28 @@ pub struct AppError {
     pub actions: Option<Vec<ErrorAction>>,
     /// For `locked-by-other`: the locks held by someone else on the requested paths, as the
     /// server reports them now. `None` when the engine could not ask (or for other codes).
-    // A boxed slice keeps `AppError` (returned by every command) small.
+    // Thin boxes (one pointer each) keep `AppError`, returned by every command, small.
+    #[allow(clippy::box_collection)]
     #[serde(default)]
     #[specta(optional)]
-    pub lock_conflicts: Option<Box<[LockConflict]>>,
+    pub lock_conflicts: Option<Box<Vec<LockConflict>>>,
+    /// For `path-not-found` on a server URL that is the repository list of an `SVNParentPath`
+    /// location (VisualSVN Server's `https://host/svn/`): the repositories it lists, so the UI
+    /// can offer them. `None` for any other error.
+    #[allow(clippy::box_collection)]
+    #[serde(default)]
+    #[specta(optional)]
+    pub repositories: Option<Box<Vec<ParentRepo>>>,
+}
+
+/// A repository listed by an `SVNParentPath` location.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentRepo {
+    /// Name for display.
+    pub name: String,
+    /// Repository URL, percent-encoded.
+    pub url: String,
 }
 
 /// A lock held by someone else that refused a lock request (doc 01 §10.4: the lock dialog shows
@@ -100,6 +118,7 @@ impl AppError {
             retryable,
             actions: (!actions.is_empty()).then(|| actions.to_vec()),
             lock_conflicts: None,
+            repositories: None,
         }
     }
 
@@ -127,7 +146,7 @@ impl AppError {
 
     /// Attaches the locks that refused a lock request; an empty list attaches nothing.
     pub fn with_lock_conflicts(mut self, conflicts: Vec<LockConflict>) -> Self {
-        self.lock_conflicts = (!conflicts.is_empty()).then(|| conflicts.into_boxed_slice());
+        self.lock_conflicts = (!conflicts.is_empty()).then(|| Box::new(conflicts));
         self
     }
 }
@@ -136,6 +155,17 @@ impl From<&SvnError> for AppError {
     /// Maps an engine error: `detail` carries the svn code (`E160028`) and the cause chain.
     fn from(err: &SvnError) -> Self {
         let mut out = AppError::from_code(err.code, err.message.clone());
+        out.repositories = err.parent_repositories().map(|repos| {
+            Box::new(
+                repos
+                    .iter()
+                    .map(|r| ParentRepo {
+                        name: r.name.clone(),
+                        url: r.url.clone(),
+                    })
+                    .collect(),
+            )
+        });
         let mut parts = Vec::new();
         let mut cur = Some(err);
         while let Some(e) = cur {
@@ -154,7 +184,7 @@ impl From<&SvnError> for AppError {
 
 /// Engine error code -> (IPC code, retryable, UI actions).
 /// `Corrupt` maps to `wc-needs-cleanup`; `UnsafePath` and `ServerUnsupported` map to `internal`;
-/// `CommitOutcomeUnknown` maps to a non-retryable `network`; `LimitExceeded` maps to a
+/// `CommitOutcomeUnknown` and `WriteOutcomeUnknown` map to a non-retryable `network`; `LimitExceeded` maps to a
 /// non-retryable `invalid-argument` with no actions.
 /// The match is exhaustive on purpose: a new engine code must be mapped explicitly.
 pub fn map_svn_error_code(code: SvnErrorCode) -> (ErrorCode, bool, &'static [ErrorAction]) {
@@ -188,6 +218,8 @@ pub fn map_svn_error_code(code: SvnErrorCode) -> (ErrorCode, bool, &'static [Err
         // Never retryable: re-sending a commit that may already be a revision could apply it
         // twice. The engine message says the outcome is unknown; reconciliation is the caller's.
         S::CommitOutcomeUnknown => (ErrorCode::Network, false, &[]),
+        // Same for a lock or unlock that may have been carried out: refresh, then decide.
+        S::WriteOutcomeUnknown => (ErrorCode::Network, false, &[]),
         // A size cap, not corruption: the same request fails again, and cleanup cannot help.
         S::LimitExceeded => (ErrorCode::InvalidArgument, false, &[]),
         S::Corrupt => (ErrorCode::WcNeedsCleanup, false, &[A::Cleanup]),
