@@ -29,11 +29,12 @@ Every case uses its own copy of the repository and of the template:
    - `tests/sigkill.rs`: at a uniformly random moment of the operation's measured duration (x1.1,
      so some runs complete);
    - `tests/failpoints.rs` (feature `failpoints`): at hit *k* of a named failpoint of `svn-wc` /
-     `svn-client`. The worker arms the `fail` crate with a callback that sends itself `SIGKILL`.
+     `svn-client` / `svn-ra`. The worker arms the `fail` crate with a callback that sends itself `SIGKILL`.
      First, an uninterrupted run counts the hits. Then the worker is killed at the first hit, the
      last hit and random hits in between. Examples: `commit.after_merge_before_finalize` is
      "after MERGE"; `update.after_txn_before_queue` #k is "mid-update with local edits" after k
-     files; `wc.create.*` is a checkout killed while it builds `wc.db`; `wc.txn.*`, `wc.wq.*`,
+     files; `net.update.mid_stream` #k is a checkout or update killed while the REPORT is still
+     streaming in, after its k-th chunk; `wc.create.*` is a checkout killed while it builds `wc.db`; `wc.txn.*`, `wc.wq.*`,
      `pristine.install.before_rename` cover every database transaction, work item and pristine
      install.
 2. Right after the kill: `PRAGMA integrity_check` and `foreign_key_check`, no NODES row without a
@@ -81,7 +82,8 @@ cargo test -p opensvn-crash --features failpoints --test failpoints -- --ignored
 The tests are `#[ignore]` so that `cargo test --workspace` stays fast and needs no server. The
 nightly workflow (`.github/workflows/nightly.yml`) runs over 1000 cases.
 
-The crate's `failpoints` feature is off by default. Turning it on enables `svn-client/failpoints`,
+The crate's `failpoints` feature is off by default. Turning it on enables `svn-client/failpoints`
+and `svn-ra/failpoints`,
 and keeping it off means `cargo test --workspace` never compiles the engine with failpoints through
 feature unification.
 

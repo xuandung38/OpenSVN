@@ -2,7 +2,7 @@
 
 Đọc file này trước khi nhận việc. Lệnh build/test, quy tắc đặt tên nhánh và cấu trúc repo nằm ở `docs/contributing.md`. Kiến trúc nằm ở `docs/system-architecture.md`.
 
-Cập nhật lần cuối: 2026-10-15, main tại `56d1f06`.
+Cập nhật lần cuối: 2026-10-15, main tại `1d86c54`.
 
 ---
 
@@ -87,6 +87,7 @@ Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #
 | #171 `feat/parent-path-repo-list` | URL server VisualSVN `https://host/svn/` hiện danh sách repo để chọn | #133 | Đang review |
 | #169 `ci/release-gating-publish` | Quy trình phát hành: environment có duyệt, ký số tùy chọn, tự đẩy sang `OpenSVN-releases` | #22 | Đang review |
 | #170 `perf/bench-100k-crash-soak` | Benchmark 100k file với svn 1.15, crash test cho switch, soak 2 giờ, test chạy đồng thời với svn CLI | #121, #21 | Đang code |
+| `test/two-way-compat` | Engine và svn 1.14/1.15 dùng chung WC qua HTTPS (`EngineDriver`, scenario `client/`, interop hai chiều); suite oracle svn-client chạy được với svn 1.14; failpoint `net.update.mid_stream`; `docs/tortoisesvn-checklist.md`. Sửa kèm: switch xóa file (`rev="-1"`), cache inherited props, `bump_moved_away` | #15, #16 | Đang review |
 | #167 `test/fixtures-hostile-repo` | Fixture WC format 31 từ svn 1.15 (42 trạng thái) và f32 (43 trạng thái); repo "độc" + evil server chạy không cần Docker; e2e `hostile.test.mjs`; `xtask compat fixtures` chạy các generator; log/author có UTF-8 hỏng hiển thị bằng U+FFFD | #8, #18 | Đang review |
 
 Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: xem/diff file Word/Excel, hiển thị %/ETA khi checkout, giữ nguyên byte đường dẫn (NFC/NFD), build Mac. Hỏi chủ repo trước khi làm những mảng này.
@@ -108,11 +109,14 @@ Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo,
 11. **"Retry now" bấm khi thao tác chưa chờ mạng (#172, follow-up).** `OperationManager::retry_now` gọi `Notify::notify_one`, nên một lần bấm (hoặc một lần thức dậy) khi thao tác đang chạy bình thường để lại permit; lần mất mạng sau bỏ qua khoảng chờ đầu tiên. Vô hại nhưng nên chỉ đánh thức khi đang chờ.
 12. **Đếm ngược "thử lại sau Ns" đọc lại mỗi giây (#172, follow-up).** `connection-wait.tsx` đặt `role="status"` lên đoạn chữ đổi mỗi giây, nên trình đọc màn hình đọc liên tục. Nên để vùng live chỉ báo "Mất kết nối" và ẩn phần đếm ngược khỏi vùng live.
 13. **"Update lên bản mới nhất" của checkout dở bỏ qua lựa chọn ignore-externals (#172, follow-up).** Nút này chạy update thường, nên tải cả externals dù checkout ban đầu chọn bỏ qua. Nên đọc journal checkout như `wc_continue`.
+14. **Switch sang URL không chung lịch sử (two-way compat, follow-up).** svn từ chối (`E195012`, cần `--ignore-ancestry`), engine thì switch luôn. Thêm kiểm tra ancestry (location segments) cho `svn_client::switch` và tùy chọn bỏ qua trong IPC.
+15. **Incoming edit trên node đã move (two-way compat, follow-up).** svn 1.15 tạo tree conflict "local move away, incoming edit" và `resolve --accept mine-conflict` đẩy thay đổi sang đích. Engine mới chỉ nâng revision của đích khi nguồn không đổi (`bump_moved_away` trong `crates/svn-wc/src/db/txn.rs`).
+16. **`dav_cache` (two-way compat, follow-up).** svn lưu `svn:wc:ra_dav:version-url` vào `NODES.dav_cache`, engine để trống; scenario so sánh với `ignore: [dav_cache]`. svn tự hỏi server khi trống, nên chỉ cần làm nếu muốn wc.db giống hệt.
 
 ## 6. Việc cần người thật (không tự động được)
 
 - **Kiểm trên 3 OS với VisualSVN thật** (#6, #17, #19, #20): đăng nhập SSO và Basic, browse, history, blame, lock, tạo branch, checkout lớn. Dùng `docs/visualsvn-iwa-checklist.md`.
-- **Kiểm chéo với TortoiseSVN** (#15, #16): OpenSVN tạo working copy rồi TortoiseSVN mở và commit, và làm chiều ngược lại.
+- **Kiểm chéo với TortoiseSVN** (#15, #16): OpenSVN tạo working copy rồi TortoiseSVN mở và commit, và làm chiều ngược lại. Làm theo `docs/tortoisesvn-checklist.md` (overlay, commit, update, cleanup, lock, TSVNCache); phần dùng chung libsvn đã tự động hóa bằng `compat_two_way`.
 - **Ký số và phát hành** (#22): Apple Developer ID, Authenticode, cặp khóa minisign, repo `OpenSVN-releases` và token fine-grained. Làm theo `docs/RELEASE-SETUP.md` (có sau khi #169 merge).
 - **GitHub Actions không có runner:** chủ repo kiểm tra Billing/Runners của repo.
 - **Bản macOS:** build trên máy Mac.

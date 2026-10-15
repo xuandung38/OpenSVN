@@ -5177,6 +5177,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "cross-krb5",
+ "fail",
  "futures-util",
  "http-body-util",
  "hyper",

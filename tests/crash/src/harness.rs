@@ -31,8 +31,9 @@ use crate::tree::{Entry, copy_dir, snapshot};
 use crate::worker::{FP_ENV, FP_HIT_ENV};
 use crate::{Result, err, verify};
 
-/// Every failpoint of `svn-wc` and `svn-client` (feature `failpoints`).
+/// Every failpoint of `svn-wc`, `svn-client` and `svn-ra` (feature `failpoints`).
 pub const FAILPOINTS: &[&str] = &[
+    "net.update.mid_stream",
     "wc.create.before_schema",
     "wc.create.before_rename",
     "pristine.install.before_rename",

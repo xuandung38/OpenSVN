@@ -198,6 +198,14 @@ async fn drive(
         for event in parser.feed(&chunk)? {
             bridge.handle(event).await?;
         }
+        // The REPORT breaks off here with part of the drive applied: the crash suite kills the
+        // process at this point, other tests see the connection closed by the server.
+        #[cfg(feature = "failpoints")]
+        fail::fail_point!("net.update.mid_stream", |_| Err(SvnError::new(
+            ErrorCode::Network,
+            "failpoint net.update.mid_stream"
+        )
+        .with_connection(svn_types::ConnectionFailure::ConnectionClosedByServer)));
     }
     for event in parser.finish()? {
         bridge.handle(event).await?;
