@@ -14,4 +14,5 @@ mod remote_tests;
 mod scaffold_tests;
 mod support;
 mod sync_tests;
+mod watcher_latency_tests;
 mod wc_status_tests;

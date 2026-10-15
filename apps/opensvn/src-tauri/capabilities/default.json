@@ -30,6 +30,8 @@
     "allow-layout-detect",
     "allow-copy-location",
     "allow-op-cancel",
+    "allow-op-retry-now",
+    "allow-wc-continue",
     "allow-op-list",
     "allow-auth-respond",
     "allow-accounts-list",

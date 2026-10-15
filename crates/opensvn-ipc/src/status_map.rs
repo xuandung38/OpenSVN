@@ -18,9 +18,8 @@ fn map_lock(lock: &svn_types::LockInfo, mine: bool) -> LockInfo {
     }
 }
 
-/// Maps an engine node status. `None` and `Incomplete` have no IPC equivalent:
-/// `None` is shown as unversioned, `Incomplete` (interrupted update) as obstructed so the UI
-/// flags the node. Returns `None` for `Excluded` nodes, which the UI never lists.
+/// Maps an engine node status. `None` has no IPC equivalent and is shown as unversioned.
+/// Returns `None` for `Excluded` nodes, which the UI never lists.
 fn map_node_status(s: SvnNodeStatus) -> Option<NodeStatus> {
     Some(match s {
         SvnNodeStatus::None | SvnNodeStatus::Unversioned => NodeStatus::Unversioned,
@@ -30,7 +29,8 @@ fn map_node_status(s: SvnNodeStatus) -> Option<NodeStatus> {
         SvnNodeStatus::Modified => NodeStatus::Modified,
         SvnNodeStatus::Replaced => NodeStatus::Replaced,
         SvnNodeStatus::Missing => NodeStatus::Missing,
-        SvnNodeStatus::Obstructed | SvnNodeStatus::Incomplete => NodeStatus::Obstructed,
+        SvnNodeStatus::Obstructed => NodeStatus::Obstructed,
+        SvnNodeStatus::Incomplete => NodeStatus::Incomplete,
         SvnNodeStatus::Ignored => NodeStatus::Ignored,
         SvnNodeStatus::Conflicted => NodeStatus::Conflicted,
         SvnNodeStatus::External => NodeStatus::External,

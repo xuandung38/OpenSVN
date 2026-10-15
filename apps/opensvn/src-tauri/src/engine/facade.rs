@@ -61,6 +61,10 @@ pub struct WcInfo {
     /// Some folder is recorded as incomplete: a checkout or update stopped before it finished.
     /// An update of the working copy finishes it.
     pub incomplete: bool,
+    /// The revision the interrupted checkout or update was reaching, as wc.db records it on the
+    /// incomplete folders (the highest when they differ); `None` when nothing is incomplete.
+    /// Continuing at this revision finishes the working copy exactly as it was asked for.
+    pub resume_rev: Option<Rev>,
 }
 
 /// A checkout with its destination already resolved from a path grant.
@@ -276,6 +280,29 @@ pub trait EngineFacade: Send + Sync {
     async fn status_remote(&self, wc: &WcRef, ctx: &OpContext) -> EngineResult<RemoteScan>;
     /// Updates; returns the revision reached.
     async fn update(&self, wc: &WcRef, req: &UpdateRequest, ctx: &OpContext) -> EngineResult<Rev>;
+    /// Finishes an interrupted checkout or update of the whole working copy at `rev`, the
+    /// revision it was reaching ([`WcInfo::resume_rev`]), with the recorded depths and with
+    /// externals unless `ignore_externals` (the choice of the interrupted checkout).
+    async fn resume(
+        &self,
+        wc: &WcRef,
+        rev: Rev,
+        ignore_externals: bool,
+        ctx: &OpContext,
+    ) -> EngineResult<Rev> {
+        let _ = ignore_externals;
+        let req = UpdateRequest {
+            wc_id: wc.id.clone(),
+            paths: None,
+            rev: Some(rev),
+            depth: None,
+        };
+        self.update(wc, &req, ctx).await
+    }
+    /// The system woke up from sleep: connections in use are most likely dead. Reads waiting
+    /// on them fail at once (as a broken connection, which a checkout or update resumes) and
+    /// idle connections are dropped. The default does nothing.
+    fn system_woke(&self) {}
     /// Switches to `url`; returns the revision reached.
     async fn switch(
         &self,

@@ -4,6 +4,8 @@ import { defineStrings } from "../lib/i18n/i18n";
 export const shellStrings = defineStrings({
   en: {
     views: "Views",
+    branch: "Branch",
+    location: "Location",
     workingCopies: "Working copies",
     changes: "Changes",
     history: "History",
@@ -18,6 +20,8 @@ export const shellStrings = defineStrings({
   },
   vi: {
     views: "Chế độ xem",
+    branch: "Branch",
+    location: "Vị trí",
     workingCopies: "Working copy",
     changes: "Thay đổi",
     history: "Lịch sử",

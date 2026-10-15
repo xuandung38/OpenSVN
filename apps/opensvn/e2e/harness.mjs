@@ -151,7 +151,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** The app under test with its own home, data and config folders. */
 export class App {
-  static async start(tag) {
+  /** `extraEnv` is merged last (e.g. a `PATH` with recording stand-ins for OS launchers). */
+  static async start(tag, extraEnv = {}) {
     const home = mkdtempSync(join(tmpdir(), `opensvn-e2e-${tag}-`));
     const env = {
       ...process.env,
@@ -162,6 +163,7 @@ export class App {
       OPENSVN_ENGINE: "real",
       // No accessibility bus or keyring in CI containers; GTK must not wait for them.
       NO_AT_BRIDGE: "1",
+      ...extraEnv,
     };
     for (const d of ["data", "config", "cache"]) mkdirSync(join(home, d), { recursive: true });
     const port = await freePort();

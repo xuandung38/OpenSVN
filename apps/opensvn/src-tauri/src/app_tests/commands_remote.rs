@@ -575,7 +575,7 @@ async fn a_lock_held_elsewhere_fails_with_its_owner_and_only_an_explicit_steal_t
     let err = f.wait_op(&h).await.unwrap_err();
     assert_eq!(err.code, opensvn_ipc::ErrorCode::LockedByOther);
     assert_eq!(
-        err.actions,
+        err.actions.as_deref().cloned(),
         Some(vec![opensvn_ipc::ErrorAction::OpenLockDialog])
     );
     let conflicts = err.lock_conflicts.expect("the refusal names the lock");

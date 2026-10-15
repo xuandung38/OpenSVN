@@ -136,6 +136,11 @@ pub struct SvnError {
     pub svn_code: Option<u32>,
     /// How the connection failed, when this is a classified network failure.
     pub connection: Option<ConnectionFailure>,
+    /// No connection could be made at all: the host name did not resolve, the connection was
+    /// refused, or the network or host was unreachable. Nothing was sent, so this is never an
+    /// outcome-unknown write; kept apart from [`SvnError::connection`] so that write paths keep
+    /// their own rules.
+    pub unreachable: bool,
     /// The repositories of the `SVNParentPath` location the URL turned out to be (VisualSVN
     /// Server's `https://host/svn/`), when it is one and the server lists them.
     pub repositories: Option<Box<[ParentRepo]>>,
@@ -164,9 +169,37 @@ impl SvnError {
             message: message.into(),
             svn_code: None,
             connection: None,
+            unreachable: false,
             repositories: None,
             child: None,
         }
+    }
+
+    /// Marks the server as unreachable (see [`SvnError::unreachable`]).
+    #[must_use]
+    pub fn with_unreachable(mut self) -> Self {
+        self.unreachable = true;
+        self
+    }
+
+    /// Whether this error or one of its causes says the server could not be reached.
+    pub fn is_unreachable(&self) -> bool {
+        let mut e = Some(self);
+        while let Some(err) = e {
+            if err.unreachable {
+                return true;
+            }
+            e = err.child.as_deref();
+        }
+        false
+    }
+
+    /// A failure of the network path to the server rather than of the request: a broken
+    /// connection ([`SvnError::connection_failure`]) or an unreachable server. A read-only
+    /// operation may wait for the network and try again; cancellation never counts.
+    pub fn is_connection_class(&self) -> bool {
+        self.code != ErrorCode::Cancelled
+            && (self.connection_failure().is_some() || self.is_unreachable())
     }
 
     /// Attaches the repositories of the parent-path location the URL turned out to be.

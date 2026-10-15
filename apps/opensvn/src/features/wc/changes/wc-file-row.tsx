@@ -1,5 +1,6 @@
 import { memo } from "react";
 import { LockBadge } from "../../../components/ui/lock-badge";
+import { RowCheck } from "../../../components/ui/row-check";
 import { SafeText } from "../../../components/ui/safe-text";
 import { StatusGlyph } from "../../../components/ui/status-glyph";
 import { cn } from "../../../lib/cn";
@@ -58,17 +59,10 @@ export const WcFileRow = memo(function WcFileRow(p: WcFileRowProps) {
           "group-focus-visible:outline-2 group-focus-visible:-outline-offset-2 group-focus-visible:outline-accent",
       )}
     >
-      <input
-        type="checkbox"
-        tabIndex={-1}
-        aria-hidden="true"
+      <RowCheck
         checked={p.checked}
-        onClick={(e) => {
-          e.stopPropagation();
-          p.onPointerActivate();
-        }}
-        onChange={() => p.onToggle(p.path)}
-        className="m-0 h-[14px] w-[14px] accent-[var(--accent)]"
+        onToggle={() => p.onToggle(p.path)}
+        onPointerActivate={p.onPointerActivate}
       />
       <StatusGlyph code={p.glyph} />
       <span className="min-w-0 truncate font-mono text-[12px]" title={shown}>

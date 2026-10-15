@@ -141,6 +141,27 @@ impl RaSession for HttpRaSession {
         Ok(())
     }
 
+    async fn probe(&self, cancel: &CancelToken) -> Result<()> {
+        // Any HTTP answer, even a refusal, means the server is reachable again; a gateway that
+        // cannot reach it (502-504) does not. Never prompts: a sign-in the session already has
+        // is used, anything else comes back as an error that is not a connection failure.
+        let req = options_request(&self.repos_root)?;
+        let resp = self.wire.send_unattended(req, cancel).await?;
+        let status = resp.status().as_u16();
+        if (502..=504).contains(&status) {
+            return Err(SvnError::new(
+                ErrorCode::Network,
+                format!("the server is not reachable through its gateway (HTTP {status})"),
+            )
+            .with_unreachable());
+        }
+        Ok(())
+    }
+
+    fn reset_connections(&self) {
+        self.wire.transport().reset_connections();
+    }
+
     async fn youngest_rev(&self, cancel: &CancelToken) -> Result<Revnum> {
         read::youngest_rev(&self.wire, cancel).await
     }
