@@ -10,9 +10,11 @@ use crate::ctx::{ClientCtx, UpdateSummary};
 use crate::update::{UpdateKind, UpdateParams, drive_update};
 use crate::wc;
 
+/// Resolves `path` like svn does (lexically, see [`wc::open_target`]): a target that is deleted
+/// or missing on disk can still be updated.
 async fn open(ctx: &ClientCtx, path: &Path) -> Result<(Arc<svn_wc::db::WcDb>, svn_types::RelPath)> {
     let (owner, path) = (ctx.lock_owner.clone(), path.to_path_buf());
-    let (db, rel) = tokio::task::spawn_blocking(move || wc::open_containing(&owner, &path))
+    let (db, rel) = tokio::task::spawn_blocking(move || wc::open_target(&owner, &path))
         .await
         .map_err(|e| SvnError::new(ErrorCode::Internal, format!("worker failed: {e}")))??;
     Ok((Arc::new(db), rel))

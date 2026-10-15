@@ -30,6 +30,12 @@ pub struct UpdateSetup {
     pub sticky_depth: bool,
     /// An unversioned file that is in the way is adopted instead of becoming a tree conflict.
     pub allow_unversioned_obstructions: bool,
+    /// The update target was missing on disk, or an empty directory, when the update started
+    /// (svn's "clean checkout" optimization, `is_empty_wc`): a node the server adds is not
+    /// checked against wc.db, so neither a local node nor a tree conflict recorded earlier in
+    /// the drive (a replacement) shadows it. What is on disk is still checked: an unversioned
+    /// item in the way stays an obstruction.
+    pub clean: bool,
     /// Repository root URL as stored in wc.db.
     pub repos_root: String,
     /// Repository UUID.

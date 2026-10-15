@@ -186,6 +186,17 @@ impl UpdateEditor {
             if f.adopt_existing && disk_exists {
                 action = UpdateAction::Existed;
                 keep_fileinfo = false;
+            } else if self.s.clean && self.below_working_layer(&db, &wc)? {
+                // A clean update adds without looking at wc.db (see `UpdateSetup::clean`), so a
+                // working layer of the user may lie over the new BASE node: a local add of the
+                // same name, or the `base-deleted` row that extends a deleted or added parent.
+                // An install from the pristine store reads that layer, which records no text;
+                // like svn's working file writer, the file is prepared from the new BASE here.
+                let sha =
+                    new_sha.ok_or_else(|| corrupt(format!("added file '{wc}' has no text")))?;
+                let tmp = self.working_text(&db, &wc, &f, sha, &pm.new_pristine)?;
+                work.extend(install_prepared(&rel_str, &tmp)?);
+                merge_tmp.push(tmp);
             } else {
                 work.push(
                     WorkItem::FileInstall {
@@ -358,6 +369,9 @@ impl UpdateEditor {
         let path = wc.clone();
         let shadow = f.shadow;
         let had_base = old.is_some();
+        // svn sets the ACTUAL properties of every node it does not shadow; a clean update's add
+        // can find a local add's properties there (they go, its changelist stays).
+        let clean_add = self.s.clean && f.added;
         self.defer(
             &wc,
             Box::new(move |t| {
@@ -374,7 +388,7 @@ impl UpdateEditor {
                 } else if obstructed {
                     t.mark_base_deleted(&path, NodeKind::File)?;
                 }
-                if !shadowed && (had_base || overlay.is_some()) {
+                if !shadowed && (had_base || clean_add || overlay.is_some()) {
                     t.set_actual_props(&path, overlay.as_ref())?;
                 }
                 if !conflicts.is_empty() {
@@ -395,6 +409,64 @@ impl UpdateEditor {
             self.skipped.push(wc);
         }
         Ok(())
+    }
+
+    /// True when a working layer of the user covers `wc` or one of its parents: the new BASE
+    /// node then lies below a local add or below a `base-deleted` row (see
+    /// `svn_wc::db::WcTxn::base_add`). Rows this drive has not committed yet are BASE rows; the
+    /// working layers they extend were committed by the user.
+    fn below_working_layer(&self, db: &WcDb, wc: &RelPath) -> Result<bool> {
+        let mut path = Some(wc.clone());
+        while let Some(p) = path {
+            if db.read_node(&p)?.is_some_and(|n| n.op_depth > 0) {
+                return Ok(true);
+            }
+            path = p.parent();
+        }
+        Ok(false)
+    }
+
+    /// The working file of the added file `f` in `.svn/tmp`, from the new pristine text `sha`,
+    /// translated and flagged by its new BASE properties `props` like svn's
+    /// `open_working_file_writer`. A node new to the working copy holds no lock token, so
+    /// `svn:needs-lock` makes it read-only.
+    fn working_text(
+        &self,
+        db: &WcDb,
+        wc: &RelPath,
+        f: &FileState,
+        sha: Sha1Digest,
+        props: &Props,
+    ) -> Result<tempfile::TempPath> {
+        let info = svn_wc::workqueue::NodeInstallInfo {
+            checksum: Some(sha),
+            props: props
+                .iter()
+                .map(|(k, v)| (String::from_utf8_lossy(k).into_owned(), v.clone()))
+                .collect(),
+            changed_date_micros: f.entry.date,
+            changed_rev: f.entry.rev.and_then(|r| i64::try_from(r).ok()),
+            changed_author: f.entry.author.clone(),
+            repos_relpath: f.new_repos.clone(),
+            repos_root_url: self.s.repos_root.clone(),
+            is_added: false,
+            has_lock: false,
+        };
+        let read_only = info.props.contains_key("svn:needs-lock");
+        let mtime = f.entry.date.filter(|_| self.s.ctx.config.use_commit_times);
+        // The new text sits in the store already; its row is still pending (see `super::batch`).
+        let source = db.pristine_store().path_of(&sha);
+        let mut reader = File::open(&source)
+            .map_err(|e| SvnError::from_io(format!("cannot open the new text of '{wc}'"), &e))?;
+        svn_wc::workqueue::write_working_text(
+            &tmp_dir(db),
+            &mut reader,
+            &info,
+            read_only,
+            mtime,
+            &svn_wc::translate::utc_offset_local,
+        )
+        .map_err(SvnError::from)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -545,6 +617,27 @@ fn install_merged(rel: &str, tmp: &tempfile::TempPath, _conflicted: bool) -> Res
         }
         .to_skel(),
         WorkItem::FileRemove { relpath: src }.to_skel(),
+    ])
+}
+
+/// Work items that rename a file prepared by [`UpdateEditor::working_text`] into place and record
+/// its size and mtime on the node's top layer, as svn's `install_working_file` does.
+fn install_prepared(rel: &str, tmp: &tempfile::TempPath) -> Result<Vec<Skel>> {
+    let name = tmp
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| corrupt("install temp file has no name"))?;
+    Ok(vec![
+        WorkItem::FileMove {
+            src: format!("{}/tmp/{name}", svn_wc::db::ADM_DIR),
+            dst: rel.to_owned(),
+        }
+        .to_skel(),
+        WorkItem::RecordFileinfo {
+            relpath: rel.to_owned(),
+            mtime: None,
+        }
+        .to_skel(),
     ])
 }
 

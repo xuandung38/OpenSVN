@@ -628,3 +628,77 @@ fn batch_writers_for_commit_post_processing() {
         Some(rec)
     );
 }
+
+#[test]
+fn an_install_of_a_node_without_text_is_refused_with_its_transaction() {
+    let (tmp, db) = new_wc();
+    let install = |path: &str| {
+        WorkItem::FileInstall {
+            relpath: path.into(),
+            use_commit_times: false,
+            record_fileinfo: true,
+            source: None,
+        }
+        .to_skel()
+    };
+    // No checksum on the top layer (as on a plain local add), or no node at all: the item
+    // would fail at every run of the queue, so the whole transaction is refused.
+    for (path, node) in [
+        ("added.txt", Some(base_file("added.txt", 1, None))),
+        ("ghost.txt", None),
+    ] {
+        let err = db
+            .with_txn(|t| {
+                if let Some(n) = &node {
+                    t.base_add(&rp(path), n)?;
+                }
+                t.queue_work(&[install(path)])
+            })
+            .expect_err(path);
+        assert_eq!(err.code, ErrorCode::Corrupt, "{path}: {err}");
+        assert!(db.read_node(&rp(path)).expect("read").is_none(), "{path}");
+    }
+    assert!(db.work_items().expect("items").is_empty());
+
+    // An install from another file does not read the node's text and is queued as before.
+    let from_tmp = WorkItem::FileInstall {
+        relpath: "added.txt".into(),
+        use_commit_times: false,
+        record_fileinfo: false,
+        source: Some(".svn/tmp/merged".into()),
+    }
+    .to_skel();
+    db.with_txn(|t| t.queue_work(std::slice::from_ref(&from_tmp)))
+        .expect("install from a file");
+    assert_eq!(db.work_items().expect("items").len(), 1);
+    drop(tmp);
+}
+
+#[test]
+fn a_new_base_node_below_a_deleted_directory_is_deleted_in_its_layer() {
+    let (_tmp, db) = new_wc();
+    let sha = install_text(&db, b"text\n");
+    let mut d = base_file("d", 1, None);
+    d.kind = NodeKind::Dir;
+    d.depth = Some(Depth::Infinity);
+    db.with_txn(|t| {
+        t.base_add(&rp("d"), &d)?;
+        t.base_add(&rp("d/a"), &base_file("d/a", 1, Some(sha.to_svn_string())))
+    })
+    .expect("base");
+    db.op_delete(&rp("d"), &[]).expect("delete d");
+
+    // svn's `insert_base_node` extends the delete over a present node it adds below `d`...
+    db.with_txn(|t| t.base_add(&rp("d/b"), &base_file("d/b", 2, Some(sha.to_svn_string()))))
+        .expect("add d/b");
+    let b = db.read_node(&rp("d/b")).expect("read").expect("d/b");
+    assert_eq!((b.op_depth, b.presence), (1, Presence::BaseDeleted));
+
+    // ...but not over a `not-present` one.
+    let mut gone = base_file("d/c", 2, None);
+    gone.presence = Presence::NotPresent;
+    db.with_txn(|t| t.base_add(&rp("d/c"), &gone))
+        .expect("add d/c");
+    let c = db.read_node(&rp("d/c")).expect("read").expect("d/c");
+    assert_eq!((c.op_depth, c.presence), (0, Presence::NotPresent));
+}

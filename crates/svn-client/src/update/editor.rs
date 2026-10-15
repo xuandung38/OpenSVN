@@ -313,6 +313,7 @@ impl UpdateEditor {
         })();
         if let Err(e) = committed {
             self.poisoned = true;
+            keep_queued(&self.s.db, p.keep);
             return Err(e);
         }
         if has_ops {
@@ -867,13 +868,16 @@ impl DeltaEditor for UpdateEditor {
         let mut shadow = p.shadow;
         let mut obstructed = false;
         let mut tree_conflict = None;
-        let (existing, base) = if p.fresh {
+        // A clean update (see `UpdateSetup::clean`) does not look at wc.db here, like svn: a
+        // tree conflict this drive recorded on the deleted node stays, it is no replacement.
+        let (existing, base) = if p.fresh || self.s.clean {
             (None, None)
         } else {
             (self.s.db.read_node(&wc)?, self.s.db.read_base(&wc)?)
         };
         if !skipped
             && shadow.is_none()
+            && !self.s.clean
             && let Some(layer) = self.take_replacement(&wc, &new_repos, NodeKind::Dir)?
         {
             shadow = Some(layer);
@@ -1158,6 +1162,45 @@ impl DeltaEditor for UpdateEditor {
     }
 }
 
+/// Deletes the temporary files of a batch whose transaction failed, except those the work queue
+/// names: a failure reported after COMMIT leaves the queued work owning them (it installs from
+/// them and removes them), so deleting them would break the item at every later run.
+fn keep_queued(db: &svn_wc::db::WcDb, files: Vec<tempfile::TempPath>) {
+    if files.is_empty() {
+        return;
+    }
+    let queued: HashSet<String> = match db.work_items() {
+        Ok(items) => items
+            .iter()
+            .filter_map(|(_, skel)| WorkItem::from_skel(skel).ok())
+            .flat_map(|item| match item {
+                WorkItem::FileInstall {
+                    source: Some(src), ..
+                } => vec![src],
+                WorkItem::FileMove { src, .. } => vec![src],
+                WorkItem::FileRemove { relpath } => vec![relpath],
+                _ => Vec::new(),
+            })
+            .collect(),
+        Err(e) => {
+            // Unknown: keeping a file costs a leftover in `.svn/tmp`, deleting one a wedge.
+            tracing::debug!("cannot read the work queue after a failed commit: {e}");
+            for tmp in files {
+                let _ = tmp.keep();
+            }
+            return;
+        }
+    };
+    for tmp in files {
+        let name = tmp
+            .file_name()
+            .map(|n| format!("{}/tmp/{}", svn_wc::db::ADM_DIR, n.to_string_lossy()));
+        if name.is_some_and(|n| queued.contains(&n)) {
+            let _ = tmp.keep();
+        }
+    }
+}
+
 impl UpdateEditor {
     fn absent(&mut self, path: &RelPath, parent: DirId, kind: NodeKind) -> Result<()> {
         let p = self.parent_info(parent)?;
@@ -1182,7 +1225,9 @@ impl UpdateEditor {
             skipped = true;
         }
         let name = wc.file_name().unwrap_or("").to_owned();
-        let base = if p.fresh {
+        // An add of a clean update does not look at wc.db (see `add_directory`).
+        let blind = p.fresh || (add && self.s.clean);
+        let base = if blind {
             None
         } else {
             self.s
@@ -1213,17 +1258,17 @@ impl UpdateEditor {
         let mut tree_conflict = None;
         let mut adopt_existing = false;
         let mut shadow = if skipped { None } else { p.shadow };
-        if !skipped && add && shadow.is_none() {
+        if !skipped && add && !blind && shadow.is_none() {
             shadow = self.take_replacement(&wc, &new_repos, NodeKind::File)?;
         }
         let replacing = shadow.is_some() && p.shadow.is_none();
-        if !skipped && !replacing && !p.fresh && self.s.db.conflict(&wc)?.is_some() {
+        if !skipped && !replacing && !blind && self.s.db.conflict(&wc)?.is_some() {
             skipped = true;
             self.skipped.push(wc.clone());
             self.emit(&wc, NodeKind::File, UpdateAction::Skipped);
         }
         if !skipped && shadow.is_none() {
-            let cur = if p.fresh {
+            let cur = if blind {
                 None
             } else {
                 self.s.db.read_node(&wc)?

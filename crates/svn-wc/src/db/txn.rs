@@ -605,38 +605,9 @@ impl WcTxn<'_> {
         Ok(n > 0)
     }
 
-    /// svn's `db_extend_parent_delete`: when the parent of `path` has a working layer deeper
-    /// than `op_depth`, `path` gets a `base-deleted` row in it (unless it already has a row
-    /// at or above that depth).
+    /// svn's `db_extend_parent_delete` (see [`ops::extend_parent_delete`]).
     fn extend_parent_delete(&self, path: &RelPath, kind: &str, op_depth: u32) -> Result<()> {
-        let lowest = |p: &str| -> Result<Option<u32>> {
-            self.conn
-                .query_row(
-                    "SELECT op_depth FROM nodes WHERE wc_id = ?1 AND local_relpath = ?2 \
-                     AND op_depth > ?3 ORDER BY op_depth LIMIT 1",
-                    params![self.wc_id, p, op_depth],
-                    |r| r.get(0),
-                )
-                .map(Some)
-                .or_else(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    e => Err(sql_err(e)),
-                })
-        };
-        let parent = parent_text(path).unwrap_or_default();
-        let Some(parent_op_depth) = lowest(&parent)? else {
-            return Ok(());
-        };
-        if lowest(path.as_str())?.is_none_or(|existing| parent_op_depth < existing) {
-            self.conn
-                .execute(
-                    "INSERT OR REPLACE INTO nodes (wc_id, local_relpath, op_depth, parent_relpath, \
-                     presence, kind) VALUES (?1, ?2, ?3, ?4, 'base-deleted', ?5)",
-                    params![self.wc_id, path.as_str(), parent_op_depth, parent, kind],
-                )
-                .map_err(sql_err)?;
-        }
-        Ok(())
+        ops::extend_parent_delete(self.conn, self.wc_id, path, kind, op_depth)
     }
 
     /// Adds a `base-deleted` working row over the BASE node at `path`: the node exists in the
@@ -740,7 +711,7 @@ impl WcTxn<'_> {
 
     /// Appends serialized work items to the queue.
     pub fn queue_work(&self, items: &[Skel]) -> Result<()> {
-        ops::queue_work(self.conn, items)
+        ops::queue_work(self.conn, self.wc_id, items)
     }
 
     /// Completes work items that already ran ([`Unsettled`] from

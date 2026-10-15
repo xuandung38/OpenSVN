@@ -315,6 +315,7 @@ fn apply(
         depth: Depth::Infinity,
         sticky_depth: false,
         allow_unversioned_obstructions: false,
+        clean: false,
         repos_root: p.repos_root.clone(),
         uuid: p.uuid.clone(),
         ctx: ctx.clone(),

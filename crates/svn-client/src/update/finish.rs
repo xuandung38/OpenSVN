@@ -93,7 +93,16 @@ impl UpdateEditor {
             // rows and the disk stay as they are.
             let keep_as_working = reason == TreeReason::Edited;
             let repos = base.repos_relpath.clone().unwrap_or_default();
-            let (old, new) = self.side(Some(&base), &repos, NodeKind::None);
+            // The left side has the kind of the local node (svn's `delete_entry` reads the
+            // working node): a file replaced locally by a directory is a directory there.
+            let mut left = base;
+            if let Some(c) = shadowing
+                .as_ref()
+                .filter(|c| c.presence != Presence::BaseDeleted)
+            {
+                left.kind = c.kind;
+            }
+            let (old, new) = self.side(Some(&left), &repos, NodeKind::None);
             let info = conflict_record::operation_info(
                 self.s.switch_relpath.is_some(),
                 &self.s.repos_root,
@@ -124,7 +133,7 @@ impl UpdateEditor {
             )?;
             self.batch.removed(wc.clone());
             self.skipped.push(wc.clone());
-            self.deletion_conflicts.insert(wc.clone(), (base, reason));
+            self.deletion_conflicts.insert(wc.clone(), (left, reason));
             self.emit(wc, NodeKind::None, UpdateAction::TreeConflicted);
             return Ok(());
         }
