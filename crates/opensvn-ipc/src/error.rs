@@ -70,6 +70,22 @@ pub struct AppError {
     #[serde(default)]
     #[specta(optional)]
     pub lock_conflicts: Option<Box<[LockConflict]>>,
+    /// For `path-not-found` on a server URL that is the repository list of an `SVNParentPath`
+    /// location (VisualSVN Server's `https://host/svn/`): the repositories it lists, so the UI
+    /// can offer them. `None` for any other error.
+    #[serde(default)]
+    #[specta(optional)]
+    pub repositories: Option<Box<[ParentRepo]>>,
+}
+
+/// A repository listed by an `SVNParentPath` location.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentRepo {
+    /// Name for display.
+    pub name: String,
+    /// Repository URL, percent-encoded.
+    pub url: String,
 }
 
 /// A lock held by someone else that refused a lock request (doc 01 §10.4: the lock dialog shows
@@ -100,6 +116,7 @@ impl AppError {
             retryable,
             actions: (!actions.is_empty()).then(|| actions.to_vec()),
             lock_conflicts: None,
+            repositories: None,
         }
     }
 
@@ -136,6 +153,15 @@ impl From<&SvnError> for AppError {
     /// Maps an engine error: `detail` carries the svn code (`E160028`) and the cause chain.
     fn from(err: &SvnError) -> Self {
         let mut out = AppError::from_code(err.code, err.message.clone());
+        out.repositories = err.parent_repositories().map(|repos| {
+            repos
+                .iter()
+                .map(|r| ParentRepo {
+                    name: r.name.clone(),
+                    url: r.url.clone(),
+                })
+                .collect()
+        });
         let mut parts = Vec::new();
         let mut cur = Some(err);
         while let Some(e) = cur {

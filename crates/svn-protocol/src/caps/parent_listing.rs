@@ -152,7 +152,11 @@ pub fn parent_path_error(url: &RepoUrl, repos: &[ParentRepo]) -> SvnError {
     );
     if let Some(first) = repos.first() {
         message.push_str(&format!(" (for example {})", first.url));
-        let shown: Vec<&str> = repos.iter().take(MAX_NAMES).map(|r| r.name.as_str()).collect();
+        let shown: Vec<&str> = repos
+            .iter()
+            .take(MAX_NAMES)
+            .map(|r| r.name.as_str())
+            .collect();
         message.push_str(&format!(". Repositories here: {}", shown.join(", ")));
         if repos.len() > MAX_NAMES {
             message.push_str(&format!(" and {} more", repos.len() - MAX_NAMES));
