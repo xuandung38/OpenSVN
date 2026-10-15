@@ -456,8 +456,13 @@ impl EngineFacade for RealEngine {
         self.do_upgrade_format(wc, to, ctx).await
     }
 
-    async fn repo_info(&self, url: &str, ctx: &OpContext) -> EngineResult<RepoInfo> {
-        self.do_repo_info(url, ctx).await
+    async fn repo_info_at(
+        &self,
+        url: &str,
+        peg: Option<Rev>,
+        ctx: &OpContext,
+    ) -> EngineResult<RepoInfo> {
+        self.do_repo_info(url, peg, ctx).await
     }
 
     async fn repo_list(

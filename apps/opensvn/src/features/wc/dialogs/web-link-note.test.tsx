@@ -55,6 +55,50 @@ test("a VisualSVN web link is replaced by the repository URL with a note", async
   expect(queryNote()).toBeUndefined();
 });
 
+test("an old-revision link checks out the path at that revision, over a typed revision", async () => {
+  renderWithQuery(<CheckoutDialog onClose={() => {}} />, "en");
+  const box = (await screen.findByRole("combobox", { name: "Repository URL" })) as HTMLInputElement;
+  const user = userEvent.setup();
+  await user.type(revisionBox("Revision"), "9");
+  await user.click(box);
+  await user.paste("https://svn.example.com/!/#game/view/r5/trunk/gone");
+  const note = await findNote();
+  expect(note.textContent).toContain("Revision 5 from the link was filled in.");
+  expect(revisionBox("Revision").value).toBe("5");
+  await waitFor(() => expect(checkoutButton().disabled).toBe(false));
+  await user.click(checkoutButton());
+  await waitFor(() => expect(mockCalls.some((c) => c.name === "checkout")).toBe(true));
+  const req = mockCalls.find((c) => c.name === "checkout")?.args[0] as { url: string; rev: number };
+  expect(req.url).toBe("https://svn.example.com/svn/game/trunk/gone");
+  expect(req.rev).toBe(5);
+});
+
+test("the note keeps naming the link's revision when the revision field changes", async () => {
+  await pasteUrl("https://svn.example.com/!/#game/view/r5/trunk", "vi");
+  const note = await findNote();
+  expect(note.textContent).toContain("Đã điền revision 5 lấy từ link.");
+  const user = userEvent.setup();
+  await user.clear(revisionBox("Revision"));
+  await waitFor(() =>
+    expect(note.textContent).toContain(
+      "Link trỏ tới revision 5, khác revision đang nhập bên dưới.",
+    ),
+  );
+});
+
+test("the different-revision note in English", async () => {
+  await pasteUrl("https://svn.example.com/!/#game/view/r5/trunk");
+  const note = await findNote();
+  const user = userEvent.setup();
+  await user.clear(revisionBox("Revision"));
+  await user.type(revisionBox("Revision"), "7");
+  await waitFor(() =>
+    expect(note.textContent).toContain(
+      "The link shows revision 5; the revision below is different.",
+    ),
+  );
+});
+
 test("a head link converts without touching the revision; Vietnamese note", async () => {
   const box = await pasteUrl(
     "https://svn.example.com:8443/vsvn/!/#game/view/head/branches/x",

@@ -172,8 +172,13 @@ impl EngineFacade for ClientCheckout {
     async fn upgrade_format(&self, wc: &WcRef, to: u8, ctx: &OpContext) -> EngineResult<()> {
         self.0.engine.upgrade_format(wc, to, ctx).await
     }
-    async fn repo_info(&self, url: &str, ctx: &OpContext) -> EngineResult<RepoInfo> {
-        self.0.engine.repo_info(url, ctx).await
+    async fn repo_info_at(
+        &self,
+        url: &str,
+        peg: Option<Rev>,
+        ctx: &OpContext,
+    ) -> EngineResult<RepoInfo> {
+        self.0.engine.repo_info_at(url, peg, ctx).await
     }
     async fn repo_list(
         &self,

@@ -123,6 +123,7 @@ export const dialogStrings = defineStrings({
     webLinkChecking: "Checking the VisualSVN web link…",
     webLinkConverted: "Converted VisualSVN web link to repository URL {url}",
     webLinkRev: "Revision {rev} from the link was filled in.",
+    webLinkRevOther: "The link shows revision {rev}; the revision below is different.",
     webLinkFailed:
       "You pasted a VisualSVN web-interface link, not a repository URL, and no repository was found for it. In VisualSVN, open the repository, use “Copy URL to clipboard” and paste that URL here.",
     urlQueryFragment:
@@ -313,6 +314,7 @@ export const dialogStrings = defineStrings({
     webLinkChecking: "Đang kiểm tra link web VisualSVN…",
     webLinkConverted: "Đã chuyển link web VisualSVN thành URL repository {url}",
     webLinkRev: "Đã điền revision {rev} lấy từ link.",
+    webLinkRevOther: "Link trỏ tới revision {rev}, khác revision đang nhập bên dưới.",
     webLinkFailed:
       "Bạn vừa dán link giao diện web VisualSVN, không phải URL repository, và không tìm thấy repository tương ứng. Trong VisualSVN, mở repository, dùng “Copy URL to clipboard” rồi dán URL đó vào đây.",
     urlQueryFragment:

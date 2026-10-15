@@ -320,8 +320,18 @@ pub trait EngineFacade: Send + Sync {
     async fn upgrade_format(&self, wc: &WcRef, to: u8, ctx: &OpContext) -> EngineResult<()>;
 
     // ---- repository
-    /// Repository facts for a URL.
-    async fn repo_info(&self, url: &str, ctx: &OpContext) -> EngineResult<RepoInfo>;
+    /// Repository facts for a URL at HEAD.
+    async fn repo_info(&self, url: &str, ctx: &OpContext) -> EngineResult<RepoInfo> {
+        self.repo_info_at(url, None, ctx).await
+    }
+    /// Repository facts for `url@peg`: `kind` is the node at `peg` (`None` = HEAD), so a path
+    /// deleted after `peg` is still found. `youngest_rev` is always the repository's HEAD.
+    async fn repo_info_at(
+        &self,
+        url: &str,
+        peg: Option<Rev>,
+        ctx: &OpContext,
+    ) -> EngineResult<RepoInfo>;
     /// Lists a directory.
     async fn repo_list(
         &self,

@@ -78,7 +78,8 @@ export const commands = {
 	/**
 	 *  Turns a VisualSVN web-interface link (`https://host/!/#Repo/view/head/trunk`) into the
 	 *  repository URL it shows (`https://host/svn/Repo/trunk`), confirmed by asking the server.
-	 *  Any other input comes back unchanged so the usual URL checks report it.
+	 *  Any other input comes back unchanged so the usual URL checks report it. For an `r<N>` link
+	 *  the server is asked about the path at revision N (peg revision), not at HEAD.
 	 * 
 	 *  The probe goes to the scheme, host and port the user typed (the parser never changes them)
 	 *  through the normal connect path: the user's sign-in prompts and certificate trust apply.
