@@ -21,6 +21,7 @@ import { displayPath } from "../wc-model";
 import { useWcSession } from "../wc-session";
 import { wcStrings } from "../wc-strings";
 import { ImageSides, PropChanges } from "./diff-parts";
+import { OfficeNote } from "./office-note";
 
 // CodeMirror is heavy: load it only when a text diff is actually shown.
 const DiffMergeEditor = lazy(() =>
@@ -231,6 +232,7 @@ export function DiffBody({
 
   return (
     <div className="flex h-full flex-col">
+      {diff.office && <OfficeNote office={diff.office} />}
       <div className="min-h-0 flex-1">{content}</div>
       <PropChanges changes={diff.propChanges} />
     </div>

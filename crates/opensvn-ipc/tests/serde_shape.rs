@@ -309,6 +309,7 @@ fn file_diff_flags_too_complex_in_camel_case() {
         image: None,
         too_large: None,
         too_complex: Some(true),
+        office: None,
     };
     let v = serde_json::to_value(&d).unwrap();
     assert_eq!(v["tooComplex"], json!(true));

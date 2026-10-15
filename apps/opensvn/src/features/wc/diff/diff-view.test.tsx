@@ -22,6 +22,7 @@ const base: FileDiff = {
   image: null,
   tooLarge: null,
   tooComplex: null,
+  office: null,
 };
 
 function body(diff: FileDiff) {
@@ -88,4 +89,32 @@ test("a forced load with both sides shows the editor even when still flagged", (
 test("the working copy root (empty path) gets a readable label", () => {
   expect(displayPath("", "proj (working copy root)")).toBe("proj (working copy root)");
   expect(displayPath("src/a.ts", "x")).toBe("src/a.ts");
+});
+
+test("an Office diff says it compares extracted text, or why there is none", () => {
+  body({
+    ...base,
+    path: "docs/contract.docx",
+    left: { content: "Điều 1\n", encoding: "UTF-8", eol: "LF", label: "base" },
+    right: { content: "Điều 2\n", encoding: "UTF-8", eol: "LF", label: "working" },
+    office: { kind: "word", extracted: true, reason: null },
+  });
+  expect(screen.getByRole("note").textContent).toMatch(/text extracted from both Word documents/);
+  expect(screen.getByTestId("editor").textContent).toBe("Điều 1\n|Điều 2\n");
+});
+
+test("an Office file without text explains the reason and keeps the binary view", () => {
+  body({
+    ...base,
+    path: "old.xls",
+    binary: true,
+    mime: "application/octet-stream",
+    office: {
+      kind: "excel",
+      extracted: false,
+      reason: "Excel 97-2003 workbooks (.xls) are not supported",
+    },
+  });
+  expect(screen.getByRole("note").textContent).toMatch(/Excel 97-2003.*default app/);
+  expect(screen.getByText("Binary file")).toBeTruthy();
 });

@@ -493,6 +493,11 @@ export type FileDiff = {
 	 *  external diff tool (`diff_external`) instead; it never retries the display diff.
 	 */
 	tooComplex: boolean | null,
+	/**
+	 *  Set for Word and Excel files: the sides are the text extracted from the documents (not
+	 *  their formatting), or, when `extracted` is false, why no text could be extracted.
+	 */
+	office: OfficeText | null,
 };
 
 export type FileKind = "file" | "dir" | "symlink";
@@ -626,6 +631,20 @@ export type LogPage = {
 export type LogTarget = { kind: "url"; url: string } | { kind: "wc"; wcId: WcId; path: string };
 
 export type NodeStatus = "normal" | "modified" | "added" | "deleted" | "replaced" | "unversioned" | "missing" | "conflicted" | "ignored" | "obstructed" | "external";
+
+/**  Office document families the diff knows. */
+export type OfficeKind = "word" | "excel";
+
+/**  How an Office file was diffed. */
+export type OfficeText = {
+	kind: OfficeKind,
+	/**
+	 *  The text sides were extracted from the documents. When false the diff is the plain
+	 *  (usually binary) one and `reason` says why: a 97-2003 file, a protected or damaged one.
+	 */
+	extracted: boolean,
+	reason: string | null,
+};
 
 export type OpFailed = {
 	opId: OpId,

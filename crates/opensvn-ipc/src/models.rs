@@ -349,6 +349,28 @@ pub struct FileDiff {
     /// (`svn_diff::DISPLAY_MAX_COST`). `left`/`right` are then omitted and the UI offers the
     /// external diff tool (`diff_external`) instead; it never retries the display diff.
     pub too_complex: Option<bool>,
+    /// Set for Word and Excel files: the sides are the text extracted from the documents (not
+    /// their formatting), or, when `extracted` is false, why no text could be extracted.
+    pub office: Option<OfficeText>,
+}
+
+/// Office document families the diff knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum OfficeKind {
+    Word,
+    Excel,
+}
+
+/// How an Office file was diffed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficeText {
+    pub kind: OfficeKind,
+    /// The text sides were extracted from the documents. When false the diff is the plain
+    /// (usually binary) one and `reason` says why: a 97-2003 file, a protected or damaged one.
+    pub extracted: bool,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]

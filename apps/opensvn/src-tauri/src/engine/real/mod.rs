@@ -34,8 +34,8 @@ use svn_types::{CancelToken, ErrorCode, LockOwnershipStore, RelPath, RepoUrl, Sv
 
 use super::context::OpContext;
 use super::facade::{
-    CheckoutPlan, DiffOptions, EngineFacade, EngineResult, LockScope, LogScope, RemoteEditPlan,
-    RemoteScan, StatusQuery, WcInfo, WcOpened, WcRef,
+    CheckoutPlan, DiffOptions, EngineFacade, EngineResult, ExportedSides, LockScope, LogScope,
+    RemoteEditPlan, RemoteScan, SideFiles, StatusQuery, WcInfo, WcOpened, WcRef,
 };
 
 mod blame;
@@ -49,6 +49,7 @@ mod progress;
 mod recovery;
 mod remote;
 mod remote_edit;
+mod side_export;
 mod sync;
 mod text;
 mod wc_map;
@@ -340,6 +341,17 @@ impl EngineFacade for RealEngine {
         self.do_diff_wc(wc, path, against, opts, ctx).await
     }
 
+    async fn export_wc_sides(
+        &self,
+        wc: &WcRef,
+        path: &str,
+        against: Option<Rev>,
+        to: SideFiles<'_>,
+        ctx: &OpContext,
+    ) -> EngineResult<ExportedSides> {
+        self.do_export_wc_sides(wc, path, against, to, ctx).await
+    }
+
     async fn changelist_set(
         &self,
         wc: &WcRef,
@@ -497,6 +509,17 @@ impl EngineFacade for RealEngine {
         ctx: &OpContext,
     ) -> EngineResult<FileDiff> {
         self.do_diff_rev(url, from, to, opts, ctx).await
+    }
+
+    async fn export_rev_sides(
+        &self,
+        url: &str,
+        from: Option<Rev>,
+        to_rev: Rev,
+        to: SideFiles<'_>,
+        ctx: &OpContext,
+    ) -> EngineResult<ExportedSides> {
+        self.do_export_rev_sides(url, from, to_rev, to, ctx).await
     }
 
     async fn log(

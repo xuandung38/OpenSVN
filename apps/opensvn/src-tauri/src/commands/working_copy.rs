@@ -190,6 +190,10 @@ pub async fn diff_get(
             force_large: request.force_large.unwrap_or(false),
             full_text: false,
         };
+        // Word and Excel files are compared as their extracted text.
+        if let Some(diff) = crate::office_diff::office_diff(&state, &request.target, opts).await? {
+            return Ok(diff);
+        }
         fetch_diff(&state, request.target, opts).await
     })
     .await
@@ -241,7 +245,7 @@ pub(crate) async fn open_external_diff(
 }
 
 /// Runs a diff for any target: working copy targets go through the working copy's actor.
-async fn fetch_diff(
+pub(crate) async fn fetch_diff(
     state: &AppState,
     target: DiffTarget,
     opts: DiffOptions,

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { SafeText } from "../../../components/ui/safe-text";
 import { Sheet } from "../../../components/ui/sheet";
@@ -8,7 +8,13 @@ import { ipc, toAppError, unwrap } from "../../../ipc/client";
 import { cn } from "../../../lib/cn";
 import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
+import { OfficeNote } from "../../wc/diff/office-note";
 import { historyStrings } from "./history-strings";
+
+// CodeMirror is heavy: load it only when an Office text diff is shown.
+const DiffMergeEditor = lazy(() =>
+  import("../../wc/diff/diff-merge-editor").then((m) => ({ default: m.DiffMergeEditor })),
+);
 
 function lineClass(line: string): string {
   if (line.startsWith("+")) return "bg-add-bg";
@@ -70,6 +76,30 @@ export function RevisionDiffDialog({
 }
 
 function DiffBody({ diff, url, rev }: { diff: FileDiff; url: string; rev: number }) {
+  const t = useT(historyStrings);
+  if (!diff.office) return <PlainDiffBody diff={diff} url={url} rev={rev} />;
+  return (
+    <div className="flex flex-col gap-2">
+      <OfficeNote office={diff.office} />
+      {diff.office.extracted && (diff.left || diff.right) ? (
+        <div className="h-[60vh] min-h-[200px] rounded-md border border-line">
+          <Suspense fallback={<p className="m-0 p-2">{t("diffLoading")}</p>}>
+            <DiffMergeEditor
+              left={diff.left?.content ?? ""}
+              right={diff.right?.content ?? ""}
+              mode="split"
+              label={diff.path}
+            />
+          </Suspense>
+        </div>
+      ) : (
+        <PlainDiffBody diff={diff} url={url} rev={rev} />
+      )}
+    </div>
+  );
+}
+
+function PlainDiffBody({ diff, url, rev }: { diff: FileDiff; url: string; rev: number }) {
   const t = useT(historyStrings);
   if (diff.binary) return <p className="m-0">{t("diffBinary")}</p>;
   if (diff.tooComplex || diff.tooLarge) {

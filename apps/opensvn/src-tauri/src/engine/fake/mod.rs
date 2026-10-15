@@ -10,6 +10,7 @@ mod conformance_tests;
 mod local_ops;
 mod remote_ops;
 mod seed;
+mod side_export;
 mod state;
 mod sync_ops;
 #[cfg(test)]
@@ -33,8 +34,8 @@ use svn_types::{ErrorCode, RelPath, SvnError};
 use self::state::FakeWc;
 use super::context::OpContext;
 use super::facade::{
-    CheckoutPlan, DiffOptions, EngineFacade, EngineResult, LockScope, LogScope, RecoveryReport,
-    RemoteEditPlan, RemoteScan, StatusQuery, WcInfo, WcOpened, WcRef,
+    CheckoutPlan, DiffOptions, EngineFacade, EngineResult, ExportedSides, LockScope, LogScope,
+    RecoveryReport, RemoteEditPlan, RemoteScan, SideFiles, StatusQuery, WcInfo, WcOpened, WcRef,
 };
 
 pub use seed::{DEMO_REPO_URL, demo_repo, demo_wc_root};
@@ -199,6 +200,17 @@ impl EngineFacade for FakeEngine {
         ctx: &OpContext,
     ) -> EngineResult<FileDiff> {
         self.do_diff_wc(wc, path, against, opts, ctx).await
+    }
+
+    async fn export_wc_sides(
+        &self,
+        wc: &WcRef,
+        path: &str,
+        against: Option<Rev>,
+        to: SideFiles<'_>,
+        ctx: &OpContext,
+    ) -> EngineResult<ExportedSides> {
+        self.do_export_wc_sides(wc, path, against, to, ctx).await
     }
 
     async fn changelist_set(
@@ -370,6 +382,17 @@ impl EngineFacade for FakeEngine {
         ctx: &OpContext,
     ) -> EngineResult<FileDiff> {
         self.do_diff_rev(url, from, to, opts, ctx).await
+    }
+
+    async fn export_rev_sides(
+        &self,
+        url: &str,
+        from: Option<Rev>,
+        to_rev: Rev,
+        to: SideFiles<'_>,
+        ctx: &OpContext,
+    ) -> EngineResult<ExportedSides> {
+        self.do_export_rev_sides(url, from, to_rev, to, ctx).await
     }
 
     async fn log(
