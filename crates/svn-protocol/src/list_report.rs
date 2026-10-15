@@ -9,9 +9,7 @@ use crate::caps::{UrlBuilder, advertise_caps};
 use crate::http::{HttpRequest, Method, ResponseParser, parse_chunked};
 use crate::limits::ParserLimits;
 use crate::propfind::{ListItem, RejectedEntry};
-use crate::util::{
-    corrupt, decode_display_field, decode_text_field, parse_revnum, parse_timestamp,
-};
+use crate::util::{corrupt, decode_display_field, parse_revnum, parse_timestamp};
 use crate::xml::{Ns, XmlEvent, XmlReader, XmlWriter};
 
 /// How deep the listing goes.

@@ -266,7 +266,10 @@ test("hostile repository renders as text, runs nothing, and its escaping symlink
   // The markdown/javascript link of r3 is not a link.
   await clickLast("option", /\[click me\]\(javascript:alert\('log r3'\)\)/, 2);
   await app.waitText("/trunk/evil.html", 30_000);
-  assert.equal(await app.exec("return document.querySelectorAll('a[href^=\"javascript:\" i]').length"), 0);
+  assert.equal(
+    await app.exec("return document.querySelectorAll('a[href^=\"javascript:\" i]').length"),
+    0,
+  );
   await assertNothingExecuted("history");
 
   // File list (repository browser) and previews of the active content.
@@ -283,7 +286,10 @@ test("hostile repository renders as text, runs nothing, and its escaping symlink
     await app.waitText(TEMPLATE_NAME, 30_000);
   };
   await preview(/^evil\.svg/, "<script>alert('svg script'); top.__opensvnPwned = 'svg';</script>");
-  await preview(/^evil\.html/, "<script>alert('html script'); top.__opensvnPwned = 'html';</script>");
+  await preview(
+    /^evil\.html/,
+    "<script>alert('html script'); top.__opensvnPwned = 'html';</script>",
+  );
   await preview(/^xss-content\.txt/, "<img src=x onerror=alert(1)>");
   await app.click("option", /^escape-abs/);
   await app.waitText("link /etc/passwd", 30_000);
