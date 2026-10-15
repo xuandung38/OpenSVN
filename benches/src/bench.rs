@@ -189,13 +189,13 @@ impl Bench<'_> {
     fn engine(&self, args: &[&str]) -> Command {
         let mut c = Command::new(&self.exe);
         c.arg("engine").arg(&self.state).args(args);
-        c
+        wrap(c)
     }
 
     fn svn(&self, args: &[&str]) -> Command {
         let mut c = self.svn.cmd();
         c.args(args);
-        c
+        wrap(c)
     }
 
     /// The working copy is clean and at `rev` according to the svn CLI.
@@ -214,6 +214,26 @@ impl Bench<'_> {
         }
         Ok(())
     }
+}
+
+/// `OPENSVN_BENCH_WRAP=<program>` runs every timed command as `<program> <command> <args...>`
+/// (a profiler such as `strace -f -c` behind a script), with the environment kept.
+fn wrap(c: Command) -> Command {
+    let Some(w) = std::env::var_os("OPENSVN_BENCH_WRAP") else {
+        return c;
+    };
+    let mut out = Command::new(w);
+    out.arg(c.get_program()).args(c.get_args());
+    for (k, v) in c.get_envs() {
+        match v {
+            Some(v) => out.env(k, v),
+            None => out.env_remove(k),
+        };
+    }
+    if let Some(d) = c.get_current_dir() {
+        out.current_dir(d);
+    }
+    out
 }
 
 /// Seed of the generated repository (the same data on every run).
