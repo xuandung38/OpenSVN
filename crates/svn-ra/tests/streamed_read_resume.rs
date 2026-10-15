@@ -937,13 +937,14 @@ async fn an_options_answer_cut_mid_body_is_asked_for_again() {
 #[tokio::test]
 async fn an_options_answer_that_keeps_breaking_fails_with_the_connection_error() {
     let srv = Server::start_cutting_options(10, |req| panic!("unexpected {}", req.method)).await;
-    let err = HttpRaSession::open(
+    let Err(err) = HttpRaSession::open(
         transport_with(vec![Duration::from_millis(10); 3]),
         srv.url(),
         &CancelToken::new(),
     )
     .await
-    .err()
-    .expect("every answer cut");
+    else {
+        panic!("every answer cut");
+    };
     assert!(err.connection_failure().is_some(), "{err:?}");
 }
