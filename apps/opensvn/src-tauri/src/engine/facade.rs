@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use opensvn_ipc::{
     BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
-    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, Layout, LockConflict,
+    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, ItemProps, Layout, LockConflict,
     LogGetRequest, LogPage, RepoEntry, RepoInfo, ResolveRequest, Rev, RevertRequest, TextSide,
     UpdateRequest, WcFormat, WcId,
 };
@@ -130,6 +130,10 @@ pub struct RecoveryReport {
     /// Directories locked by a foreign or unknown owner. Never stolen automatically: the UI offers
     /// "Run cleanup" and the user decides.
     pub needs_user_action: Vec<String>,
+    /// The directories of `needs_user_action` whose lock row is still in place, held by another
+    /// program (svn, TortoiseSVN, an IDE, or one that crashed): nothing can write to the working
+    /// copy until that program finishes or the user removes its lock in cleanup.
+    pub foreign_locks: Vec<String>,
 }
 
 /// Result of [`EngineFacade::open_wc`].
@@ -295,6 +299,14 @@ pub trait EngineFacade: Send + Sync {
     ) -> EngineResult<()>;
     /// Resolves a conflict.
     async fn resolve(&self, wc: &WcRef, req: &ResolveRequest, ctx: &OpContext) -> EngineResult<()>;
+    /// Properties of each of `paths` (local changes included), in the order given; fails on the
+    /// first path that is not versioned.
+    async fn props_get(
+        &self,
+        wc: &WcRef,
+        paths: &[String],
+        ctx: &OpContext,
+    ) -> EngineResult<Vec<ItemProps>>;
     /// Sets (`Some`) or deletes (`None`) a property.
     async fn props_set(
         &self,

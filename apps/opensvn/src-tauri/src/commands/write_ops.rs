@@ -3,8 +3,8 @@
 
 use opensvn_ipc::{
     AppError, CheckoutRequest, CleanupRequest, CommitRequest, Depth, ErrorCode, IncompleteCheckout,
-    OpResult, OperationHandle, OperationKind, ResolveRequest, Rev, RevertRequest, UpdateRequest,
-    WcFormat, WcId,
+    ItemProps, OpResult, OperationHandle, OperationKind, ResolveRequest, Rev, RevertRequest,
+    UpdateRequest, WcFormat, WcId,
 };
 use tauri::State;
 
@@ -487,6 +487,25 @@ pub async fn resolve(state: State<'_, AppState>, request: ResolveRequest) -> Res
     .await
 }
 
+/// Properties of each of `paths` (working copy relative, `""` is the root), local changes
+/// included, in the order given. Values that are not UTF-8 text come back flagged `binary`.
+#[tauri::command]
+#[specta::specta]
+pub async fn props_get(
+    state: State<'_, AppState>,
+    wc_id: WcId,
+    paths: Vec<String>,
+) -> Result<Vec<ItemProps>, AppError> {
+    guard(state.wc_read(&wc_id, move |engine, wc| {
+        let paths = paths.clone();
+        async move { engine.props_get(&wc, &paths, &OpContext::detached()).await }
+    }))
+    .await
+}
+
+/// Sets (`value`) or deletes (`None`) property `name` on `path`. Subversion properties are checked
+/// as `svn propset` checks them (known names, where they apply, `svn:eol-style`, `svn:mime-type`,
+/// `svn:externals` and `svn:mergeinfo` values) and canonicalized (`svn:needs-lock` becomes `*`).
 #[tauri::command]
 #[specta::specta]
 pub async fn props_set(

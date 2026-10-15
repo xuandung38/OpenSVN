@@ -79,6 +79,12 @@ export function fileMenuEntries(
       onSelect: () => session.openDialog({ kind: "delete", paths }),
     });
   }
+  if (versioned && all((f) => f.text !== "missing" && f.text !== "deleted")) {
+    entries.push({
+      label: t("properties"),
+      onSelect: () => session.openDialog({ kind: "properties", paths }),
+    });
+  }
   if (single) {
     entries.push("separator");
     if (session.links.showLog && versioned) {

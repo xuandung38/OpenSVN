@@ -29,8 +29,163 @@ const DIR_ONLY: &[&str] = &[
     "svn:inheritable-global-ignores",
 ];
 
+/// Subversion-namespace properties that apply to any node (`svn_prop_is_known_svn_node_prop`).
+const ANY_NODE: &[&str] = &["svn:mergeinfo"];
+
 fn invalid(msg: impl Into<String>) -> SvnError {
     SvnError::new(ErrorCode::WcInvalidOperation, msg)
+}
+
+/// Whether `name` is a node property svn knows (`svn propset` refuses other `svn:` names
+/// unless `--force` is given).
+pub fn is_known_svn_prop(name: &str) -> bool {
+    FILE_ONLY.contains(&name) || DIR_ONLY.contains(&name) || ANY_NODE.contains(&name)
+}
+
+/// `svn_mime_type_validate`: a media type with a `/`, no white space, control or special
+/// characters before the parameters, and no control characters at all.
+pub fn validate_mime_type(value: &str) -> std::result::Result<(), String> {
+    const TSPECIALS: &str = "()<>@,;:\\\"/[]?=";
+    let len = value.find([';', ' ']).unwrap_or(value.len());
+    let media = &value[..len];
+    if len == 0 {
+        return Err(format!("MIME type '{value}' has empty media type"));
+    }
+    let Some(slash) = media.find('/') else {
+        return Err(format!("MIME type '{value}' does not contain '/'"));
+    };
+    for (i, c) in media.char_indices() {
+        if i != slash
+            && (!c.is_ascii()
+                || c.is_ascii_control()
+                || c.is_ascii_whitespace()
+                || TSPECIALS.contains(c))
+        {
+            return Err(format!(
+                "MIME type '{value}' contains invalid character '{c}' in media type"
+            ));
+        }
+    }
+    if let Some(c) = value.chars().find(|c| c.is_control() && *c != '\t') {
+        return Err(format!(
+            "MIME type '{value}' contains invalid character '0x{:02x}' in postfix",
+            u32::from(c)
+        ));
+    }
+    Ok(())
+}
+
+/// `svn_mime_type_is_binary`: anything but `text/*` and the two X bitmap types.
+pub fn mime_type_is_binary(value: &str) -> bool {
+    let media = value.split(';').next().unwrap_or("").trim();
+    !(media.starts_with("text/") || media == "image/x-xbitmap" || media == "image/x-xpixmap")
+}
+
+/// `svn_mergeinfo_parse`: lines `/path:ranges`, ranges `N`, `N-M` (`N < M`) or either with a
+/// trailing `*`, revisions from 1.
+pub fn validate_mergeinfo(value: &str) -> std::result::Result<(), String> {
+    let rev = |w: &str| -> std::result::Result<u64, String> {
+        match w.parse::<u64>() {
+            Ok(0) => Err(format!(
+                "invalid revision number '0' found in range list '{w}'"
+            )),
+            Ok(n) => Ok(n),
+            Err(_) => Err(format!("invalid revision number found parsing '{w}'")),
+        }
+    };
+    for line in value.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((path, ranges)) = line.rsplit_once(':') else {
+            return Err(format!("pathname not terminated by ':' in '{line}'"));
+        };
+        if !path.starts_with('/') {
+            return Err(format!("mergeinfo path '{path}' is not absolute"));
+        }
+        if ranges.trim().is_empty() {
+            return Err(format!(
+                "mergeinfo for '{path}' maps to an empty revision range"
+            ));
+        }
+        for range in ranges.split(',') {
+            let range = range.trim().strip_suffix('*').unwrap_or(range.trim());
+            match range.split_once('-') {
+                Some((a, b)) => {
+                    let (a, b) = (rev(a)?, rev(b)?);
+                    if a >= b {
+                        return Err(format!("unable to parse reversed revision range '{a}-{b}'"));
+                    }
+                }
+                None => {
+                    rev(range)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The checks `svn_wc_canonicalize_svn_prop` and `svn propset` make on a Subversion-namespace
+/// property before it is stored (the line-ending check of `svn:eol-style` is made by the caller,
+/// which has the file). `value` is canonical; `props` are the node's current properties.
+fn check_svn_prop(
+    rel: &RelPath,
+    name: &str,
+    value: &[u8],
+    is_dir: bool,
+    props: &[(Vec<u8>, Vec<u8>)],
+) -> Result<()> {
+    if !is_known_svn_prop(name) {
+        return Err(
+            invalid(format!("'{name}' is not a valid svn: property name")).with_svn_code(195_011),
+        );
+    }
+    if is_dir && FILE_ONLY.contains(&name) {
+        return Err(invalid(format!(
+            "cannot set '{name}' on a directory ('{rel}')"
+        )));
+    }
+    if !is_dir && DIR_ONLY.contains(&name) {
+        return Err(invalid(format!("cannot set '{name}' on a file ('{rel}')")));
+    }
+    let text = |what: &str| {
+        std::str::from_utf8(value).map_err(|_| {
+            invalid(format!(
+                "the value of '{what}' on '{rel}' is not UTF-8 text"
+            ))
+        })
+    };
+    match name {
+        "svn:mime-type" => validate_mime_type(text(name)?).map_err(invalid)?,
+        "svn:eol-style" => {
+            if EolStyle::from_prop(Some(value)) == EolStyle::Unknown {
+                return Err(invalid(format!(
+                    "unrecognized line ending style '{}' for '{rel}'",
+                    String::from_utf8_lossy(value)
+                )));
+            }
+            let binary = props
+                .iter()
+                .find(|(k, _)| k.as_slice() == b"svn:mime-type")
+                .is_some_and(|(_, v)| mime_type_is_binary(&String::from_utf8_lossy(v)));
+            if binary {
+                return Err(invalid(format!(
+                    "cannot set 'svn:eol-style' on a file ('{rel}') with binary mime type"
+                ))
+                .with_svn_code(200_009));
+            }
+        }
+        "svn:externals" => {
+            crate::externals::parse_externals(rel.as_str(), value)?;
+        }
+        "svn:mergeinfo" => {
+            validate_mergeinfo(text(name)?)
+                .map_err(|e| invalid(format!("invalid svn:mergeinfo on '{rel}': {e}")))?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// `svn_prop_name_is_valid`: starts with a letter, `:` or `_`, then letters, digits and `:_-.`.
@@ -123,28 +278,16 @@ pub(crate) fn propset_locked(
         )));
     }
     let is_dir = info.node.kind == NodeKind::Dir;
-    if !opts.skip_checks {
-        if is_dir && FILE_ONLY.contains(&name) {
-            return Err(invalid(format!(
-                "cannot set '{name}' on a directory ('{rel}')"
-            )));
-        }
-        if !is_dir && DIR_ONLY.contains(&name) {
-            return Err(invalid(format!("cannot set '{name}' on a file ('{rel}')")));
-        }
-    }
     let value = value.map(|v| canonicalize_value(name, v));
+    let mut props = db.actual_props(rel)?;
+    // Only a value that is set is checked: deleting any property is always allowed.
     if !opts.skip_checks
-        && name == "svn:eol-style"
+        && name.starts_with("svn:")
         && let Some(v) = &value
-        && !is_dir
     {
-        if EolStyle::from_prop(Some(v)) == EolStyle::Unknown {
-            return Err(invalid(format!(
-                "unrecognized line ending style '{}' for '{rel}'",
-                String::from_utf8_lossy(v)
-            )));
-        }
+        check_svn_prop(rel, name, v, is_dir, &props)?;
+    }
+    if !opts.skip_checks && name == "svn:eol-style" && value.is_some() && !is_dir {
         let abs = abs_of(db, rel);
         if abs.is_file() {
             let bytes = fs::read(&abs)
@@ -156,7 +299,6 @@ pub(crate) fn propset_locked(
             })?;
         }
     }
-    let mut props = db.actual_props(rel)?;
     let old = props
         .iter()
         .find(|(k, _)| k.as_slice() == name.as_bytes())

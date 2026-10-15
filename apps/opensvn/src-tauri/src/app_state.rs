@@ -398,9 +398,10 @@ impl AppState {
         }
     }
 
-    /// Opens a working copy (engine recovery included). Locks that need the user (foreign or
-    /// unknown owner) are announced as a `needs-cleanup` banner so the UI can offer "Run cleanup";
-    /// they are never taken over automatically.
+    /// Opens a working copy (engine recovery included). A lock row another program still holds
+    /// is announced as a `wc-busy` banner, anything else that needs the user (an unknown owner,
+    /// unfinished work) as `needs-cleanup`, so the UI can offer "Run cleanup"; neither is ever
+    /// taken over automatically.
     pub async fn open_wc(&self, id: &WcId) -> Result<opensvn_ipc::WorkingCopy, AppError> {
         let (wc, report) = self.wcs.open(id).await?;
         if !report.recovered.is_empty() {
@@ -412,12 +413,28 @@ impl AppState {
         if let Some(op) = &ours {
             tracing::info!(wc = %id.0, op = %op.title, "working copy locked by a running operation");
         }
-        if !report.needs_user_action.is_empty() && ours.is_none() {
-            self.events.banner(&opensvn_ipc::Banner {
-                wc_id: id.clone(),
-                kind: opensvn_ipc::BannerKind::NeedsCleanup,
-                data: report.needs_user_action,
-            });
+        if ours.is_none() {
+            // Another program's lock still in place: "in use by another program", with cleanup
+            // offering to remove that lock. Anything else left for the user: "needs cleanup".
+            let rest: Vec<String> = report
+                .needs_user_action
+                .into_iter()
+                .filter(|d| !report.foreign_locks.contains(d))
+                .collect();
+            if !report.foreign_locks.is_empty() {
+                self.events.banner(&opensvn_ipc::Banner {
+                    wc_id: id.clone(),
+                    kind: opensvn_ipc::BannerKind::WcBusy,
+                    data: report.foreign_locks,
+                });
+            }
+            if !rest.is_empty() {
+                self.events.banner(&opensvn_ipc::Banner {
+                    wc_id: id.clone(),
+                    kind: opensvn_ipc::BannerKind::NeedsCleanup,
+                    data: rest,
+                });
+            }
         }
         Ok(wc)
     }
