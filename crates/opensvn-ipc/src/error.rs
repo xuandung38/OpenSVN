@@ -51,6 +51,8 @@ pub enum ErrorAction {
     OpenSettings,
     /// The default app was refused for this item; show it in the file manager instead.
     RevealInFileManager,
+    /// An interrupted checkout can be finished: see [`AppError::incomplete_checkout`].
+    ContinueCheckout,
 }
 
 /// Error returned by every command. `message` is user-displayable; never a bare string error.
@@ -70,6 +72,21 @@ pub struct AppError {
     #[serde(default)]
     #[specta(optional)]
     pub lock_conflicts: Option<Box<[LockConflict]>>,
+    /// A checkout found its target folder holding an interrupted checkout of the same location
+    /// (or a checkout stopped and left one): the UI offers "Continue checkout".
+    #[serde(default)]
+    #[specta(optional)]
+    pub incomplete_checkout: Option<Box<IncompleteCheckout>>,
+}
+
+/// An interrupted checkout the user can continue (`wc_continue`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct IncompleteCheckout {
+    pub wc_id: crate::WcId,
+    /// Revision the checkout was reaching.
+    pub rev: crate::Rev,
+    pub root_path: String,
 }
 
 /// A lock held by someone else that refused a lock request (doc 01 §10.4: the lock dialog shows
@@ -100,6 +117,7 @@ impl AppError {
             retryable,
             actions: (!actions.is_empty()).then(|| actions.to_vec()),
             lock_conflicts: None,
+            incomplete_checkout: None,
         }
     }
 
@@ -122,6 +140,16 @@ impl AppError {
 
     pub fn with_path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
+        self
+    }
+
+    /// Attaches an interrupted checkout to continue, and offers the action.
+    pub fn with_incomplete_checkout(mut self, info: IncompleteCheckout) -> Self {
+        self.incomplete_checkout = Some(Box::new(info));
+        let actions = self.actions.get_or_insert_with(Vec::new);
+        if !actions.contains(&ErrorAction::ContinueCheckout) {
+            actions.insert(0, ErrorAction::ContinueCheckout);
+        }
         self
     }
 

@@ -98,6 +98,11 @@ export interface OpState {
   /** Bytes per second, smoothed; `null` until two byte samples arrived. */
   rate: number | null;
   rateMark: { bytes: number; at: number } | null;
+  /**
+   * While the operation waits for a lost connection (stage `waiting-for-connection`): when its
+   * next attempt is due (wall-clock ms), for the "retrying in Ns" countdown; `null` otherwise.
+   */
+  retryAt: number | null;
 }
 
 /** Fresh state of an operation that just started. */
@@ -116,6 +121,7 @@ export function newOpState(handle: OperationHandle, now: number = Date.now()): O
     endedAt: null,
     rate: null,
     rateMark: null,
+    retryAt: null,
   };
 }
 
@@ -146,7 +152,9 @@ export function applyProgress(cur: OpState, p: OpProgress, now: number = Date.no
       rateMark = { bytes: p.bytesDone, at: now };
     }
   }
-  return { ...cur, progress: p, log, logDropped, rate, rateMark };
+  const wait = p.stage === "waiting-for-connection" ? p.connectionWait : null;
+  const retryAt = wait ? now + wait.retryInSecs * 1000 : null;
+  return { ...cur, progress: p, log, logDropped, rate, rateMark, retryAt };
 }
 
 /** Counts of the finished (or running) operation, `null` when it reported no paths. */

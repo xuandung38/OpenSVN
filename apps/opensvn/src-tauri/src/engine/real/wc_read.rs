@@ -69,12 +69,15 @@ pub(super) fn describe(db: &WcDb) -> EngineResult<WcInfo> {
     })?;
     // `svn-client` marks a folder incomplete while a drive fills it and clears the mark when the
     // drive completes it, so any left over means a checkout or update stopped half-way.
-    let incomplete: bool = db.with_read(|c| {
+    // svn records the revision a drive was reaching on every folder it marks incomplete
+    // (`svn_wc__db_temp_op_start_directory_update`), so the highest one is where an
+    // interrupted checkout or update was going.
+    let (incomplete, resume): (bool, Option<i64>) = db.with_read(|c| {
         c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM nodes \
-             WHERE wc_id = ?1 AND op_depth = 0 AND presence = 'incomplete')",
+            "SELECT COUNT(*) > 0, MAX(revision) FROM nodes \
+             WHERE wc_id = ?1 AND op_depth = 0 AND presence = 'incomplete'",
             [wc_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(sql_err)
     })?;
@@ -98,6 +101,7 @@ pub(super) fn describe(db: &WcDb) -> EngineResult<WcInfo> {
         store_pristine: db.store_pristine(),
         path_in_repo: format!("/{repos_path}"),
         incomplete,
+        resume_rev: resume.map(revision).transpose()?.map(Rev),
     })
 }
 

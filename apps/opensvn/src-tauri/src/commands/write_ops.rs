@@ -2,9 +2,9 @@
 //! `add`/`delete`/`move` are named `add_paths`/`delete_paths`/`move_path` (keyword and clarity).
 
 use opensvn_ipc::{
-    AppError, CheckoutRequest, CleanupRequest, CommitRequest, Depth, ErrorCode, OpResult,
-    OperationHandle, OperationKind, ResolveRequest, Rev, RevertRequest, UpdateRequest, WcFormat,
-    WcId,
+    AppError, CheckoutRequest, CleanupRequest, CommitRequest, Depth, ErrorCode, IncompleteCheckout,
+    OpResult, OperationHandle, OperationKind, ResolveRequest, Rev, RevertRequest, UpdateRequest,
+    WcFormat, WcId,
 };
 use tauri::State;
 
@@ -30,11 +30,17 @@ fn mvp_limit(msg: &str) -> AppError {
 }
 
 /// Checks out into a new folder (`dest_name`) inside the granted parent folder, or into the granted
-/// folder itself. The target must not exist or be an empty folder. On success the working copy is
+/// folder itself. The target must not exist or be an empty folder, unless it holds an interrupted
+/// checkout of the same URL: then the checkout is refused with
+/// [`AppError::incomplete_checkout`] set, so the UI offers "Continue checkout" instead.
+///
+/// The choices of the checkout are journaled before it starts and dropped when it finishes, so a
+/// checkout interrupted in any way (connection lost for longer than the wait, cancelled, app
+/// closed or killed) can be continued exactly ([`wc_continue`]). On success the working copy is
 /// registered and its id returned in `OpResult::CheckedOut`. When the checkout fails or is cancelled
 /// after it created the working copy, the partial working copy is registered anyway (listed as
-/// incomplete; an update finishes it); otherwise a folder this checkout created is removed again
-/// while it is still empty.
+/// incomplete, with "Continue checkout"); otherwise a folder this checkout created is removed again
+/// while it is still empty. Nothing else is ever removed.
 #[tauri::command]
 #[specta::specta]
 pub async fn checkout(
@@ -50,10 +56,32 @@ pub async fn checkout(
             crate::wc::checkout_target::validate_folder_name(name)?;
         }
         let dest = state.redeem_dir(&request.dest)?;
-        let target = crate::wc::checkout_target::prepare(&dest, request.dest_name.as_deref())?;
+        let target = match crate::wc::checkout_target::prepare(&dest, request.dest_name.as_deref())
+        {
+            Ok(t) => t,
+            Err(e) => {
+                let wanted = request
+                    .dest_name
+                    .as_deref()
+                    .map_or_else(|| dest.clone(), |n| dest.join(n));
+                return Err(
+                    match interrupted_checkout_at(&state, &wanted, &request.url).await {
+                        Some(info) => e.with_incomplete_checkout(info),
+                        None => e,
+                    },
+                );
+            }
+        };
         if let Err(e) = state.db.recent_url_touch(&request.url) {
             tracing::warn!(error = %e, "could not record recent URL");
         }
+        let journal = crate::db::CheckoutJournal {
+            root_path: canonical_root(&target.path),
+            url: request.url.clone(),
+            depth: depth_word(request.depth).to_owned(),
+            ignore_externals: request.ignore_externals,
+        };
+        state.db.checkout_journal_put(&journal)?;
         let plan = crate::engine::CheckoutPlan {
             url: request.url.clone(),
             path: target.path.clone(),
@@ -67,19 +95,34 @@ pub async fn checkout(
         let title = format!("Checkout {}", leaf(&request.url));
         let wcs = std::sync::Arc::clone(&state.wcs);
         let engine = std::sync::Arc::clone(&state.engine);
+        let db = state.db.clone();
         let spec = crate::ops::OpSpec::new(OperationKind::Checkout, None, title).at(&target.path);
         Ok(state.ops.spawn_with(spec, move |ctx| async move {
             let info = match engine.checkout(&plan, &ctx).await {
                 Ok(info) => info,
                 Err(e) => {
                     // A checkout that already wrote its working copy stays resumable: it is
-                    // listed as incomplete and an update finishes it.
-                    if wcs.add_unfinished(&target.path).await.is_none() {
-                        target.discard_if_empty();
-                    }
-                    return Err(AppError::from(&e));
+                    // listed as incomplete and "Continue checkout" finishes it.
+                    let err = AppError::from(&e);
+                    return Err(match wcs.add_unfinished(&target.path).await {
+                        Some(wc) => match wc.resume {
+                            Some(resume) => err.with_incomplete_checkout(IncompleteCheckout {
+                                wc_id: wc.id,
+                                rev: resume.rev,
+                                root_path: wc.root_path,
+                            }),
+                            None => err,
+                        },
+                        None => {
+                            forget_journal(&db, &journal.root_path);
+                            target.discard_if_empty();
+                            err
+                        }
+                    });
                 }
             };
+            forget_journal(&db, &journal.root_path);
+            forget_journal(&db, &info.root_path);
             // Register the new working copy so the UI can open it right after `op://finished`.
             let wc_id = match wcs.add_existing(&info.root_path).await {
                 Ok(wc) => Some(wc.id),
@@ -93,6 +136,102 @@ pub async fn checkout(
                 new_rev: info.base_rev,
             })
         }))
+    })
+    .await
+}
+
+/// `path` canonicalized like the engine records a working copy root; a missing last component
+/// is joined to its canonical parent.
+pub(crate) fn canonical_root(path: &std::path::Path) -> String {
+    let resolved =
+        std::fs::canonicalize(path).or_else(|_| match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) => std::fs::canonicalize(parent).map(|p| p.join(name)),
+            _ => Err(std::io::Error::other("no parent")),
+        });
+    resolved
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn depth_word(depth: Depth) -> &'static str {
+    match depth {
+        Depth::Empty => "empty",
+        Depth::Files => "files",
+        Depth::Immediates => "immediates",
+        Depth::Infinity => "infinity",
+    }
+}
+
+fn forget_journal(db: &crate::db::AppDb, root: &str) {
+    if let Err(e) = db.checkout_journal_remove(root) {
+        tracing::warn!(error = %e, "could not update the checkout journal");
+    }
+}
+
+/// The interrupted checkout of `url` at `path`, registered so it can be continued; `None` when
+/// `path` holds anything else (a complete working copy, another URL, user files).
+async fn interrupted_checkout_at(
+    state: &AppState,
+    path: &std::path::Path,
+    url: &str,
+) -> Option<IncompleteCheckout> {
+    // Looked at first, registered only when it is the interrupted checkout of this URL.
+    let info = state
+        .engine
+        .wc_info(path, &crate::engine::OpContext::detached())
+        .await
+        .ok()?;
+    let same = |a: &str, b: &str| a.trim_end_matches('/') == b.trim_end_matches('/');
+    if !info.incomplete || info.resume_rev.is_none() || !same(&info.url, url) {
+        return None;
+    }
+    let wc = state.wcs.add_unfinished(path).await?;
+    let resume = wc.resume?;
+    Some(IncompleteCheckout {
+        wc_id: wc.id,
+        rev: resume.rev,
+        root_path: wc.root_path,
+    })
+}
+
+/// Finishes an interrupted checkout or update of the whole working copy at the revision it was
+/// reaching (recorded in the working copy), with the depths it records and, for a checkout,
+/// the externals choice the user made. Fails when nothing is incomplete.
+#[tauri::command]
+#[specta::specta]
+pub async fn wc_continue(
+    state: State<'_, AppState>,
+    wc_id: WcId,
+) -> Result<OperationHandle, AppError> {
+    guard(async {
+        let row = state.wcs.resolve(&wc_id)?.row;
+        let journal = state.db.checkout_journal_get(&row.root_path)?;
+        let title = if journal.is_some() {
+            format!("Continue checkout {}", row.name)
+        } else {
+            format!("Continue update {}", row.name)
+        };
+        let ignore_externals = journal.as_ref().is_some_and(|j| j.ignore_externals);
+        let db = state.db.clone();
+        state.start_wc_op(
+            OperationKind::Update,
+            &wc_id,
+            title,
+            move |engine, wc, ctx| async move {
+                let info = engine.wc_info(&wc.root, &ctx).await?;
+                let Some(rev) = info.resume_rev.filter(|_| info.incomplete) else {
+                    return Err(svn_types::SvnError::new(
+                        svn_types::ErrorCode::WcInvalidOperation,
+                        "There is nothing to continue: the working copy is complete.",
+                    ));
+                };
+                let new_rev = engine.resume(&wc, rev, ignore_externals, &ctx).await?;
+                forget_journal(&db, &info.root_path);
+                forget_journal(&db, &row.root_path);
+                Ok(OpResult::NewRev { new_rev })
+            },
+        )
     })
     .await
 }
