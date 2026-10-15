@@ -82,7 +82,7 @@ Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #
 
 | PR / nhánh | Nội dung | Issue | Trạng thái |
 |---|---|---|---|
-| #172 `feat/resume-interrupted-checkout` | Mất mạng lâu khi checkout: chờ mạng rồi tự tải tiếp; nút "Tiếp tục checkout" sau khi hủy, đóng app hoặc crash | (yêu cầu chủ repo) | Đang code |
+| #172 `feat/resume-interrupted-checkout` | Mất mạng lâu khi checkout: chờ mạng rồi tự tải tiếp; nút "Tiếp tục checkout" sau khi hủy, đóng app hoặc crash | (yêu cầu chủ repo) | Đang review |
 | #171 `feat/parent-path-repo-list` | URL server VisualSVN `https://host/svn/` hiện danh sách repo để chọn | #133 | Đang review |
 | #169 `ci/release-gating-publish` | Quy trình phát hành: environment có duyệt, ký số tùy chọn, tự đẩy sang `OpenSVN-releases` | #22 | Đang review |
 | #170 `perf/bench-100k-crash-soak` | Benchmark 100k file với svn 1.15, crash test cho switch, soak 2 giờ, test chạy đồng thời với svn CLI | #121, #21 | Đang code |
