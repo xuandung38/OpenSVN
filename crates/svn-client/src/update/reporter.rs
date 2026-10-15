@@ -223,10 +223,28 @@ pub fn build_report(
         } else {
             recorded
         };
-        let parent_repos = match target_wc.parent() {
-            Some(p) => db.read_base(&p)?.and_then(|n| n.repos_relpath),
+        let parent = match target_wc.parent() {
+            Some(p) => db.read_base(&p)?,
             None => None,
         };
+        let parent_repos = parent.as_ref().and_then(|n| n.repos_relpath.clone());
+        let switched = parent_repos.as_deref().is_some_and(|p| {
+            repos_child(p, target_wc.file_name().unwrap_or(""))
+                != node.repos_relpath.clone().unwrap_or_default()
+        });
+        if switched {
+            // A switched target is described by a `link_path`, which may not open the report:
+            // svn_repos takes a first `set_path` of the operand as a place-holder carrying the
+            // anchor's revision and lets the next entry for the same path describe it
+            // (reporter.c `finish_report`). The HTTP layer refuses a report that starts with
+            // anything else.
+            let rev = parent
+                .as_ref()
+                .and_then(|n| n.revision)
+                .or(node.revision)
+                .unwrap_or(0);
+            r.set_path(&target, Revnum(rev), report_depth, false, None)?;
+        }
         ctx.report_entry(
             r,
             &target,

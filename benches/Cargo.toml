@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Benchmarks: engine vs the svn CLI on the same local Apache (checkout, update, status)"
+description = "Benchmarks: engine vs the svn CLI on the same local Apache (checkout, update, status, commit, log)"
 
 [lints]
 workspace = true
@@ -17,6 +17,10 @@ path = "src/main.rs"
 [[bin]]
 name = "compare-svn-commit"
 path = "src/commit.rs"
+
+[[bin]]
+name = "compare-svn-log"
+path = "src/log.rs"
 
 [dependencies]
 opensvn-crash = { path = "../tests/crash" }

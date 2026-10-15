@@ -3,12 +3,15 @@
 //!
 //! Fixture (built with the svn CLI): `r1` holds `files` text files of ten lines in ten
 //! directories plus two binaries; `r2` (another user's commit) changes the last line of every
-//! third file, deletes some files, adds some, and rewrites a binary. Templates:
+//! third file, deletes some files, adds some, and rewrites a binary. It also branches `d0` to
+//! `d0-branch` (a copy of `d0@1`) whose files get one more line 5 change and the same last-line
+//! change as r2's `d0`, plus one file of its own. Templates:
 //!
 //! * `tpl-r1`: checked out at r1 with local edits on the first line of every fourth file (some
 //!   of them also changed on the server: clean merges), two files whose last line is edited
 //!   locally and on the server (text conflicts), and an unversioned file. Used by `update` and
-//!   `cleanup` ("mid-update with local edits").
+//!   `cleanup` ("mid-update with local edits"), and by `switch` (`d0` to `d0-branch`, with local
+//!   edits merged and one text conflict).
 //! * `tpl-r2`: checked out at HEAD with local edits, a locally rewritten binary, an added
 //!   directory with files and deleted files. Used by `commit` and `revert`.
 //!
@@ -44,6 +47,8 @@ pub const FAILPOINTS: &[&str] = &[
     "update.after_merge3_before_txn",
     "update.after_txn_before_queue",
     "update.after_merge3_before_markers",
+    "update.sync_barrier",
+    "update.barrier_wait",
     "commit.after_txn_created",
     "commit.after_merge_sent_marker",
     "commit.journal_merged_write",
@@ -52,6 +57,13 @@ pub const FAILPOINTS: &[&str] = &[
     "commit.finalize",
 ];
 
+/// The directory of `tpl-r1` the `switch` cases switch.
+pub const SWITCH_DIR: &str = "d0";
+/// Where `switch` switches [`SWITCH_DIR`] to: a branch of it made in r2.
+pub const SWITCH_BRANCH: &str = "d0-branch";
+/// A file that only the branch has (`<SWITCH_BRANCH>/<name>`).
+pub const BRANCH_ONLY: &str = "only-on-branch.txt";
+
 /// The operation a worker runs and the suite kills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Op {
@@ -59,6 +71,8 @@ pub enum Op {
     Checkout,
     /// Update r1 -> r2 of a working copy with local edits (clean merges and conflicts).
     Update,
+    /// Switch of `d0` of the same working copy to `d0-branch` at r2.
+    Switch,
     /// Commit of edits, adds, deletes and a binary change.
     Commit,
     /// Recursive revert of the same changes.
@@ -69,9 +83,10 @@ pub enum Op {
 
 impl Op {
     /// All operations.
-    pub const ALL: [Op; 5] = [
+    pub const ALL: [Op; 6] = [
         Op::Checkout,
         Op::Update,
+        Op::Switch,
         Op::Commit,
         Op::Revert,
         Op::Cleanup,
@@ -82,6 +97,7 @@ impl Op {
         match self {
             Op::Checkout => "checkout",
             Op::Update => "update",
+            Op::Switch => "switch",
             Op::Commit => "commit",
             Op::Revert => "revert",
             Op::Cleanup => "cleanup",
@@ -178,14 +194,33 @@ pub struct CaseRecord {
     pub warnings: Vec<String>,
     /// Wall time of the whole case.
     pub elapsed: Duration,
+    /// Recovery left a lock row of unknown owner and needed a manual `svn cleanup`.
+    pub manual_cleanup: bool,
+}
+
+/// Whether `kill` may land between the commit of a WC_LOCK row and its ownership record, the
+/// one window where recovery leaves the lock for the user (`svn-wc` `wc_lock.rs`: the row is
+/// committed first so that a crash never makes a foreign lock look like ours).
+pub fn lock_row_window(kill: &Kill) -> bool {
+    match kill {
+        Kill::After(_) => true,
+        Kill::Failpoint { name, hit } => name == "wc.txn.after_commit" && *hit == 1,
+        Kill::Never => false,
+    }
 }
 
 /// Text file contents: ten lines; line 1 and line 10 can be replaced.
 fn text(path: &str, first: Option<&str>, last: Option<&str>) -> Vec<u8> {
+    text5(path, first, None, last)
+}
+
+/// [`text`] with line 5 replaced as well.
+fn text5(path: &str, first: Option<&str>, fifth: Option<&str>, last: Option<&str>) -> Vec<u8> {
     let mut s = String::new();
     for k in 1..=10 {
         let line = match k {
             1 => first.map(str::to_owned),
+            5 => fifth.map(str::to_owned),
             10 => last.map(str::to_owned),
             _ => None,
         }
@@ -204,6 +239,11 @@ pub fn local_line(path: &str) -> String {
 /// Line 10 of a file changed in r2.
 pub fn server_line(path: &str) -> String {
     format!("server edit of {path}")
+}
+
+/// Line 5 of a file of `d0` on the branch.
+pub fn branch_line(path: &str) -> String {
+    format!("branch edit of {path}")
 }
 
 /// Line 10 of a file edited locally where r2 also changes it (conflict).
@@ -228,6 +268,8 @@ pub struct Model {
     pub local_edits: BTreeSet<String>,
     /// tpl-r1: last line edited locally, conflicting with r2.
     pub conflicts: BTreeSet<String>,
+    /// Text files of r1 below [`SWITCH_DIR`] (the branch has each of them).
+    pub switched: BTreeSet<String>,
     /// tpl-r2: first line edited locally.
     pub commit_edits: BTreeSet<String>,
     /// tpl-r2: files added locally (below `added/`).
@@ -248,6 +290,13 @@ impl Model {
         for i in 0..n {
             m.files.push(format!("d{}/f{i:05}.txt", i % 10));
         }
+        let below = format!("{SWITCH_DIR}/");
+        m.switched = m
+            .files
+            .iter()
+            .filter(|f| f.starts_with(&below))
+            .cloned()
+            .collect();
         for (i, f) in m.files.iter().enumerate() {
             let deleted = i % 17 == 5;
             if deleted {
@@ -335,6 +384,20 @@ impl Model {
         text(p, first.as_deref(), last.as_deref())
     }
 
+    /// Contents on the branch of `p`, a file of [`SWITCH_DIR`] at r1 (named after its path
+    /// below `d0`): line 5 changed, and the last line as r2 changes it in `d0`.
+    pub fn branch_text(&self, p: &str) -> Vec<u8> {
+        let last = self.server_modified.contains(p).then(|| server_line(p));
+        text5(p, None, Some(&branch_line(p)), last.as_deref())
+    }
+
+    /// tpl-r1 working file of `p` (below [`SWITCH_DIR`]) once switched to the branch.
+    pub fn switched_working(&self, p: &str) -> Vec<u8> {
+        let first = self.local_edits.contains(p).then(|| local_line(p));
+        let last = self.server_modified.contains(p).then(|| server_line(p));
+        text5(p, first.as_deref(), Some(&branch_line(p)), last.as_deref())
+    }
+
     /// tpl-r2 working file of edited file `p`.
     pub fn r2_local(&self, p: &str) -> Vec<u8> {
         let last = self.server_modified.contains(p).then(|| server_line(p));
@@ -359,6 +422,11 @@ fn contains(hay: &[u8], needle: &str) -> bool {
 
 /// BASE revision of `rel` in `wc.db` (`None`: no BASE row or not present).
 fn base_rev(wc: &Path, rel: &str) -> Result<Option<u64>> {
+    Ok(base_row(wc, rel)?.and_then(|(_, rev)| rev))
+}
+
+/// Repository path and revision of the BASE row of `rel` (`None`: no BASE row or not present).
+fn base_row(wc: &Path, rel: &str) -> Result<Option<(String, Option<u64>)>> {
     let c = rusqlite::Connection::open_with_flags(
         wc.join(".svn/wc.db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -366,17 +434,23 @@ fn base_rev(wc: &Path, rel: &str) -> Result<Option<u64>> {
     .map_err(|e| err(format!("open wc.db: {e}")))?;
     let mut stmt = c
         .prepare(
-            "SELECT revision FROM nodes WHERE local_relpath = ?1 AND op_depth = 0 \
+            "SELECT repos_path, revision FROM nodes WHERE local_relpath = ?1 AND op_depth = 0 \
              AND presence = 'normal'",
         )
-        .map_err(|e| err(format!("base_rev: {e}")))?;
+        .map_err(|e| err(format!("base_row: {e}")))?;
     let mut rows = stmt
-        .query_map([rel], |r| r.get::<_, Option<i64>>(0))
-        .map_err(|e| err(format!("base_rev: {e}")))?;
+        .query_map([rel], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                r.get::<_, Option<i64>>(1)?,
+            ))
+        })
+        .map_err(|e| err(format!("base_row: {e}")))?;
     match rows.next() {
-        Some(r) => Ok(r
-            .map_err(|e| err(format!("base_rev: {e}")))?
-            .and_then(|v| u64::try_from(v).ok())),
+        Some(r) => {
+            let (path, rev) = r.map_err(|e| err(format!("base_row: {e}")))?;
+            Ok(Some((path, rev.and_then(|v| u64::try_from(v).ok()))))
+        }
         None => Ok(None),
     }
 }
@@ -457,6 +531,17 @@ impl Fixture {
         let other = self.path("other");
         self.svn
             .run(&["checkout", "-q", &url, &other.to_string_lossy()])?;
+        // The branch for `switch`: a copy of d0@1 with line 5 changed (and the last line as in
+        // d0@2), plus a file of its own.
+        self.svn
+            .run_in(&other, &["copy", "-q", SWITCH_DIR, SWITCH_BRANCH])?;
+        for f in &m.switched {
+            let name = &f[SWITCH_DIR.len() + 1..];
+            write(&other.join(SWITCH_BRANCH).join(name), &m.branch_text(f))?;
+        }
+        let only = format!("{SWITCH_BRANCH}/{BRANCH_ONLY}");
+        write(&other.join(&only), b"only on the branch\n")?;
+        self.svn.run_in(&other, &["add", "-q", &only])?;
         for f in &m.server_modified {
             write(&other.join(f), &m.base_text(f, 2))?;
         }
@@ -659,6 +744,7 @@ impl Fixture {
             failure: None,
             warnings: Vec::new(),
             elapsed: Duration::ZERO,
+            manual_cleanup: false,
         };
         let dir = self.path(&format!("case-{id}"));
         let repo = format!("r{id}");
@@ -718,7 +804,7 @@ impl Fixture {
         let wc = dir.join("wc");
         match op {
             Op::Checkout => {}
-            Op::Update | Op::Cleanup => self.clone_template("tpl-r1", &wc, &url)?,
+            Op::Update | Op::Switch | Op::Cleanup => self.clone_template("tpl-r1", &wc, &url)?,
             Op::Commit | Op::Revert => self.clone_template("tpl-r2", &wc, &url)?,
         }
         if op == Op::Cleanup {
@@ -764,6 +850,15 @@ impl Fixture {
             let r = self.worker(&state, "recover", &url, &wc, &Kill::Never)?;
             let mut detail = r.require_ok("recover")?.to_owned();
             if !detail.contains("locks_need_user=0") {
+                // Recovery must need no manual step. The one known exception is a kill right
+                // after the WC_LOCK row commits and before its ownership record exists (the
+                // first `wc.txn.after_commit` of an operation, or a random kill landing there).
+                if !lock_row_window(kill) {
+                    return Err(err(format!(
+                        "recovery needs a manual `svn cleanup` after a kill at {kill}: {detail}"
+                    )));
+                }
+                rec.manual_cleanup = true;
                 // A kill between committing the WC_LOCK row and writing the ownership record
                 // or marker leaves a row the engine cannot prove is its own; by design
                 // (svn-wc `wc_lock.rs`) it is left for the user, whose remedy is `svn cleanup`.
@@ -805,6 +900,10 @@ impl Fixture {
                 self.worker(&state, "commit", &url, &wc, &Kill::Never)?
                     .require_ok("commit after crash")?;
             }
+            Op::Switch => {
+                self.worker(&state, "switch", &url, &wc, &Kill::Never)?
+                    .require_ok("switch after crash")?;
+            }
             Op::Revert => {
                 self.worker(&state, "revert", &url, &wc, &Kill::Never)?
                     .require_ok("revert after crash")?;
@@ -815,6 +914,9 @@ impl Fixture {
         verify::db_integrity(&wc).map_err(|e| err(format!("final: {e}")))?;
         verify::db_quiescent(&wc)?;
         let svn_status = self.status_agrees(&state, &wc, "final")?;
+        if op == Op::Switch {
+            return self.final_switch(&wc, &url, dir, &svn_status);
+        }
         self.final_checks(op, &wc, &url, dir, &svn_status)
     }
 
@@ -858,6 +960,7 @@ impl Fixture {
         let m = &self.model;
         match op {
             Op::Checkout => Ok(()),
+            Op::Switch => self.intermediate_switch(wc),
             Op::Update | Op::Cleanup => {
                 for f in &m.files {
                     let got = read(&wc.join(f));
@@ -986,6 +1089,140 @@ impl Fixture {
         }
     }
 
+    /// A killed switch: every file of `d0` is on the branch (with its local edit merged) or still
+    /// at r1 as its BASE row says, every other file is untouched, nothing local is lost.
+    fn intermediate_switch(&self, wc: &Path) -> Result<()> {
+        let m = &self.model;
+        let branch = format!("{SWITCH_BRANCH}/");
+        for f in &m.files {
+            let got = read(&wc.join(f));
+            if m.conflicts.contains(f) {
+                if !got
+                    .as_deref()
+                    .is_some_and(|g| contains(g, &conflict_line(f)))
+                {
+                    return Err(err(format!("lost local modification: {f}")));
+                }
+                continue;
+            }
+            let switched = match base_row(wc, f)? {
+                Some((path, _)) => path.starts_with(&branch),
+                None => return Err(err(format!("{f}: BASE row lost"))),
+            };
+            let want = if switched {
+                m.switched_working(f)
+            } else {
+                m.r1_working(f, 1)
+            };
+            if got.as_deref() != Some(&want[..]) {
+                return Err(err(format!(
+                    "{f}: BASE is {} but the working file is {}",
+                    if switched { "on the branch" } else { "r1" },
+                    describe(got.as_deref(), &want, m.local_edits.contains(f))
+                )));
+            }
+        }
+        let only = format!("{SWITCH_DIR}/{BRANCH_ONLY}");
+        if base_row(wc, &only)?.is_some()
+            && read(&wc.join(&only)).as_deref() != Some(b"only on the branch\n")
+        {
+            return Err(err(format!("{only}: BASE row but wrong contents")));
+        }
+        if read(&wc.join("unversioned.txt")).as_deref() != Some(b"not versioned\n") {
+            return Err(err("unversioned file lost"));
+        }
+        Ok(())
+    }
+
+    /// After a killed and finished switch the working copy equals what svn's own switch makes of
+    /// the same template: same files (conflicted files: both sides present), same `svn status`.
+    fn final_switch(
+        &self,
+        wc: &Path,
+        url: &str,
+        dir: &Path,
+        status: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        let m = &self.model;
+        let youngest = self.svn.youngest(url)?;
+        if youngest != 2 {
+            return Err(err(format!("repository at r{youngest}, expected r2")));
+        }
+        let oracle = dir.join("oracle");
+        self.clone_template("tpl-r1", &oracle, url)?;
+        // svn reports the conflict and exits 0 (no `--accept`, non-interactive: postpone).
+        self.svn.run_in(
+            &oracle,
+            &[
+                "switch",
+                "-q",
+                &format!("{url}/{SWITCH_BRANCH}"),
+                SWITCH_DIR,
+            ],
+        )?;
+        let conflicted: Vec<&String> = m
+            .conflicts
+            .iter()
+            .filter(|f| m.switched.contains(*f))
+            .collect();
+        // Conflict artifacts (`f.mine`, `f.r1`, `f.r2`) carry labels; their names are compared
+        // through `svn status` only by prefix.
+        let artifact = |p: &str| conflicted.iter().any(|f| p.starts_with(&format!("{f}.")));
+        let strip = |st: &BTreeMap<String, String>| -> BTreeMap<String, String> {
+            st.iter()
+                .filter(|(p, c)| !(c.as_str() == "?  " && artifact(p)))
+                .map(|(p, c)| (p.clone(), c.clone()))
+                .collect()
+        };
+        let theirs = strip(&self.svn.status(&oracle)?);
+        let ours = strip(status);
+        if ours != theirs {
+            return Err(err(format!(
+                "svn status after our switch differs from svn's own switch:\n  {}",
+                verify::status_diff("ours", &ours, "svn", &theirs).join("\n  ")
+            )));
+        }
+        let want = snapshot(&oracle)?;
+        let got = snapshot(wc)?;
+        let mut problems = Vec::new();
+        for (p, e) in &want {
+            if artifact(p) || conflicted.contains(&p) {
+                continue;
+            }
+            match got.get(p) {
+                Some(g) if g == e => {}
+                Some(_) => problems.push(format!("{p}: content differs")),
+                None => problems.push(format!("{p}: missing")),
+            }
+        }
+        for p in got.keys() {
+            if !want.contains_key(p) && !artifact(p) {
+                problems.push(format!("{p}: unexpected"));
+            }
+        }
+        for f in &conflicted {
+            let g = read(&wc.join(f)).unwrap_or_default();
+            if !contains(&g, &conflict_line(f)) || !contains(&g, &server_line(f)) {
+                problems.push(format!("{f}: conflict file lacks one side"));
+            }
+        }
+        if !problems.is_empty() {
+            problems.truncate(20);
+            return Err(err(format!(
+                "working copy differs from svn's own switch of the same template:\n  {}",
+                problems.join("\n  ")
+            )));
+        }
+        let diff = self.svn.diff(wc)?;
+        if let Some(l) = diff
+            .lines()
+            .find(|l| l.starts_with("-server edit of") || l.starts_with("-branch edit of"))
+        {
+            return Err(err(format!("silent revert of a branch change: {l}")));
+        }
+        Ok(())
+    }
+
     /// The repository holds exactly the tpl-r2 changes in r3.
     fn server_has_commit(&self, url: &str) -> Result<()> {
         let m = &self.model;
@@ -1037,7 +1274,7 @@ impl Fixture {
         let mut want_status: BTreeMap<String, String> = BTreeMap::new();
         let mut allow_extra: Vec<String> = Vec::new();
         match op {
-            Op::Checkout | Op::Commit => {}
+            Op::Checkout | Op::Commit | Op::Switch => {}
             Op::Update | Op::Cleanup => {
                 for f in &m.local_edits {
                     want.insert(f.clone(), Entry::File(m.r1_working(f, 2)));
@@ -1162,7 +1399,7 @@ impl Report {
             self.seed, self.seed
         );
         s.push_str(
-            "| op | cases | killed | completed before kill | failed |\n|---|---:|---:|---:|---:|\n",
+            "| op | cases | killed | completed before kill | manual cleanup | failed |\n|---|---:|---:|---:|---:|---:|\n",
         );
         for op in Op::ALL {
             let cs: Vec<_> = self.cases.iter().filter(|c| c.op == op).collect();
@@ -1175,8 +1412,9 @@ impl Report {
                 .filter(|c| matches!(c.ended, Ended::Ok(_)))
                 .count();
             let failed = cs.iter().filter(|c| c.failure.is_some()).count();
+            let manual = cs.iter().filter(|c| c.manual_cleanup).count();
             s.push_str(&format!(
-                "| {} | {} | {killed} | {done} | {failed} |\n",
+                "| {} | {} | {killed} | {done} | {manual} | {failed} |\n",
                 op.name(),
                 cs.len()
             ));

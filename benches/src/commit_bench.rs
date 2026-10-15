@@ -420,12 +420,14 @@ fn run(a: &Args) -> Result<()> {
     let rows = [add, modify, big];
     let mut md = String::from("# Benchmark: commit, OpenSVN engine vs svn CLI\n\n");
     md.push_str(&format!(
-        "- svn CLI {}; server Apache + mod_dav_svn over HTTP on 127.0.0.1\n- {} CPUs, build: {}, repetitions: {} (median, min in brackets)\n- bytes: what the client sent to the server during the commit (median)\n\n",
+        "- svn CLI {}; server: {}, HTTP on 127.0.0.1\n- machine: {}\n- filesystem of the working copies: {}\n- build: {}, repetitions: {} (median, min in brackets)\n- bytes: what the client sent to the server during the commit (median)\n\n",
         {
             let (x, y, z) = b.svn.version();
             format!("{x}.{y}.{z}")
         },
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+        crate::machine::server(&b.apache.url("")),
+        crate::machine::machine(),
+        crate::machine::filesystem(&b.scratch),
         if cfg!(debug_assertions) { "DEBUG (not representative)" } else { "release" },
         a.reps
     ));

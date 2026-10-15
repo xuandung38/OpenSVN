@@ -13,7 +13,7 @@ use svn_ra_api::{
 };
 use svn_types::{
     CancelToken, Checksum, DeltaEditor, Depth, DirEntry, DirId, ErrorCode, FileId, LockInfo,
-    LogEntry, NodeKind, PropChange, RelPath, RepoUrl, Result, Revnum, SvnError,
+    LogEntry, NodeKind, PropChange, RelPath, RepoUrl, Reporter, Result, Revnum, SvnError,
 };
 use tokio::io::AsyncWrite;
 
@@ -47,6 +47,9 @@ pub struct RecRa {
     /// Break every drive with the error when it is about to close this file (a server that
     /// always cuts the answer at the same point). Applies after `update_breaks` is used up.
     pub update_break_at: Mutex<Option<(String, SvnError)>>,
+    /// Every working copy report, one line per reporter call (`set_path <path> r<rev>`,
+    /// `link_path <path> <url> r<rev>`, `delete_path <path>`), one list per `do_update`.
+    pub reports: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
 impl RecRa {
@@ -64,6 +67,7 @@ impl RecRa {
             update_breaks: Mutex::default(),
             update_revisions: Mutex::default(),
             update_break_at: Mutex::default(),
+            reports: Arc::default(),
         }
     }
 
@@ -72,6 +76,51 @@ impl RecRa {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+}
+
+/// Records the reporter calls and passes them on.
+struct RecReporter<'a> {
+    inner: &'a mut dyn Reporter,
+    lines: Vec<String>,
+}
+
+impl Reporter for RecReporter<'_> {
+    fn set_path(
+        &mut self,
+        path: &RelPath,
+        rev: Revnum,
+        depth: Depth,
+        start_empty: bool,
+        lock_token: Option<&str>,
+    ) -> Result<()> {
+        self.lines.push(format!("set_path {path} r{}", rev.0));
+        self.inner
+            .set_path(path, rev, depth, start_empty, lock_token)
+    }
+    fn delete_path(&mut self, path: &RelPath) -> Result<()> {
+        self.lines.push(format!("delete_path {path}"));
+        self.inner.delete_path(path)
+    }
+    fn link_path(
+        &mut self,
+        path: &RelPath,
+        url: &RepoUrl,
+        rev: Revnum,
+        depth: Depth,
+        start_empty: bool,
+        lock_token: Option<&str>,
+    ) -> Result<()> {
+        self.lines
+            .push(format!("link_path {path} {url} r{}", rev.0));
+        self.inner
+            .link_path(path, url, rev, depth, start_empty, lock_token)
+    }
+    fn finish(&mut self) -> Result<()> {
+        self.inner.finish()
+    }
+    fn abort(&mut self) -> Result<()> {
+        self.inner.abort()
     }
 }
 
@@ -464,6 +513,20 @@ impl RaSession for RecRa {
             }),
             (None, None) => editor,
         };
+        let reports = Arc::clone(&self.reports);
+        let report: ReportFn = Box::new(move |r: &mut dyn Reporter| {
+            let mut rec = RecReporter {
+                inner: r,
+                lines: Vec::new(),
+            };
+            let result = report(&mut rec);
+            let lines = std::mem::take(&mut rec.lines);
+            reports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(lines);
+            result
+        });
         self.inner.do_update(req, report, editor, cancel).await
     }
     async fn commit_editor(
