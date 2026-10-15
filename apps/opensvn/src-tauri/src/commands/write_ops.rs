@@ -261,6 +261,8 @@ pub async fn update(
     .await
 }
 
+/// `ignore_ancestry`: switch even when `url` shares no history with the working copy (`svn
+/// switch --ignore-ancestry`); otherwise such a switch fails with `no-common-ancestry`.
 #[tauri::command]
 #[specta::specta]
 pub async fn switch(
@@ -268,6 +270,7 @@ pub async fn switch(
     wc_id: WcId,
     url: String,
     rev: Option<Rev>,
+    ignore_ancestry: bool,
 ) -> Result<OperationHandle, AppError> {
     guard(async {
         let name = state.wcs.resolve(&wc_id)?.row.name;
@@ -276,7 +279,7 @@ pub async fn switch(
             &wc_id,
             format!("Switch {name}"),
             move |engine, wc, ctx| async move {
-                let new_rev = engine.switch(&wc, &url, rev, &ctx).await?;
+                let new_rev = engine.switch(&wc, &url, rev, ignore_ancestry, &ctx).await?;
                 Ok(OpResult::NewRev { new_rev })
             },
         )

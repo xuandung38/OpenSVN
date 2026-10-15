@@ -308,6 +308,26 @@ fn synthetic_skelta_fetch_elements_and_late_checked_in() {
     );
 }
 
+/// A switch with ancestry ignored: mod_dav_svn deletes a node replaced by an unrelated one with
+/// `rev="-1"` (no base revision), which libsvn_ra_serf passes on as `SVN_INVALID_REVNUM`.
+#[test]
+fn delete_entry_without_a_base_revision() {
+    let doc = r#"<S:update-report xmlns:S="svn:" xmlns:D="DAV:" xmlns:V="http://subversion.tigris.org/xmlns/dav/"><S:target-revision rev="3"/><S:open-directory rev="2"><S:delete-entry name="a" rev="-1"/><S:delete-entry name="b" rev="2"/></S:open-directory></S:update-report>"#;
+    let evs = parse_update(&urls(), doc.as_bytes()).unwrap();
+    let deletes: Vec<(String, Option<u64>)> = evs
+        .iter()
+        .filter_map(|e| match e {
+            UpdateEvent::DeleteEntry { path, rev } => {
+                Some((path.as_str().to_owned(), rev.map(|r| r.0)))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deletes, [("a".into(), None), ("b".into(), Some(2))]);
+    let bad = doc.replace(r#"rev="-1""#, r#"rev="-2""#);
+    assert!(parse_update(&urls(), bad.as_bytes()).is_err());
+}
+
 #[test]
 fn hostile_reports_are_rejected() {
     let wrap = |inner: &str| {

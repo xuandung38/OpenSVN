@@ -350,7 +350,13 @@ impl UpdateParser {
                 out.push(match tag.name.local.as_str() {
                     "delete-entry" => UpdateEvent::DeleteEntry {
                         path,
-                        rev: tag.attr("rev").map(parse_revnum).transpose()?,
+                        // `-1` (SVN_INVALID_REVNUM): mod_dav_svn sends it for a node replaced
+                        // by an unrelated one when ancestry is ignored.
+                        rev: tag
+                            .attr("rev")
+                            .filter(|r| r.trim() != "-1")
+                            .map(parse_revnum)
+                            .transpose()?,
                     },
                     "absent-file" => UpdateEvent::AbsentFile { path },
                     _ => UpdateEvent::AbsentDir { path },

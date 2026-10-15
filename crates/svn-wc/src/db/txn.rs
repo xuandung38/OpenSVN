@@ -150,21 +150,28 @@ impl WcTxn<'_> {
 
     /// [`WcTxn::bump_revisions_post_update`] at depth infinity.
     pub fn bump_revisions(&self, root: &RelPath, rev: u64, skipped: &[RelPath]) -> Result<()> {
-        self.bump_revisions_post_update(root, rev, Depth::Infinity, skipped)
+        self.bump_revisions_post_update(root, rev, Depth::Infinity, skipped, None)
     }
 
-    /// Moves the BASE tree at `root` to `rev` after an update drive, like svn's
+    /// Moves the BASE tree at `root` to `rev` after an update or switch drive, like svn's
     /// `bump_revisions_post_update`: nodes within `depth` of `root` get the new revision, except
     /// the `skipped` subtrees (tree conflicts), which keep theirs. Below the root, a
     /// `not-present` node that the drive did not re-add is gone at `rev` and its row is removed,
     /// as is a `server-excluded` node at another revision. The root itself keeps such a row (an
-    /// update target deleted on the server stays a `not-present` marker).
+    /// update target deleted on the server stays a `not-present` marker), and a root that is
+    /// `excluded`, `server-excluded` or `not-present` is left as it is.
+    ///
+    /// `switch_relpath` (a switch) is the new repository path of `root`: every node bumped also
+    /// gets the path below it, `excluded` nodes included, so an excluded child stays excluded at
+    /// its new location. Nodes outside `depth` and the `skipped` subtrees keep their old path,
+    /// as svn leaves them.
     pub fn bump_revisions_post_update(
         &self,
         root: &RelPath,
         rev: u64,
         depth: Depth,
         skipped: &[RelPath],
+        switch_relpath: Option<&str>,
     ) -> Result<()> {
         let depth = match depth {
             Depth::Unknown | Depth::Exclude => Depth::Infinity,
@@ -173,20 +180,30 @@ impl WcTxn<'_> {
         let Some(node) = self.read_base(root)? else {
             return Ok(());
         };
-        self.bump_node(node, to_i64(rev)?, depth, skipped, true, false)
+        if matches!(
+            node.presence,
+            Presence::Excluded | Presence::ServerExcluded | Presence::NotPresent
+        ) {
+            return Ok(());
+        }
+        let bump = Bump {
+            rev: to_i64(rev)?,
+            skipped,
+        };
+        self.bump_node(&bump, node, switch_relpath, depth, true, false)
     }
 
     fn bump_node(
         &self,
+        b: &Bump<'_>,
         node: Node,
-        rev: i64,
+        new_repos: Option<&str>,
         depth: Depth,
-        skipped: &[RelPath],
         is_root: bool,
         skip_when_dir: bool,
     ) -> Result<()> {
         let path = &node.relpath;
-        if skipped.contains(path) {
+        if b.skipped.contains(path) {
             return Ok(());
         }
         if skip_when_dir && node.kind == NodeKind::Dir {
@@ -199,16 +216,27 @@ impl WcTxn<'_> {
         let old_rev = node.revision.and_then(|r| i64::try_from(r).ok());
         if !is_root
             && (node.presence == Presence::NotPresent
-                || (node.presence == Presence::ServerExcluded && old_rev != Some(rev)))
+                || (node.presence == Presence::ServerExcluded && old_rev != Some(b.rev)))
         {
             return ops::base_remove(self.conn, self.wc_id, path);
         }
-        if old_rev.is_some() && old_rev != Some(rev) {
+        if old_rev.is_some() && old_rev != Some(b.rev) {
             super::connection::cached_exec(
                 self.conn,
                 "UPDATE nodes SET revision = ?3 WHERE wc_id = ?1 AND local_relpath = ?2 \
                      AND op_depth = 0",
-                params![self.wc_id, path.as_str(), rev],
+                params![self.wc_id, path.as_str(), b.rev],
+            )
+            .map_err(sql_err)?;
+        }
+        if let Some(new) = new_repos
+            && node.repos_relpath.as_deref() != Some(new)
+        {
+            super::connection::cached_exec(
+                self.conn,
+                "UPDATE nodes SET repos_path = ?3 WHERE wc_id = ?1 AND local_relpath = ?2 \
+                     AND op_depth = 0",
+                params![self.wc_id, path.as_str(), new],
             )
             .map_err(sql_err)?;
         }
@@ -228,7 +256,22 @@ impl WcTxn<'_> {
         };
         // One query per directory; each child's row comes with it.
         for child in nodes::base_children(self.conn, self.wc_id, path)? {
-            self.bump_node(child, rev, below, skipped, false, depth == Depth::Files)?;
+            let child_repos = new_repos.map(|p| {
+                let name = child.relpath.file_name().unwrap_or("");
+                if p.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{p}/{name}")
+                }
+            });
+            self.bump_node(
+                b,
+                child,
+                child_repos.as_deref(),
+                below,
+                false,
+                depth == Depth::Files,
+            )?;
         }
         Ok(())
     }
@@ -779,4 +822,10 @@ impl WcTxn<'_> {
         .map_err(sql_err)?;
         Ok(())
     }
+}
+
+/// What [`WcTxn::bump_revisions_post_update`] applies to every node it visits.
+struct Bump<'a> {
+    rev: i64,
+    skipped: &'a [RelPath],
 }

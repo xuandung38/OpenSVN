@@ -277,6 +277,7 @@ impl FakeEngine {
         wc: &WcRef,
         url: &str,
         rev: Option<Rev>,
+        ignore_ancestry: bool,
         ctx: &OpContext,
     ) -> Result<Rev, SvnError> {
         let info = self.with_wc(&wc.root, |w| Ok(w.info()))?;
@@ -288,6 +289,28 @@ impl FakeEngine {
             ));
         }
         session.ensure_authenticated(&ctx.cancel).await?;
+        if !ignore_ancestry {
+            // The same check as the real engine (svn-client's `switch`).
+            let rev = match rev {
+                Some(r) => Revnum(r.0),
+                None => session.youngest_rev(&ctx.cancel).await?,
+            };
+            let current = RelPath::new(info.path_in_repo.trim_start_matches('/'))?;
+            let related = svn_ra_api::have_common_ancestor(
+                &session,
+                (&base, rev),
+                (&current, Revnum(info.base_rev.0)),
+                &ctx.cancel,
+            )
+            .await?;
+            if !related {
+                return Err(SvnError::new(
+                    ErrorCode::NoCommonAncestry,
+                    format!("'{url}' shares no common ancestry with the working copy"),
+                )
+                .with_svn_code(195_012));
+            }
+        }
         let snap = self
             .snapshot(&session, &base, rev.map(|r| Revnum(r.0)), ctx)
             .await?;
@@ -549,6 +572,11 @@ impl CommitPlan {
                     FakeChange::PutDir(p) => FakeChange::PutDir(map(p)?),
                     FakeChange::SetProp(p, c) => FakeChange::SetProp(map(p)?, c.clone()),
                     FakeChange::Delete(p) => FakeChange::Delete(map(p)?),
+                    FakeChange::Copy { from, rev, to } => FakeChange::Copy {
+                        from: map(from)?,
+                        rev: *rev,
+                        to: map(to)?,
+                    },
                 })
             })
             .collect()

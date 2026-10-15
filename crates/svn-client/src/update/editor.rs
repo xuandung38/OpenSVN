@@ -67,7 +67,6 @@ pub struct UpdateEditor {
     /// deleted: an add of the same name that follows is a replacement (svn's
     /// `deletion_conflicts`), see [`UpdateEditor::take_replacement`].
     pub(super) deletion_conflicts: HashMap<RelPath, (Node, TreeReason)>,
-    old_target_repos: Option<String>,
     finished: bool,
     /// Nodes prepared but not committed yet.
     pub(super) batch: Batch,
@@ -109,14 +108,6 @@ impl UpdateEditor {
     /// Creates the editor and the shared handle the caller reads results from.
     pub fn new(setup: UpdateSetup) -> Result<(Self, OutcomeHandle)> {
         let target_wc = wc::join_rel(&setup.anchor, &setup.target)?;
-        let old_target_repos = if setup.switch_relpath.is_some() {
-            setup
-                .db
-                .read_base(&target_wc)?
-                .and_then(|n| n.repos_relpath)
-        } else {
-            None
-        };
         let out: OutcomeHandle = Arc::new(Mutex::new(Outcome::default()));
         let batched = svn_wc::durable::batched_sync(setup.db.wcroot());
         Ok((
@@ -130,7 +121,6 @@ impl UpdateEditor {
                 files: HashMap::new(),
                 skipped: Vec::new(),
                 deletion_conflicts: HashMap::new(),
-                old_target_repos,
                 finished: false,
                 batch: Batch::default(),
                 staged: None,
@@ -155,10 +145,6 @@ impl UpdateEditor {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .completed = true;
-    }
-
-    pub(super) fn old_target(&self) -> Option<&str> {
-        self.old_target_repos.as_deref()
     }
 
     pub(super) fn rev(&self) -> Result<u64> {

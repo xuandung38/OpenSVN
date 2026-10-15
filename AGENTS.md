@@ -88,6 +88,7 @@ Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #
 | #169 `ci/release-gating-publish` | Quy trình phát hành: environment có duyệt, ký số tùy chọn, tự đẩy sang `OpenSVN-releases` | #22 | Đang review |
 | #170 `perf/bench-100k-crash-soak` | Benchmark 100k file với svn 1.15, crash test cho switch, soak 2 giờ, test chạy đồng thời với svn CLI | #121, #21 | Đang code |
 | #167 `test/fixtures-hostile-repo` | Fixture WC format 31 từ svn 1.15 (42 trạng thái) và f32 (43 trạng thái); repo "độc" + evil server chạy không cần Docker; e2e `hostile.test.mjs`; `xtask compat fixtures` chạy các generator; log/author có UTF-8 hỏng hiển thị bằng U+FFFD | #8, #18 | Đang review |
+| `fix/switch-exclude-ancestry` | Switch khớp svn 1.15: dòng `exclude` giữ nguyên và dời sang vị trí mới (node ngoài depth giữ vị trí cũ như svn); kiểm tra ancestry trước khi switch (E195012, mã `no-common-ancestry`, tùy chọn `ignore_ancestry` ở `svn_client::switch`, `EngineFacade::switch` và command `switch`); `RaSession::location_segments` (REPORT `get-location-segments`) | — | Đang review |
 
 Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: xem/diff file Word/Excel, hiển thị %/ETA khi checkout, giữ nguyên byte đường dẫn (NFC/NFD), build Mac. Hỏi chủ repo trước khi làm những mảng này.
 
@@ -108,6 +109,8 @@ Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo,
 11. **"Retry now" bấm khi thao tác chưa chờ mạng (#172, follow-up).** `OperationManager::retry_now` gọi `Notify::notify_one`, nên một lần bấm (hoặc một lần thức dậy) khi thao tác đang chạy bình thường để lại permit; lần mất mạng sau bỏ qua khoảng chờ đầu tiên. Vô hại nhưng nên chỉ đánh thức khi đang chờ.
 12. **Đếm ngược "thử lại sau Ns" đọc lại mỗi giây (#172, follow-up).** `connection-wait.tsx` đặt `role="status"` lên đoạn chữ đổi mỗi giây, nên trình đọc màn hình đọc liên tục. Nên để vùng live chỉ báo "Mất kết nối" và ẩn phần đếm ngược khỏi vùng live.
 13. **"Update lên bản mới nhất" của checkout dở bỏ qua lựa chọn ignore-externals (#172, follow-up).** Nút này chạy update thường, nên tải cả externals dù checkout ban đầu chọn bỏ qua. Nên đọc journal checkout như `wc_continue`.
+14. **Switch thư mục có thư mục con đã switch riêng lỗi `Corrupt` (`fix/switch-exclude-ancestry`, follow-up).** Switch `A` sang nhánh khi `A/X` đã switch sang chỗ khác báo "file 'X/x.txt' is not in the working copy base"; svn thì đưa `X` về vị trí con của `A` ở nhánh mới. Tái hiện với fake session: checkout `trunk`, `svn_client::switch` thư mục con `X` sang `branches/b/Y`, rồi switch gốc working copy sang `branches/b`; có trên main trước nhánh này. Lỗi nằm ở reporter (`link_path`), vùng #170 đang sửa: làm sau khi #170 merge.
+15. **Switch depth hẹp khi có thư mục con đã switch riêng thiếu dòng `not-present` (follow-up).** Với `--depth immediates`, svn ghi `not-present` cho file mà thư mục con mới có nhưng drive không gửi (giống `record_unseen_children` của update); `svn-client` chỉ làm việc này cho update. Hiếm gặp: engine luôn switch với depth `Unknown`.
 
 ## 6. Việc cần người thật (không tự động được)
 

@@ -11,8 +11,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use svn_protocol::options_request;
 use svn_ra_api::{
-    CommitEditor, CommitObserver, FileMeta, FileRevHandler, LogRequest, RaSession, ReportFn,
-    TxnAbort, UpdateRequest,
+    CommitEditor, CommitObserver, FileMeta, FileRevHandler, LocationSegment, LogRequest, RaSession,
+    ReportFn, TxnAbort, UpdateRequest,
 };
 use svn_types::{
     CancelToken, DeltaEditor, Depth, DirEntry, ErrorCode, LockInfo, LogEntry, NodeKind, PropChange,
@@ -213,6 +213,15 @@ impl RaSession for HttpRaSession {
         cancel: &CancelToken,
     ) -> Result<()> {
         log::log(&self.wire, req, on_entry, cancel).await
+    }
+
+    async fn location_segments(
+        &self,
+        repos_path: &RelPath,
+        peg: Revnum,
+        cancel: &CancelToken,
+    ) -> Result<Vec<LocationSegment>> {
+        super::history::location_segments(&self.wire, repos_path, peg, cancel).await
     }
 
     async fn get_locks(

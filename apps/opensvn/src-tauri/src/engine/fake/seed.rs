@@ -78,14 +78,17 @@ pub fn demo_repo() -> Result<FakeRaSession, SvnError> {
     repo.seed(
         "carol",
         "Create feature-x branch",
+        // A copy of trunk (so switching between the two passes the ancestry check), trimmed to
+        // the README and `main.rs`.
         &[
-            dir("branches/feature-x")?,
-            dir("branches/feature-x/src")?,
-            put(
-                "branches/feature-x/README.md",
-                "# Demo\n\nA small project.\n",
-            )?,
-            put("branches/feature-x/src/main.rs", MAIN_V2)?,
+            FakeChange::Copy {
+                from: RelPath::new("trunk")?,
+                rev: svn_types::Revnum(3),
+                to: RelPath::new("branches/feature-x")?,
+            },
+            FakeChange::Delete(RelPath::new("branches/feature-x/src/lib.rs")?),
+            FakeChange::Delete(RelPath::new("branches/feature-x/docs")?),
+            FakeChange::Delete(RelPath::new("branches/feature-x/assets")?),
         ],
     )?;
     repo.seed(

@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::LocationSegment;
 use bytes::Bytes;
 use svn_types::{
     ChangeAction, ChangedPath, DirEntry, ErrorCode, LockInfo, NodeKind, PropChange, RelPath,
@@ -104,6 +105,16 @@ pub enum FakeChange {
     SetProp(RelPath, PropChange),
     /// Delete a node and its subtree.
     Delete(RelPath),
+    /// Copy the node `from` of revision `rev` with its subtree to `to` (`svn copy`), recording
+    /// the copy source in the changed paths, so the copy has history.
+    Copy {
+        /// Copy source.
+        from: RelPath,
+        /// Revision of the copy source.
+        rev: Revnum,
+        /// New path (its parent must exist).
+        to: RelPath,
+    },
 }
 
 impl RepoState {
@@ -143,6 +154,71 @@ impl RepoState {
             .ok_or_else(|| SvnError::new(ErrorCode::PathNotFound, format!("no such revision {r}")))
     }
 
+    /// Location history of `path@peg`, youngest segment first, like svn_repos'
+    /// `node_location_segments`: followed back through the copies recorded in the changed paths
+    /// (`FakeChange::Copy` and copies made by commits), with a gap (`path: None`) between a copy
+    /// source revision and the revision before the copy.
+    pub fn location_segments(&self, path: &RelPath, peg: Revnum) -> Result<Vec<LocationSegment>> {
+        let (_, at_peg) = self.revision(Some(peg))?;
+        if !at_peg.tree.contains_key(path) {
+            return Err(SvnError::new(
+                ErrorCode::PathNotFound,
+                format!("path '{path}' does not exist in revision {peg}"),
+            ));
+        }
+        let segment = |start: u64, end: u64, path: Option<&RelPath>| LocationSegment {
+            range_start: Revnum(start),
+            range_end: Revnum(end),
+            path: path.map(RepoDisplayPath::from_rel),
+        };
+        let mut out = Vec::new();
+        let mut cur = path.clone();
+        let mut end = peg.0;
+        let mut n = peg.0;
+        while n > 0 {
+            let (_, rv) = self.revision(Some(Revnum(n)))?;
+            // The deepest add of the node itself or of a directory above it.
+            let born = rv
+                .changed
+                .iter()
+                .filter(|c| matches!(c.action, ChangeAction::Added | ChangeAction::Replaced))
+                .filter_map(|c| {
+                    let p = RelPath::new(c.path.as_str().trim_start_matches('/')).ok()?;
+                    cur.starts_with(&p).then_some((p, c))
+                })
+                .max_by_key(|(p, _)| p.as_str().len());
+            let Some((at, c)) = born else {
+                n -= 1;
+                continue;
+            };
+            out.push(segment(n, end, Some(&cur)));
+            let Some((src, src_rev)) = &c.copy_from else {
+                return Ok(out);
+            };
+            let suffix = cur
+                .as_str()
+                .strip_prefix(at.as_str())
+                .unwrap_or("")
+                .trim_start_matches('/')
+                .to_owned();
+            let src = RelPath::new(src.as_str().trim_start_matches('/'))?;
+            cur = if suffix.is_empty() {
+                src
+            } else if src.is_root() {
+                RelPath::new(&suffix)?
+            } else {
+                RelPath::new(&format!("{src}/{suffix}"))?
+            };
+            if src_rev.0 + 1 < n {
+                out.push(segment(src_rev.0 + 1, n - 1, None));
+            }
+            end = src_rev.0;
+            n = src_rev.0;
+        }
+        out.push(segment(0, end, Some(&cur)));
+        Ok(out)
+    }
+
     /// Directory entry for `path` in `tree`.
     pub fn entry(tree: &Tree, path: &RelPath, lock: Option<&LockInfo>) -> Option<DirEntry> {
         let node = tree.get(path)?;
@@ -176,6 +252,11 @@ impl RepoState {
             .unwrap_or_default();
         let mut changed = Vec::new();
         for c in changes {
+            if let FakeChange::Copy { from, rev: src, to } = c {
+                let (_, source) = self.revision(Some(*src))?;
+                copy_node(&mut tree, &source.tree, from, *src, to, rev, &mut changed)?;
+                continue;
+            }
             apply_change(&mut tree, rev, c, &mut changed)?;
         }
         if let Some(root) = tree.get_mut(&RelPath::root()) {
@@ -231,6 +312,70 @@ fn changed_path(path: &RelPath, action: ChangeAction, kind: NodeKind) -> Changed
         text_mods: kind == NodeKind::File,
         prop_mods: false,
     }
+}
+
+/// Copies `from` of `source` (revision `src`) with its subtree to `to` in `tree` (revision `rev`
+/// being built), like a server-side `svn copy`: the copy root records its source.
+fn copy_node(
+    tree: &mut Tree,
+    source: &Tree,
+    from: &RelPath,
+    src: Revnum,
+    to: &RelPath,
+    rev: Revnum,
+    changed: &mut Vec<ChangedPath>,
+) -> Result<()> {
+    let kind = source.get(from).map(Node::kind).ok_or_else(|| {
+        SvnError::new(
+            ErrorCode::PathNotFound,
+            format!("copy source {from}@{src} does not exist"),
+        )
+    })?;
+    if tree.contains_key(to) {
+        return Err(SvnError::new(
+            ErrorCode::OutOfDate,
+            format!("copy target {to} already exists"),
+        ));
+    }
+    if to.parent().is_some_and(|p| !tree.contains_key(&p)) {
+        return Err(SvnError::new(
+            ErrorCode::PathNotFound,
+            format!("parent of copy target {to} does not exist"),
+        ));
+    }
+    for (k, n) in source.iter().filter(|(k, _)| k.starts_with(from)) {
+        let suffix = k
+            .as_str()
+            .strip_prefix(from.as_str())
+            .unwrap_or("")
+            .trim_start_matches('/');
+        let mut n = n.clone();
+        let target = if suffix.is_empty() {
+            n.created_rev = rev;
+            to.clone()
+        } else if to.is_root() {
+            RelPath::new(suffix)?
+        } else {
+            RelPath::new(&format!("{to}/{suffix}"))?
+        };
+        tree.insert(target, n);
+    }
+    changed.push(ChangedPath {
+        path: RepoDisplayPath::from_rel(to),
+        action: ChangeAction::Added,
+        kind,
+        copy_from: Some((RepoDisplayPath::from_rel(from), src)),
+        text_mods: false,
+        prop_mods: false,
+    });
+    let mut parent = to.parent();
+    while let Some(p) = parent {
+        if let Some(n) = tree.get_mut(&p) {
+            n.created_rev = rev;
+        }
+        parent = p.parent();
+    }
+    Ok(())
 }
 
 /// Applies one change to a tree, recording it. Shared by seeding and the commit editor.
@@ -289,6 +434,12 @@ pub fn apply_change(
             tree.retain(|k, _| !k.starts_with(path));
             changed.push(changed_path(path, ChangeAction::Deleted, kind));
         }
+        FakeChange::Copy { .. } => {
+            return Err(SvnError::new(
+                ErrorCode::Internal,
+                "a copy needs the repository history; seed it through commit_changes",
+            ));
+        }
     }
     // Ancestors changed too.
     let mut parent = match change {
@@ -296,6 +447,7 @@ pub fn apply_change(
         | FakeChange::PutFile(p, _)
         | FakeChange::PutDir(p)
         | FakeChange::SetProp(p, _) => p.parent(),
+        FakeChange::Copy { to, .. } => to.parent(),
     };
     while let Some(p) = parent {
         if let Some(n) = tree.get_mut(&p) {

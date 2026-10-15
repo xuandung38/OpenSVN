@@ -200,6 +200,14 @@ impl RaSession for HttpSession {
     ) -> Result<()> {
         unsupported()
     }
+    async fn location_segments(
+        &self,
+        _p: &RelPath,
+        _r: Revnum,
+        _c: &CancelToken,
+    ) -> Result<Vec<svn_ra_api::LocationSegment>> {
+        unsupported()
+    }
     async fn get_locks(&self, _p: &RelPath, _d: Depth, _c: &CancelToken) -> Result<Vec<LockInfo>> {
         unsupported()
     }

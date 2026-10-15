@@ -304,11 +304,16 @@ pub trait EngineFacade: Send + Sync {
     /// idle connections are dropped. The default does nothing.
     fn system_woke(&self) {}
     /// Switches to `url`; returns the revision reached.
+    ///
+    /// Like `svn switch`, a `url` that shares no history with the working copy (not a branch or
+    /// tag of its line of development) is refused with `ErrorCode::NoCommonAncestry` before
+    /// anything changes, unless `ignore_ancestry` is set (`--ignore-ancestry`).
     async fn switch(
         &self,
         wc: &WcRef,
         url: &str,
         rev: Option<Rev>,
+        ignore_ancestry: bool,
         ctx: &OpContext,
     ) -> EngineResult<Rev>;
     /// Commits; returns the new revision.

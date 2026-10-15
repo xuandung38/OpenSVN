@@ -84,6 +84,7 @@ scenario!(repo_info_at_a_peg_revision);
 scenario!(cancellation_and_errors);
 scenario!(working_copy_metadata_operations);
 scenario!(switch_to_a_branch);
+scenario!(switch_needs_common_ancestry);
 scenario!(branch_detection_follows_a_switch);
 scenario!(repository_content_tools);
 scenario!(open_recovers_dead_locks_and_reports_foreign_ones);

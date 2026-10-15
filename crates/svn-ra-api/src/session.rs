@@ -80,6 +80,20 @@ pub struct LogRequest {
     pub strict_node_history: bool,
 }
 
+/// One piece of a node's location history, as reported by `location_segments` (svn's
+/// `svn_location_segment_t`): the node had `path` in every revision of
+/// `range_start..=range_end`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocationSegment {
+    /// Oldest revision of the range.
+    pub range_start: Revnum,
+    /// Youngest revision of the range.
+    pub range_end: Revnum,
+    /// Absolute repository path, display only; `None` for a gap in the history (the node did
+    /// not exist, or the path is not readable).
+    pub path: Option<RepoDisplayPath>,
+}
+
 /// One revision of a file as reported by `file_revs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileRev {
@@ -203,6 +217,20 @@ pub trait RaSession: Send + Sync {
         break_lock: bool,
         cancel: &CancelToken,
     ) -> Result<()>;
+    /// Location history of the node at `repos_path` in revision `peg`, from `peg` back to its
+    /// origin, youngest segment first (svn's `get_location_segments` with the default range).
+    ///
+    /// Unlike the other paths of this trait, `repos_path` is relative to the **repository
+    /// root**, not to the session URL: the history of a location outside the session (the
+    /// working copy's own URL when switching away from it) is asked without reparenting.
+    /// `PathNotFound` when the node does not exist in `peg`.
+    async fn location_segments(
+        &self,
+        repos_path: &RelPath,
+        peg: Revnum,
+        cancel: &CancelToken,
+    ) -> Result<Vec<LocationSegment>>;
+
     /// Reports the revisions of a file in `start..=end` that changed its text.
     ///
     /// Revisions that changed only the file's properties are **not** passed to `handler`

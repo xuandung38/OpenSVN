@@ -580,6 +580,7 @@ impl FakeEngine {
     }
 
     /// Changes that copy the repository subtree at `from` to `to`.
+    /// A server-side copy of `from@rev` to `to`, with history (like `svn copy URL URL`).
     async fn copy_changes(
         &self,
         session: &FakeRaSession,
@@ -588,37 +589,21 @@ impl FakeEngine {
         to: &RelPath,
         ctx: &OpContext,
     ) -> Result<Vec<FakeChange>, SvnError> {
-        let mut out = Vec::new();
-        match session.check_path(from, rev, &ctx.cancel).await? {
-            NodeKind::File => {
-                let (_, data) = self.read_file(session, from, rev, ctx).await?;
-                out.push(FakeChange::PutFile(to.clone(), data.into()));
-            }
-            NodeKind::Dir => {
-                out.push(FakeChange::PutDir(to.clone()));
-                let entries = session
-                    .list(from, rev, svn_types::Depth::Infinity, &ctx.cancel)
-                    .await?;
-                for e in entries {
-                    let sub = RelPath::from_server(&e.name)?;
-                    let target = RelPath::new(&format!("{to}/{sub}"))?;
-                    if e.kind == NodeKind::Dir {
-                        out.push(FakeChange::PutDir(target));
-                    } else {
-                        let src = RelPath::new(&format!("{from}/{sub}"))?;
-                        let (_, data) = self.read_file(session, &src, rev, ctx).await?;
-                        out.push(FakeChange::PutFile(target, data.into()));
-                    }
-                }
-            }
-            _ => {
-                return Err(SvnError::new(
-                    ErrorCode::PathNotFound,
-                    format!("/{from} does not exist"),
-                ));
-            }
+        let rev = match rev {
+            Some(r) => r,
+            None => session.youngest_rev(&ctx.cancel).await?,
+        };
+        match session.check_path(from, Some(rev), &ctx.cancel).await? {
+            NodeKind::File | NodeKind::Dir => Ok(vec![FakeChange::Copy {
+                from: from.clone(),
+                rev,
+                to: to.clone(),
+            }]),
+            _ => Err(SvnError::new(
+                ErrorCode::PathNotFound,
+                format!("/{from} does not exist"),
+            )),
         }
-        Ok(out)
     }
 
     async fn commit_remote(

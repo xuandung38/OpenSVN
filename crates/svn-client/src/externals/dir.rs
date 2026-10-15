@@ -118,6 +118,8 @@ pub(super) async fn ensure(
                 url,
                 Some(rev),
                 Depth::Unknown,
+                // Like svn's `switch_dir_external`: an external may point anywhere.
+                true,
                 job.cancel,
             )
             .await?;

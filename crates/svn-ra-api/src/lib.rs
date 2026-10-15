@@ -6,6 +6,7 @@
 //! * [`AuthPrompter`] lets the transport ask the app for credentials and certificate trust.
 //! * With the `fake` feature the crate also ships an in-memory repository and test editors.
 
+mod ancestry;
 mod auth;
 mod commit;
 mod editor_worker;
@@ -14,6 +15,7 @@ mod session;
 #[cfg(feature = "fake")]
 pub mod fake;
 
+pub use ancestry::have_common_ancestor;
 pub use auth::{
     AuthMethod, AuthPrompter, CertDecision, CertFailure, CertInfo, CredentialRequest, Credentials,
     PromptReason,
@@ -21,6 +23,6 @@ pub use auth::{
 pub use commit::{CommitEditor, CommitInfo, CommitObserver, ReplayableSource};
 pub use editor_worker::{DEFAULT_COMMAND_CAPACITY, EditorHandle, EditorWorker, WindowSender};
 pub use session::{
-    FileMeta, FileRev, FileRevHandler, LogRequest, RaSession, ReportFn, TxnAbort, UpdateMode,
-    UpdateRequest,
+    FileMeta, FileRev, FileRevHandler, LocationSegment, LogRequest, RaSession, ReportFn, TxnAbort,
+    UpdateMode, UpdateRequest,
 };

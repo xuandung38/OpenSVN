@@ -241,6 +241,7 @@ async fn nested_target_below_a_switched_parent_is_refused_for_update_and_switch(
         &url("branches/b/src"),
         None,
         Depth::Unknown,
+        true,
         &cancel,
     )
     .await
@@ -265,6 +266,7 @@ async fn nested_target_below_a_switched_parent_is_refused_for_update_and_switch(
         &url("branches/b/other"),
         None,
         Depth::Unknown,
+        true,
         &cancel,
     )
     .await

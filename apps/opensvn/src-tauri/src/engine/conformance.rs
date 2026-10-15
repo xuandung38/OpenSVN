@@ -692,7 +692,13 @@ pub async fn switch_to_a_branch(h: &dyn Harness) {
     .expect("copy");
     let (wc, _) = checkout(h, "switch", None).await;
     let reached = e
-        .switch(&wc, &format!("{url}/branches/switch-target"), None, &ctx())
+        .switch(
+            &wc,
+            &format!("{url}/branches/switch-target"),
+            None,
+            false,
+            &ctx(),
+        )
         .await
         .expect("switch");
     let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
@@ -703,6 +709,52 @@ pub async fn switch_to_a_branch(h: &dyn Harness) {
         info.url
     );
     assert!(status(h, &wc).await.is_empty());
+}
+
+/// Like `svn switch`, a location that shares no history with the working copy (a folder added
+/// on its own) is refused with `no-common-ancestry` before anything changes; with ancestry
+/// ignored the switch goes through. (A branch copied from trunk passes: `switch_to_a_branch`.)
+pub async fn switch_needs_common_ancestry(h: &dyn Harness) {
+    let e = h.engine();
+    let url = h.repo_url();
+    let unrelated = format!("{url}/unrelated");
+    e.remote_edit(
+        &RemoteEditPlan {
+            ops: vec![EditOp::Mkdir {
+                url: unrelated.clone(),
+            }],
+            message: "Unrelated folder".into(),
+        },
+        &ctx(),
+    )
+    .await
+    .expect("mkdir");
+    let (wc, before) = checkout(h, "ancestry", None).await;
+    let err = e
+        .switch(&wc, &unrelated, None, false, &ctx())
+        .await
+        .expect_err("a switch to an unrelated folder is refused");
+    assert_eq!(err.code, ErrorCode::NoCommonAncestry, "{err:?}");
+    assert_eq!(err.svn_code, Some(195_012), "{err:?}");
+    let app = opensvn_ipc::AppError::from(&err);
+    assert_eq!(
+        app.code,
+        opensvn_ipc::ErrorCode::NoCommonAncestry,
+        "{app:?}"
+    );
+    assert!(!app.retryable);
+    let after = e.wc_info(&wc.root, &ctx()).await.expect("info");
+    assert_eq!(
+        (after.url.as_str(), after.base_rev),
+        (before.url.as_str(), before.base_rev)
+    );
+    assert!(status(h, &wc).await.is_empty());
+
+    e.switch(&wc, &unrelated, None, true, &ctx())
+        .await
+        .expect("switch with ancestry ignored");
+    let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
+    assert!(info.url.ends_with("/unrelated"), "{}", info.url);
 }
 
 /// The trunk/branches/tags layout around a working copy URL is found through the engine, follows a
@@ -755,7 +807,7 @@ pub async fn branch_detection_follows_a_switch(h: &dyn Harness) {
         .iter()
         .find(|n| n.kind == BranchKind::Branch && n.name == "feature-y")
         .expect("listed branch");
-    e.switch(&wc, &target.url, None, &ctx())
+    e.switch(&wc, &target.url, None, false, &ctx())
         .await
         .expect("switch");
     let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
@@ -774,7 +826,7 @@ pub async fn branch_detection_follows_a_switch(h: &dyn Harness) {
     );
     assert_eq!(current.url, target.url);
 
-    e.switch(&wc, &format!("{url}/lib-copy"), None, &ctx())
+    e.switch(&wc, &format!("{url}/lib-copy"), None, false, &ctx())
         .await
         .expect("switch outside the layout");
     let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
@@ -1360,6 +1412,7 @@ pub async fn run_all<H: Harness>(make: impl Fn() -> H) {
     working_copy_metadata_operations(&make()).await;
     mark_move_and_set_depth(&make()).await;
     switch_to_a_branch(&make()).await;
+    switch_needs_common_ancestry(&make()).await;
     branch_detection_follows_a_switch(&make()).await;
     repository_content_tools(&make()).await;
     open_recovers_dead_locks_and_reports_foreign_ones(&make()).await;

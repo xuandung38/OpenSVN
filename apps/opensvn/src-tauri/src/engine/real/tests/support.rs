@@ -322,6 +322,14 @@ impl RaSession for ScriptedSession {
     ) -> Result<(), SvnError> {
         self.inner.log(req, on_entry, cancel).await
     }
+    async fn location_segments(
+        &self,
+        repos_path: &RelPath,
+        peg: Revnum,
+        cancel: &CancelToken,
+    ) -> Result<Vec<svn_ra_api::LocationSegment>, SvnError> {
+        self.inner.location_segments(repos_path, peg, cancel).await
+    }
     async fn get_locks(
         &self,
         path: &RelPath,

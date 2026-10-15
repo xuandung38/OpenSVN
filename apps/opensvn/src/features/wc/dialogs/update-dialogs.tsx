@@ -85,7 +85,7 @@ export function SwitchDialog({ onClose }: { onClose: () => void }) {
       onClose={onClose}
       onSubmit={async () => {
         if (!wc || rev === "invalid") return;
-        const h = await unwrap(ipc().commands.switch(wc.id, trimmed, rev));
+        const h = await unwrap(ipc().commands.switch(wc.id, trimmed, rev, false));
         toast.show(t("opStarted", { title: h.title }));
         onClose();
       }}
