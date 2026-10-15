@@ -12,8 +12,8 @@ on:
         description: Random SIGKILL cases per operation
         default: "120"
       fp_iters:
-        description: Kills per reachable (operation, failpoint)
-        default: "8"
+        description: Kills per reachable failpoint (at least 50)
+        default: "50"
       bench_files:
         description: Text files in the benchmark repository
         default: "100000"
@@ -37,10 +37,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     env:
-      # 5 operations x 120 random kills + about 40 reachable (operation, failpoint) pairs x 8
-      # kills: over 1000 crash cases a night.
+      # 6 operations x 120 random kills + 17 failpoints x 50 kills: over 1500 crash cases a night.
       CRASH_RANDOM_ITERS: ${{ inputs.random_iters || '120' }}
-      CRASH_FP_ITERS: ${{ inputs.fp_iters || '8' }}
+      CRASH_FP_ITERS: ${{ inputs.fp_iters || '50' }}
       CRASH_FILES: "200"
       CRASH_REPORT_DIR: ${{ github.workspace }}/crash-report
       CRASH_KEEP_FAILED: "5"

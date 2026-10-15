@@ -70,7 +70,7 @@ cargo test -p opensvn-crash --features failpoints --test failpoints -- --ignored
 | Variable | Default | Meaning |
 |---|---|---|
 | `CRASH_RANDOM_ITERS` | 6 | random kills per operation |
-| `CRASH_FP_ITERS` | 3 | kills per reachable (operation, failpoint) |
+| `CRASH_FP_ITERS` | 50 | kills per reachable failpoint, spread over the operations that reach it |
 | `CRASH_FILES` | 200 | text files in the fixture |
 | `CRASH_SEED` | clock | replay a run (printed at start and in the report) |
 | `CRASH_REPORT_DIR` | `target/crash-report` | markdown reports (`sigkill.md`, `failpoints.md`) |
