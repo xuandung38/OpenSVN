@@ -170,6 +170,7 @@ fn program_settings_are_readable_but_not_patchable() {
         "diff.mergeTool",
         "tools.editor",
         "tools.terminal",
+        "diff.toolsByExtension",
     ] {
         let err = serde_json::from_value::<SettingsPatch>(json!({ key: null })).unwrap_err();
         assert!(err.to_string().contains("unknown field"), "{key}: {err}");
@@ -216,6 +217,7 @@ fn sample_settings() -> Settings {
         diff_merge_tool: None,
         tools_editor: None,
         tools_terminal: None,
+        diff_tools_by_extension: None,
     }
 }
 
@@ -310,6 +312,7 @@ fn file_diff_flags_too_complex_in_camel_case() {
         image: None,
         too_large: None,
         too_complex: Some(true),
+        office: None,
     };
     let v = serde_json::to_value(&d).unwrap();
     assert_eq!(v["tooComplex"], json!(true));

@@ -11,15 +11,15 @@ use async_trait::async_trait;
 use opensvn_ipc::{
     BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
     EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage,
-    RepoEntry, RepoInfo, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
+    RepoInfo, RepoListing, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
 };
 use svn_types::{CancelToken, ErrorCode, RepoUrl, Revnum, SvnError};
 
 use super::support::{Fixture, fixture, plant_dead_app_lock, plant_lock_row};
 use crate::engine::conformance::{self, Harness, PlantedOwner};
 use crate::engine::{
-    CheckoutPlan, DiffOptions, EngineFacade, EngineResult, LockScope, LogScope, OpContext,
-    RemoteEditPlan, RemoteScan, StatusQuery, WcInfo, WcOpened, WcRef,
+    CheckoutPlan, DiffOptions, EngineFacade, EngineResult, ExportedSides, LockScope, LogScope,
+    OpContext, RemoteEditPlan, RemoteScan, SideFiles, StatusQuery, WcInfo, WcOpened, WcRef,
 };
 
 /// The real engine with checkout done by `svn-client` directly.
@@ -56,6 +56,20 @@ impl EngineFacade for ClientCheckout {
         ctx: &OpContext,
     ) -> EngineResult<FileDiff> {
         self.0.engine.diff_wc(wc, path, against, opts, ctx).await
+    }
+
+    async fn export_wc_sides(
+        &self,
+        wc: &WcRef,
+        path: &str,
+        against: Option<Rev>,
+        to: SideFiles<'_>,
+        ctx: &OpContext,
+    ) -> EngineResult<ExportedSides> {
+        self.0
+            .engine
+            .export_wc_sides(wc, path, against, to, ctx)
+            .await
     }
     async fn changelist_set(
         &self,
@@ -185,7 +199,7 @@ impl EngineFacade for ClientCheckout {
         url: &str,
         rev: Option<Rev>,
         ctx: &OpContext,
-    ) -> EngineResult<Vec<RepoEntry>> {
+    ) -> EngineResult<RepoListing> {
         self.0.engine.repo_list(url, rev, ctx).await
     }
     async fn repo_cat(
@@ -214,6 +228,20 @@ impl EngineFacade for ClientCheckout {
         ctx: &OpContext,
     ) -> EngineResult<FileDiff> {
         self.0.engine.diff_rev(url, from, to, opts, ctx).await
+    }
+
+    async fn export_rev_sides(
+        &self,
+        url: &str,
+        from: Option<Rev>,
+        to_rev: Rev,
+        to: SideFiles<'_>,
+        ctx: &OpContext,
+    ) -> EngineResult<ExportedSides> {
+        self.0
+            .engine
+            .export_rev_sides(url, from, to_rev, to, ctx)
+            .await
     }
     async fn log(
         &self,
