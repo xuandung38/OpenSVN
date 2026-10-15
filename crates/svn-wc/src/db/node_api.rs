@@ -133,7 +133,7 @@ impl WcDb {
     ) -> Result<T> {
         self.with_write(|tx| {
             let value = f(tx)?;
-            ops::queue_work(tx, work)?;
+            ops::queue_work(tx, self.wc_id, work)?;
             Ok(value)
         })
     }

@@ -1115,22 +1115,21 @@ async fn update_of_nested_targets_matches_svn() {
     }
 }
 
-/// The server replaces a file, and a directory by a file, in one revision: each path is deleted
-/// and added again by the same drive, so the update must commit the deletion (and remove the old
-/// node from disk) before it looks at the added node.
-///
-/// A file replaced by a directory is left out: there the engine and svn 1.15 already differed
-/// before the update batching (same result on `main`), which is a separate issue.
+/// The server replaces a file, a directory by a file and a file by a directory in one revision:
+/// each path is deleted and added again by the same drive, so the update must commit the
+/// deletion (and remove the old node from disk) before it looks at the added node. Local
+/// changes on replaced nodes are covered by `update_replace_kind_vs_svn`.
 #[tokio::test(flavor = "multi_thread")]
 async fn incoming_replacements_vs_svn() {
     let Some((o, t, w)) = scenario(
         "incoming-replacements",
         |_, _, _| {},
         |repo, seed| {
-            repo.svn(seed, &["rm", "-q", "README", "docs"]);
+            repo.svn(seed, &["rm", "-q", "README", "docs", "run.sh"]);
             write(&seed.join("README"), "replaced\n");
             write(&seed.join("docs"), "a file now\n");
-            repo.svn(seed, &["add", "-q", "README", "docs"]);
+            write(&seed.join("run.sh/inner.txt"), "a dir now\n");
+            repo.svn(seed, &["add", "-q", "README", "docs", "run.sh"]);
         },
     )
     .await

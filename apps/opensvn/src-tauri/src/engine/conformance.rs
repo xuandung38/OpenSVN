@@ -480,6 +480,58 @@ pub async fn remote_edit_and_copy(h: &dyn Harness) {
     );
 }
 
+/// `repo_info_at` looks at the path in the peg revision: a folder deleted since is still found
+/// there, and a revision past HEAD is an error.
+pub async fn repo_info_at_a_peg_revision(h: &dyn Harness) {
+    let e = h.engine();
+    let url = h.repo_url();
+    let before = e.repo_info(&url, &ctx()).await.unwrap().youngest_rev;
+    let gone = format!("{url}/trunk/gone");
+    e.remote_edit(
+        &RemoteEditPlan {
+            ops: vec![EditOp::Mkdir { url: gone.clone() }],
+            message: "Add gone".into(),
+        },
+        &ctx(),
+    )
+    .await
+    .expect("mkdir");
+    let deleted = e
+        .remote_edit(
+            &RemoteEditPlan {
+                ops: vec![EditOp::Delete { url: gone.clone() }],
+                message: "Delete gone".into(),
+            },
+            &ctx(),
+        )
+        .await
+        .expect("delete");
+    let at_head = e
+        .repo_info(&gone, &ctx())
+        .await
+        .expect_err("deleted at HEAD");
+    assert_eq!(at_head.code, ErrorCode::PathNotFound, "{at_head:?}");
+    let at_add = e
+        .repo_info_at(&gone, Some(Rev(before.0 + 1)), &ctx())
+        .await
+        .expect("found at the peg revision");
+    assert_eq!(at_add.kind, EntryKind::Dir);
+    assert_eq!(at_add.youngest_rev, deleted, "youngest_rev stays HEAD");
+    let before_add = e
+        .repo_info_at(&gone, Some(before), &ctx())
+        .await
+        .expect_err("not there before it was added");
+    assert_eq!(before_add.code, ErrorCode::PathNotFound, "{before_add:?}");
+    e.repo_info_at(&url, Some(Rev(deleted.0 + 10)), &ctx())
+        .await
+        .expect_err("revision past HEAD");
+    // `None` is HEAD, as `repo_info`.
+    assert_eq!(
+        e.repo_info_at(&url, None, &ctx()).await.unwrap(),
+        e.repo_info(&url, &ctx()).await.unwrap()
+    );
+}
+
 /// Cancellation and error mapping.
 pub async fn cancellation_and_errors(h: &dyn Harness) {
     let e = h.engine();
@@ -1303,6 +1355,7 @@ pub async fn run_all<H: Harness>(make: impl Fn() -> H) {
     conflict_blocks_commit_until_resolved(&make()).await;
     lock_and_unlock(&make()).await;
     remote_edit_and_copy(&make()).await;
+    repo_info_at_a_peg_revision(&make()).await;
     cancellation_and_errors(&make()).await;
     working_copy_metadata_operations(&make()).await;
     mark_move_and_set_depth(&make()).await;
