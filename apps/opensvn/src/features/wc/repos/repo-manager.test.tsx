@@ -3,6 +3,7 @@ import { beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { AppShell } from "../../../app/app-shell";
 import type { WcEntry } from "../../../ipc/bindings";
 import { mockCalls, mockEmit, setMockOpDuration } from "../../../ipc/mock/adapter";
+import { MOCK_WC_ID } from "../../../ipc/mock/data";
 import { markMockWcIncomplete, resetWcMock } from "../../../ipc/mock/wc-mock-commands";
 import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../../test-utils";
 import {
@@ -243,7 +244,21 @@ test("a missing working copy offers Locate…, which re-grants through the nativ
   expect(await screen.findByText("old-prototype was found at its new location")).toBeTruthy();
   expect(String(lastCall("wcLocate")?.args[1])).toMatch(/^grant-/);
   expect(lastCall("wcLocate")?.args[0]).toBe("wc-missing");
-  expect(calls("wcOpen")).toBe(0);
+  // Located, it is the most recently opened one: the window shows it and opens it like any
+  // working copy current without a pick.
+  await waitFor(() => expect(lastCall("wcOpen")?.args[0]).toBe("wc-missing"));
+});
+
+test("the working copy current at start-up is opened once, so its watcher runs", async () => {
+  renderApp(<AppShell />);
+  await screen.findByRole("option", { name: /renderer\.ts/ });
+  // The last opened one (game-client) was never picked: the window opens it itself.
+  await waitFor(() => expect(lastCall("wcOpen")?.args[0]).toBe(MOCK_WC_ID));
+  await act(async () => {
+    mockEmit("wc://revision-changed", { wcId: MOCK_WC_ID, baseRev: 1, revRange: null });
+  });
+  await screen.findByRole("option", { name: /renderer\.ts/ });
+  expect(calls("wcOpen")).toBe(1);
 });
 
 test("rename and remove from the context menu; remove asks first and keeps the files", async () => {

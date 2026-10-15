@@ -465,6 +465,50 @@ async fn opening_recovers_dead_owner_locks_and_only_reports_foreign_ones() {
 }
 
 #[tokio::test]
+async fn a_busy_working_copy_stays_listed() {
+    // A long write (an update, the recovery of a crashed commit) holds the working copy: reads
+    // give up as busy, and the list keeps the last description instead of dropping it (#20).
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    assert_eq!(f.state().wcs.list().await.unwrap().len(), 1);
+    let actor = f.state().wcs.resolve(&wc.id).unwrap().actor;
+    let (release, held) = tokio::sync::oneshot::channel::<()>();
+    let writer = tokio::spawn(async move {
+        actor
+            .write(async move {
+                let _ = held.await;
+                Ok(())
+            })
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let listed = f.state().wcs.list().await.unwrap();
+    let _ = release.send(());
+    writer.await.unwrap().unwrap();
+    assert_eq!(listed.len(), 1, "the busy working copy is still listed");
+    assert_eq!(listed[0].id, wc.id);
+    assert_eq!(listed[0].root_path, wc.root_path);
+}
+
+#[tokio::test]
+async fn recovery_at_start_has_the_ui_read_the_working_copy_again() {
+    // The window lists the working copies while start-up recovery runs; a read that met the
+    // recovery's write left the working copy out as busy (#20). Once it is open, the UI is told
+    // to read it again: the revision event refreshes the list and its status.
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    let before = f.events.all().len();
+    f.state().recover_all().await;
+    let revision = f.events.all()[before..].iter().find_map(|r| match r {
+        Recorded::Revision(r) => Some(r.clone()),
+        _ => None,
+    });
+    let revision = revision.expect("a revision-changed event after the recovery");
+    assert_eq!(revision.wc_id, wc.id);
+    assert_eq!(revision.base_rev, wc.base_rev);
+}
+
+#[tokio::test]
 async fn open_working_copy_republishes_status_when_files_change() {
     // The fake working copy does not exist on disk, so the service falls back to periodic rescans.
     let timing = crate::status::StatusTiming {

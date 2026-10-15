@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppToolbar } from "../components/layout/app-toolbar";
 import { MainWindow } from "../components/layout/main-window";
 import { Button } from "../components/ui/button";
@@ -75,6 +75,21 @@ export function AppShell() {
     ? null
     : (wcs.data?.find((w) => w.id === (wcId ?? lastOpened)) ?? wcs.data?.[0] ?? null);
   const status = useStatus(current?.id ?? null);
+  // The working copy current at start-up (the last opened one) was never picked, so open it like
+  // a picked one: recovery, the background status scan and the file watcher (#20, #21). Without
+  // this, edits on disk stay unseen until the user switches working copies. A picked one
+  // (`wcId`) is opened by whoever picked it.
+  const autoOpened = useRef<string | null>(null);
+  const implicitId = closed || wcId !== null ? null : (current?.id ?? null);
+  useEffect(() => {
+    if (!implicitId || autoOpened.current === implicitId) return;
+    autoOpened.current = implicitId;
+    void ipc()
+      .commands.wcOpen(implicitId)
+      .catch(() => {
+        // A working copy that cannot be opened shows its own error when the user acts on it.
+      });
+  }, [implicitId]);
   const [view, setView] = useState<View>("changes");
   const links = useRemoteLinks(setView);
 
