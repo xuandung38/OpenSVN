@@ -12,7 +12,7 @@ use md5::{Digest, Md5};
 use svn_protocol::propfind::{self, MultiStatusParser, PropfindEntry};
 use svn_protocol::xml::Ns;
 use svn_protocol::{ResponseParser, errors::codes, get, options_request, parse_chunked};
-use svn_ra_api::FileMeta;
+use svn_ra_api::{DirListing, FileMeta};
 use svn_types::{
     CancelToken, Checksum, Depth, DirEntry, ErrorCode, NodeKind, PropChange, RelPath, Result,
     Revnum, SvnError,
@@ -181,9 +181,10 @@ fn too_deep(max: usize) -> SvnError {
     )
 }
 
-/// One `Depth: 1` listing: the directory's own entry and its children with their repository
-/// paths. Children the protocol layer refuses (other origin, unsafe names) are skipped with a
-/// warning rather than failing the whole listing.
+/// One `Depth: 1` listing: the directory's own entry, its children with their repository
+/// paths, and how many children the protocol layer refused (other origin, unsafe names). Those
+/// are skipped with a warning rather than failing the whole listing, and counted so the caller
+/// can say that something is hidden.
 ///
 /// At most `budget` children are accepted: one more fails with [`ErrorCode::LimitExceeded`]
 /// while the answer is still streaming (`max` is the overall cap, for the message).
@@ -194,16 +195,17 @@ async fn list_one(
     budget: usize,
     max: usize,
     cancel: &CancelToken,
-) -> Result<(DirEntry, Vec<(RelPath, DirEntry)>)> {
+) -> Result<(DirEntry, Vec<(RelPath, DirEntry)>, usize)> {
     // Nothing reaches the caller before the whole answer is in: a listing that breaks off is
     // asked for again from the start.
     let mut retry = ReadRetry::new(wire, "listing");
-    let (own, children) = loop {
+    let (own, children, rejected) = loop {
         let req = propfind::list_request(wire.urls(), rev, dir)?;
         let attempt = async {
             let resp = wire.send_ok(req, cancel).await?;
             let mut own = None;
             let mut children = Vec::new();
+            let mut rejected = 0_usize;
             // A repeated entry would make a recursive listing walk its subtree again at every
             // level.
             let mut seen = HashSet::new();
@@ -232,12 +234,13 @@ async fn list_one(
                             "skipping a listing entry: {}",
                             err.message
                         );
+                        rejected += 1;
                     }
                 }
                 Ok(())
             })
             .await?;
-            Ok((own, children))
+            Ok((own, children, rejected))
         }
         .await;
         match attempt {
@@ -246,7 +249,7 @@ async fn list_one(
         }
     };
     let own = own.ok_or_else(|| corrupt("listing does not include the directory itself"))?;
-    Ok((own, children))
+    Ok((own, children, rejected))
 }
 
 /// Lists the directory `path` at `rev`. `Files` keeps only files, `Immediates` all children,
@@ -254,14 +257,15 @@ async fn list_one(
 ///
 /// Every listing is bounded by the wire's [`ListLimits`] and fails with
 /// [`ErrorCode::LimitExceeded`] when it would exceed them. Repeated entries in an answer are
-/// listed once.
+/// listed once. Entries the protocol layer refuses are left out and counted in
+/// [`DirListing::rejected`]; with `Files`, refused entries of any kind count.
 pub(crate) async fn list(
     wire: &RaWire,
     path: &RelPath,
     rev: Option<Revnum>,
     depth: Depth,
     cancel: &CancelToken,
-) -> Result<Vec<DirEntry>> {
+) -> Result<DirListing> {
     if matches!(depth, Depth::Exclude | Depth::Unknown) {
         return Err(SvnError::new(
             ErrorCode::Internal,
@@ -272,7 +276,7 @@ pub(crate) async fn list(
     let repo = wire.repo_path(path)?;
     let limits = wire.list_limits();
     let max = limits.max_entries;
-    let (own, children) = list_one(wire, rev, &repo, max, max, cancel).await?;
+    let (own, children, mut rejected) = list_one(wire, rev, &repo, max, max, cancel).await?;
     if own.kind != NodeKind::Dir {
         return Err(SvnError::new(
             ErrorCode::PathNotFound,
@@ -304,14 +308,18 @@ pub(crate) async fn list(
                 if is_dir {
                     // Everything already accepted (listed or still on the stack) counts.
                     let budget = max.saturating_sub(out.len() + stack.len());
-                    let (_, below) = list_one(wire, rev, &p, budget, max, cancel).await?;
+                    let (_, below, refused) = list_one(wire, rev, &p, budget, max, cancel).await?;
+                    rejected += refused;
                     stack.extend(below.into_iter().rev().map(|(c, e)| (c, e, level + 1)));
                 }
             }
         }
-        Depth::Empty | Depth::Exclude | Depth::Unknown => {}
+        Depth::Empty | Depth::Exclude | Depth::Unknown => rejected = 0,
     }
-    Ok(out)
+    Ok(DirListing {
+        entries: out,
+        rejected,
+    })
 }
 
 /// `p` relative to `base` (`base` is a proper ancestor of `p`).

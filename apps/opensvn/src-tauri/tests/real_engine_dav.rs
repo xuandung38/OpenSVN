@@ -508,6 +508,7 @@ async fn authz_denied_at_root_allowed_on_trunk() {
         .repo_list(&format!("{url}/trunk"), None, &ctx())
         .await
         .expect("list trunk")
+        .entries
         .into_iter()
         .map(|x| x.name)
         .collect();

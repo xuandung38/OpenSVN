@@ -11,8 +11,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use svn_protocol::options_request;
 use svn_ra_api::{
-    CommitEditor, CommitObserver, FileMeta, FileRevHandler, LogRequest, RaSession, ReportFn,
-    TxnAbort, UpdateRequest,
+    CommitEditor, CommitObserver, DirListing, FileMeta, FileRevHandler, LogRequest, RaSession,
+    ReportFn, TxnAbort, UpdateRequest,
 };
 use svn_types::{
     CancelToken, DeltaEditor, Depth, DirEntry, ErrorCode, LockInfo, LogEntry, NodeKind, PropChange,
@@ -193,6 +193,18 @@ impl RaSession for HttpRaSession {
         depth: Depth,
         cancel: &CancelToken,
     ) -> Result<Vec<DirEntry>> {
+        Ok(read::list(&self.wire, path, rev, depth, cancel)
+            .await?
+            .entries)
+    }
+
+    async fn list_counted(
+        &self,
+        path: &RelPath,
+        rev: Option<Revnum>,
+        depth: Depth,
+        cancel: &CancelToken,
+    ) -> Result<DirListing> {
         read::list(&self.wire, path, rev, depth, cancel).await
     }
 
