@@ -153,3 +153,116 @@ fn old_logs_and_huge_logs_are_trimmed() {
         "the rotated log is redacted too"
     );
 }
+
+mod secrets_never_reach_the_zip {
+    use proptest::prelude::*;
+
+    use super::*;
+    use opensvn_ipc::{ExtDiffTool, ExternalDiffTool, ProxySetting};
+
+    /// Log lines in the shapes the app and its libraries write, each carrying `{s}`.
+    const LOG_LINES: &[&str] = &[
+        "GET https://alice:{s}@svn.test/repo/trunk HTTP/1.1",
+        "Authorization: Basic {s}",
+        "authorization: Negotiate {s}",
+        "Proxy-Authorization: Basic {s}",
+        "Cookie: sid={s}",
+        "Cookie: theme=dark; sid={s}; lang=vi",
+        "Set-Cookie: sid={s}; Path=/svn; Secure; HttpOnly",
+        "{\"password\":\"{s}\",\"user\":\"alice\"}",
+        "password = {s}",
+        "PASSWD: {s}",
+        "lock-token: <opaquelocktoken:{s}>",
+        "If: (<opaquelocktoken:{s}>)",
+        "token={s}&rev=3",
+        "x-api-key: {s}",
+        "X-Auth-Token: {s}",
+        "level=DEBUG proxy=\"http://bob:{s}@proxy.test:3128\" connecting",
+        "2026-10-15T01:02:03Z WARN request failed url=https://u:{s}@svn.test/r secret=\"{s}\"",
+    ];
+
+    /// Characters a secret may hold in every line shape above. No `/`: inside a URL's userinfo
+    /// it is percent-encoded (`%2F`), as the URL parser writes it.
+    fn secret() -> impl Strategy<Value = String> {
+        "[A-Za-z0-9+=_.~%-]{12,32}"
+    }
+
+    fn settings_with(s: &str, place: u8) -> opensvn_ipc::Settings {
+        let mut settings = defaults(None);
+        let tool = |args: Vec<String>| ExternalDiffTool {
+            path: "/usr/bin/meld".into(),
+            args,
+        };
+        match place % 5 {
+            0 => {
+                settings.network_proxy = ProxySetting::Custom {
+                    url: format!("http://proxy-user:{s}@proxy.test:3128"),
+                };
+            }
+            1 => {
+                settings.integrations_web_revision_url =
+                    format!("https://web.test/r/{{rev}}?token={s}");
+            }
+            2 => {
+                settings.integrations_web_file_url =
+                    format!("https://viewer:{s}@web.test/f/{{path}}");
+            }
+            3 => {
+                settings.diff_external_tool =
+                    Some(tool(vec!["--password".into(), format!("password={s}")]));
+            }
+            _ => {
+                settings.diff_tools_by_extension = Some(vec![ExtDiffTool {
+                    ext: "docx".into(),
+                    path: "/opt/diff".into(),
+                    args: vec![format!("--token={s}"), "{left}".into(), "{right}".into()],
+                }]);
+            }
+        }
+        settings
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Preview then export, as the dialog does, with random secrets in random log lines and in
+        /// one setting: neither the preview nor any byte of the saved zip holds a secret.
+        #[test]
+        fn preview_then_export(
+            secrets in prop::collection::vec(secret(), 1..4),
+            lines in prop::collection::vec((0..LOG_LINES.len(), 0usize..4), 1..12),
+            place in 0u8..5,
+            hide_paths in any::<bool>(),
+            hide_commit_messages in any::<bool>(),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let mut log = String::from("2026-10-15T01:00:00Z INFO opensvn started\n");
+            for (line, which) in &lines {
+                let s = &secrets[which % secrets.len()];
+                log.push_str(&LOG_LINES[*line].replace("{s}", s));
+                log.push('\n');
+            }
+            std::fs::write(dir.path().join("opensvn.2026-10-15.log"), &log).unwrap();
+            std::fs::write(dir.path().join("opensvn.log.1"), &log).unwrap();
+            let mut i = inputs(Some(dir.path().to_path_buf()));
+            i.settings = settings_with(&secrets[0], place);
+
+            let svc = DiagnosticsService::default();
+            let p = svc.preview(&i, DiagnosticsOptions { hide_paths, hide_commit_messages });
+            prop_assert!(p.entries.iter().any(|e| e.name == "logs/opensvn.log.1"));
+            let dest = dir.path().join("diag.zip");
+            svc.export(&p.token, &dest).unwrap();
+            let zip = std::fs::read(&dest).unwrap();
+            for s in &secrets {
+                for e in &p.entries {
+                    prop_assert!(!e.content.contains(s.as_str()), "{} leaked in {}:\n{}", s, e.name, e.content);
+                }
+                prop_assert!(!contains(&zip, s.as_bytes()), "{} leaked in the zip", s);
+            }
+        }
+    }
+}
