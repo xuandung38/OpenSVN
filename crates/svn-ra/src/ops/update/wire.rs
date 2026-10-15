@@ -387,8 +387,8 @@ async fn parent_path_check(
     if !(200..300).contains(&head.status) {
         return None;
     }
-    let names = svn_protocol::parent_path_listing(&page)?;
-    Some(svn_protocol::parent_path_error(url, &names))
+    let repos = svn_protocol::parent_path_repos(url, &page)?;
+    Some(svn_protocol::parent_path_error(url, &repos))
 }
 
 /// Sends a read-only request and reads at most `limit` bytes of its answer, like
