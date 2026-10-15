@@ -14,16 +14,22 @@ import { type BrowseNode, type NodeActionHandlers, nodeMenuEntries } from "./nod
 
 const COLS = "grid-cols-[1fr_84px_64px_96px_92px_70px]";
 
-/** Directory contents as a keyboard-navigable list (Enter opens, context menu / Actions for the rest). */
+/**
+ * Directory contents as a keyboard-navigable list (Enter opens, context menu / Actions for the rest).
+ * `hidden` counts children the backend refused for their names: they are never shown, only counted,
+ * so a folder holding only such entries does not read as empty.
+ */
 export function DirTable({
   dirUrl,
   entries,
+  hidden = 0,
   selectedUrl,
   handlers,
   onSelect,
 }: {
   dirUrl: string;
   entries: RepoEntry[];
+  hidden?: number;
   selectedUrl: string | null;
   handlers: NodeActionHandlers;
   onSelect: (n: BrowseNode) => void;
@@ -114,7 +120,14 @@ export function DirTable({
           );
         }}
       />
-      {sorted.length === 0 && <p className="m-0 px-3 py-4 text-muted-text">{t("emptyFolder")}</p>}
+      {hidden > 0 && (
+        <p role="note" className="m-0 border-t border-line px-3 py-2 text-muted-text">
+          {hidden === 1 ? t("hiddenOne") : t("hiddenMany", { n: hidden })}
+        </p>
+      )}
+      {sorted.length === 0 && hidden === 0 && (
+        <p className="m-0 px-3 py-4 text-muted-text">{t("emptyFolder")}</p>
+      )}
     </div>
   );
 }
