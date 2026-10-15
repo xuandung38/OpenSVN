@@ -1,6 +1,8 @@
 //! Semantic validation of a complete settings value.
 
-use opensvn_ipc::{AppError, ExternalDiffTool, ProxySetting, SettingRange, Settings, WcFormat};
+use opensvn_ipc::{
+    AppError, ExtDiffTool, ExternalDiffTool, ProxySetting, SettingRange, Settings, WcFormat,
+};
 use serde_json::Value;
 
 /// Every numeric setting and its inclusive range. This table is the only definition: [`validate`]
@@ -152,6 +154,38 @@ pub fn validate(s: &Settings) -> Result<(), AppError> {
         if let Some(t) = tool {
             check_program(key, t)?;
         }
+    }
+    check_ext_tools(s.diff_tools_by_extension.as_deref().unwrap_or_default())
+}
+
+/// Most per-extension diff tools.
+pub const MAX_EXT_TOOLS: usize = 32;
+
+/// Whether `ext` is a stored extension: lowercase ASCII letters and digits, 1 to 16 of them (the
+/// extensions the staged copies keep).
+pub fn valid_ext(ext: &str) -> bool {
+    (1..=16).contains(&ext.len())
+        && ext
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
+fn check_ext_tools(tools: &[ExtDiffTool]) -> Result<(), AppError> {
+    const KEY: &str = "diff.toolsByExtension";
+    if tools.len() > MAX_EXT_TOOLS {
+        return Err(invalid(KEY, "too many extensions"));
+    }
+    for (i, t) in tools.iter().enumerate() {
+        if !valid_ext(&t.ext) || tools[..i].iter().any(|o| o.ext == t.ext) {
+            return Err(invalid(KEY, "extension is invalid or listed twice"));
+        }
+        check_program(
+            KEY,
+            &ExternalDiffTool {
+                path: t.path.clone(),
+                args: t.args.clone(),
+            },
+        )?;
     }
     Ok(())
 }
