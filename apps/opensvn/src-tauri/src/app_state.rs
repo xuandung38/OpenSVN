@@ -460,11 +460,11 @@ impl AppState {
         tauri::async_runtime::spawn(async move {
             let mut detector = crate::wake::WakeDetector::new(
                 std::time::Instant::now(),
-                std::time::SystemTime::now(),
+                crate::wake::boot_clock(),
             );
             loop {
                 tokio::time::sleep(crate::wake::TICK).await;
-                if detector.tick(std::time::Instant::now(), std::time::SystemTime::now()) {
+                if detector.tick(std::time::Instant::now(), crate::wake::boot_clock()) {
                     tracing::info!("the system woke up; reconnecting");
                     engine.system_woke();
                     ops.retry_all_now();
