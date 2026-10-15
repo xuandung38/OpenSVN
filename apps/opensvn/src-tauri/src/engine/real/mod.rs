@@ -216,6 +216,18 @@ impl RealEngine {
         self.svn_config.set_dir(dir);
     }
 
+    /// `global-ignores` patterns used instead of the configured ones (`None`: the configuration's
+    /// own list). The app passes the `wc.globalIgnores` setting when it is not empty.
+    pub fn set_global_ignores(&self, patterns: Option<Vec<String>>) {
+        self.svn_config.set_global_ignores(patterns);
+    }
+
+    /// `global-ignores` the next local operation uses (before the working copy's local list).
+    #[cfg(test)]
+    pub(crate) fn effective_global_ignores(&self) -> Vec<String> {
+        self.svn_config.add_config().global_ignores
+    }
+
     /// Directory set by [`RealEngine::set_subversion_config_dir`].
     #[cfg(test)]
     pub(crate) fn subversion_config_dir(&self) -> Option<PathBuf> {

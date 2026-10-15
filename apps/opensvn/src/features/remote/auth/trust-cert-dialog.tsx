@@ -2,11 +2,11 @@ import { useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { BadBox, Dialog, WarnBox } from "../../../components/ui/dialog";
 import { SafeText } from "../../../components/ui/safe-text";
+import type { CertDecision } from "../../../ipc/bindings";
 import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
 import { type CertPromptInfo, isChanged, isTrustable, originOf } from "./auth-model";
 import { authStrings } from "./auth-strings";
-import type { CertDecisionChoice } from "./cert-decision";
 
 type Key = keyof (typeof authStrings)["en"];
 
@@ -39,7 +39,7 @@ export function TrustCertDialog({
   onDecision,
 }: {
   prompt: CertPromptInfo;
-  onDecision: (d: CertDecisionChoice) => void;
+  onDecision: (d: CertDecision) => void;
 }) {
   const t = useT(authStrings);
   const c = useT(commonStrings);

@@ -201,6 +201,40 @@ async fn changed_pinned_certificate_is_reported_distinctly_and_replaces_the_pin_
 }
 
 #[tokio::test]
+async fn replace_pin_never_overrides_a_hard_failure_of_a_changed_certificate() {
+    // The host has a pin and now presents another certificate that also fails hard (expired, or
+    // issued for another name). `ReplacePin` is only for a pin mismatch on an otherwise valid
+    // chain: nothing is asked, the connection fails and the old pin stays.
+    let ca = TestCa::new();
+    let first = TestCa::self_signed_leaf(&["localhost"]);
+    for (presented, roots, why) in [
+        (ca.leaf(&["localhost"], true), vec![ca.der()], "expired"),
+        (ca.leaf(&["localhost"], true), vec![], "expired"),
+        (
+            TestCa::self_signed_leaf(&["other.test.local"]),
+            vec![],
+            "host name",
+        ),
+    ] {
+        let server = TlsServer::start(&presented, ok_handler()).await;
+        let trust = Arc::new(MemoryTrustStore::new());
+        let old_fp = sha256_fingerprint(&first.cert_der);
+        trust.pin("localhost", server.addr.port(), old_fp);
+        let prompter = ScriptedPrompter::with_cert_decision(CertDecision::ReplacePin);
+        let t = plain_transport(prompter.clone(), trust.clone(), roots);
+        let err = get(&t, server.url("/")).await.expect_err("blocked");
+        assert_eq!(err.code, ErrorCode::TlsUntrusted, "{why}");
+        assert!(err.message.contains(why), "{why}: {}", err.message);
+        assert_eq!(prompter.cert_prompts(), 0, "{why}");
+        assert_eq!(
+            trust.pinned("localhost", server.addr.port()),
+            vec![old_fp],
+            "{why}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn untrusted_certificate_for_the_wrong_host_is_not_overridable() {
     // Self-signed and issued for another name: the user must not be able to pin it.
     let leaf = TestCa::self_signed_leaf(&["other.test.local"]);
