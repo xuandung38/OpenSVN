@@ -104,9 +104,9 @@ lock row, work item or unsettled commit journal for the user. There is one excep
 of `svn-wc` `wc_lock.rs`: the WC_LOCK row is committed before its ownership record and marker are
 written, so that a crash never makes a foreign lock look like ours. A kill in that window leaves
 a lock row nobody can prove is ours, and the user has to run `svn cleanup`. The suite allows it
-only for a random SIGKILL or for a kill at `wc.txn.after_commit#1` (the operation's first
-transaction is the lock), counts it in the "manual cleanup" column, and fails any other case
-that needs it.
+only for a random SIGKILL or a kill at `wc.txn.after_commit` (any hit: for `continue` the lock
+is not the first transaction) that left no lock marker in `.svn/tmp`, counts it in the "manual
+cleanup" column, and fails any other case that needs it.
 
 ## Concurrency: engine and svn on one working copy
 

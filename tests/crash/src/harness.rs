@@ -206,13 +206,20 @@ pub struct CaseRecord {
 
 /// Whether `kill` may land between the commit of a WC_LOCK row and its ownership record, the
 /// one window where recovery leaves the lock for the user (`svn-wc` `wc_lock.rs`: the row is
-/// committed first so that a crash never makes a foreign lock look like ours).
-pub fn lock_row_window(kill: &Kill) -> bool {
-    match kill {
+/// committed first so that a crash never makes a foreign lock look like ours): a random kill or
+/// a kill right after a transaction commits, and the process died before it wrote the lock's
+/// marker into `.svn/tmp` (the marker is written last).
+pub fn lock_row_window(kill: &Kill, wc: &Path) -> bool {
+    let after_commit = match kill {
         Kill::After(_) => true,
-        Kill::Failpoint { name, hit } => name == "wc.txn.after_commit" && *hit == 1,
+        Kill::Failpoint { name, .. } => name == "wc.txn.after_commit",
         Kill::Never => false,
-    }
+    };
+    let marker = std::fs::read_dir(wc.join(".svn/tmp")).is_ok_and(|rd| {
+        rd.filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with("opensvn-lock-"))
+    });
+    after_commit && !marker
 }
 
 /// Text file contents: ten lines; line 1 and line 10 can be replaced.
@@ -869,6 +876,8 @@ impl Fixture {
         if has_db {
             verify::db_integrity(&wc).map_err(|e| err(format!("after kill: {e}")))?;
         }
+        // Read before recovery touches `.svn/tmp`.
+        let in_lock_window = lock_row_window(kill, &wc);
 
         // 2. Next open recovers.
         if has_db {
@@ -876,9 +885,9 @@ impl Fixture {
             let mut detail = r.require_ok("recover")?.to_owned();
             if !detail.contains("locks_need_user=0") {
                 // Recovery must need no manual step. The one known exception is a kill right
-                // after the WC_LOCK row commits and before its ownership record exists (the
-                // first `wc.txn.after_commit` of an operation, or a random kill landing there).
-                if !lock_row_window(kill) {
+                // after the WC_LOCK row commits and before its ownership record and marker exist
+                // (see `lock_row_window`).
+                if !in_lock_window {
                     return Err(err(format!(
                         "recovery needs a manual `svn cleanup` after a kill at {kill}: {detail}"
                     )));
