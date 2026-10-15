@@ -96,13 +96,20 @@ impl UpdateEditor {
             .as_ref()
             .and_then(|b| b.properties.clone())
             .unwrap_or_default();
-        // A node deleted or replaced locally, or lying below such a directory, is shadowed: only
-        // BASE moves on, nothing is merged into ACTUAL and the working layer is left alone (svn
-        // records just the tree conflict).
+        // A node deleted, replaced or added locally (an incoming add over a local add or move
+        // destination), or lying below such a directory, is shadowed: only BASE moves on,
+        // nothing is merged into ACTUAL and the working layer is left alone (svn records just
+        // the tree conflict).
         let shadowed = f.shadow.is_some()
-            || f.tree_conflict
-                .as_ref()
-                .is_some_and(|t| matches!(t.reason, TreeReason::Deleted | TreeReason::Replaced));
+            || f.tree_conflict.as_ref().is_some_and(|t| {
+                matches!(
+                    t.reason,
+                    TreeReason::Deleted
+                        | TreeReason::Replaced
+                        | TreeReason::Added
+                        | TreeReason::MovedHere
+                )
+            });
         let actual: Props = if shadowed {
             old_pristine.clone()
         } else if old.is_some() {
@@ -288,6 +295,9 @@ impl UpdateEditor {
             // Nothing visible changed (a pure revision bump); keep the event stream quiet.
         }
 
+        // Nothing so far rewrites the working file; the `.prej` marker below does not either.
+        let working_file_untouched = work.is_empty();
+
         // 3. Property conflict.
         if !pm.conflicted.is_empty() {
             let marker = create_prop_marker(db.wcroot(), &rel_str, false)?;
@@ -307,7 +317,7 @@ impl UpdateEditor {
 
         // 4. One transaction.
         let (keep_size, keep_mtime) =
-            if keep_fileinfo && !keep_working_tree && !text_changed && work.is_empty() {
+            if keep_fileinfo && !keep_working_tree && !text_changed && working_file_untouched {
                 old.as_ref()
                     .map_or((None, None), |b| (b.translated_size, b.last_mod_time))
             } else {
