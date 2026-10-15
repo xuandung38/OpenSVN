@@ -44,6 +44,9 @@ pub struct RecRa {
     pub update_breaks: Mutex<std::collections::VecDeque<Option<(usize, SvnError)>>>,
     /// Revision asked for by every `do_update` call.
     pub update_revisions: Mutex<Vec<Option<Revnum>>>,
+    /// Break every drive with the error when it is about to close this file (a server that
+    /// always cuts the answer at the same point). Applies after `update_breaks` is used up.
+    pub update_break_at: Mutex<Option<(String, SvnError)>>,
 }
 
 impl RecRa {
@@ -60,6 +63,7 @@ impl RecRa {
             on_auth: None,
             update_breaks: Mutex::default(),
             update_revisions: Mutex::default(),
+            update_break_at: Mutex::default(),
         }
     }
 
@@ -438,13 +442,27 @@ impl RaSession for RecRa {
             .unwrap_or_else(PoisonError::into_inner)
             .pop_front()
             .flatten();
-        let editor: Box<dyn DeltaEditor> = match brk {
-            Some((after, error)) => Box::new(BreakingEditor {
+        let at = self
+            .update_break_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let editor: Box<dyn DeltaEditor> = match (brk, at) {
+            (Some((after, error)), _) => Box::new(BreakingEditor {
                 inner: editor,
                 left: after,
                 error,
+                at: None,
+                files: HashMap::new(),
             }),
-            None => editor,
+            (None, Some((path, error))) => Box::new(BreakingEditor {
+                inner: editor,
+                left: usize::MAX,
+                error,
+                at: Some(path),
+                files: HashMap::new(),
+            }),
+            (None, None) => editor,
         };
         self.inner.do_update(req, report, editor, cancel).await
     }
@@ -514,6 +532,9 @@ struct BreakingEditor {
     inner: Box<dyn DeltaEditor>,
     left: usize,
     error: SvnError,
+    /// Also break at the `close_file` of this path.
+    at: Option<String>,
+    files: HashMap<FileId, String>,
 }
 
 impl BreakingEditor {
@@ -573,7 +594,9 @@ impl DeltaEditor for BreakingEditor {
         copyfrom: Option<(&str, Revnum)>,
     ) -> Result<FileId> {
         self.check()?;
-        self.inner.add_file(path, parent, copyfrom)
+        let id = self.inner.add_file(path, parent, copyfrom)?;
+        self.files.insert(id, path.as_str().to_owned());
+        Ok(id)
     }
     fn open_file(
         &mut self,
@@ -582,7 +605,9 @@ impl DeltaEditor for BreakingEditor {
         base_rev: Option<Revnum>,
     ) -> Result<FileId> {
         self.check()?;
-        self.inner.open_file(path, parent, base_rev)
+        let id = self.inner.open_file(path, parent, base_rev)?;
+        self.files.insert(id, path.as_str().to_owned());
+        Ok(id)
     }
     fn apply_textdelta(
         &mut self,
@@ -598,6 +623,9 @@ impl DeltaEditor for BreakingEditor {
     }
     fn close_file(&mut self, file: FileId, text_checksum: Option<Checksum>) -> Result<()> {
         self.check()?;
+        if self.at.is_some() && self.files.get(&file) == self.at.as_ref() {
+            return Err(self.error.clone());
+        }
         self.inner.close_file(file, text_checksum)?;
         self.left -= 1;
         Ok(())

@@ -13,6 +13,7 @@ use svn_types::{
 };
 
 use super::read::{corrupt, peg, stream_items};
+use super::resume::{ReadRetry, cannot_resume};
 use super::update::RaWire;
 
 /// Where the report currently is.
@@ -23,6 +24,10 @@ struct Drive<'h> {
     /// Sink receiving the current delta, if the handler wanted it.
     sink: Option<(SvndiffDecoder, Box<dyn WindowSink>)>,
     in_delta: bool,
+    /// Revisions handed to the handler, over every attempt.
+    delivered: usize,
+    /// Revisions of this attempt still to skip: an earlier attempt handed them over.
+    skip: usize,
 }
 
 impl Drive<'_> {
@@ -56,6 +61,12 @@ impl Drive<'_> {
                     .take()
                     .ok_or_else(|| corrupt("file-revs delta outside a revision"))?;
                 self.in_delta = true;
+                if self.skip > 0 {
+                    // The handler has it (and the next delta builds on its own copy).
+                    self.skip -= 1;
+                    return Ok(());
+                }
+                self.delivered += 1;
                 self.sink = self
                     .handler
                     .revision(rev)?
@@ -108,16 +119,53 @@ pub(crate) async fn file_revs(
     // libsvn_ra_serf addresses the newer end of the range.
     let peg_rev = start.max(end);
     let repo = wire.repo_path(path)?;
-    let req = file_revs_request(wire.urls(), peg_rev, &repo, start, end, false)?;
-    let resp = wire.send_ok(req, cancel).await?;
     let mut drive = Drive {
         handler,
         pending: None,
         sink: None,
         in_delta: false,
+        delivered: 0,
+        skip: 0,
     };
-    let mut parser = FileRevsParser::new();
-    stream_items(resp, &mut parser, cancel, |ev| drive.handle(ev)).await?;
+    // The report is the same every time it is asked for (same peg, same range), each delta
+    // against the previous revision of the report. One that breaks off between two revisions is
+    // asked for again, and the revisions the handler already has are skipped; one that breaks
+    // off inside a delta the handler is receiving cannot be resumed.
+    let mut retry = ReadRetry::new(wire, "file history");
+    loop {
+        let req = file_revs_request(wire.urls(), peg_rev, &repo, start, end, false)?;
+        let before = drive.delivered;
+        drive.skip = drive.delivered;
+        drive.pending = None;
+        drive.in_delta = false;
+        let mut handler_failed = false;
+        let attempt = async {
+            let resp = wire.send_ok(req, cancel).await?;
+            let mut parser = FileRevsParser::new();
+            stream_items(resp, &mut parser, cancel, |ev| {
+                drive.handle(ev).inspect_err(|_| handler_failed = true)
+            })
+            .await
+        }
+        .await;
+        let err = match attempt {
+            Ok(()) => break,
+            Err(e) if handler_failed => return Err(e),
+            Err(e) => e,
+        };
+        if drive.sink.take().is_some() {
+            // Part of a delta reached the handler's sink.
+            return Err(if err.connection_failure().is_some() {
+                cannot_resume(err, "file history")
+            } else {
+                err
+            });
+        }
+        if drive.delivered > before {
+            retry.progressed();
+        }
+        retry.again(err, cancel).await?;
+    }
     if drive.in_delta || drive.sink.is_some() {
         return Err(corrupt("file-revs report ended inside a delta"));
     }

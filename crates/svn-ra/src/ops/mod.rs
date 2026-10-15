@@ -12,6 +12,7 @@ pub mod log;
 pub mod open;
 pub mod read;
 pub mod remote_edit;
+pub(crate) mod resume;
 pub mod update;
 
 pub use open::HttpRaSession;

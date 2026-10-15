@@ -144,6 +144,12 @@ impl HttpTransport {
         self.auth.basic_user(url)
     }
 
+    /// Retry behavior for idempotent requests; reads that resume a broken body follow the same
+    /// delays.
+    pub fn retry_policy(&self) -> &super::RetryPolicy {
+        &self.config.retry
+    }
+
     /// Sends a request and returns the response once its headers arrive.
     ///
     /// Handles 401 challenges (prompting through the `AuthPrompter`), transient failures of
