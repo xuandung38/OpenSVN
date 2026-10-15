@@ -77,10 +77,10 @@ Build bộ cài:
 | Fuzz hằng đêm (svn-protocol, svn-delta), proptest update so với svn 1.15, độ trễ watcher (~460 ms với 10k file), kiểm tra accessibility bằng axe (en/vi) | #168 |
 | `LogProgress::accept` chịu được entry merge lồng (`-g`): entry con không còn kéo lệch `last`, không bị bỏ hay lặp khi tải tiếp | #164 (follow-up) |
 | Mất mạng lâu khi checkout/update: chờ mạng (`network.reconnectWaitMin`, mặc định 10 phút) rồi tải tiếp đúng revision; "Tiếp tục checkout" sau khi hủy, đóng app hoặc crash (journal checkout); phát hiện ngủ/thức bằng đồng hồ boot, không theo giờ hệ thống | #172 |
-| Lock/unlock lỗi khi chưa mở được kết nối (connect timeout, reset lúc handshake) báo lỗi mạng thường, thử lại được; `WriteOutcomeUnknown` chỉ còn khi yêu cầu có thể đã tới server (`SvnError::not_sent`) | fix/backend-gaps |
-| "Retry now" và đánh thức sau ngủ chỉ đánh thức thao tác đang chờ mạng, không để lại permit cho lần chờ sau | fix/backend-gaps |
-| Test IPC qua mock runtime cho `add_paths`, `diff_external`, `status_refresh`, `menu_set_layout`, `op_retry_now`; proptest diagnostics preview→export quét byte zip (sửa lộ cookie thứ hai của header `Cookie` và giá trị cờ `--password=`) | fix/backend-gaps |
-| Biến thể Samba AD DC của `visualsvn-like.sh` (`VSVN_KDC=samba`, AES-only, service account có SPN), `visualsvn_like` 18/18 và DAV suite 27/27 với mod_dav_svn 1.14.3 và 1.15.0; Secret Service round trip trên Linux headless; bộ nhớ 1 GiB tải lên/xuống (+3–4 MiB) chạy nightly | fix/backend-gaps |
+| Lock/unlock lỗi khi chưa mở được kết nối (connect timeout, reset lúc handshake) báo lỗi mạng thường, thử lại được; `WriteOutcomeUnknown` chỉ còn khi yêu cầu có thể đã tới server (`SvnError::not_sent`) | #191 |
+| "Retry now" và đánh thức sau ngủ chỉ đánh thức thao tác đang chờ mạng, không để lại permit cho lần chờ sau | #191 |
+| Test IPC qua mock runtime cho `add_paths`, `diff_external`, `status_refresh`, `menu_set_layout`, `op_retry_now`; proptest diagnostics preview→export quét byte zip (sửa lộ cookie thứ hai của header `Cookie` và giá trị cờ `--password=`) | #191 |
+| Biến thể Samba AD DC của `visualsvn-like.sh` (`VSVN_KDC=samba`, AES-only, service account có SPN), `visualsvn_like` 18/18 và DAV suite 27/27 với mod_dav_svn 1.14.3 và 1.15.0; Secret Service round trip trên Linux headless; bộ nhớ 1 GiB tải lên/xuống (+3–4 MiB) chạy nightly | #191 |
 
 Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #144, #145, #146.
 
