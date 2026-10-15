@@ -5,8 +5,10 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use opensvn_ipc::time_fmt::timestamp_to_iso;
-use opensvn_ipc::{FileDiff, LogGetRequest, LogPage, RepoEntry, RepoInfo, Rev, Size, TextSide};
-use svn_ra_api::{LogRequest, RaSession};
+use opensvn_ipc::{
+    FileDiff, LogGetRequest, LogPage, RepoEntry, RepoInfo, RepoListing, Rev, Size, TextSide,
+};
+use svn_ra_api::{DirListing, LogRequest, RaSession};
 use svn_types::{CancelToken, ErrorCode, NodeKind, RelPath, Revnum, SvnError, rename_replacing};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -150,10 +152,15 @@ impl RealEngine {
         url: &str,
         rev: Option<Rev>,
         ctx: &OpContext,
-    ) -> EngineResult<Vec<RepoEntry>> {
+    ) -> EngineResult<RepoListing> {
         let (session, path) = self.locate(url, ctx).await?;
-        let mut entries = session
-            .list(
+        // Children with names the app refuses are left out by the session; only their number
+        // comes back, so Browse can say they exist instead of showing an empty folder.
+        let DirListing {
+            mut entries,
+            rejected,
+        } = session
+            .list_counted(
                 &path,
                 revnum(rev),
                 svn_types::Depth::Immediates,
@@ -187,7 +194,10 @@ impl RealEngine {
                     b.name.to_lowercase(),
                 ))
         });
-        Ok(out)
+        Ok(RepoListing {
+            entries: out,
+            hidden: u32::try_from(rejected).unwrap_or(u32::MAX),
+        })
     }
 
     pub(super) async fn do_repo_cat(

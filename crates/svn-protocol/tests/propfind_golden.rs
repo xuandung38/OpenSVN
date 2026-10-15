@@ -82,7 +82,20 @@ fn listing_names_are_nfc_and_unicode_survives() {
 fn listing_of_the_wrong_directory_is_corrupt() {
     let f = load("propfind/list-depth1");
     let err = parse_list(&urls(), &RelPath::new("branches").unwrap(), &f.resp_body).unwrap_err();
-    assert_eq!(err.code, ErrorCode::Corrupt);
+    assert_eq!(err.code, ErrorCode::ProtocolViolation);
+}
+
+/// A server answer that is not UTF-8 is the server's fault: `ProtocolViolation`, never the
+/// `Corrupt` that marks a damaged working copy (and would offer Cleanup in the app).
+#[test]
+fn invalid_utf8_in_a_server_answer_is_a_protocol_violation() {
+    let mut body = br#"<?xml version="1.0"?>
+<D:multistatus xmlns:D="DAV:"><D:response><D:href>/svn/repo/!svn/rvr/5/trunk/"#
+        .to_vec();
+    body.extend_from_slice(b"\xff\xfe");
+    body.extend_from_slice(br#"</D:href><D:propstat><D:prop><D:resourcetype/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>"#);
+    let err = parse_stat(&urls(), &body).unwrap_err();
+    assert_eq!(err.code, ErrorCode::ProtocolViolation, "{err:?}");
 }
 
 #[test]

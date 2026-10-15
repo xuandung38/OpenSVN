@@ -257,7 +257,10 @@ fn rejects_hostile_hrefs() {
     for href in hostile {
         let err = u.accept_href(href).expect_err(href);
         assert!(
-            matches!(err.code, ErrorCode::UnsafePath | ErrorCode::Corrupt),
+            matches!(
+                err.code,
+                ErrorCode::UnsafePath | ErrorCode::ProtocolViolation
+            ),
             "{href}: {:?}",
             err.code
         );

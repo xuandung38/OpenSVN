@@ -11,7 +11,11 @@ use svn_protocol::{Headers, ParserLimits, ResponseHead, ResponseParser};
 use svn_types::ErrorCode;
 
 fn corrupt<T: std::fmt::Debug>(r: svn_types::Result<T>, what: &str) {
-    assert_eq!(r.expect_err(what).code, ErrorCode::Corrupt, "{what}");
+    assert_eq!(
+        r.expect_err(what).code,
+        ErrorCode::ProtocolViolation,
+        "{what}"
+    );
 }
 
 fn update_doc(inner: &str) -> String {
