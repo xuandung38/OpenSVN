@@ -359,8 +359,10 @@ impl RaWire {
 const PARENT_LISTING_LIMIT: usize = 256 << 10;
 
 /// When `url` is the repository list of an `SVNParentPath` location (VisualSVN Server's
-/// `https://host/svn/`), the error that says so and names the repositories. `None` for any
-/// other answer: the caller then reports the original failure. Cancellation is reported.
+/// `https://host/svn/`), the error that says so and carries the repositories. `None` for any
+/// other answer: the caller then reports the original failure. Cancellation, and a sign-in or
+/// certificate the listing needed and did not get, are reported as themselves: they say more
+/// than the bare 500.
 async fn parent_path_check(
     transport: &HttpTransport,
     url: &RepoUrl,
@@ -381,14 +383,24 @@ async fn parent_path_check(
     .await
     {
         Ok((head, page, _)) => (head, page),
-        Err(err) if err.code == ErrorCode::Cancelled => return Some(err),
+        Err(err)
+            if matches!(
+                err.code,
+                ErrorCode::Cancelled
+                    | ErrorCode::AuthRequired
+                    | ErrorCode::NegotiateFailed
+                    | ErrorCode::TlsUntrusted
+            ) =>
+        {
+            return Some(err);
+        }
         Err(_) => return None,
     };
     if !(200..300).contains(&head.status) {
         return None;
     }
-    let names = svn_protocol::parent_path_listing(&page)?;
-    Some(svn_protocol::parent_path_error(url, &names))
+    let repos = svn_protocol::parent_path_repos(url, &page)?;
+    Some(svn_protocol::parent_path_error(url, &repos))
 }
 
 /// Sends a read-only request and reads at most `limit` bytes of its answer, like

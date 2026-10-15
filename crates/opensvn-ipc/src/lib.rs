@@ -18,7 +18,8 @@ pub mod time_fmt;
 
 pub use commands::*;
 pub use error::{
-    AppError, ErrorAction, ErrorCode, IncompleteCheckout, LockConflict, map_svn_error_code,
+    AppError, ErrorAction, ErrorCode, IncompleteCheckout, LockConflict, ParentRepo,
+    map_svn_error_code,
 };
 pub use events::*;
 pub use ids::{OpId, Rev, Size, WcId};

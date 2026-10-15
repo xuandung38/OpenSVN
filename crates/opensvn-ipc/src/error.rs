@@ -65,19 +65,38 @@ pub struct AppError {
     pub detail: Option<String>,
     pub path: Option<String>,
     pub retryable: bool,
-    pub actions: Option<Vec<ErrorAction>>,
+    // A thin box, like the lists below: `AppError` stays small.
+    #[allow(clippy::box_collection)]
+    pub actions: Option<Box<Vec<ErrorAction>>>,
     /// For `locked-by-other`: the locks held by someone else on the requested paths, as the
     /// server reports them now. `None` when the engine could not ask (or for other codes).
-    // A thin box keeps `AppError` (returned by every command) small.
+    // Thin boxes (one pointer each) keep `AppError`, returned by every command, small.
+    #[allow(clippy::box_collection)]
     #[serde(default)]
     #[specta(optional)]
-    #[allow(clippy::box_collection)]
     pub lock_conflicts: Option<Box<Vec<LockConflict>>>,
+    /// For `path-not-found` on a server URL that is the repository list of an `SVNParentPath`
+    /// location (VisualSVN Server's `https://host/svn/`): the repositories it lists, so the UI
+    /// can offer them. `None` for any other error.
+    #[allow(clippy::box_collection)]
+    #[serde(default)]
+    #[specta(optional)]
+    pub repositories: Option<Box<Vec<ParentRepo>>>,
     /// A checkout found its target folder holding an interrupted checkout of the same location
     /// (or a checkout stopped and left one): the UI offers "Continue checkout".
     #[serde(default)]
     #[specta(optional)]
     pub incomplete_checkout: Option<Box<IncompleteCheckout>>,
+}
+
+/// A repository listed by an `SVNParentPath` location.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentRepo {
+    /// Name for display.
+    pub name: String,
+    /// Repository URL, percent-encoded.
+    pub url: String,
 }
 
 /// An interrupted checkout the user can continue (`wc_continue`).
@@ -116,9 +135,10 @@ impl AppError {
             detail: None,
             path: None,
             retryable,
-            actions: (!actions.is_empty()).then(|| actions.to_vec()),
+            actions: (!actions.is_empty()).then(|| Box::new(actions.to_vec())),
             lock_conflicts: None,
             incomplete_checkout: None,
+            repositories: None,
         }
     }
 
@@ -147,7 +167,7 @@ impl AppError {
     /// Attaches an interrupted checkout to continue, and offers the action.
     pub fn with_incomplete_checkout(mut self, info: IncompleteCheckout) -> Self {
         self.incomplete_checkout = Some(Box::new(info));
-        let actions = self.actions.get_or_insert_with(Vec::new);
+        let actions = self.actions.get_or_insert_with(Box::default);
         if !actions.contains(&ErrorAction::ContinueCheckout) {
             actions.insert(0, ErrorAction::ContinueCheckout);
         }
@@ -165,6 +185,17 @@ impl From<&SvnError> for AppError {
     /// Maps an engine error: `detail` carries the svn code (`E160028`) and the cause chain.
     fn from(err: &SvnError) -> Self {
         let mut out = AppError::from_code(err.code, err.message.clone());
+        out.repositories = err.parent_repositories().map(|repos| {
+            Box::new(
+                repos
+                    .iter()
+                    .map(|r| ParentRepo {
+                        name: r.name.clone(),
+                        url: r.url.clone(),
+                    })
+                    .collect(),
+            )
+        });
         let mut parts = Vec::new();
         let mut cur = Some(err);
         while let Some(e) = cur {

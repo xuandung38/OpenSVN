@@ -8,7 +8,9 @@ mod url_builder;
 pub use fallbacks::{BulkPreference, ListStrategy};
 pub(crate) use options::advertise_caps;
 pub use options::{BulkUpdates, Capabilities, DavCaps, options_request};
-pub use parent_listing::{parent_listing_request, parent_path_error, parent_path_listing};
+pub use parent_listing::{
+    parent_listing_request, parent_path_error, parent_path_listing, parent_path_repos,
+};
 pub use url_builder::{
     AcceptedHref, HrefKind, TxnName, UrlBuilder, check_server_url_text, segments_below_root,
 };

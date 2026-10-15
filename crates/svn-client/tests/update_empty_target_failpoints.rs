@@ -168,8 +168,15 @@ fn assert_complete(wc: &Path, what: &str) {
             );
         }
     }
+    // A clean update installs the server's text. A later one meets the local add as a tree
+    // conflict and, like svn, puts the server's file in BASE under the local add and leaves the
+    // disk alone (the locally added file was removed, so it stays missing).
     if db.read_base(&rp("E/new.txt")).expect("read").is_some() {
-        assert_eq!(rd("E/new.txt"), "server new\n", "{what}");
+        if db.conflict(&rp("E/new.txt")).expect("read").is_some() {
+            assert!(!wc.join("E/new.txt").exists(), "{what}: new.txt installed");
+        } else {
+            assert_eq!(rd("E/new.txt"), "server new\n", "{what}");
+        }
     }
     if db.read_base(&rp("E/sub/s.txt")).expect("read").is_some() {
         let s = db
