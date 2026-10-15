@@ -107,7 +107,9 @@ test("commit box warns about foreign locks, long summaries and blocks on conflic
   await option(/crate\.fbx/);
   expect(await screen.findByText("1 file(s) are locked by another user.")).toBeTruthy();
   await user().click(await option(/physics\.ts/)); // select only
-  await user().click(within(await option(/physics\.ts/)).getByRole("checkbox", { hidden: true }));
+  const tick = (await option(/physics\.ts/)).querySelector<HTMLElement>("[data-row-check]");
+  if (!tick) throw new Error("no tick box in the physics.ts row");
+  await user().click(tick);
   expect(await screen.findByText(/Resolve conflicts in 1 selected file/)).toBeTruthy();
   const summary = screen.getByRole("textbox", { name: "Summary (required)" });
   await user().type(summary, "x".repeat(73));
