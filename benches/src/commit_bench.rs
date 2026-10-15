@@ -457,6 +457,21 @@ fn run(a: &Args) -> Result<()> {
             median(&r.engine_bytes)
         ));
     }
+    md.push_str("\n## Every repetition\n\n| operation | svn CLI | engine |\n|---|---|---|\n");
+    let all = |v: &[Duration]| {
+        v.iter()
+            .map(|d| format!("{:.2}", d.as_secs_f64()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    for r in &rows {
+        md.push_str(&format!(
+            "| {} | {} | {} |\n",
+            r.name,
+            all(&r.svn),
+            all(&r.engine)
+        ));
+    }
     if let Some(p) = a.out.parent() {
         std::fs::create_dir_all(p).map_err(|e| err(format!("mkdir {}: {e}", p.display())))?;
     }
