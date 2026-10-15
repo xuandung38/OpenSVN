@@ -11,7 +11,7 @@
 //! the link. That case is compared on wc.db only, and the directory behind the link must stay
 //! byte-identical.
 //!
-//! Skipped when no svn 1.15 is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
+//! Skipped when no svn 1.14 or newer is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 

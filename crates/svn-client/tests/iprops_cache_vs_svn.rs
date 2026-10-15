@@ -3,7 +3,7 @@
 //! outside the working copy pass down; other nodes have no cache. svn 1.14 and TortoiseSVN read
 //! `svn:global-ignores` and `svn:auto-props` of the repository from there.
 //!
-//! Skipped when no svn 1.15 is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
+//! Skipped when no svn 1.14 or newer is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod common;

@@ -14,7 +14,7 @@
 //! The switch moves `A` to `B`, which holds the same tree as `A` after the replacement (the
 //! histories are unrelated, so both clients switch with ignore-ancestry semantics).
 //!
-//! Skipped when no svn 1.15 is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
+//! Skipped when no svn 1.14 or newer is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod common;

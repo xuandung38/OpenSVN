@@ -10,9 +10,10 @@ use svn_types::{MemoryLockOwnership, RelPath};
 use svn_wc::WcDb;
 use svn_wc::db::{LockOwner, find_wcroot};
 
-/// svn 1.15 or `None` (test skips; `OPENSVN_REQUIRE_SVN=1` makes absence fatal).
+/// svn 1.14 or newer, or `None` (test skips; `OPENSVN_REQUIRE_SVN=1` makes absence fatal). The
+/// tests using it compare the same with svn 1.14.x and 1.15.0.
 pub fn oracle() -> Option<Oracle> {
-    Oracle::resolve(MinVersion::V1_15).expect("oracle")
+    Oracle::resolve(MinVersion::V1_14).expect("oracle")
 }
 
 /// Runs svn in `cwd` and panics with stderr on failure.

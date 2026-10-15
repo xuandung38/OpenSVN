@@ -2,7 +2,7 @@
 //! with and without the recorded mtime restored, touched files, keyword and eol-style files, on
 //! a tree wide enough for the directory listings to run on several threads. Both a working copy
 //! checked out by svn and one checked out by this client (each records its own stat cache).
-//! Skipped when no svn 1.15 is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
+//! Skipped when no svn 1.14 or newer is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod common;
