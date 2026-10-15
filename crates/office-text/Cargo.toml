@@ -1,0 +1,18 @@
+[package]
+name = "office-text"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Plain-text extraction from Word (.docx) and Excel (.xlsx) files for text diffs"
+
+[lints]
+workspace = true
+
+[dependencies]
+quick-xml.workspace = true
+zip.workspace = true
+# Pulled in so zip's deflate support uses the pure Rust backend (miniz_oxide).
+flate2.workspace = true
+

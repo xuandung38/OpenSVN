@@ -343,6 +343,20 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     Object.assign(mockSettings, { [PROGRAM_KEYS[kind]]: null });
     return ok({ ...mockSettings });
   },
+  programChooseForExtension: (ext: string, args: string[]) => {
+    const key = ext.replace(/^\./, "").toLowerCase();
+    const rest = (mockSettings["diff.toolsByExtension"] ?? []).filter((t) => t.ext !== key);
+    Object.assign(mockSettings, {
+      "diff.toolsByExtension": [...rest, { ext: key, path: "/usr/bin/meld", args }],
+    });
+    return ok({ ...mockSettings });
+  },
+  programClearForExtension: (ext: string) => {
+    const key = ext.replace(/^\./, "").toLowerCase();
+    const rest = (mockSettings["diff.toolsByExtension"] ?? []).filter((t) => t.ext !== key);
+    Object.assign(mockSettings, { "diff.toolsByExtension": rest.length > 0 ? rest : null });
+    return ok({ ...mockSettings });
+  },
   // The real backend shows the native folder dialog; the mock pretends the user chose a folder.
   checkoutRootChoose: () => {
     Object.assign(mockSettings, { "general.checkoutRoot": "/Users/dev/projects" });
