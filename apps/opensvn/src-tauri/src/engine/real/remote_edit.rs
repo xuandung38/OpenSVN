@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use md5::{Digest, Md5};
 use opensvn_ipc::{CopyLocationRequest, Rev};
-use svn_ra_api::{CommitEditor, CommitInfo, CommitObserver, RaSession, ReplayableSource};
+use svn_ra_api::{CommitEditor, CommitInfo, CommitObserver, RaSession, ReplayableSource, TxnAbort};
 use svn_types::{Checksum, DirId, ErrorCode, NodeKind, RelPath, Revnum, SvnError};
 
 use super::RealEngine;
@@ -80,11 +80,19 @@ impl Tree {
     }
 }
 
-/// The commit is not journaled: a remote edit has no working copy to finalize.
-struct NoJournal;
+/// The commit is not journaled: a remote edit has no working copy to finalize. Only the
+/// transaction name is kept, to settle a `MERGE` whose answer was lost.
+#[derive(Default)]
+struct NoJournal {
+    txn: std::sync::Mutex<Option<String>>,
+}
 
 impl CommitObserver for NoJournal {
-    fn on_txn_created(&self, _txn: &str) -> svn_types::Result<()> {
+    fn on_txn_created(&self, txn: &str) -> svn_types::Result<()> {
+        *self
+            .txn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(txn.to_owned());
         Ok(())
     }
 
@@ -190,6 +198,45 @@ async fn digest_local_file(path: &Path) -> EngineResult<([u8; 16], u64)> {
     .await
 }
 
+/// The answer to the `MERGE` of a remote edit was lost (`err`, `CommitOutcomeUnknown`); the
+/// edit is never sent again. Its transaction is deleted, which also tells what happened: a
+/// transaction that still existed was never merged, so nothing was committed and the edit can
+/// be repeated; one that is gone was merged (or deleted by someone else), so the outcome stays
+/// unknown. Either way no transaction is left on the server. Without a transaction name, or
+/// when the `DELETE` fails too, `err` is returned as it is.
+async fn settle_lost_merge(
+    session: &dyn RaSession,
+    txn: Option<String>,
+    err: SvnError,
+    ctx: &OpContext,
+) -> SvnError {
+    let Some(txn) = txn else {
+        return err;
+    };
+    match session.abort_txn_checked(&txn, &ctx.cancel).await {
+        Ok(TxnAbort::Deleted) => SvnError::new(
+            ErrorCode::Network,
+            "the connection was lost while the change was being committed and the server did \
+             not apply it; nothing was committed, so it can be made again",
+        )
+        .with_child(err),
+        Ok(TxnAbort::Gone) => SvnError::new(
+            ErrorCode::CommitOutcomeUnknown,
+            "the connection was lost while the change was being committed; the server most \
+             likely applied it. Check the repository log before making it again",
+        )
+        .with_child(err),
+        Ok(TxnAbort::Unknown(reason)) => {
+            tracing::warn!(%reason, "could not delete the transaction of a lost MERGE");
+            err
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not delete the transaction of a lost MERGE");
+            err
+        }
+    }
+}
+
 impl RealEngine {
     /// Commits `tree` as one revision through a commit editor.
     async fn commit_tree(
@@ -200,8 +247,16 @@ impl RealEngine {
         ctx: &OpContext,
     ) -> EngineResult<Rev> {
         let head = session.youngest_rev(&ctx.cancel).await?;
+        let observer = Arc::new(NoJournal::default());
         let mut editor = session
-            .commit_editor(message, &[], &[], false, Arc::new(NoJournal), &ctx.cancel)
+            .commit_editor(
+                message,
+                &[],
+                &[],
+                false,
+                Arc::clone(&observer) as Arc<dyn CommitObserver>,
+                &ctx.cancel,
+            )
             .await?;
         let driven = async {
             let root = editor.open_root(Some(head)).await?;
@@ -211,7 +266,18 @@ impl RealEngine {
         }
         .await;
         match driven {
-            Ok(()) => Ok(mapping::rev(editor.close_edit().await?.revision)),
+            Ok(()) => match editor.close_edit().await {
+                Ok(info) => Ok(mapping::rev(info.revision)),
+                Err(e) if e.code == ErrorCode::CommitOutcomeUnknown => {
+                    let txn = observer
+                        .txn
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    Err(settle_lost_merge(session, txn, e, ctx).await)
+                }
+                Err(e) => Err(e),
+            },
             Err(e) => {
                 // `abort_edit` works after cancellation too; the original error is what matters.
                 if let Err(abort) = editor.abort_edit().await {

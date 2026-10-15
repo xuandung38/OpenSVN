@@ -77,9 +77,10 @@ export const commands = {
 	checkout: (request: CheckoutRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("checkout", { request })),
 	update: (request: UpdateRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("update", { request })),
 	/**
-	 *  Finishes an interrupted checkout or update of the whole working copy at the revision it was
-	 *  reaching (recorded in the working copy), with the depths it records and, for a checkout,
-	 *  the externals choice the user made. Fails when nothing is incomplete.
+	 *  Finishes an interrupted checkout, update or switch of the whole working copy at the revision
+	 *  it was reaching (recorded in the working copy), with the depths it records and, for a
+	 *  checkout, the externals choice the user made; a switch goes on to the URL it was switching
+	 *  to. Fails when nothing is incomplete.
 	 */
 	wcContinue: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("wc_continue", { wcId })),
 	switch: (wcId: WcId, url: string, rev: number | null) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("switch", { wcId, url, rev })),
