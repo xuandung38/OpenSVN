@@ -68,23 +68,35 @@ pub fn filesystem(path: &Path) -> String {
 }
 
 fn ext_journal(source: &str, options: &str) -> String {
-    let out = Command::new("dumpe2fs").args(["-h", source]).output();
-    let features = out.ok().and_then(|o| {
-        String::from_utf8_lossy(&o.stdout).lines().find_map(|l| {
-            l.strip_prefix("Filesystem features:")
-                .map(|f| f.trim().to_owned())
+    // A journaled ext3/ext4 filesystem has a jbd2 instance named `<device>-<inode>`; without one
+    // it runs without a journal (mkfs `^has_journal`). No root tools needed.
+    let dev = source.rsplit('/').next().unwrap_or(source);
+    let jbd2 = std::fs::read_dir("/proc/fs/jbd2").map(|rd| {
+        rd.filter_map(|e| e.ok()).any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(&format!("{dev}-"))
         })
     });
-    let data = options
-        .split(',')
-        .find_map(|o| o.strip_prefix("data="))
-        .unwrap_or("ordered");
-    match features {
-        Some(f) if f.split_whitespace().any(|x| x == "has_journal") => {
-            format!("journaled (has_journal, data={data})")
-        }
-        Some(_) => "not journaled (no has_journal feature)".into(),
-        None => "journaling unknown (dumpe2fs unavailable)".into(),
+    let data = std::fs::read_to_string(format!("/proc/fs/ext4/{dev}/options"))
+        .ok()
+        .and_then(|o| {
+            o.lines()
+                .find_map(|l| l.strip_prefix("data=").map(str::to_owned))
+        })
+        .or_else(|| {
+            options
+                .split(',')
+                .find_map(|o| o.strip_prefix("data=").map(str::to_owned))
+        });
+    match (jbd2, data) {
+        (Ok(true), d) => format!(
+            "journaled (jbd2, data={})",
+            d.as_deref().unwrap_or("ordered")
+        ),
+        (Ok(false), _) => "NOT journaled (no jbd2 journal for this device)".into(),
+        (Err(_), Some(d)) => format!("journaled (data={d})"),
+        (Err(_), None) => "journaling unknown".into(),
     }
 }
 

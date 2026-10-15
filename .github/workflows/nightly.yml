@@ -35,7 +35,8 @@ jobs:
   crash:
     name: crash suite
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    # 50 kills per failpoint (19 failpoints) plus 6 x 120 random kills.
+    timeout-minutes: 300
     env:
       # 6 operations x 120 random kills + 17 failpoints x 50 kills: over 1500 crash cases a night.
       CRASH_RANDOM_ITERS: ${{ inputs.random_iters || '120' }}
@@ -103,13 +104,22 @@ jobs:
           target/release/compare-svn --files "${{ inputs.bench_files || '100000' }}" \
             --binaries 4 --binary-mb 64 --update-files 10000 --reps 2 \
             --out bench-report/bench.md
+      - name: Log over 100k revisions
+        if: success() || failure()
+        run: target/release/compare-svn-log --revisions 100000 --reps 3 --out bench-report/log.md
+      - name: Commit of 1k files
+        if: success() || failure()
+        run: |
+          target/release/compare-svn-commit --files 1000 --modify-files 1000 --big-mb 40 --reps 3 \
+            --out bench-report/commit-1k.md
       - name: Summary and regression warnings
         if: always()
         run: |
-          cat bench-report/bench.md >> "$GITHUB_STEP_SUMMARY" || exit 0
+          cat bench-report/*.md >> "$GITHUB_STEP_SUMMARY" || exit 0
           # Warn when the engine is more than 10% slower than the svn CLI.
-          jq -r '.[] | select(.ratio > 1.10) | "::warning title=slower than svn CLI::\(.op): engine \(.engine_s)s vs svn \(.svn_s)s (x\(.ratio))"' \
-            bench-report/bench.json || true
+          for f in bench-report/*.json; do
+            jq -r '.[] | select(.ratio > 1.10) | "::warning title=slower than svn CLI::\(.op): engine \(.engine_s)s vs svn \(.svn_s)s (x\(.ratio))"' "$f" || true
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:

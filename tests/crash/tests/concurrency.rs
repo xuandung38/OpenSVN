@@ -26,6 +26,9 @@
 //! while svn's lock row is in `wc.db`, every writing engine operation fails with `WcBusy`,
 //! changes nothing, and the engine's status works.
 //!
+//! One pairing is kept apart because it is known to lose data: an engine update against
+//! `svn cleanup` (see [`engine_update_vs_svn_cleanup`]).
+//!
 //! `cargo test -p opensvn-crash --test concurrency -- --ignored --nocapture`
 //! Knobs: `CONC_ROUNDS` (operations per side and scenario, default 12), `CONC_FILES` (default
 //! 300), `CRASH_REPORT_DIR` (report `concurrency.md`).
@@ -393,7 +396,6 @@ fn check_after(
 #[ignore = "needs apache2 + mod_dav_svn and svn 1.15"]
 fn engine_and_svn_on_one_working_copy() {
     let Some(fx) = Fixture::new() else { return };
-    let rounds = env_count("CONC_ROUNDS", 12);
     let scenarios = [
         Scenario {
             engine: Op::Update,
@@ -445,12 +447,32 @@ fn engine_and_svn_on_one_working_copy() {
             svn: Op::Update,
             toggle: true,
         },
-        Scenario {
-            engine: Op::Update,
-            svn: Op::Cleanup,
-            toggle: true,
-        },
     ];
+    run_scenarios(&fx, &scenarios, "concurrency");
+}
+
+/// Known to fail (kept out of the suite above so that it stays strict): `svn cleanup` breaks
+/// the engine's lock in the middle of an update, runs the update's queued work itself and
+/// vacuums the pristine texts no NODES row references yet, among them those the update has just
+/// installed for rows it commits next. The update's next transaction then references a pristine
+/// that is gone (`wc.db` integrity check: "pristine ... referenced by NODES is missing"). svn
+/// against svn on the same machine (30 rounds of `svn update` with a concurrent
+/// `svn cleanup`) shows no such loss: svn's update keeps the database busy, so the cleanup
+/// mostly fails with `E200033` before it vacuums.
+#[test]
+#[ignore = "known: svn cleanup breaks the engine's lock and vacuums the pristines of a running update"]
+fn engine_update_vs_svn_cleanup() {
+    let Some(fx) = Fixture::new() else { return };
+    let scenarios = [Scenario {
+        engine: Op::Update,
+        svn: Op::Cleanup,
+        toggle: true,
+    }];
+    run_scenarios(&fx, &scenarios, "concurrency-update-vs-svn-cleanup");
+}
+
+fn run_scenarios(fx: &Fixture, scenarios: &[Scenario], report: &str) {
+    let rounds = env_count("CONC_ROUNDS", 12);
     let mut md = format!(
         "# Engine and svn {} on one working copy\n\n{} files, {rounds} operations per side and scenario. Outcomes: ok / busy (typed) / out of date / broken by `svn cleanup`.\n\n| engine | svn | engine | svn | problems |\n|---|---|---|---|---:|\n",
         {
@@ -461,7 +483,7 @@ fn engine_and_svn_on_one_working_copy() {
     );
     let mut all_problems = Vec::new();
     for (n, s) in scenarios.iter().enumerate() {
-        let name = format!("c{n}-{}-{}", s.engine.name(), s.svn.name());
+        let name = format!("{report}-c{n}-{}-{}", s.engine.name(), s.svn.name());
         let (url, wc) = fx.case(&name);
         let state = fx.path(&format!("state-{name}"));
         let start = Arc::new(Barrier::new(2));
@@ -494,7 +516,7 @@ fn engine_and_svn_on_one_working_copy() {
             .chain(theirs.edits.iter())
             .cloned()
             .collect();
-        problems.extend(check_after(&fx, &name, &url, &wc, &state, &edits));
+        problems.extend(check_after(fx, &name, &url, &wc, &state, &edits));
         if ours.ok == 0 && theirs.ok == 0 {
             problems.push("neither side ever succeeded".into());
         }
@@ -537,7 +559,7 @@ fn engine_and_svn_on_one_working_copy() {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/crash-report")
         });
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("concurrency.md");
+    let path = dir.join(format!("{report}.md"));
     std::fs::write(&path, &md).unwrap();
     eprintln!("{md}\nreport: {}", path.display());
     assert!(

@@ -46,12 +46,10 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).expect("write");
 }
 
-/// Appends a line to `path`.
-fn touch(path: &Path, line: &str) {
-    let mut t = std::fs::read_to_string(path).expect("read");
-    t.push_str(line);
-    t.push('\n');
-    std::fs::write(path, t).expect("write");
+/// Rewrites file `i` with a new last line of fixed width, so the working copy and every text
+/// stay the same size from cycle to cycle (only memory the engine keeps may grow).
+fn touch(path: &Path, i: usize, who: &str, cycle: usize) {
+    std::fs::write(path, format!("file {i}\n{who} {cycle:010}\n")).expect("write");
 }
 
 struct Sample {
@@ -116,7 +114,7 @@ fn soak(default_secs: u64, name: &str) {
         // Another user's commit: the first half of the files, round robin.
         for k in 0..per_cycle {
             let i = (cycle * per_cycle + k) % (files / 2);
-            touch(&theirs.join(file(i)), &format!("theirs {cycle}"));
+            touch(&theirs.join(file(i)), i, "theirs", cycle);
         }
         svn.run_in(&theirs, &["commit", "-q", "-m", &format!("theirs {cycle}")])
             .expect("svn commit");
@@ -125,7 +123,7 @@ fn soak(default_secs: u64, name: &str) {
             // Our edits: the second half.
             for k in 0..per_cycle {
                 let i = files / 2 + (cycle * per_cycle + k) % (files / 2);
-                touch(&ours.join(file(i)), &format!("ours {cycle}"));
+                touch(&ours.join(file(i)), i, "ours", cycle);
             }
             let st = engine.status(&ours).await.expect("status");
             assert_eq!(st.len(), per_cycle, "status before commit: {st:?}");
