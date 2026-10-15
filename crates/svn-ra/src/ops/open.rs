@@ -123,6 +123,9 @@ impl RaSession for HttpRaSession {
         &self.uuid
     }
 
+    fn reparented(&self, url: &RepoUrl) -> Result<Box<dyn RaSession>> {
+        Ok(Box::new(self.reparent(url)?))
+    }
     fn session_url(&self) -> &RepoUrl {
         self.wire.session_url()
     }

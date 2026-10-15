@@ -115,6 +115,17 @@ pub trait RaSession: Send + Sync {
     /// URL this session is rooted at.
     fn session_url(&self) -> &RepoUrl;
 
+    /// The same session rooted at `url` (same repository, connection settings and
+    /// credentials), for a drive anchored elsewhere than this session's URL: an update or
+    /// switch of a directory switched away from its parent is anchored at that directory, at
+    /// its own URL, like svn's `svn_wc_get_actual_target2`. The default refuses.
+    fn reparented(&self, url: &RepoUrl) -> Result<Box<dyn RaSession>> {
+        Err(SvnError::new(
+            ErrorCode::Internal,
+            format!("this session cannot be rooted at {url}"),
+        ))
+    }
+
     /// User name this session authenticates as, when known (the Basic user name the server
     /// last accepted). `None` before authentication, for anonymous access and for mechanisms
     /// that do not reveal a name (Negotiate). Commits journal it so that recovery can match

@@ -223,7 +223,10 @@ pub fn build_report(
         } else {
             recorded
         };
-        let parent = match target_wc.parent() {
+        // The anchor itself (`target` is the root of the drive) is where the session URL says
+        // it is, switched or not: a plain `set_path("")`, like svn's crawler. A directory
+        // switched away from its parent is always its own anchor (`drive_update`).
+        let parent = match target_wc.parent().filter(|_| !target.is_root()) {
             Some(p) => db.read_base(&p)?,
             None => None,
         };
@@ -232,18 +235,26 @@ pub fn build_report(
             repos_child(p, target_wc.file_name().unwrap_or(""))
                 != node.repos_relpath.clone().unwrap_or_default()
         });
-        if switched {
-            // A switched target is described by a `link_path`, which may not open the report:
-            // svn_repos takes a first `set_path` of the operand as a place-holder carrying the
-            // anchor's revision and lets the next entry for the same path describe it
-            // (reporter.c `finish_report`). The HTTP layer refuses a report that starts with
-            // anything else.
+        if switched && node.kind != NodeKind::Dir {
+            // A switched file target is described by a `link_path`, which may not open the
+            // report: svn_repos takes a first `set_path` of the operand as a place-holder
+            // carrying the anchor's revision and lets the next entry describe it
+            // (`svn_wc_crawl_revisions5` reports a switched file this way; reporter.c
+            // `finish_report`). A file has no entries below, so nothing else follows.
             let rev = parent
                 .as_ref()
                 .and_then(|n| n.revision)
                 .or(node.revision)
                 .unwrap_or(0);
             r.set_path(&target, Revnum(rev), report_depth, false, None)?;
+        } else if switched {
+            return Err(SvnError::new(
+                ErrorCode::Internal,
+                format!(
+                    "'{target_wc}' is switched: its update must be anchored at it, not reported \
+                     with a link below its parent"
+                ),
+            ));
         }
         ctx.report_entry(
             r,

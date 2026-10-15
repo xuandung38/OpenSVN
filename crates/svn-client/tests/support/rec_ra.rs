@@ -393,6 +393,13 @@ impl RaSession for RecRa {
     fn session_url(&self) -> &RepoUrl {
         self.inner.session_url()
     }
+    fn reparented(&self, url: &RepoUrl) -> Result<Box<dyn RaSession>> {
+        push(&self.log, format!("reparented {url}"));
+        let mut s = RecRa::new(self.inner.at(url)?);
+        s.log = Arc::clone(&self.log);
+        s.reports = Arc::clone(&self.reports);
+        Ok(Box::new(s))
+    }
     async fn ensure_authenticated(&self, cancel: &CancelToken) -> Result<()> {
         push(&self.log, "ensure_authenticated".into());
         if let Some(h) = &self.on_auth {

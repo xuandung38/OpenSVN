@@ -139,8 +139,8 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'sta
         .map_err(|e| SvnError::new(ErrorCode::Internal, format!("worker failed: {e}")))?
 }
 
-/// Working copy path of the directory the session URL points to.
-pub fn anchor_of(db: &WcDb, session: &dyn RaSession) -> Result<RelPath> {
+/// The session's repository is the working copy's.
+fn check_identity(db: &WcDb, session: &dyn RaSession) -> Result<()> {
     let (root, uuid) = wc::repos_identity(db)?;
     if uuid != session.uuid() || root.trim_end_matches('/') != root_string(session) {
         return Err(SvnError::new(
@@ -151,6 +151,41 @@ pub fn anchor_of(db: &WcDb, session: &dyn RaSession) -> Result<RelPath> {
             ),
         ));
     }
+    Ok(())
+}
+
+/// URL of `target_wc` (BASE `node`) when it is a directory switched away from its parent's
+/// URL (its repository path is not its parent's plus its name); `None` otherwise.
+fn switched_dir_url(
+    db: &WcDb,
+    target_wc: &RelPath,
+    node: &svn_wc::db::Node,
+    session: &dyn RaSession,
+) -> Result<Option<RepoUrl>> {
+    if node.kind != NodeKind::Dir {
+        return Ok(None);
+    }
+    let (Some(parent), Some(name)) = (target_wc.parent(), target_wc.file_name()) else {
+        return Ok(None);
+    };
+    let Some(parent_repos) = db.read_base(&parent)?.and_then(|n| n.repos_relpath) else {
+        return Ok(None);
+    };
+    let repos = node.repos_relpath.clone().unwrap_or_default();
+    let expected = if parent_repos.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{parent_repos}/{name}")
+    };
+    if repos == expected {
+        return Ok(None);
+    }
+    Ok(Some(session.repos_root().join(&RelPath::new(&repos)?)?))
+}
+
+/// Working copy path of the directory the session URL points to.
+pub fn anchor_of(db: &WcDb, session: &dyn RaSession) -> Result<RelPath> {
+    check_identity(db, session)?;
     let wc_root = db
         .read_base(&RelPath::root())?
         .and_then(|n| n.repos_relpath)
@@ -201,8 +236,25 @@ pub async fn drive_update(
     } else {
         target_wc.parent().unwrap_or_else(RelPath::root)
     };
-    let anchor = anchor_of(&db, session)?;
-    let target = wc::strip_rel(&target_wc, &anchor).ok_or_else(|| {
+    // A directory switched away from its parent's URL is its own anchor, reached through a
+    // session at its own URL (svn's `svn_wc_get_actual_target2`): the report is then a plain
+    // `set_path("")`. A `link_path` for it with entries below would make svn_repos read freed
+    // memory (`reporter.c`, `delta_dirs`), and mod_dav_svn's child dies on an assertion.
+    let reparented: Box<dyn RaSession>;
+    let (session, anchor) = match switched_dir_url(&db, &target_wc, &node, session)? {
+        Some(url) => {
+            check_identity(&db, session)?;
+            let session: &dyn RaSession = if session.session_url() == &url {
+                session
+            } else {
+                reparented = session.reparented(&url)?;
+                reparented.as_ref()
+            };
+            (session, target_wc.clone())
+        }
+        None => (session, anchor_of(&db, session)?),
+    };
+    let mut target = wc::strip_rel(&target_wc, &anchor).ok_or_else(|| {
         SvnError::new(
             ErrorCode::WcInvalidOperation,
             format!("'{target_wc}' is not below the session URL"),
@@ -210,7 +262,12 @@ pub async fn drive_update(
     })?;
     // The drive is anchored at the target's parent (svn's anchor/target split), named by its
     // path below the session URL: that parent must be where the session URL says it is. This
-    // holds for a switch too: only the target moves, its parent still anchors the drive.
+    // holds for a switch too: only the target moves, its parent still anchors the drive. When
+    // the parent (or a folder above it) is switched, the drive is anchored at the parent
+    // itself, over a session at its own URL, as svn does.
+    let reparented_to_parent: Box<dyn RaSession>;
+    let mut session = session;
+    let mut anchor = anchor;
     if let Some(parent) = target_wc.parent().filter(|_| !target.is_root())
         && parent.starts_with(&anchor)
     {
@@ -224,14 +281,21 @@ pub async fn drive_update(
             format!("{session_rel}/{below}")
         };
         let actual = db.read_base(&parent)?.and_then(|n| n.repos_relpath);
-        if actual.as_deref() != Some(expected.as_str()) {
-            return Err(SvnError::new(
-                ErrorCode::WcInvalidOperation,
-                format!(
-                    "'{parent}' is switched to another location; update '{target_wc}' through a \
-                     session at its parent's URL"
-                ),
-            ));
+        match actual {
+            Some(actual) if actual == expected => {}
+            Some(actual) => {
+                let url = session.repos_root().join(&RelPath::new(&actual)?)?;
+                reparented_to_parent = session.reparented(&url)?;
+                session = reparented_to_parent.as_ref();
+                target = RelPath::new(target_wc.file_name().unwrap_or(""))?;
+                anchor = parent;
+            }
+            None => {
+                return Err(SvnError::new(
+                    ErrorCode::WcInvalidOperation,
+                    format!("'{parent}' has no place in the repository; update its parent"),
+                ));
+            }
         }
     }
 
