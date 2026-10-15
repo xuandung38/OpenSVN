@@ -64,6 +64,19 @@ pub fn open_log_file(logs_dir: &Path) -> io::Result<File> {
     options.open(path)
 }
 
+/// What Help > Show logs folder reveals: the current log, so the file manager opens the logs
+/// folder with it selected, or the folder itself before anything was logged. The folder is created
+/// (owner-only) when missing.
+pub fn logs_reveal_target(logs_dir: &Path) -> io::Result<PathBuf> {
+    create_private_dir(logs_dir)?;
+    let file = logs_dir.join(LOG_FILE);
+    Ok(if file.is_file() {
+        file
+    } else {
+        logs_dir.to_path_buf()
+    })
+}
+
 fn create_private_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {

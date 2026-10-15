@@ -1,8 +1,10 @@
+import { Folder, SlidersHorizontal } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { VirtualList } from "../../../components/list/virtual-list";
 import { Button } from "../../../components/ui/button";
 import { Chip } from "../../../components/ui/chip";
 import { ContextMenu } from "../../../components/ui/context-menu";
+import { DropdownMenu, type MenuEntries } from "../../../components/ui/dropdown-menu";
 import { EmptyState } from "../../../components/ui/empty-state";
 import { Input } from "../../../components/ui/fields";
 import { SafeText } from "../../../components/ui/safe-text";
@@ -11,14 +13,17 @@ import { cn } from "../../../lib/cn";
 import { useT } from "../../../lib/i18n/i18n";
 import { useUiCommand } from "../ui-commands";
 import { useWcActions } from "../use-wc-actions";
+import { setViewPref, useViewPrefs, type ViewPref } from "../view-prefs";
 import {
   buildRows,
   CHIPS,
   type ChipId,
   changedFiles,
-  fileGlyph,
   filterFiles,
+  isTickable,
+  listedFiles,
   lockFiles,
+  rowGlyph,
   suggestMoves,
   tickedByDefault,
   tristate,
@@ -31,6 +36,15 @@ import { WcFileRow } from "./wc-file-row";
 
 const ROW_H = 28;
 const NO_CHIPS: ReadonlySet<ChipId> = new Set();
+/** Indent of one tree level, in pixels. */
+const INDENT = 14;
+
+const VIEW_OPTIONS = [
+  ["showUnversioned", "viewShowUnversioned"],
+  ["showIgnored", "viewShowIgnored"],
+  ["groupByChangelist", "viewGroupChangelist"],
+  ["tree", "viewTree"],
+] as const satisfies readonly (readonly [ViewPref, keyof (typeof wcStrings)["en"]])[];
 
 const CHIP_LABEL = {
   modified: "chipModified",
@@ -43,6 +57,8 @@ const CHIP_LABEL = {
 /**
  * Changes tab list (doc 01 3.3): filter + quick chips, tri-state "select all", changelist groups,
  * staging-less commit selection (ticked rows are what the next commit contains) and move hints.
+ * The View options (doc 01 8.4, also in the View menu) hide unversioned files, show ignored ones,
+ * turn changelist groups off and show the list as a folder tree.
  */
 export function ChangesList() {
   const session = useWcSession();
@@ -51,32 +67,40 @@ export function ChangesList() {
   const actions = useWcActions();
   const [filter, setFilter] = useState("");
   const [chips, setChips] = useState<ReadonlySet<ChipId>>(new Set());
+  const prefs = useViewPrefs();
 
   const changed = useMemo(() => changedFiles(files), [files]);
-  const visible = useMemo(() => filterFiles(changed, filter, chips), [changed, filter, chips]);
-  const rows = useMemo(() => buildRows(visible), [visible]);
-  const moves = useMemo(() => suggestMoves(changed), [changed]);
+  const listed = useMemo(() => listedFiles(files, prefs), [files, prefs]);
+  const tickable = useMemo(() => new Set(listed.filter(isTickable).map((f) => f.path)), [listed]);
+  const visible = useMemo(() => filterFiles(listed, filter, chips), [listed, filter, chips]);
   const locks = useMemo(() => filterFiles(lockFiles(files), filter, NO_CHIPS), [files, filter]);
+  const rows = useMemo(
+    () => buildRows(visible, { group: prefs.groupByChangelist, tree: prefs.tree }),
+    [visible, prefs.groupByChangelist, prefs.tree],
+  );
+  const moves = useMemo(() => suggestMoves(changed), [changed]);
 
-  // Tick tracked changes the first time they appear; forget ticks of files that left the list.
+  // Tick tracked changes the first time they appear; forget ticks of files that left the list
+  // (also when a View option hides them).
   const seen = useRef(new Set<string>());
   useEffect(() => {
-    const present = new Set(changed.map((f) => f.path));
-    const next = new Set([...checked].filter((p) => present.has(p)));
-    for (const f of changed) {
+    const next = new Set([...checked].filter((p) => tickable.has(p)));
+    for (const f of listed) {
       if (!seen.current.has(f.path) && tickedByDefault(f)) next.add(f.path);
     }
-    for (const p of [...seen.current]) if (!present.has(p)) seen.current.delete(p);
-    for (const p of present) seen.current.add(p);
+    for (const p of [...seen.current]) if (!tickable.has(p)) seen.current.delete(p);
+    for (const p of tickable) seen.current.add(p);
     if (next.size !== checked.size || [...next].some((p) => !checked.has(p))) setChecked(next);
-  }, [changed, checked, setChecked]);
+  }, [listed, tickable, checked, setChecked]);
 
-  // A file that is no longer a change (committed, reverted, ignored) cannot stay selected.
+  // A file that left the list (committed, reverted, ignored, hidden) cannot stay selected.
   useEffect(() => {
-    if (selected !== null && !changed.some((f) => f.path === selected)) setSelected(null);
-  }, [changed, selected, setSelected]);
+    if (selected !== null && !listed.some((f) => f.path === selected)) setSelected(null);
+  }, [listed, selected, setSelected]);
 
-  const toggleMany = (paths: readonly string[]) => {
+  const toggleMany = (all: readonly string[]) => {
+    const paths = all.filter((p) => tickable.has(p));
+    if (paths.length === 0) return;
     const next = new Set(checked);
     const allOn = paths.every((p) => next.has(p));
     for (const p of paths) {
@@ -85,7 +109,7 @@ export function ChangesList() {
     }
     setChecked(next);
   };
-  const visiblePaths = useMemo(() => visible.map((f) => f.path), [visible]);
+  const visiblePaths = useMemo(() => visible.filter(isTickable).map((f) => f.path), [visible]);
   const overall = tristate(visiblePaths, checked);
   const headerRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -98,7 +122,13 @@ export function ChangesList() {
   });
 
   const targetsFor = (f: FileStatus): FileStatus[] =>
-    checked.has(f.path) && checked.size > 1 ? changed.filter((c) => checked.has(c.path)) : [f];
+    checked.has(f.path) && checked.size > 1 ? listed.filter((c) => checked.has(c.path)) : [f];
+
+  const viewMenu: MenuEntries = VIEW_OPTIONS.map(([key, label]) => ({
+    label: t(label),
+    checked: prefs[key],
+    onSelect: () => setViewPref(key, !prefs[key]),
+  }));
 
   const labels = { needsLock: t("needsLockBadge"), outOfDate: t("outOfDateBadge") };
   const rootLabel = t("wcRootRow", { name: session.wc?.name ?? "" });
@@ -106,13 +136,24 @@ export function ChangesList() {
   return (
     <>
       <div className="flex flex-col gap-1.5 border-b border-line px-2.5 py-2">
-        <Input
-          data-wc-filter=""
-          aria-label={t("filter")}
-          placeholder={t("filterPlaceholder")}
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        />
+        <div className="flex items-center gap-1.5">
+          <Input
+            data-wc-filter=""
+            aria-label={t("filter")}
+            placeholder={t("filterPlaceholder")}
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            className="min-w-0 flex-1"
+          />
+          <DropdownMenu
+            trigger={
+              <Button small aria-label={t("viewOptions")} title={t("viewOptions")}>
+                <SlidersHorizontal size={14} aria-hidden="true" />
+              </Button>
+            }
+            entries={viewMenu}
+          />
+        </div>
         <fieldset
           aria-label={t("chips")}
           className="m-0 flex min-w-0 flex-wrap gap-1.5 border-0 p-0"
@@ -160,8 +201,8 @@ export function ChangesList() {
       <div className="min-h-0 flex-1">
         {rows.length === 0 ? (
           <EmptyState
-            title={changed.length === 0 ? t("noChanges") : t("noMatches")}
-            description={changed.length === 0 ? t("noChangesHint") : ""}
+            title={listed.length === 0 ? t("noChanges") : t("noMatches")}
+            description={listed.length === 0 ? t("noChangesHint") : ""}
           />
         ) : (
           <VirtualList
@@ -187,7 +228,10 @@ export function ChangesList() {
                   r.name === null
                     ? t("noChangelist", { count: r.paths.length })
                     : t("changelist", { name: r.name, count: r.paths.length });
-                const state = tristate(r.paths, checked);
+                const state = tristate(
+                  r.paths.filter((p) => tickable.has(p)),
+                  checked,
+                );
                 return (
                   // biome-ignore lint/a11y/useFocusableInteractive: roving focus lives on the owning listbox
                   // biome-ignore lint/a11y/useKeyWithClickEvents: Enter/Space handled by the listbox
@@ -210,8 +254,38 @@ export function ChangesList() {
                   </div>
                 );
               }
+              if (r.kind === "dir") {
+                const state = tristate(
+                  r.paths.filter((p) => tickable.has(p)),
+                  checked,
+                );
+                return (
+                  // biome-ignore lint/a11y/useFocusableInteractive: roving focus lives on the owning listbox
+                  // biome-ignore lint/a11y/useKeyWithClickEvents: Enter/Space handled by the listbox
+                  <div
+                    id={ctx.id}
+                    role="option"
+                    aria-selected={false}
+                    aria-checked={state === "all" ? true : state === "some" ? "mixed" : false}
+                    aria-label={t("folderRow", { path: r.path, count: r.paths.length })}
+                    onClick={() => {
+                      ctx.activate();
+                      toggleMany(r.paths);
+                    }}
+                    style={{ paddingLeft: 10 + r.depth * INDENT }}
+                    className={cn(
+                      "flex h-full cursor-default items-center gap-1.5 pr-2.5 font-mono text-[12px] text-muted-text",
+                      ctx.active &&
+                        "group-focus-visible:outline-2 group-focus-visible:-outline-offset-2 group-focus-visible:outline-accent",
+                    )}
+                  >
+                    <Folder size={13} aria-hidden="true" className="shrink-0" />
+                    <SafeText className="min-w-0 truncate">{r.name}</SafeText>
+                  </div>
+                );
+              }
               const f = r.file;
-              const glyph = fileGlyph(f);
+              const glyph = rowGlyph(f);
               if (!glyph) return null;
               return (
                 <ContextMenu entries={fileMenuEntries(targetsFor(f), session, actions, t)}>
@@ -227,6 +301,8 @@ export function ChangesList() {
                       lock={f.lock ? (f.lock.mine ? "me" : "other") : undefined}
                       needsLock={f.needsLock}
                       outOfDate={f.remote?.outOfDate === true}
+                      depth={r.depth}
+                      tickable={isTickable(f)}
                       labels={labels}
                       onToggle={(p) => toggleMany([p])}
                       onSelect={setSelected}

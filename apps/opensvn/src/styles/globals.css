@@ -52,12 +52,16 @@ body {
   overflow: hidden;
 }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
-  color: inherit;
+/* In the base layer: unlayered, it would beat every utility (`text-on-accent` on primary buttons
+   rendered in the body colour). */
+@layer base {
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
 }
 
 /* Focus ring for every interactive element (design-guidelines 4). */

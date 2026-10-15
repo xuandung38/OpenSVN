@@ -81,7 +81,25 @@ const TREE: Record<string, RepoEntry[]> = {
   "trunk/assets/models": [entry("crate.fbx", "file", { size: 1_240_000 })],
   "trunk/notes": [entry(HOSTILE_NAME, "file"), entry("todo.txt", "file")],
   branches: [entry("feature-x", "dir"), entry("release-1.0", "dir")],
-  "branches/feature-x": [entry("README.md", "file")],
+  // Copied from trunk: unchanged nodes keep trunk's revisions (Compare with branch demo).
+  "branches/feature-x": [
+    entry("src", "dir", { createdRev: 48210 }),
+    entry("assets", "dir"),
+    entry("notes", "dir"),
+    entry("README.md", "file", { createdRev: 48207, size: 2900 }),
+    entry("build.gradle", "file"),
+    entry("CHANGELOG.md", "file", { createdRev: 48209 }),
+  ],
+  "branches/feature-x/src": [
+    entry("engine", "dir", { createdRev: 48210 }),
+    entry("ui", "dir"),
+    entry("main.ts", "file"),
+  ],
+  "branches/feature-x/src/engine": [
+    entry("renderer.ts", "file", { createdRev: 48210 }),
+    entry("physics.ts", "file"),
+    entry("particles.ts", "file", { createdRev: 48208 }),
+  ],
   "branches/release-1.0": [entry("README.md", "file")],
   tags: [entry("v1.0.0", "dir"), entry("v2.4.0", "dir")],
 };
@@ -105,6 +123,8 @@ export function mockFileText(url: string): string {
   for (let i = 0; i < 24; i++) lines.push(`  draw(${i}, frame * ${i + 1}); // step ${i}`);
   lines.push("}");
   if (name === HOSTILE_NAME) lines.push("<script>window.__pwned = 1</script>");
+  if (url.includes("/branches/"))
+    lines.splice(3, 1, "  draw(1, frame * 3); // tuned on the branch");
   return lines.join("\n");
 }
 

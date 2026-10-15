@@ -2,6 +2,7 @@ import type { Commands, IpcAdapter } from "../adapter";
 import {
   type AppError,
   type CopyLocationRequest,
+  type DiagnosticsOptions,
   type EngineCapabilities,
   type LockRequest,
   type LogGetRequest,
@@ -195,6 +196,8 @@ const {
   simulateOp,
   emit: mockEmit,
 });
+
+let lastDiagnosticsToken: string | null = null;
 
 const PROGRAM_KEYS = {
   "diff-tool": "diff.externalTool",
@@ -401,6 +404,39 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     Object.assign(mockSettings, patch);
     return ok({ ...mockSettings });
   },
+  // The real backend reads its logs and settings and removes secrets; the mock shows the shape.
+  diagnosticsPreview: (options: DiagnosticsOptions) => {
+    const home = options.hidePaths ? "<home>" : "/Users/dev";
+    const message = options.hideCommitMessages ? "<message removed>" : "Fix the jump height";
+    const files = [
+      {
+        name: "system.txt",
+        content: "OpenSVN 0.0.0 (mock)\nplatform: browser\n",
+      },
+      {
+        name: "working-copies.txt",
+        content: `game-assets\t${home}/projects/game-assets\n`,
+      },
+      {
+        name: "logs/opensvn.log",
+        content: `INFO commit r48212 "${message}" in ${home}/projects/game-assets\n`,
+      },
+    ];
+    lastDiagnosticsToken = `diag-${Date.now()}`;
+    return ok({
+      token: lastDiagnosticsToken,
+      entries: files.map((f) => ({ ...f, size: new TextEncoder().encode(f.content).length })),
+    });
+  },
+  // The real backend asks for the destination in a native save dialog; the token is single use.
+  diagnosticsExport: (token: string) => {
+    if (token !== lastDiagnosticsToken) {
+      return errCode("invalid-argument", "This preview has expired. Build it again.");
+    }
+    lastDiagnosticsToken = null;
+    return ok("/Users/dev/Downloads/opensvn-diagnostics.zip");
+  },
+  logsReveal: () => ok(null),
 };
 
 // Commands are looked up lazily; anything not mocked resolves to a typed AppError instead of throwing.

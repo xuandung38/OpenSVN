@@ -19,6 +19,7 @@ import type {
   OpResult,
   ResolveRequest,
   RevertRequest,
+  StatusGetRequest,
   UnlockRequest,
   UpdateRequest,
   WcEntry,
@@ -280,7 +281,15 @@ export function wcMockCommands(deps: MockDeps) {
         kind: "dir" as const,
       });
     },
-    statusGet: (req: { wcId: string }) => ok([...statusOf(req.wcId)]),
+    // Like the backend: ignored entries only on request, unversioned ones unless refused.
+    statusGet: (req: StatusGetRequest) =>
+      ok(
+        statusOf(req.wcId).filter(
+          (f) =>
+            (f.text !== "ignored" || req.includeIgnored === true) &&
+            (f.text !== "unversioned" || req.includeUnversioned !== false),
+        ),
+      ),
     statusRefresh: (wcId: string) => ok(simulateOp("status-refresh", "Refresh status", wcId)),
     statusRemote: (wcId: string) =>
       op("status-remote", "Check for updates", wcId, () =>
@@ -401,7 +410,7 @@ export function wcMockCommands(deps: MockDeps) {
       setStatus(
         deps,
         req.wcId,
-        statusOf(req.wcId).filter((f) => !hidden(f)),
+        statusOf(req.wcId).map((f) => (hidden(f) ? { ...f, text: "ignored" as const } : f)),
       );
       return ok(null);
     },

@@ -308,6 +308,21 @@ pub async fn diagnostics_preview(
     .await
 }
 
+/// Shows the app's logs folder in the file manager (Help > Show logs folder). The path is the app's
+/// own data folder; nothing in it comes from the UI.
+#[tauri::command]
+#[specta::specta]
+pub async fn logs_reveal(state: State<'_, AppState>) -> Result<(), AppError> {
+    guard(async {
+        let target =
+            crate::logging::logs_reveal_target(&state.data_dir.join("logs")).map_err(|e| {
+                AppError::internal("Could not open the logs folder.").with_detail(e.to_string())
+            })?;
+        state.opener.reveal(&target)
+    })
+    .await
+}
+
 /// Saves the previewed bundle as a zip. The destination is chosen in a native save dialog;
 /// returns the saved path, or `None` when the user cancels the dialog.
 #[tauri::command]
