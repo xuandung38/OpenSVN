@@ -132,8 +132,16 @@ pub(crate) struct Base64Stream {
 impl Base64Stream {
     /// Adds text (whitespace ignored) and returns every byte that is now decodable.
     pub(crate) fn push(&mut self, text: &str) -> Result<Vec<u8>, SvnError> {
-        self.pending
-            .extend(text.chars().filter(|c| !c.is_whitespace()));
+        // The base64 alphabet is ASCII. Rejecting anything else up front also keeps `pending` one
+        // byte per character, so the group boundary below is always a char boundary.
+        for c in text.chars().filter(|c| !c.is_whitespace()) {
+            if !c.is_ascii() {
+                return Err(corrupt(format!(
+                    "invalid base64: non-ASCII character {c:?}"
+                )));
+            }
+            self.pending.push(c);
+        }
         let usable = self.pending.len() / 4 * 4;
         if usable == 0 {
             return Ok(Vec::new());
@@ -234,6 +242,20 @@ pub fn parse_timestamp(s: &str) -> Result<Timestamp, SvnError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_stream_rejects_non_ascii_instead_of_splitting_a_char() {
+        // Found by the file_revs fuzz target: a BOM after 3 base64 characters put the group
+        // boundary inside the multi-byte character and `String::split_off` panicked.
+        let mut s = Base64Stream::default();
+        assert!(s.push("QUJD\u{feff}=").is_err());
+        let mut s = Base64Stream::default();
+        assert_eq!(s.push("QU").unwrap(), b"");
+        assert!(s.push("J\u{e9}D").is_err());
+        let mut s = Base64Stream::default();
+        assert_eq!(s.push("QU JD\n").unwrap(), b"ABC");
+        s.finish().unwrap();
+    }
 
     #[test]
     fn timestamp_with_micros() {

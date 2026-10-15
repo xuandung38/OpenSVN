@@ -19,8 +19,8 @@ export function Popover({
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   className?: string;
-  /** Accessible name of the popup. */
-  label?: string;
+  /** Accessible name of the popup (a dialog without one fails axe `aria-dialog-name`). */
+  label: string;
 }) {
   return (
     <P.Root open={open} onOpenChange={onOpenChange}>

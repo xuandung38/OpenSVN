@@ -1,0 +1,93 @@
+name: fuzz
+
+# One hour of libFuzzer per target for the svn-protocol parsers and the svndiff codec. The target
+# list comes from the fuzz_targets/ directories, so a new target is picked up without editing
+# this file. Crash inputs are uploaded as an artifact; any crash fails the job.
+on:
+  schedule:
+    - cron: "41 18 * * *" # 01:41 Asia/Ho_Chi_Minh, before the crash suite in nightly.yml
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: Seconds of fuzzing per target
+        default: "3600"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  targets:
+    name: list targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: list
+        run: |
+          matrix=$(
+            for f in crates/svn-protocol/fuzz/fuzz_targets/*.rs crates/svn-delta/fuzz/fuzz_targets/*.rs; do
+              printf '{"crate":"%s","target":"%s"}\n' "$(dirname "$(dirname "$f")")" "$(basename "$f" .rs)"
+            done | jq -cs '{include: .}'
+          )
+          echo "$matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    needs: targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install nightly Rust
+        run: rustup toolchain install nightly --profile minimal
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ${{ matrix.crate }} -> target
+          key: ${{ matrix.target }}
+      - name: Build
+        working-directory: ${{ matrix.crate }}
+        run: cargo +nightly fuzz build ${{ matrix.target }}
+      - name: Run
+        working-directory: ${{ matrix.crate }}
+        # An explicit `shell: bash` adds pipefail, so a crash still fails the step through tee.
+        shell: bash
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} -- \
+            -max_total_time=${{ inputs.max_total_time || '3600' }} -print_final_stats=1 \
+            2>&1 | tee fuzz-${{ matrix.target }}.log
+      - name: Summary
+        if: always()
+        working-directory: ${{ matrix.crate }}
+        run: |
+          {
+            echo "### ${{ matrix.target }}"
+            echo '```'
+            grep -E '^(#[0-9]+.*DONE|stat::|==[0-9]+== ERROR|SUMMARY)' fuzz-${{ matrix.target }}.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: fuzz-crashes-${{ matrix.target }}
+          path: |
+            ${{ matrix.crate }}/artifacts/${{ matrix.target }}
+            ${{ matrix.crate }}/fuzz-${{ matrix.target }}.log
+          if-no-files-found: ignore
+          retention-days: 30
