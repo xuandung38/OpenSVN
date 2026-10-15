@@ -1,8 +1,9 @@
 //! Working copy registry (3.1) and status / local changes (3.2).
 
 use opensvn_ipc::{
-    AppError, DiffGetRequest, DiffTarget, FileDiff, FileStatus, IgnoreAddRequest, NodeStatus,
-    OpResult, OperationHandle, OperationKind, PathGrantId, StatusGetRequest, WcId, WorkingCopy,
+    AppError, DiffGetRequest, DiffSideKind, DiffTarget, FileDiff, FileStatus, IgnoreAddRequest,
+    NodeStatus, OpResult, OperationHandle, OperationKind, PathGrantId, StatusGetRequest, WcId,
+    WorkingCopy,
 };
 use tauri::State;
 
@@ -192,18 +193,36 @@ pub async fn diff_get(
             force_large: request.force_large.unwrap_or(false),
             full_text: false,
         };
+        // Word and Excel files are compared as their extracted text.
+        if let Some(diff) = crate::office_diff::office_diff(&state, &request.target, opts).await? {
+            return Ok(diff);
+        }
         fetch_diff(&state, request.target, opts).await
     })
     .await
 }
 
-/// Opens `target` in the configured external diff tool (`diff.externalTool`): both sides are
-/// written as read-only copies into a private folder and the tool is started on them. Used when a
-/// diff is too complex or too large to show, or on request. Binary files are refused.
+/// Opens `target` in the configured external diff tool: both sides are written as read-only
+/// copies into a private folder and the tool is started on them. Used when a diff is too complex
+/// or too large to show, or on request. A tool set for the file's extension
+/// (`diff.toolsByExtension`) gets the files as they are, binary ones included; `diff.externalTool`
+/// gets text only and binary files are refused.
 #[tauri::command]
 #[specta::specta]
 pub async fn diff_external(state: State<'_, AppState>, target: DiffTarget) -> Result<(), AppError> {
     guard(open_external_diff(&state, target)).await
+}
+
+/// Opens one version of `target` (the older or the newer side) with the default application, as
+/// a read-only copy. Only document types the default application may open are accepted.
+#[tauri::command]
+#[specta::specta]
+pub async fn diff_open_version(
+    state: State<'_, AppState>,
+    target: DiffTarget,
+    side: DiffSideKind,
+) -> Result<(), AppError> {
+    guard(crate::diff_sides::open_version(&state, target, side)).await
 }
 
 pub(crate) async fn open_external_diff(
@@ -212,7 +231,15 @@ pub(crate) async fn open_external_diff(
 ) -> Result<(), AppError> {
     use crate::programs::external_diff::{STALE_AFTER, expand_args, stage_sides, sweep_stale};
     // Fails before any engine work when no tool is configured.
-    let (program, args) = state.programs.external_diff_tool()?;
+    let (program, args, by_extension) = state
+        .programs
+        .external_diff_tool_for(&crate::diff_sides::target_path(&target))?;
+    if by_extension {
+        // A tool chosen for this file type gets both files as they are, binary or not.
+        let (l, r) = crate::diff_sides::stage_raw_sides(state, &target).await?;
+        let args = expand_args(&args, &l.to_string_lossy(), &r.to_string_lossy());
+        return state.launcher.launch(&program, &args);
+    }
     let opts = DiffOptions {
         ignore_whitespace: false,
         force_large: true,
@@ -243,7 +270,7 @@ pub(crate) async fn open_external_diff(
 }
 
 /// Runs a diff for any target: working copy targets go through the working copy's actor.
-async fn fetch_diff(
+pub(crate) async fn fetch_diff(
     state: &AppState,
     target: DiffTarget,
     opts: DiffOptions,

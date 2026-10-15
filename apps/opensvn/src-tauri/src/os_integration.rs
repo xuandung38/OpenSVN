@@ -44,18 +44,7 @@ pub fn default_app_allowed(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    // Windows strips trailing dots and spaces when it opens a file, so `a.exe.` runs `a.exe`.
-    // Such names are already refused by `resolve_in_wc`; trimming here keeps this check honest
-    // on its own.
-    let name = name.trim_end_matches(['.', ' ']);
-    let ext = match name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => ext,
-        _ => return false,
-    };
-    if !DEFAULT_APP_EXTENSIONS
-        .iter()
-        .any(|a| a.eq_ignore_ascii_case(ext))
-    {
+    if !default_app_name_allowed(name) {
         return false;
     }
     let Ok(meta) = std::fs::symlink_metadata(path) else {
@@ -72,6 +61,22 @@ pub fn default_app_allowed(path: &Path) -> bool {
         }
     }
     true
+}
+
+/// Whether a file called `name` has an extension the default application may open (the name
+/// check of [`default_app_allowed`], usable before the file exists).
+pub fn default_app_name_allowed(name: &str) -> bool {
+    // Windows strips trailing dots and spaces when it opens a file, so `a.exe.` runs `a.exe`.
+    // Such names are already refused by `resolve_in_wc`; trimming here keeps this check honest
+    // on its own.
+    let name = name.trim_end_matches(['.', ' ']);
+    let ext = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => ext,
+        _ => return false,
+    };
+    DEFAULT_APP_EXTENSIONS
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(ext))
 }
 
 /// Whether the default application may open the directory at `path`. A directory whose name has

@@ -120,13 +120,31 @@ fn write_copy(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf, AppError> 
         .map_err(|e| io_error("file", &e))?;
     f.write_all(data).map_err(|e| io_error("write", &e))?;
     drop(f);
-    // Read-only: edits in the tool must not look like they reach the working copy.
-    let mut perms = std::fs::metadata(&path)
+    make_read_only(&path)?;
+    Ok(path)
+}
+
+/// Marks a staged copy read-only: edits in the tool must not look like they reach the working
+/// copy.
+pub fn make_read_only(path: &Path) -> Result<(), AppError> {
+    let mut perms = std::fs::metadata(path)
         .map_err(|e| io_error("metadata", &e))?
         .permissions();
     perms.set_readonly(true);
-    std::fs::set_permissions(&path, perms).map_err(|e| io_error("permissions", &e))?;
-    Ok(path)
+    std::fs::set_permissions(path, perms).map_err(|e| io_error("permissions", &e))
+}
+
+/// Creates a new, empty staged folder in `root` for copies written by someone else (the engine
+/// streams them in), after removing the oldest folders beyond the caps. The size of the new
+/// copies is not known yet: the byte cap is enforced again by the next staging.
+pub fn new_stage_dir(root: &Path) -> Result<PathBuf, AppError> {
+    let _guard = STAGING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    make_room(root, MAX_STAGED_DIRS.saturating_sub(1), MAX_STAGED_BYTES);
+    let dir = root.join(uuid::Uuid::now_v7().simple().to_string());
+    std::fs::create_dir(&dir).map_err(|e| io_error("folder", &e))?;
+    Ok(dir)
 }
 
 /// Serializes staging so the folder and byte caps hold when launches overlap.

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-diff-open-version"
+description = "Enables the diff_open_version command without any pre-configured scope."
+commands.allow = ["diff_open_version"]
+
+[[permission]]
+identifier = "deny-diff-open-version"
+description = "Denies the diff_open_version command without any pre-configured scope."
+commands.deny = ["diff_open_version"]

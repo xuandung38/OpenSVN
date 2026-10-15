@@ -421,7 +421,7 @@ async fn get_file_detects_a_checksum_mismatch() {
         .get_file(&p("a.txt"), None, &mut out, &CancelToken::new())
         .await
         .unwrap_err();
-    assert_eq!(err.code, ErrorCode::Corrupt);
+    assert_eq!(err.code, ErrorCode::ProtocolViolation);
 }
 
 #[tokio::test]
@@ -1009,7 +1009,7 @@ async fn one_level_listings_enforce_the_entry_limit() {
 }
 
 /// The cap is enforced while the answer streams in: an answer whose tail is broken still
-/// fails on the cap (it would be `Corrupt` if the whole body were read before counting).
+/// fails on the cap (it would be `ProtocolViolation` if the whole body were read before counting).
 #[tokio::test]
 async fn entry_limit_is_enforced_while_streaming() {
     let srv = server(Bulk::Prefer).await;
@@ -1053,7 +1053,7 @@ async fn entry_limit_is_enforced_while_streaming() {
         )
         .await
         .unwrap_err();
-    assert_eq!(err.code, ErrorCode::Corrupt, "{err:?}");
+    assert_eq!(err.code, ErrorCode::ProtocolViolation, "{err:?}");
 }
 
 #[tokio::test]

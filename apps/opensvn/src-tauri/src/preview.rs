@@ -11,6 +11,8 @@ use opensvn_ipc::AppError;
 pub const PREVIEW_DIR: &str = "preview";
 /// Folder under the data directory holding the copies opened in the external diff tool.
 pub const EXTERNAL_DIFF_DIR: &str = "external-diff";
+/// Folder under the data directory holding Office files while their text is extracted.
+pub const OFFICE_DIFF_DIR: &str = "office-diff";
 
 fn refuse(name: &str, why: &str) -> AppError {
     crate::errors::invalid_argument(format!("The {name} folder is not safe to use: {why}."))
