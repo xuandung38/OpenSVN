@@ -32,6 +32,10 @@ const MAX_AUTH_ROUND_TRIPS: u8 = 10;
 /// Client, TLS state and connection limit of one `(scheme, host, port)`.
 struct OriginClient {
     client: reqwest::Client,
+    /// Same settings with a pool of its own for writes, whose idle connections expire after
+    /// [`TransportConfig::write_reuse_window`]: a write is sent once, so it only reuses a
+    /// connection that was busy moments ago (see [`HttpTransport::attempt`]).
+    writer: reqwest::Client,
     /// Same settings without a pool: every request opens its own connection. Used to retry a
     /// request whose pooled connection broke, so the retry cannot pick another stale one.
     fresh: reqwest::Client,
@@ -308,10 +312,12 @@ impl HttpTransport {
         let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
         let port = url.port_or_known_default().unwrap_or(0);
         let tls = Arc::new(OriginTls::new(host, port, Arc::clone(&self.trust)));
-        let client = self.make_client(&tls, true)?;
-        let fresh = self.make_client(&tls, false)?;
+        let client = self.make_client(&tls, Some(self.config.pool_idle_timeout))?;
+        let writer = self.make_client(&tls, Some(self.config.write_reuse_window))?;
+        let fresh = self.make_client(&tls, None)?;
         let entry = Arc::new(OriginClient {
             client,
+            writer,
             fresh,
             tls,
             slots: Arc::new(Semaphore::new(self.config.effective_connections())),
@@ -321,21 +327,27 @@ impl HttpTransport {
         Ok(entry)
     }
 
-    /// Client of one origin; `pooled == false` keeps no idle connection.
-    fn make_client(&self, tls: &Arc<OriginTls>, pooled: bool) -> Result<reqwest::Client> {
+    /// Client of one origin whose idle connections are kept for `pool_idle`; `None` keeps no
+    /// idle connection.
+    fn make_client(
+        &self,
+        tls: &Arc<OriginTls>,
+        pool_idle: Option<Duration>,
+    ) -> Result<reqwest::Client> {
         let tls_config = make_client_config(Arc::clone(tls), &self.config.extra_root_certs)?;
         let mut b = reqwest::Client::builder()
             .http1_only()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(self.config.connect_timeout)
             .read_timeout(self.config.read_timeout)
-            .pool_max_idle_per_host(if pooled {
+            .pool_max_idle_per_host(if pool_idle.is_some() {
                 self.config.effective_connections()
             } else {
                 0
             })
-            // Drop idle connections before the server's keep-alive timeout closes them.
-            .pool_idle_timeout(self.config.pool_idle_timeout)
+            // Drop idle connections before the server's keep-alive timeout closes them. The
+            // pool checks this when it hands out a connection, so an older one is never used.
+            .pool_idle_timeout(pool_idle.unwrap_or(self.config.pool_idle_timeout))
             .user_agent(self.config.user_agent.clone())
             // Exposes the server certificate per response, for Negotiate channel bindings.
             .tls_info(true)
@@ -509,6 +521,12 @@ impl HttpTransport {
 
     /// Sends once (plus transient retries for idempotent requests). A retry never resends a
     /// Negotiate token: `sent` is renewed with a fresh context first.
+    ///
+    /// A write (not [`is_idempotent`]) is sent at most once. It goes out on a connection idle
+    /// for at most [`TransportConfig::write_reuse_window`] or on a new one, so a connection the
+    /// server or a proxy dropped while idle does not take it down. It is sent again only when
+    /// it provably never left: the connection could not be opened (`is_connect`). A connection
+    /// that breaks after the write was handed to it fails the write, whatever was sent.
     async fn attempt(
         &self,
         origin: &OriginClient,
@@ -523,7 +541,8 @@ impl HttpTransport {
                 SvnError::new(ErrorCode::Internal, "connection pool closed")
             })?,
         };
-        let retriable = is_idempotent(&req.method) && req.body.is_replayable();
+        let idempotent = is_idempotent(&req.method);
+        let retriable = idempotent && req.body.is_replayable();
         let mut retries = 0usize;
         // Set once a connection broke under this request: the retries do not use the pool.
         let mut fresh_connection = false;
@@ -539,8 +558,10 @@ impl HttpTransport {
             let prepared = req.body.prepare().await?;
             let client = if fresh_connection {
                 &origin.fresh
-            } else {
+            } else if idempotent {
                 &origin.client
+            } else {
+                &origin.writer
             };
             let mut rb = client
                 .request(req.method.clone(), req.url.clone())
@@ -602,8 +623,10 @@ impl HttpTransport {
                         return Err(AttemptError::Tls(Box::new(p)));
                     }
                     let builder = e.is_builder();
+                    // No connection, so nothing of the request was sent.
+                    let unsent = e.is_connect() && req.body.is_replayable();
                     let err = classify_error(e);
-                    if retriable
+                    if (retriable || unsent)
                         && !builder
                         && let Some(d) = delay
                     {

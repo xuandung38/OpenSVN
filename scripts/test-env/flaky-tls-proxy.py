@@ -10,6 +10,11 @@ close is a plain TCP close (FIN) or, where asked, a reset (RST). Faults, per cli
   --reset-after N    the same, with a TCP reset
   --idle-reset S     reset a connection idle for S seconds: between requests, or in the middle
                      of a response the client stopped reading (not while the server works)
+  --stale-after S    a connection idle for S seconds or more is reset under the next request,
+                     which is not forwarded (a proxy, firewall or NAT that dropped the idle
+                     connection without telling the client)
+  --log-requests     log the request line of every request the client starts, forwarded or not
+                     ("conn N: request METHOD URI"), so a test can count what was sent
   --truncate-every K cut every K-th response bigger than --truncate-at bytes after that many
                      bytes and close without close_notify (a broken connection mid-body)
   --truncate-method M  only count and cut responses to these methods (comma-separated, e.g.
@@ -130,24 +135,32 @@ class Conn:
                 if not data or self.closed:
                     break
                 with self.lock:
+                    idle = time.monotonic() - self.last_activity
                     self.last_activity = time.monotonic()
                     self.awaiting = True
                     new_request = self.responding or self.exchanges == 0 and self.response_bytes == 0
-                    if self.responding or not self.started:
+                    starts = self.responding or not self.started
+                    if starts:
                         # The first bytes of a request (not more of its body).
                         self.started = True
                         self.method = data.split(b" ", 1)[0].decode("ascii", "replace")
+                        line = data.split(b"\r\n", 1)[0].decode("ascii", "replace")
                     if self.responding:
                         self.responding = False
                         self.exchanges += 1
                         self.response_bytes = 0
                     exchanges = self.exchanges
+                if starts and self.args.log_requests:
+                    log(f"conn {self.cid}: request {' '.join(line.split(' ')[:2])}")
                 if new_request and exchanges > 0:
                     if self.args.close_after and exchanges >= self.args.close_after:
-                        self.close(False, f"closing before request {exchanges + 1} (no close_notify)")
+                        self.close(False, f"closing before request {exchanges + 1} ({self.method}, no close_notify)")
                         return
                     if self.args.reset_after and exchanges >= self.args.reset_after:
-                        self.close(True, f"resetting before request {exchanges + 1}")
+                        self.close(True, f"resetting before request {exchanges + 1} ({self.method})")
+                        return
+                    if self.args.stale_after and idle >= self.args.stale_after:
+                        self.close(True, f"resetting a connection idle {idle:.1f}s under request {exchanges + 1} ({self.method})")
                         return
                 self.upstream_io.sendall(data)
         except OSError:
@@ -256,6 +269,8 @@ def main():
     p.add_argument("--close-after", type=int, default=0)
     p.add_argument("--reset-after", type=int, default=0)
     p.add_argument("--idle-reset", type=float, default=0.0)
+    p.add_argument("--stale-after", type=float, default=0.0)
+    p.add_argument("--log-requests", action="store_true")
     p.add_argument("--truncate-every", type=int, default=0)
     p.add_argument("--truncate-at", type=int, default=2048)
     p.add_argument("--truncate-method", type=lambda v: [m.strip().upper() for m in v.split(",") if m.strip()], default=[])
