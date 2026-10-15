@@ -75,6 +75,7 @@ Build bộ cài:
 | Tree-conflict và thay file↔thư mục khớp svn 1.15 | #162, #165 |
 | Obstruction trong status, WcBusy, symlink | #147, #152 |
 | Fuzz hằng đêm (svn-protocol, svn-delta), proptest update so với svn 1.15, độ trễ watcher (~460 ms với 10k file), kiểm tra accessibility bằng axe (en/vi) | #168 |
+| Golden giao thức từ mod_dav_svn 1.15.0 (`tests/data-1.15`, `fixtures/protocol-1.15`), test golden và replay chạy trên cả 1.14 và 1.15; snapshot `list_report_request`/`parent_listing_request`; fuzz 8 target svn-protocol mỗi target 1 giờ, không crash | #184 |
 | `LogProgress::accept` chịu được entry merge lồng (`-g`): entry con không còn kéo lệch `last`, không bị bỏ hay lặp khi tải tiếp | #164 (follow-up) |
 | Mất mạng lâu khi checkout/update: chờ mạng (`network.reconnectWaitMin`, mặc định 10 phút) rồi tải tiếp đúng revision; "Tiếp tục checkout" sau khi hủy, đóng app hoặc crash (journal checkout); phát hiện ngủ/thức bằng đồng hồ boot, không theo giờ hệ thống | #172 |
 | Thanh bên History hiện trạng thái đang tải, lỗi kèm nút Thử lại và danh sách trống, giống màn History chính | #174 |

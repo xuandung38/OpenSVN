@@ -110,6 +110,28 @@ keeps the buffer at one byte per character. The input is
 `tests/fuzz_regressions.rs`, which replays the artifact and checks every split point reports the
 response as corrupt. Both reruns marked "after the fix" ran on the fixed code.
 
+#### Local run, 1 hour per target, 2026-10-15
+
+Setup: `cargo +nightly fuzz run <target> corpus/<target> -- -max_total_time=3600`, cargo-fuzz
+0.13.2, nightly rustc 1.101.0 (2026-10-14), 4-core container. Two batches of four targets ran in
+parallel (15:16–17:16 UTC); the first batch shared the machine with the local gates for about 40
+minutes, so its exec/s is lower. Every target except `href_vetting` started from the
+`tests/data/**/*.resp` and `tests/data-1.15/**/*.resp` bodies. Code: this branch (1.15 goldens),
+no parser change since the 16-minute run above.
+
+| Target | Time | Execs | exec/s | cov | ft | Corpus | Crash |
+|---|---|---|---|---|---|---|---|
+| `error_body` | 60 min | 49,876,393 | 13,850 | 1,875 | 9,378 | 2,120 | none |
+| `file_revs` | 60 min | 15,780,761 | 4,382 | 3,537 | 17,473 | 3,512 | none |
+| `get_locks` | 60 min | 40,248,797 | 11,177 | 2,130 | 10,124 | 2,166 | none |
+| `href_vetting` | 60 min | 15,283,462 | 4,244 | 4,802 | 22,709 | 4,648 | none |
+| `log_parser` | 60 min | 31,235,964 | 8,674 | 2,548 | 11,833 | 2,289 | none |
+| `multistatus` | 60 min | 33,705,240 | 9,359 | 2,302 | 11,718 | 2,579 | none |
+| `update_parser` | 60 min | 5,335,516 | 1,481 | 4,769 | 17,817 | 2,613 | none |
+| `xml_reader` | 60 min | 20,326,660 | 5,644 | 1,555 | 8,585 | 1,670 | none |
+
+No crash, so `tests/fuzz_regressions.rs` gained no new input.
+
 ## Verified facts
 
 ### OPTIONS / session
