@@ -124,3 +124,23 @@ fn server_header(url: &str) -> Option<String> {
             .then(|| v.trim().to_owned())
     })
 }
+
+/// `OPENSVN_BENCH_WRAP=<program>` runs every timed command as `<program> <command> <args...>`
+/// (a profiler such as `strace -f -c` behind a script), with the environment kept.
+pub fn wrap(c: Command) -> Command {
+    let Some(w) = std::env::var_os("OPENSVN_BENCH_WRAP") else {
+        return c;
+    };
+    let mut out = Command::new(w);
+    out.arg(c.get_program()).args(c.get_args());
+    for (k, v) in c.get_envs() {
+        match v {
+            Some(v) => out.env(k, v),
+            None => out.env_remove(k),
+        };
+    }
+    if let Some(d) = c.get_current_dir() {
+        out.current_dir(d);
+    }
+    out
+}

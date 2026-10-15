@@ -235,6 +235,15 @@ enum Who {
     Engine,
 }
 
+impl Who {
+    fn name(self) -> &'static str {
+        match self {
+            Who::Svn => "svn",
+            Who::Engine => "engine",
+        }
+    }
+}
+
 impl Bench {
     fn url(&self, repo: &str) -> String {
         format!("http://127.0.0.1:{}/svn/{repo}", self.proxy.port)
@@ -267,16 +276,18 @@ impl Bench {
     fn commit(&self, who: Who, name: &str, wc: &Path, msg: &str) -> Result<(Duration, u64)> {
         let w = wc.to_string_lossy().into_owned();
         self.proxy.take();
-        let d = match who {
-            Who::Svn => time(
-                self.svn.cmd().args(["commit", "-q", "-m", msg, &w]),
-                "svn commit",
-            )?,
-            Who::Engine => time(
-                &mut self.engine(&["commit", &self.url(name), &w, msg]),
-                "engine commit",
-            )?,
+        let cmd = match who {
+            Who::Svn => {
+                let mut c = self.svn.cmd();
+                c.args(["commit", "-q", "-m", msg, &w]);
+                c
+            }
+            Who::Engine => self.engine(&["commit", &self.url(name), &w, msg]),
         };
+        let d = time(
+            &mut crate::machine::wrap(cmd),
+            &format!("{} commit", who.name()),
+        )?;
         let bytes = self.proxy.take();
         let st = self.svn.run_in(wc, &["status", "-q"])?;
         if !st.trim().is_empty() {

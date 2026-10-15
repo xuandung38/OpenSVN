@@ -306,7 +306,18 @@ fn run(a: &Args) -> Result<()> {
     write_dump(a, &dump)?;
     eprintln!("svnadmin load...");
     let t = Instant::now();
-    svn.load(&repo, &dump)?;
+    // The dump is regenerated on every run, so the load need not survive a power cut.
+    let mut c = svn.admin();
+    c.args(["load", "-q", "--no-flush-to-disk"])
+        .arg(&repo)
+        .stdin(std::fs::File::open(&dump).map_err(|e| err(format!("open dump: {e}")))?);
+    let out = c.output().map_err(|e| err(format!("svnadmin load: {e}")))?;
+    if !out.status.success() {
+        return Err(err(format!(
+            "svnadmin load: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
     eprintln!("loaded in {:.1} s", t.elapsed().as_secs_f64());
     apache.hand_over("log")?;
     let url = apache.url("log");
@@ -370,7 +381,7 @@ fn run(a: &Args) -> Result<()> {
                 if who == 0 {
                     let mut c = svn.cmd();
                     c.args(svn_args);
-                    let (d, out) = time(&mut c, "svn log")?;
+                    let (d, out) = time(&mut crate::machine::wrap(c), "svn log")?;
                     row.svn.push(d);
                     let (n, ch) = (count_entries(&out), count_changed(&out));
                     // The engine must report exactly what svn printed.
@@ -393,7 +404,7 @@ fn run(a: &Args) -> Result<()> {
                         .arg(&state)
                         .args(["log", url.as_str(), path.as_str(), limit.as_str()])
                         .arg(if *verbose { "v" } else { "q" });
-                    let (d, _) = time(&mut c, "engine log")?;
+                    let (d, _) = time(&mut crate::machine::wrap(c), "engine log")?;
                     row.engine.push(d);
                 }
             }
