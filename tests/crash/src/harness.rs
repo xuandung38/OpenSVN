@@ -208,7 +208,9 @@ pub struct CaseRecord {
 /// one window where recovery leaves the lock for the user (`svn-wc` `wc_lock.rs`: the row is
 /// committed first so that a crash never makes a foreign lock look like ours): a random kill or
 /// a kill right after a transaction commits, and the process died before it wrote the lock's
-/// marker into `.svn/tmp` (the marker is written last).
+/// marker into `.svn/tmp` (the marker is written last). A marker file killed between its
+/// creation and its contents is empty and proves nothing (`wc_lock.rs` ignores it), so it
+/// counts as missing.
 pub fn lock_row_window(kill: &Kill, wc: &Path) -> bool {
     let after_commit = match kill {
         Kill::After(_) => true,
@@ -216,8 +218,10 @@ pub fn lock_row_window(kill: &Kill, wc: &Path) -> bool {
         Kill::Never => false,
     };
     let marker = std::fs::read_dir(wc.join(".svn/tmp")).is_ok_and(|rd| {
-        rd.filter_map(|e| e.ok())
-            .any(|e| e.file_name().to_string_lossy().starts_with("opensvn-lock-"))
+        rd.filter_map(|e| e.ok()).any(|e| {
+            e.file_name().to_string_lossy().starts_with("opensvn-lock-")
+                && e.metadata().is_ok_and(|m| m.len() > 0)
+        })
     });
     after_commit && !marker
 }
