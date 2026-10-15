@@ -855,9 +855,12 @@ impl Fixture {
         let run = self.worker(&state, op.name(), &url, &wc, kill)?;
         rec.ended = run.ended.clone();
         match (&run.ended, kill) {
-            (Ended::Failed(m), _) if op == Op::Cleanup && m.contains("WcBusy") => {
-                // The killed update left a lock row the engine treats as foreign (see below).
-                rec.warnings.push(format!("cleanup refused: {m}"));
+            (Ended::Failed(m), _)
+                if matches!(op, Op::Cleanup | Op::Continue) && m.contains("WcBusy") =>
+            {
+                // The killed update or checkout left a lock row the engine treats as foreign
+                // (see below).
+                rec.warnings.push(format!("{} refused: {m}", op.name()));
             }
             (Ended::Failed(m), _) => {
                 return Err(err(format!("{} failed without a crash: {m}", op.name())));
