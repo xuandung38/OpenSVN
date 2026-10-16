@@ -14,7 +14,8 @@
 //!   unknown): the log after the journal's start revision is searched for the commit (author
 //!   when known, log message and changed paths); exactly one match is finalized, anything else
 //!   keeps the journal and reports it as needing the user;
-//! * only a transaction is recorded: it is deleted on the server and the journal is dropped;
+//! * only a transaction is recorded: it is deleted on the server (a `DELETE` the server fails
+//!   is tried again a few times, see [`delete_unmerged_txn`]) and the journal is dropped;
 //! * nothing reached the server: the journal is dropped.
 //!
 //! A journal whose outcome is unknown is never dropped without that check, and no journal is
@@ -354,10 +355,77 @@ async fn process(
     if let Some(txn) = &data.txn {
         let ra = ra.ok_or_else(|| needs_session(&data))?;
         authenticate(ra, cancel, authenticated).await?;
-        ra.abort_txn(txn).await?;
+        delete_unmerged_txn(ra, txn, cancel, TXN_DELETE_RETRY).await?;
     }
     store.remove(&data.id)?;
     Ok(Outcome::Aborted)
+}
+
+/// How often, and how far apart, [`delete_unmerged_txn`] sends the `DELETE` of a transaction.
+#[derive(Debug, Clone, Copy)]
+struct TxnDeleteRetry {
+    /// `DELETE`s sent at most (the first one included).
+    attempts: u32,
+    /// Wait before the second `DELETE`; doubled before each later one.
+    first_delay: std::time::Duration,
+}
+
+/// 5 `DELETE`s, 200 ms apart and doubling: at most 3 s of waiting in all.
+const TXN_DELETE_RETRY: TxnDeleteRetry = TxnDeleteRetry {
+    attempts: 5,
+    first_delay: std::time::Duration::from_millis(200),
+};
+
+/// Deletes the transaction of a journal whose `MERGE` was never sent.
+///
+/// A process killed during an upload can leave the server still finishing its last request
+/// (a `PUT` into the transaction), and FSFS then fails the `DELETE` with a 500 ("Directory not
+/// empty" on the transaction directory). That is transient, so a `DELETE` the server or the
+/// connection failed ([`TxnAbort::Unknown`]) is sent again, at most `retry.attempts` times
+/// with a doubling pause that cancellation cuts short. Deleted now, or gone already (a 404), is
+/// done. Any other error stops at once, and running out of attempts is an error too: the
+/// journal is then kept and reported, never dropped, and the next recovery tries again.
+///
+/// Sending the `DELETE` again does not break the rule that a write is never sent twice: a
+/// `DELETE` of a transaction is idempotent (a second one finds it gone), and since no `MERGE`
+/// was sent the transaction can never become a revision, so whatever a repeated `DELETE` finds
+/// changes nothing about the commit. This is also why [`reconcile`] does not retry: there the
+/// `MERGE` may have been sent, a 500 can mean the `DELETE` raced the commit's own purge, and a
+/// later "deleted" would no longer prove the commit did not happen.
+async fn delete_unmerged_txn(
+    ra: &dyn RaSession,
+    txn: &str,
+    cancel: &CancelToken,
+    retry: TxnDeleteRetry,
+) -> Result<()> {
+    let mut delay = retry.first_delay;
+    let mut attempt = 1;
+    loop {
+        let why = match ra.abort_txn_checked(txn, cancel).await {
+            Ok(TxnAbort::Deleted | TxnAbort::Gone) => return Ok(()),
+            Ok(TxnAbort::Unknown(why)) => why,
+            // A session that cannot tell the cases apart: the plain, idempotent delete.
+            Err(e) if e.code == ErrorCode::ServerUnsupported => return ra.abort_txn(txn).await,
+            Err(e) => return Err(e),
+        };
+        if attempt >= retry.attempts {
+            return Err(SvnError::new(
+                ErrorCode::WcNeedsCleanup,
+                format!(
+                    "the server could not delete the interrupted commit's transaction '{txn}' \
+                     after {attempt} attempts ({why}); the commit was never applied, and the \
+                     next recovery tries again"
+                ),
+            ));
+        }
+        tracing::debug!(txn, attempt, %why, "transaction DELETE failed; trying again");
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            () = cancel.cancelled() => cancel.check()?,
+        }
+        delay = delay.saturating_mul(2);
+        attempt += 1;
+    }
 }
 
 async fn authenticate(ra: &dyn RaSession, cancel: &CancelToken, done: &mut bool) -> Result<()> {
@@ -652,5 +720,100 @@ mod tests {
             Reconciled::NoMatch(_)
         ));
         assert_eq!(RECOVERY_LOG_SEARCH_LIMIT, 1000);
+    }
+
+    struct NoObserver;
+
+    impl svn_ra_api::CommitObserver for NoObserver {
+        fn on_txn_created(&self, _txn: &str) -> Result<()> {
+            Ok(())
+        }
+        fn on_merged(&self, _info: &svn_ra_api::CommitInfo) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A session with one open transaction and its name.
+    async fn open_txn() -> (FakeRaSession, String) {
+        let ra = FakeRaSession::new("https://svn.test.local/repo", "uuid").expect("fake");
+        let editor = ra
+            .commit_editor(
+                "m",
+                &[],
+                &[],
+                false,
+                std::sync::Arc::new(NoObserver),
+                &CancelToken::new(),
+            )
+            .await
+            .expect("editor");
+        std::mem::forget(editor);
+        let txn = ra.open_txns().pop().expect("txn");
+        (ra, txn)
+    }
+
+    const FAST: TxnDeleteRetry = TxnDeleteRetry {
+        attempts: 5,
+        first_delay: std::time::Duration::from_millis(1),
+    };
+
+    #[tokio::test]
+    async fn a_transient_txn_delete_failure_is_retried() {
+        let (ra, txn) = open_txn().await;
+        ra.fail_txn_deletes_times("transactions/1-1.txn: Directory not empty", 4);
+        delete_unmerged_txn(&ra, &txn, &CancelToken::new(), FAST)
+            .await
+            .expect("the fifth DELETE gets through");
+        assert!(ra.open_txns().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_txn_delete_retries_are_bounded() {
+        let (ra, txn) = open_txn().await;
+        ra.fail_txn_deletes_times("Directory not empty", 5);
+        let err = delete_unmerged_txn(&ra, &txn, &CancelToken::new(), FAST)
+            .await
+            .expect_err("five failures");
+        assert_eq!(err.code, ErrorCode::WcNeedsCleanup, "{err}");
+        assert!(err.message.contains("after 5 attempts"), "{err}");
+        assert!(err.message.contains("Directory not empty"), "{err}");
+        assert_eq!(ra.open_txns(), vec![txn.clone()], "transaction kept");
+        // All five faults were used: the next DELETE is answered normally.
+        delete_unmerged_txn(&ra, &txn, &CancelToken::new(), FAST)
+            .await
+            .expect("deleted");
+        assert!(ra.open_txns().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_gone_txn_needs_no_retry() {
+        let (ra, txn) = open_txn().await;
+        ra.abort_txn(&txn).await.expect("admin removes it");
+        delete_unmerged_txn(&ra, &txn, &CancelToken::new(), FAST)
+            .await
+            .expect("gone is done");
+    }
+
+    #[tokio::test]
+    async fn cancellation_cuts_the_retry_pause_short() {
+        let (ra, txn) = open_txn().await;
+        ra.fail_txn_deletes(Some("Directory not empty"));
+        let cancel = CancelToken::new();
+        let slow = TxnDeleteRetry {
+            attempts: 5,
+            first_delay: std::time::Duration::from_secs(60),
+        };
+        let canceller = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            canceller.cancel();
+        });
+        let started = std::time::Instant::now();
+        let err = delete_unmerged_txn(&ra, &txn, &cancel, slow)
+            .await
+            .expect_err("cancelled");
+        assert_eq!(err.code, ErrorCode::Cancelled, "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(ra.open_txns(), vec![txn], "transaction kept");
     }
 }
