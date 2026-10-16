@@ -317,6 +317,7 @@ impl EngineCli {
                     remove_unversioned: Some(c.flag(&["--remove-unversioned"])),
                     remove_ignored: Some(c.flag(&["--remove-ignored"])),
                     vacuum_pristines: Some(c.flag(&["--vacuum-pristines"])),
+                    break_foreign_locks: None,
                 };
                 e.cleanup(&wc, &req, &ctx).await?;
             }
