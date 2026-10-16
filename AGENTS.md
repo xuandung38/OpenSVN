@@ -123,6 +123,9 @@ Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo,
 12. **Lỗi PUT bị cắt hiện thông báo transport thô (#193, follow-up).** Txn đã được xóa nên chưa có gì được commit, nhưng người dùng chỉ thấy "Connection reset by peer". Nên bọc lỗi thành "chưa commit gì, có thể làm lại" khi DELETE txn trả về `Deleted`.
 13. **Fake server chưa mô phỏng `link_path` khi update (#193, follow-up).** `svn-ra-api::fake` chỉ đọc nguồn của `link_path` khi switch. Khi update, svn_repos còn theo link ở phía đích, nên test update với subtree đã switch trên fake chưa phản ánh đúng.
 14. **Switch dừng giữa chừng với `--depth` hẹp (#193, follow-up).** Khi resume neo tại thư mục đích, bump chỉ ghi lại `repos_relpath` trong phạm vi depth. Thư mục con nằm ngoài depth giữ URL cũ. App luôn switch với depth `Unknown` nên chưa gặp.
+15. **`pnpm test:browser` trên WebKit (#12, follow-up).** Máy dev chưa có WebKit của Playwright nên mới chạy Chromium. Cần chạy `pnpm exec playwright-core install webkit` (hoặc dùng máy có sẵn), chạy script rồi xem ảnh trong `test-results/browser`.
+16. **Mục View dạng check trong menu native (#18, follow-up).** Show unversioned/ignored, Group by changelist, Show as tree hiện là mục thường và báo trạng thái bằng toast. Nên dùng `CheckMenuItem` và đồng bộ trạng thái từ UI (cần lệnh IPC như `menu_set_layout`).
+17. **Compare ở revision cụ thể hoặc tính cả thay đổi local (#18, follow-up).** Compare hiện so hai URL ở HEAD và so từng thư mục theo last-changed revision và kích thước. Muốn chính xác theo nội dung hoặc gồm working copy thì cần lệnh diff URL↔URL ở backend.
 
 ## 6. Việc cần người thật (không tự động được)
 
@@ -139,7 +142,3 @@ Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo,
 - Main đổi thì merge main vào nhánh. Không rebase.
 - Báo cáo kết quả ngay trong mô tả PR: gate nào đã chạy, số test pass/fail, việc gì chưa chạy được và lý do.
 - Khi xong một mảng, cập nhật mục 3–5 của file này trong cùng PR.
-
-12. **`pnpm test:browser` trên WebKit (#12, follow-up).** Máy dev chưa có WebKit của Playwright nên mới chạy Chromium. Cần chạy `pnpm exec playwright-core install webkit` (hoặc dùng máy có sẵn), chạy script rồi xem ảnh trong `test-results/browser`.
-13. **Mục View dạng check trong menu native (#18, follow-up).** Show unversioned/ignored, Group by changelist, Show as tree hiện là mục thường và báo trạng thái bằng toast. Nên dùng `CheckMenuItem` và đồng bộ trạng thái từ UI (cần lệnh IPC như `menu_set_layout`).
-14. **Compare ở revision cụ thể hoặc tính cả thay đổi local (#18, follow-up).** Compare hiện so hai URL ở HEAD và so từng thư mục theo last-changed revision và kích thước. Muốn chính xác theo nội dung hoặc gồm working copy thì cần lệnh diff URL↔URL ở backend.
