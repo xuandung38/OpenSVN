@@ -269,7 +269,6 @@ async fn drive(
     report: &(dyn Fn() -> svn_ra_api::ReportFn + Send + Sync),
     right: &RepoUrl,
     right_rev: Option<Revnum>,
-    depth: Depth,
     opts: SummaryOptions,
     cancel: &CancelToken,
 ) -> Result<Collected> {
@@ -281,7 +280,6 @@ async fn drive(
             report(),
             right,
             right_rev,
-            depth,
             opts,
             cancel,
         )
@@ -315,7 +313,6 @@ async fn drive_once(
     report: svn_ra_api::ReportFn,
     right: &RepoUrl,
     right_rev: Option<Revnum>,
-    depth: Depth,
     opts: SummaryOptions,
     cancel: &CancelToken,
 ) -> Result<Collected> {
@@ -330,7 +327,8 @@ async fn drive_once(
             UpdateRequest {
                 revision: right_rev,
                 target,
-                depth,
+                // As the caller wants it on the wire (`wc_request_depth`).
+                depth: opts.depth,
                 mode: UpdateMode::Diff(right.clone()),
                 send_copyfrom: false,
                 ignore_ancestry: opts.ignore_ancestry,
@@ -417,8 +415,7 @@ pub async fn summarize_repos(
         &report,
         right,
         right_rev,
-        depth,
-        opts,
+        SummaryOptions { depth, ..opts },
         cancel,
     )
     .await?;
@@ -558,8 +555,10 @@ pub async fn summarize_wc(
         &report,
         right,
         right_rev,
-        wc_request_depth(opts.depth),
-        opts,
+        SummaryOptions {
+            depth: wc_request_depth(opts.depth),
+            ..opts
+        },
         cancel,
     )
     .await?;
