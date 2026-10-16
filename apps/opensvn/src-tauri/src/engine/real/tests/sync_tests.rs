@@ -480,7 +480,7 @@ async fn unsupported_requests_fail_with_user_facing_errors() {
             .checkout(
                 &CheckoutPlan {
                     sparse: Some(vec![SparseEntry {
-                        path: "src".into(),
+                        path: String::new(),
                         depth: SparseDepth::Empty,
                     }]),
                     ..plan(&url, &wc)
@@ -490,7 +490,7 @@ async fn unsupported_requests_fail_with_user_facing_errors() {
             .await
             .unwrap_err();
     assert_eq!(err.code, ErrorCode::WcInvalidOperation);
-    assert!(err.message.contains("sparse"), "{err}");
+    assert!(err.message.contains("checkout root"), "{err}");
     assert!(!wc.exists(), "a refused checkout must not create anything");
 
     s.f.engine.checkout(&plan(&url, &wc), &ctx()).await.unwrap();
@@ -1033,4 +1033,84 @@ async fn locking_a_needs_lock_file_makes_it_writable_until_unlocked() {
     assert!(!read_only(), "writable while locked");
     s.f.engine.unlock(&scope, false, &ctx()).await.unwrap();
     assert!(read_only(), "read-only again after the unlock");
+}
+
+/// A sparse checkout on a session anchored below the repository root: the folders come in
+/// below the checkout root, all at one revision, and "Choose folders" changes them later.
+#[tokio::test]
+async fn sparse_checkout_on_an_anchored_session() {
+    let s = setup();
+    let wc = s.tmp.path().join("sparse");
+    let url = format!("{URL}/branches");
+    let info =
+        s.f.engine
+            .checkout(
+                &CheckoutPlan {
+                    depth: Depth::Empty,
+                    sparse: Some(vec![SparseEntry {
+                        path: "b1/src".into(),
+                        depth: SparseDepth::Files,
+                    }]),
+                    ..plan(&url, &wc)
+                },
+                &ctx(),
+            )
+            .await
+            .unwrap();
+    assert_eq!(info.base_rev, Rev(2));
+    assert!(wc.join("b1/src/main.rs").is_file());
+    assert!(!wc.join("b1/README.md").exists());
+    let r = wc_ref(&wc);
+    let depths = s.f.engine.wc_depths(&r, &ctx()).await.unwrap();
+    assert_eq!(
+        depths,
+        vec![
+            SparseEntry {
+                path: String::new(),
+                depth: SparseDepth::Empty
+            },
+            SparseEntry {
+                path: "b1".into(),
+                depth: SparseDepth::Empty
+            },
+            SparseEntry {
+                path: "b1/src".into(),
+                depth: SparseDepth::Files
+            },
+        ]
+    );
+    // An excluded folder is listed as such and comes back through its own depth.
+    s.f.engine
+        .sparse_apply(
+            &r,
+            &[SparseEntry {
+                path: "b1/src".into(),
+                depth: SparseDepth::Exclude,
+            }],
+            &ctx(),
+        )
+        .await
+        .unwrap();
+    assert!(!wc.join("b1/src").exists());
+    assert_eq!(
+        s.f.engine.wc_depths(&r, &ctx()).await.unwrap()[2].depth,
+        SparseDepth::Exclude
+    );
+    s.f.engine
+        .set_depth(&r, "b1/src", Depth::Infinity, &ctx())
+        .await
+        .unwrap();
+    assert!(wc.join("b1/src/main.rs").is_file());
+    // A folder below one the working copy does not have comes in with its parents.
+    s.f.engine
+        .set_depth(&r, "b1", Depth::Empty, &ctx())
+        .await
+        .unwrap();
+    assert!(!wc.join("b1/src").exists());
+    s.f.engine
+        .set_depth(&r, "b1/src", Depth::Empty, &ctx())
+        .await
+        .unwrap();
+    assert!(wc.join("b1/src").is_dir());
+    assert!(!wc.join("b1/src/main.rs").exists());
 }

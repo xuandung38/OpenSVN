@@ -1404,3 +1404,98 @@ async fn refused_merge_with_a_failing_txn_delete_keeps_the_journal() {
     let report = e.recover_wc().await;
     assert_eq!(report.needs_user.len(), 1, "{report:?}");
 }
+
+// ---- A killed upload: the recovery DELETE of a never-merged transaction fails with a 500 ----
+
+/// What FSFS answers (HTTP 500) while it still finishes a killed client's last `PUT` into the
+/// transaction.
+const DIR_NOT_EMPTY: &str = "Can't remove directory 'db/transactions/1-1.txn': Directory not empty";
+
+impl Env {
+    /// A journal that only names an open transaction, as left by a process killed during the
+    /// upload (its `MERGE` was never sent); the journal id and the transaction name.
+    async fn leaked_txn_journal(&self) -> (String, String) {
+        use svn_client::commit::journal::{JournalObserver, JournalStore};
+        let store = JournalStore::new(&self.state);
+        let id = store.new_id();
+        let data = store.begin(
+            id.clone(),
+            self.wc.clone(),
+            false,
+            false,
+            Vec::new(),
+            Vec::new(),
+        );
+        store.write(&data).expect("journal");
+        let obs = Arc::new(JournalObserver::new(store, data));
+        let editor = self
+            .ra
+            .inner
+            .commit_editor("m", &[], &[], false, obs, &self.cancel)
+            .await
+            .expect("editor");
+        std::mem::forget(editor);
+        let txns = self.ra.inner.open_txns();
+        assert_eq!(txns.len(), 1);
+        let j = self.only_journal();
+        assert!(!j.outcome_unknown(), "{j:?}");
+        (id, txns[0].clone())
+    }
+
+    fn txn_deletes(&self) -> usize {
+        self.ra
+            .events()
+            .iter()
+            .filter(|l| l.starts_with("abort_txn_checked"))
+            .count()
+    }
+}
+
+#[tokio::test]
+async fn recovery_retries_a_txn_delete_the_server_fails_once() {
+    let Some(e) = env() else { return };
+    let (id, _) = e.leaked_txn_journal().await;
+    e.ra.inner.fail_txn_deletes_times(DIR_NOT_EMPTY, 1);
+    let report = e.recover_wc().await;
+    assert_eq!(report.aborted, vec![id], "{report:?}");
+    assert!(report.failed.is_empty() && report.needs_user.is_empty());
+    assert_eq!(e.txn_deletes(), 2, "{:?}", e.ra.events());
+    assert!(e.ra.inner.open_txns().is_empty(), "no leaked transaction");
+    assert_eq!(e.journal_count(), 0);
+}
+
+#[tokio::test]
+async fn recovery_keeps_the_journal_when_the_txn_delete_keeps_failing() {
+    let Some(e) = env() else { return };
+    let (id, txn) = e.leaked_txn_journal().await;
+    e.ra.inner.fail_txn_deletes(Some(DIR_NOT_EMPTY));
+    let report = e.recover_wc().await;
+    assert!(report.aborted.is_empty() && report.needs_user.is_empty());
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    let (failed_id, err) = &report.failed[0];
+    assert_eq!(failed_id, &id);
+    assert_eq!(err.code, ErrorCode::WcNeedsCleanup, "{err}");
+    assert!(err.message.contains(DIR_NOT_EMPTY), "{err}");
+    assert_eq!(e.txn_deletes(), 5, "bounded: {:?}", e.ra.events());
+    assert_eq!(e.ra.inner.open_txns(), vec![txn]);
+    assert_eq!(e.journal_count(), 1, "journal kept");
+
+    // The next recovery, once the server answers again, settles it.
+    e.ra.inner.fail_txn_deletes(None);
+    let report = e.recover_wc().await;
+    assert_eq!(report.aborted, vec![id], "{report:?}");
+    assert!(e.ra.inner.open_txns().is_empty());
+    assert_eq!(e.journal_count(), 0);
+}
+
+#[tokio::test]
+async fn recovery_settles_a_journal_whose_txn_is_already_gone() {
+    let Some(e) = env() else { return };
+    let (id, txn) = e.leaked_txn_journal().await;
+    e.ra.inner.abort_txn(&txn).await.expect("admin removes it");
+    let report = e.recover_wc().await;
+    assert_eq!(report.aborted, vec![id], "{report:?}");
+    assert!(report.failed.is_empty() && report.needs_user.is_empty());
+    assert_eq!(e.txn_deletes(), 1, "a 404 is not retried");
+    assert_eq!(e.journal_count(), 0);
+}

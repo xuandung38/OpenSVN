@@ -263,6 +263,10 @@ pub fn exclude(db: &WcDb, cancel: &CancelToken, rel: &RelPath) -> Result<Vec<(Re
 /// update (local changes stay) when [`ClientCtx::externals`] is set.
 /// Only directories can change depth; a file can only be excluded. Anchor `session` at the
 /// directory itself (the HTTP layer expects the report to start with the update target).
+///
+/// A node the working copy does not have (outside its parent's depth, `not-present` or
+/// excluded) is brought in at `depth`, like svn; its parent must be in the working copy (see
+/// [`set_depth_parents`]) and `session` must then be anchored at that parent or above.
 pub async fn set_depth(
     ctx: &ClientCtx,
     session: &dyn RaSession,
@@ -286,11 +290,11 @@ pub async fn set_depth(
         )));
     }
     session.ensure_authenticated(cancel).await?;
-    let (owner, p) = (ctx.lock_owner.clone(), path.to_path_buf());
-    let (db, rel) = tokio::task::spawn_blocking(move || wc::open_containing(&owner, &p))
-        .await
-        .map_err(|e| SvnError::new(ErrorCode::Internal, format!("worker failed: {e}")))??;
-    let db = Arc::new(db);
+    let (db, rel) = open_wc(ctx, path).await?;
+    let (db2, rel2) = (Arc::clone(&db), rel.clone());
+    if blocking(move || absent_target(&db2, &rel2)).await? {
+        return bring_in(ctx, session, db, rel, revision, depth, cancel).await;
+    }
     let (db2, rel2, cancel2) = (Arc::clone(&db), rel.clone(), cancel.clone());
     let removed = tokio::task::spawn_blocking(move || -> Result<_> {
         let base = check_target(&db2, &rel2, "change the depth of")?;
@@ -354,5 +358,147 @@ pub async fn set_depth(
     all.append(&mut summary.events);
     summary.events = all;
     summary.externals.splice(0..0, externals);
+    Ok(summary)
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| SvnError::new(ErrorCode::Internal, format!("worker failed: {e}")))?
+}
+
+/// Opens the working copy holding `path`, resolved lexically like `svn update` does: the target
+/// may not exist on disk yet (a folder the working copy does not have).
+async fn open_wc(ctx: &ClientCtx, path: &Path) -> Result<(Arc<WcDb>, RelPath)> {
+    let (owner, p) = (ctx.lock_owner.clone(), path.to_path_buf());
+    let (db, rel) = blocking(move || wc::open_target(&owner, &p)).await?;
+    Ok((Arc::new(db), rel))
+}
+
+/// Whether `rel` is a node `--set-depth` brings in: missing from BASE, `not-present` or
+/// excluded, with nothing scheduled at its path and its parent a present, unscheduled
+/// directory. A node whose parent is missing too is refused (see [`set_depth_parents`]).
+fn absent_target(db: &WcDb, rel: &RelPath) -> Result<bool> {
+    let Some(parent) = rel.parent() else {
+        return Ok(false);
+    };
+    let base = db.read_base(rel)?;
+    if base
+        .as_ref()
+        .is_some_and(|b| b.presence.is_present() || b.presence == Presence::ServerExcluded)
+    {
+        return Ok(false);
+    }
+    // Something scheduled at the path: `check_target` explains why it cannot change depth.
+    if db.read_node(rel)?.is_some_and(|c| c.op_depth > 0) {
+        return Ok(false);
+    }
+    let parent_ok = db
+        .read_base(&parent)?
+        .is_some_and(|b| b.kind == NodeKind::Dir && b.presence.is_present())
+        && db.read_node(&parent)?.is_some_and(|c| c.op_depth == 0);
+    if !parent_ok {
+        return Err(SvnError::new(
+            ErrorCode::PathNotFound,
+            format!(
+                "cannot change the depth of '{rel}': its folder '{parent}' is not in the working \
+                 copy; bring that folder in first"
+            ),
+        ));
+    }
+    Ok(true)
+}
+
+/// `--set-depth` on a node the working copy does not have: an update of it with the depth
+/// made sticky, reported missing so the server adds it at `depth` (svn's crawler does the
+/// same). Excluding a node the working copy does not have changes nothing.
+async fn bring_in(
+    ctx: &ClientCtx,
+    session: &dyn RaSession,
+    db: Arc<WcDb>,
+    rel: RelPath,
+    revision: Option<Revnum>,
+    depth: Depth,
+    cancel: &CancelToken,
+) -> Result<UpdateSummary> {
+    if depth == Depth::Exclude {
+        return Ok(UpdateSummary::default());
+    }
+    let summary = drive_update(
+        ctx,
+        session,
+        Arc::clone(&db),
+        rel.clone(),
+        UpdateParams {
+            revision,
+            depth,
+            kind: UpdateKind::Update,
+            allow_unversioned_obstructions: false,
+            ignore_ancestry: false,
+            sticky_depth: true,
+        },
+        cancel,
+    )
+    .await?;
+    let rel2 = rel.clone();
+    let present = blocking(move || {
+        Ok(db
+            .read_base(&rel2)?
+            .is_some_and(|n| n.presence.is_present()))
+    })
+    .await?;
+    if !present {
+        return Err(SvnError::new(
+            ErrorCode::PathNotFound,
+            format!("'{rel}' does not exist in the repository at that revision"),
+        ));
+    }
+    Ok(summary)
+}
+
+/// `svn update --parents --set-depth DEPTH PATH`: like [`set_depth`], first bringing in every
+/// folder above `path` the working copy does not have yet, each at depth `empty` and all at the
+/// same revision (HEAD when `None`). Anchor `session` at the working copy root.
+pub async fn set_depth_parents(
+    ctx: &ClientCtx,
+    session: &dyn RaSession,
+    path: &Path,
+    revision: Option<Revnum>,
+    depth: Depth,
+    cancel: &CancelToken,
+) -> Result<UpdateSummary> {
+    session.ensure_authenticated(cancel).await?;
+    let (db, rel) = open_wc(ctx, path).await?;
+    let revision = match revision {
+        Some(r) => r,
+        None => session.youngest_rev(cancel).await?,
+    };
+    let mut ancestors = Vec::new();
+    let mut cur = rel.parent();
+    while let Some(p) = cur.filter(|p| !p.is_root()) {
+        cur = p.parent();
+        ancestors.push(p);
+    }
+    let mut events = Vec::new();
+    for dir in ancestors.into_iter().rev() {
+        let (db2, dir2) = (Arc::clone(&db), dir.clone());
+        if !blocking(move || absent_target(&db2, &dir2)).await? {
+            continue;
+        }
+        let summary = bring_in(
+            ctx,
+            session,
+            Arc::clone(&db),
+            dir,
+            Some(revision),
+            Depth::Empty,
+            cancel,
+        )
+        .await?;
+        events.extend(summary.events);
+    }
+    let mut summary = set_depth(ctx, session, path, Some(revision), depth, cancel).await?;
+    events.append(&mut summary.events);
+    summary.events = events;
     Ok(summary)
 }

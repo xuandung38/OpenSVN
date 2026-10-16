@@ -8,6 +8,7 @@ import { SafeText } from "../../../components/ui/safe-text";
 import { Tabs } from "../../../components/ui/tabs";
 import { useToast } from "../../../components/ui/toast";
 import type { RepoEntry } from "../../../ipc/bindings";
+import { ipc, toAppError, unwrap } from "../../../ipc/client";
 import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
 import { BlameView } from "../blame/blame-view";
@@ -23,6 +24,7 @@ import { FilePreview } from "./file-preview";
 import { type BrowseNode, type NodeActionHandlers, nodeMenuEntries } from "./node-actions";
 import { RemoteEditDialog, type RemoteEditMode } from "./remote-edit-dialog";
 import { RepoTree } from "./repo-tree";
+import { UploadDialog } from "./upload-dialog";
 import { useRepoList } from "./use-repo";
 
 type FileTab = "preview" | "blame" | "log";
@@ -38,7 +40,8 @@ export interface BrowseLocation {
 type Dialog =
   | { kind: "edit"; mode: RemoteEditMode; targetUrl: string }
   | { kind: "lock"; mode: "lock" | "unlock"; targets: LockTarget[] }
-  | { kind: "branch"; sourceUrl: string; sourceName: string };
+  | { kind: "branch"; sourceUrl: string; sourceName: string }
+  | { kind: "upload"; folderUrl: string };
 
 const syntheticDir = (url: string): RepoEntry => ({
   name: baseName(url),
@@ -152,8 +155,29 @@ export function BrowseScreen({
       remove: (n) => setDialog({ kind: "edit", mode: "delete", targetUrl: n.url }),
       createBranchTag: (n) =>
         setDialog({ kind: "branch", sourceUrl: n.url, sourceName: n.entry.name }),
+      // The native "Save as" dialog grants the destination; the file streams there as an
+      // operation, at the revision being browsed.
+      download: (n) => {
+        const name = n.entry.name;
+        unwrap(
+          ipc().commands.pathPick({
+            kind: "saveFile",
+            suggestedName: name,
+            title: t("saveAsTitle", { name }),
+          }),
+        )
+          .then((grant) =>
+            grant
+              ? unwrap(ipc().commands.repoSave(n.url, rev, grant.id)).then(() =>
+                  toast.show(t("downloadStarted", { name })),
+                )
+              : undefined,
+          )
+          .catch((e: unknown) => toast.show(toAppError(e).message, 6000));
+      },
+      upload: (n) => setDialog({ kind: "upload", folderUrl: n.url }),
     }),
-    [onShowLog, repoRootUrl, t, toast],
+    [onShowLog, repoRootUrl, rev, t, toast],
   );
 
   const applyRev = () => {
@@ -288,6 +312,9 @@ export function BrowseScreen({
           repoRoot={repoRootUrl}
           onClose={() => setDialog(null)}
         />
+      )}
+      {dialog?.kind === "upload" && (
+        <UploadDialog folderUrl={dialog.folderUrl} rev={rev} onClose={() => setDialog(null)} />
       )}
       {dialog?.kind === "lock" && (
         <LockDialog mode={dialog.mode} targets={dialog.targets} onClose={() => setDialog(null)} />
