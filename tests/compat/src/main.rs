@@ -52,7 +52,9 @@ fn run() -> Result<bool> {
     // `OPENSVN_COMPAT_BACKEND=local`: servers and clients on the host (see README).
     let local = std::env::var("OPENSVN_COMPAT_BACKEND").is_ok_and(|b| b == "local");
     let backend: Box<dyn Backend> = if local {
-        Box::new(LocalBackend::from_env(&default_work_root().join(".svn-config"))?)
+        Box::new(LocalBackend::from_env(
+            &default_work_root().join(".svn-config"),
+        )?)
     } else {
         Box::new(DockerBackend::new(&root))
     };

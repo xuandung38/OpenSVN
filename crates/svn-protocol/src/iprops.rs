@@ -32,7 +32,7 @@ pub struct InheritedItem {
     /// Repository-relative path of the parent, without a leading `/`.
     pub path: String,
     /// `(name, value)` pairs.
-    pub props: Vec<(String, Vec<u8>)>,
+    pub props: Props,
 }
 
 /// Builds the `REPORT` for the node at repository path `repo_path` in revision `rev`.
@@ -46,9 +46,13 @@ pub fn inherited_props_request(
     w.element("S:revision", &[], &rev.0.to_string());
     w.element("S:path", &[], "");
     w.end();
-    let req = HttpRequest::new(Method::Report, urls.rev_root(rev, repo_path)?).xml_body(w.finish()?);
+    let req =
+        HttpRequest::new(Method::Report, urls.rev_root(rev, repo_path)?).xml_body(w.finish()?);
     Ok(advertise_caps(req))
 }
+
+/// `(name, value)` pairs of one item.
+type Props = Vec<(String, Vec<u8>)>;
 
 /// Which text element of an item is being read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +67,8 @@ enum Field {
 pub struct InheritedPropsParser {
     xml: XmlReader,
     depth: usize,
-    item: Option<(Option<String>, Vec<(String, Vec<u8>)>)>,
+    /// The item being read: its path (once seen) and properties.
+    item: Option<(Option<String>, Props)>,
     name: Option<String>,
     field: Option<(Field, Option<String>)>,
     text: String,
@@ -139,7 +144,8 @@ impl InheritedPropsParser {
     }
 
     fn store_field(&mut self) -> Result<()> {
-        let (Some((field, encoding)), Some((path, props))) = (self.field.take(), self.item.as_mut())
+        let (Some((field, encoding)), Some((path, props))) =
+            (self.field.take(), self.item.as_mut())
         else {
             return Ok(());
         };
@@ -272,11 +278,21 @@ build
     fn malformed_reports_are_corrupt() {
         for bad in [
             "<S:log-report xmlns:S=\"svn:\"></S:log-report>".to_owned(),
-            format!("{HEAD}<S:iprop-item><S:iprop-propname>p</S:iprop-propname><S:iprop-propval>v</S:iprop-propval></S:iprop-item></S:inherited-props-report>"),
-            format!("{HEAD}<S:iprop-item><S:iprop-path>t</S:iprop-path><S:iprop-propval>v</S:iprop-propval></S:iprop-item></S:inherited-props-report>"),
-            format!("{HEAD}<S:iprop-item><S:iprop-path>t</S:iprop-path><S:iprop-propname>p</S:iprop-propname></S:iprop-item></S:inherited-props-report>"),
-            format!("{HEAD}<S:iprop-item><S:iprop-path>../x</S:iprop-path></S:iprop-item></S:inherited-props-report>"),
-            format!("{HEAD}<S:iprop-item><S:iprop-path>t</S:iprop-path><S:iprop-propname>p</S:iprop-propname><S:iprop-propval encoding=\"base64\">!!</S:iprop-propval></S:iprop-item></S:inherited-props-report>"),
+            format!(
+                "{HEAD}<S:iprop-item><S:iprop-propname>p</S:iprop-propname><S:iprop-propval>v</S:iprop-propval></S:iprop-item></S:inherited-props-report>"
+            ),
+            format!(
+                "{HEAD}<S:iprop-item><S:iprop-path>t</S:iprop-path><S:iprop-propval>v</S:iprop-propval></S:iprop-item></S:inherited-props-report>"
+            ),
+            format!(
+                "{HEAD}<S:iprop-item><S:iprop-path>t</S:iprop-path><S:iprop-propname>p</S:iprop-propname></S:iprop-item></S:inherited-props-report>"
+            ),
+            format!(
+                "{HEAD}<S:iprop-item><S:iprop-path>../x</S:iprop-path></S:iprop-item></S:inherited-props-report>"
+            ),
+            format!(
+                "{HEAD}<S:iprop-item><S:iprop-path>t</S:iprop-path><S:iprop-propname>p</S:iprop-propname><S:iprop-propval encoding=\"base64\">!!</S:iprop-propval></S:iprop-item></S:inherited-props-report>"
+            ),
         ] {
             let err = parse_inherited_props(bad.as_bytes()).expect_err(&bad);
             assert_eq!(err.code, ErrorCode::Corrupt, "{bad}: {err}");

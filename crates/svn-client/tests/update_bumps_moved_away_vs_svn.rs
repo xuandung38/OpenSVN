@@ -31,16 +31,27 @@ fn build(repo: &Repo) {
 fn svn_checkout_r1(repo: &Repo, name: &str) -> PathBuf {
     let wc = repo.base().join(name);
     let path = wc.to_str().expect("utf-8 path");
-    repo.svn(&repo.base(), &["checkout", "-q", "-r", "1", &repo.url, path]);
+    repo.svn(
+        &repo.base(),
+        &["checkout", "-q", "-r", "1", &repo.url, path],
+    );
     wc
 }
 
 async fn our_checkout_r1(repo: &Repo, sb: &Sandbox, name: &str) -> PathBuf {
     let ours = sb.path(name);
     let fake = repo.fake(None);
-    checkout(&ctx(), &fake, &ours, Some(Revnum(1)), Depth::Infinity, false, &CancelToken::new())
-        .await
-        .expect("checkout");
+    checkout(
+        &ctx(),
+        &fake,
+        &ours,
+        Some(Revnum(1)),
+        Depth::Infinity,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("checkout");
     ours
 }
 

@@ -95,10 +95,7 @@ impl LocalBackend {
             "--config-dir".into(),
             self.config_dir.display().to_string(),
             "--config-option".into(),
-            format!(
-                "servers:global:ssl-authority-files={}",
-                self.ca.display()
-            ),
+            format!("servers:global:ssl-authority-files={}", self.ca.display()),
             "--no-auth-cache".into(),
         ]
     }

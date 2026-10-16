@@ -261,9 +261,9 @@ impl<'a> Runner<'a> {
                     }
                     let res = driver.run(step, &wc_host, &args);
                     match (&step.fails_with, res) {
-                        (None, res) => res.with_context(|| {
-                            format!("step {i} (engine {})", args.join(" "))
-                        })?,
+                        (None, res) => {
+                            res.with_context(|| format!("step {i} (engine {})", args.join(" ")))?
+                        }
                         (Some(needle), Err(e)) if format!("{e:#}").contains(needle.as_str()) => {}
                         (Some(needle), Err(e)) => bail!(
                             "step {i} (engine {}) should fail with '{needle}' but failed with: {e:#}",

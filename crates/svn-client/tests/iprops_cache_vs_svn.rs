@@ -27,9 +27,15 @@ fn build(repo: &Repo) {
     repo.svn(&seed, &["add", "-q", "trunk", "branches"]);
     repo.svn(&seed, &["commit", "-q", "-m", "r1"]);
     repo.svn(&seed, &["update", "-q"]);
-    repo.svn(&seed, &["propset", "-q", "svn:global-ignores", "*.bak", "."]);
+    repo.svn(
+        &seed,
+        &["propset", "-q", "svn:global-ignores", "*.bak", "."],
+    );
     repo.svn(&seed, &["propset", "-q", "custom:team", "core", "trunk"]);
-    repo.svn(&seed, &["propset", "-q", "custom:team", "branch", "branches/b"]);
+    repo.svn(
+        &seed,
+        &["propset", "-q", "custom:team", "branch", "branches/b"],
+    );
     repo.svn(&seed, &["commit", "-q", "-m", "r2"]);
 }
 
@@ -95,11 +101,28 @@ async fn checkout_update_and_switch_cache_inherited_props_like_svn() {
     checkout(&ctx(), &fake, &ours, None, Depth::Infinity, false, &cancel)
         .await
         .expect("checkout");
-    repo.svn(&theirs, &["switch", "-q", "--ignore-ancestry", &url("branches/b/src"), "src"]);
+    repo.svn(
+        &theirs,
+        &[
+            "switch",
+            "-q",
+            "--ignore-ancestry",
+            &url("branches/b/src"),
+            "src",
+        ],
+    );
     let target = furl(&root, "branches/b/src");
-    switch(&ctx(), &fake, &ours.join("src"), &target, None, Depth::Unknown, &cancel)
-        .await
-        .expect("switch");
+    switch(
+        &ctx(),
+        &fake,
+        &ours.join("src"),
+        &target,
+        None,
+        Depth::Unknown,
+        &cancel,
+    )
+    .await
+    .expect("switch");
     assert_eq!(caches(&ours), caches(&theirs), "switch of src");
     assert_eq!(caches(&ours).len(), 2);
     repo.svn(&theirs, &["update", "-q"]);
@@ -109,11 +132,28 @@ async fn checkout_update_and_switch_cache_inherited_props_like_svn() {
     assert_eq!(caches(&ours), caches(&theirs), "update");
 
     // Switched back: the sub-tree is not switched any more and loses its cache.
-    repo.svn(&theirs, &["switch", "-q", "--ignore-ancestry", &url("trunk/src"), "src"]);
+    repo.svn(
+        &theirs,
+        &[
+            "switch",
+            "-q",
+            "--ignore-ancestry",
+            &url("trunk/src"),
+            "src",
+        ],
+    );
     let back = furl(&root, "trunk/src");
-    switch(&ctx(), &fake, &ours.join("src"), &back, None, Depth::Unknown, &cancel)
-        .await
-        .expect("switch back");
+    switch(
+        &ctx(),
+        &fake,
+        &ours.join("src"),
+        &back,
+        None,
+        Depth::Unknown,
+        &cancel,
+    )
+    .await
+    .expect("switch back");
     assert_eq!(caches(&ours), caches(&theirs), "switch back");
     assert_eq!(caches(&ours).len(), 1);
 }

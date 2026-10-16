@@ -185,7 +185,11 @@ fn depth(s: &str) -> Result<Depth> {
 
 fn rel(p: &str) -> String {
     let p = p.trim_start_matches("./").trim_end_matches('/');
-    if p == "." { String::new() } else { p.to_owned() }
+    if p == "." {
+        String::new()
+    } else {
+        p.to_owned()
+    }
 }
 
 fn wc_ref(dir: &Path) -> Result<WcRef> {
@@ -203,8 +207,14 @@ impl EngineCli {
         let ctx = OpContext::detached();
         let e = &self.engine;
         if c.sub == "checkout" || c.sub == "co" {
-            let url = c.args.first().ok_or_else(|| anyhow!("checkout needs a URL"))?;
-            let path = c.args.get(1).map_or_else(|| dir.to_path_buf(), |p| dir.join(rel(p)));
+            let url = c
+                .args
+                .first()
+                .ok_or_else(|| anyhow!("checkout needs a URL"))?;
+            let path = c
+                .args
+                .get(1)
+                .map_or_else(|| dir.to_path_buf(), |p| dir.join(rel(p)));
             std::fs::create_dir_all(&path)?;
             let plan = CheckoutPlan {
                 url: url.clone(),
@@ -225,7 +235,11 @@ impl EngineCli {
             "update" | "up" => {
                 if let Some(d) = c.set_depth {
                     let paths = c.rels();
-                    for p in if paths.is_empty() { vec![String::new()] } else { paths } {
+                    for p in if paths.is_empty() {
+                        vec![String::new()]
+                    } else {
+                        paths
+                    } {
                         e.set_depth(&wc, &p, d, &ctx).await?;
                     }
                 } else {
@@ -240,7 +254,10 @@ impl EngineCli {
                 }
             }
             "switch" | "sw" => {
-                let url = c.args.first().ok_or_else(|| anyhow!("switch needs a URL"))?;
+                let url = c
+                    .args
+                    .first()
+                    .ok_or_else(|| anyhow!("switch needs a URL"))?;
                 if c.args.len() > 1 && !rel(&c.args[1]).is_empty() {
                     bail!("the engine switches the working copy root only");
                 }
@@ -250,7 +267,11 @@ impl EngineCli {
                 let paths = c.rels();
                 let req = CommitRequest {
                     wc_id: id,
-                    paths: if paths.is_empty() { vec![String::new()] } else { paths },
+                    paths: if paths.is_empty() {
+                        vec![String::new()]
+                    } else {
+                        paths
+                    },
                     message: c.message.clone().unwrap_or_default(),
                     keep_locks: c.flag(&["--no-unlock"]),
                     auto_add_remove: false,
@@ -310,7 +331,7 @@ impl EngineCli {
                     let req = ResolveRequest {
                         wc_id: id.clone(),
                         path,
-                        choice: choice.clone(),
+                        choice,
                     };
                     e.resolve(&wc, &req, &ctx).await?;
                 }

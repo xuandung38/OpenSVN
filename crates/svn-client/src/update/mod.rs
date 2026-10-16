@@ -29,9 +29,9 @@ mod state;
 mod text_sink;
 
 pub use editor::UpdateEditor;
+pub(crate) use iprops::to_cache as iprops_cache;
 pub use props::{PropMerge, merge_props};
 pub use reporter::build_report;
-pub(crate) use iprops::to_cache as iprops_cache;
 pub(crate) use run::RECONNECT_DELAYS;
 pub use run::{UpdateKind, UpdateParams, anchor_of, drive_update, repos_relpath_of, root_string};
 pub(crate) use state::tmp_dir as tmp_dir_of;

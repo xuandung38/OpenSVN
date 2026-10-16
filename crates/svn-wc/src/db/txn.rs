@@ -213,8 +213,8 @@ impl WcTxn<'_> {
             if conflicted {
                 continue;
             }
-            let dst_rel = RelPath::new(&dst)
-                .map_err(|_| nodes::corrupt(format!("bad moved_to '{dst}'")))?;
+            let dst_rel =
+                RelPath::new(&dst).map_err(|_| nodes::corrupt(format!("bad moved_to '{dst}'")))?;
             let src_rows = self.layer_rows(&src, 0)?;
             let dst_rows = self.layer_rows(&dst, i64::from(relpath_depth(&dst_rel)))?;
             let same = src_rows.len() == dst_rows.len()
@@ -227,7 +227,11 @@ impl WcTxn<'_> {
                             && s.props == d.props
                     })
                 });
-            if !same || src_rows.iter().all(|(k, s)| dst_rows[k].revision == s.revision) {
+            if !same
+                || src_rows
+                    .iter()
+                    .all(|(k, s)| dst_rows[k].revision == s.revision)
+            {
                 continue;
             }
             let op_depth = i64::from(relpath_depth(&dst_rel));
