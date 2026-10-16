@@ -140,6 +140,7 @@ fn cleanup_req(wc: &WcRef, unversioned: bool, ignored: bool) -> CleanupRequest {
         remove_unversioned: Some(unversioned),
         remove_ignored: Some(ignored),
         vacuum_pristines: Some(false),
+        break_foreign_locks: None,
     }
 }
 
@@ -757,6 +758,217 @@ async fn cleanup_reports_a_lock_that_needs_the_user_as_busy() {
     assert!(wc.root.join("scratch.txt").exists(), "nothing removed");
 }
 
+fn break_req(wc: &WcRef) -> CleanupRequest {
+    CleanupRequest {
+        break_foreign_locks: Some(true),
+        ..cleanup_req(wc, false, false)
+    }
+}
+
+fn lock_rows(root: &Path) -> Vec<String> {
+    let db = svn_wc::WcDb::open(root).unwrap();
+    db.with_read(|c| {
+        let mut stmt = c
+            .prepare("SELECT local_dir_relpath FROM wc_lock ORDER BY 1")
+            .map_err(svn_wc::db::sql_err)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(svn_wc::db::sql_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(svn_wc::db::sql_err)?;
+        Ok(rows)
+    })
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_programs_lock_is_removed_only_with_the_confirmed_flag() {
+    let e = env();
+    let wc = e.checkout("break").await;
+    // svn or TortoiseSVN crashed while holding `src`; nothing records an owner.
+    plant_lock_row(&wc.root, "src");
+    write(&wc.root, "scratch.txt", "mine\n");
+    write(&wc.root, "src/main.rs", "fn main() { edited(); }\n");
+    let err = e
+        .engine()
+        .cleanup(&wc, &cleanup_req(&wc, false, false), &ctx())
+        .await
+        .expect_err("not without the flag");
+    assert_eq!(err.code, ErrorCode::WcBusy);
+    assert_eq!(lock_rows(&wc.root), vec!["src"], "never stolen");
+
+    e.engine()
+        .cleanup(&wc, &break_req(&wc), &ctx())
+        .await
+        .expect("cleanup removing the lock");
+    assert!(lock_rows(&wc.root).is_empty());
+    assert_eq!(
+        std::fs::read_to_string(wc.root.join("scratch.txt")).unwrap(),
+        "mine\n",
+        "no file is deleted for the lock"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wc.root.join("src/main.rs")).unwrap(),
+        "fn main() { edited(); }\n"
+    );
+    // The working copy is writable again.
+    e.engine()
+        .props_set(&wc, "src", "my:note", Some("x"), &ctx())
+        .await
+        .expect("write after the break");
+}
+
+/// A process that still has `wc.db` open may still be writing (svn keeps it open while it holds
+/// its lock): the lock stays even with the user's confirmation.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lock_is_not_removed_while_another_process_has_the_working_copy_open() {
+    use std::time::{Duration, Instant};
+
+    let e = env();
+    let wc = e.checkout("held-open").await;
+    plant_lock_row(&wc.root, "");
+    let wc_db = wc.root.join(".svn").join("wc.db");
+    let mut holder = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exec 3<\"$1\"; exec sleep 60")
+        .arg("sh")
+        .arg(&wc_db)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while crate::lock_ownership::other_processes_with_open(&wc_db)
+        .unwrap()
+        .is_empty()
+    {
+        assert!(Instant::now() < deadline, "the holder never opened wc.db");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let err = e
+        .engine()
+        .cleanup(&wc, &break_req(&wc), &ctx())
+        .await
+        .expect_err("still in use");
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    assert_eq!(err.code, ErrorCode::WcBusy);
+    assert!(
+        err.message
+            .contains(&format!("sleep (process {})", holder.id())),
+        "{err}"
+    );
+    assert_eq!(lock_rows(&wc.root), vec![""]);
+    e.engine()
+        .cleanup(&wc, &break_req(&wc), &ctx())
+        .await
+        .expect("removed once nothing has it open");
+    assert!(lock_rows(&wc.root).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn props_get_lists_values_kinds_and_binary_values() {
+    let e = env();
+    let wc = e.checkout("props").await;
+    let eng = e.engine();
+    eng.props_set(&wc, "README.md", "svn:needs-lock", Some("yes"), &ctx())
+        .await
+        .expect("needs-lock");
+    eng.props_set(&wc, "README.md", "a:note", Some("line 1\nline 2"), &ctx())
+        .await
+        .expect("note");
+    {
+        let db = svn_client::wc::open_containing(&e.f.engine.lock_owner(), &wc.root)
+            .unwrap()
+            .0;
+        svn_client::local::propset(
+            &db,
+            &CancelToken::new(),
+            &RelPath::new("src").unwrap(),
+            "raw",
+            Some(&[0xff, 0x00, 0x41]),
+            svn_client::local::PropSetOptions::default(),
+        )
+        .unwrap();
+    }
+    let items = eng
+        .props_get(&wc, &paths(&["README.md", "src", ""]), &ctx())
+        .await
+        .expect("props_get");
+    type Row = (String, opensvn_ipc::FileKind, Vec<(String, String, bool)>);
+    let summary: Vec<Row> = items
+        .into_iter()
+        .map(|i| {
+            (
+                i.path,
+                i.kind,
+                i.props
+                    .into_iter()
+                    .map(|p| (p.name, p.value, p.binary))
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (
+                "README.md".to_owned(),
+                opensvn_ipc::FileKind::File,
+                vec![
+                    ("a:note".to_owned(), "line 1\nline 2".to_owned(), false),
+                    ("svn:needs-lock".to_owned(), "*".to_owned(), false),
+                ]
+            ),
+            (
+                "src".to_owned(),
+                opensvn_ipc::FileKind::Dir,
+                vec![("raw".to_owned(), "\u{fffd}\0A".to_owned(), true)]
+            ),
+            (String::new(), opensvn_ipc::FileKind::Dir, vec![]),
+        ]
+    );
+
+    write(&wc.root, "new.txt", "x\n");
+    let err = eng
+        .props_get(&wc, &paths(&["new.txt"]), &ctx())
+        .await
+        .expect_err("unversioned");
+    assert_ne!(err.code, ErrorCode::Internal, "{err}");
+    let err = eng
+        .props_get(&wc, &paths(&["../outside"]), &ctx())
+        .await
+        .expect_err("outside");
+    assert_ne!(err.code, ErrorCode::Internal, "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn props_set_checks_subversion_values_like_svn() {
+    let e = env();
+    let wc = e.checkout("prop-checks").await;
+    let eng = e.engine();
+    for (path, name, value) in [
+        ("README.md", "svn:eol-style", "unix"),
+        ("README.md", "svn:mime-type", "plain"),
+        ("README.md", "svn:bogus", "x"),
+        ("src", "svn:needs-lock", "*"),
+        ("README.md", "svn:externals", "^/src ext"),
+        ("src", "svn:externals", "a b c d e"),
+        ("src", "svn:mergeinfo", "/trunk:5-2"),
+    ] {
+        let err = eng
+            .props_set(&wc, path, name, Some(value), &ctx())
+            .await
+            .expect_err(name);
+        assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{name}: {err}");
+    }
+    eng.props_set(&wc, "src", "svn:externals", Some("^/src ext"), &ctx())
+        .await
+        .expect("valid externals");
+    eng.props_set(&wc, "README.md", "svn:eol-style", Some("native"), &ctx())
+        .await
+        .expect("valid eol-style");
+}
+
 async fn conflicted_pair(e: &Env) -> WcRef {
     let b = e.checkout("conflict-b").await;
     e.f.repo
@@ -1175,6 +1387,99 @@ mod oracle {
         );
     }
 
+    /// svn 1.15 holding the working copy lock (its commit waits in a pre-commit hook): cleanup
+    /// refuses with and without the confirmation while svn runs. Once svn was killed its lock
+    /// stays, and only the confirmed cleanup removes it, after which svn sees no lock, commits,
+    /// and the user's files are untouched.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lock_held_by_svn_is_never_broken_while_svn_runs() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let Some(r) = Repo::new() else { return };
+        let f = engine();
+        let eng: &dyn EngineFacade = &f.engine;
+        let wc = r.checkout("svn-lock");
+        let gate = r.base.join("hold");
+        let hook = r.base.join("repo/hooks/pre-commit");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nwhile [ -e '{}' ]; do sleep 0.1; done\nexit 0\n",
+                gate.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write(&wc.root, "README.md", "edited by the user\n");
+        write(&wc.root, "notes.txt", "unversioned work\n");
+        std::fs::write(&gate, "").unwrap();
+        let mut svn = r.oracle.svn();
+        svn.args(["commit", "-q", "-m", "held", "README.md"])
+            .current_dir(&wc.root);
+        let mut child = svn.spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while lock_rows(&wc.root).is_empty() {
+            assert!(Instant::now() < deadline, "svn never took its lock");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let plain = eng
+            .cleanup(&wc, &cleanup_req(&wc, false, false), &ctx())
+            .await
+            .expect_err("svn holds the lock");
+        assert_eq!(plain.code, ErrorCode::WcBusy, "{plain}");
+        #[cfg(target_os = "linux")]
+        {
+            let confirmed = eng
+                .cleanup(&wc, &break_req(&wc), &ctx())
+                .await
+                .expect_err("svn is still running");
+            assert_eq!(confirmed.code, ErrorCode::WcBusy, "{confirmed}");
+            assert!(confirmed.message.contains("svn"), "{confirmed}");
+        }
+        assert_eq!(lock_rows(&wc.root), vec![""], "svn's lock is intact");
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+        std::fs::remove_file(&gate).unwrap();
+        assert_eq!(
+            lock_rows(&wc.root),
+            vec![""],
+            "a killed svn leaves its lock"
+        );
+        let again = eng
+            .cleanup(&wc, &cleanup_req(&wc, false, false), &ctx())
+            .await
+            .expect_err("still not without the confirmation");
+        assert_eq!(again.code, ErrorCode::WcBusy);
+        assert_eq!(lock_rows(&wc.root), vec![""]);
+
+        eng.cleanup(&wc, &break_req(&wc), &ctx())
+            .await
+            .expect("confirmed cleanup");
+        assert!(lock_rows(&wc.root).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(wc.root.join("README.md")).unwrap(),
+            "edited by the user\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wc.root.join("notes.txt")).unwrap(),
+            "unversioned work\n"
+        );
+        let status = r.svn(&wc.root, &["status"]);
+        assert!(
+            !status.lines().any(|l| l.as_bytes().get(2) == Some(&b'L')),
+            "svn sees no lock: {status}"
+        );
+        r.svn(
+            &wc.root,
+            &["commit", "-q", "-m", "after the break", "README.md"],
+        );
+        assert_eq!(r.status(&wc), vec!["?       notes.txt"]);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn conflict_resolved_with_theirs_matches_svn() {
         let Some(r) = Repo::new() else { return };
@@ -1468,6 +1773,7 @@ mod case_insensitive {
                     remove_unversioned: Some(true),
                     remove_ignored: Some(false),
                     vacuum_pristines: Some(false),
+                    break_foreign_locks: None,
                 },
                 &ctx(),
             )

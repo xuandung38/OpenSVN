@@ -79,9 +79,10 @@ export const commands = {
 	checkout: (request: CheckoutRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("checkout", { request })),
 	update: (request: UpdateRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("update", { request })),
 	/**
-	 *  Finishes an interrupted checkout or update of the whole working copy at the revision it was
-	 *  reaching (recorded in the working copy), with the depths it records and, for a checkout,
-	 *  the externals choice the user made. Fails when nothing is incomplete.
+	 *  Finishes an interrupted checkout, update or switch of the whole working copy at the revision
+	 *  it was reaching (recorded in the working copy), with the depths it records and, for a
+	 *  checkout, the externals choice the user made; a switch goes on to the URL it was switching
+	 *  to. Fails when nothing is incomplete.
 	 */
 	wcContinue: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("wc_continue", { wcId })),
 	switch: (wcId: WcId, url: string, rev: number | null, ignoreAncestry: boolean) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("switch", { wcId, url, rev, ignoreAncestry })),
@@ -107,6 +108,16 @@ export const commands = {
 	wcDepths: (wcId: WcId) => typedError<SparseEntry[], AppError>(__TAURI_INVOKE("wc_depths", { wcId })),
 	upgradeFormat: (wcId: WcId, to: number) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("upgrade_format", { wcId, to })),
 	resolve: (request: ResolveRequest) => typedError<null, AppError>(__TAURI_INVOKE("resolve", { request })),
+	/**
+	 *  Properties of each of `paths` (working copy relative, `""` is the root), local changes
+	 *  included, in the order given. Values that are not UTF-8 text come back flagged `binary`.
+	 */
+	propsGet: (wcId: WcId, paths: string[]) => typedError<ItemProps[], AppError>(__TAURI_INVOKE("props_get", { wcId, paths })),
+	/**
+	 *  Sets (`value`) or deletes (`None`) property `name` on `path`. Subversion properties are checked
+	 *  as `svn propset` checks them (known names, where they apply, `svn:eol-style`, `svn:mime-type`,
+	 *  `svn:externals` and `svn:mergeinfo` values) and canonicalized (`svn:needs-lock` becomes `*`).
+	 */
 	propsSet: (wcId: WcId, path: string, name: string, value: string | null) => typedError<null, AppError>(__TAURI_INVOKE("props_set", { wcId, path, name, value })),
 	repoInfo: (url: string) => typedError<RepoInfo, AppError>(__TAURI_INVOKE("repo_info", { url })),
 	/**
@@ -223,6 +234,11 @@ export const commands = {
 	 *  returns the saved path, or `None` when the user cancels the dialog.
 	 */
 	diagnosticsExport: (token: string) => typedError<string | null, AppError>(__TAURI_INVOKE("diagnostics_export", { token })),
+	/**
+	 *  Shows the app's logs folder in the file manager (Help > Show logs folder). The path is the app's
+	 *  own data folder; nothing in it comes from the UI.
+	 */
+	logsReveal: () => typedError<null, AppError>(__TAURI_INVOKE("logs_reveal")),
 };
 
 /** Events */
@@ -339,7 +355,12 @@ export type Banner = {
 	data: string[],
 };
 
-export type BannerKind = "conflicts" | "mixed-rev" | "lock-stolen" | "needs-cleanup";
+export type BannerKind = "conflicts" | "mixed-rev" | "lock-stolen" | "needs-cleanup" | 
+/**
+ *  Another program (svn, TortoiseSVN, an IDE) holds the working copy lock. `data` lists the
+ *  locked directories (`""` is the root).
+ */
+"wc-busy";
 
 /**  Blame result line. */
 export type BlameLine = {
@@ -428,6 +449,13 @@ export type CleanupRequest = {
 	removeUnversioned: boolean | null,
 	removeIgnored: boolean | null,
 	vacuumPristines: boolean | null,
+	/**
+	 *  Also removes the working copy locks another program (svn, TortoiseSVN, an IDE) left
+	 *  behind. Set only after the user ticked the explicit confirmation: the engine refuses while
+	 *  a process it can see still has the working copy open, never touches a lock of a running
+	 *  operation of this app, and never deletes files.
+	 */
+	breakForeignLocks: boolean | null,
 };
 
 export type CommitRequest = {
@@ -692,6 +720,15 @@ export type IncompleteCheckout = {
 	/**  Revision the checkout was reaching. */
 	rev: Rev,
 	rootPath: string,
+};
+
+/**  Properties of one item (`props_get`). */
+export type ItemProps = {
+	/**  Working copy relative path (`""` is the root). */
+	path: string,
+	kind: FileKind,
+	/**  Sorted by name. */
+	props: PropEntry[],
 };
 
 export type Language = "vi" | "en";
@@ -963,6 +1000,15 @@ export type PropChange = {
 	name: string,
 	before: string | null,
 	after: string | null,
+};
+
+/**  One versioned property of a working copy item, local changes included. */
+export type PropEntry = {
+	name: string,
+	/**  The value as text; bytes that are not UTF-8 show as U+FFFD (see `binary`). */
+	value: string,
+	/**  The value is not UTF-8 text: shown, never edited (saving the text back would change it). */
+	binary: boolean,
 };
 
 export type PropStatus = "none" | "normal" | "modified" | "conflicted";

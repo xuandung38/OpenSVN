@@ -325,6 +325,7 @@ async fn invalid_paths_and_requests_are_rejected() {
                 remove_unversioned: Some(true),
                 remove_ignored: None,
                 vacuum_pristines: None,
+                break_foreign_locks: None,
             },
             &ctx,
         )

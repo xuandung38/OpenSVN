@@ -388,6 +388,13 @@ function applyToCache(qc: QueryClient, name: EventName, payload: unknown): void 
     case "op://finished": {
       const p = payload as OpFinished;
       setOutcome(qc, p.opId, { status: "ok", result: p.result });
+      const done = qc.getQueryData<Record<string, OpState>>(queryKeys.ops)?.[p.opId]?.handle;
+      if (done?.kind === "cleanup" && done.wcId) {
+        // The locks and unfinished work those banners were about are gone.
+        qc.setQueryData<Banner[]>(queryKeys.banners(done.wcId), (cur) =>
+          (cur ?? []).filter((b) => b.kind !== "needs-cleanup" && b.kind !== "wc-busy"),
+        );
+      }
       // Refetch repository views only for operations that change the server. Read-only ones (blame,
       // log, status-remote) must not trigger refetching every loaded log page and open folder.
       if (changesRepository(p.opId, qc)) {
@@ -410,6 +417,15 @@ function applyToCache(qc: QueryClient, name: EventName, payload: unknown): void 
       const p = payload as OpFailed;
       setOutcome(qc, p.opId, { status: "failed", error: p.error });
       const failed = qc.getQueryData<Record<string, OpState>>(queryKeys.ops)?.[p.opId]?.handle;
+      if (p.error.code === "wc-busy" && failed?.wcId && !failed.background) {
+        // The engine found another program's lock: the working copy shows "in use by another
+        // program" with the way out (cleanup can remove a lock left by a crashed program).
+        const banner: Banner = { wcId: failed.wcId, kind: "wc-busy", data: [] };
+        qc.setQueryData<Banner[]>(queryKeys.banners(failed.wcId), (cur) => [
+          ...(cur ?? []).filter((b) => b.kind !== banner.kind),
+          banner,
+        ]);
+      }
       if (failed?.background) {
         // Offline, a check fails every round: only the newest failure per working copy stays, so
         // they never push the user's own operations out of the panel (MAX_OPS).

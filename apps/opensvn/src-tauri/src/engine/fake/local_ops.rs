@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use opensvn_ipc::{
-    CleanupRequest, Depth, FileKind, IgnoreAddRequest, IgnoreScope, ResolveChoice, ResolveRequest,
-    RevertRequest,
+    CleanupRequest, Depth, FileKind, IgnoreAddRequest, IgnoreScope, ItemProps, PropEntry,
+    ResolveChoice, ResolveRequest, RevertRequest,
 };
 use svn_types::{ErrorCode, RelPath, SvnError};
 
@@ -104,6 +104,34 @@ impl FakeEngine {
             node.conflicted = false;
             node.tree_conflict = false;
             Ok(())
+        })
+    }
+
+    pub(super) fn do_props_get(
+        &self,
+        root: &Path,
+        paths: &[String],
+    ) -> Result<Vec<ItemProps>, SvnError> {
+        self.with_wc(root, |wc| {
+            paths
+                .iter()
+                .map(|p| {
+                    let node = wc.node(&rel(p)?)?;
+                    Ok(ItemProps {
+                        path: p.clone(),
+                        kind: node.kind,
+                        props: node
+                            .props
+                            .iter()
+                            .map(|(name, value)| PropEntry {
+                                name: name.clone(),
+                                value: value.clone(),
+                                binary: false,
+                            })
+                            .collect(),
+                    })
+                })
+                .collect()
         })
     }
 
@@ -265,6 +293,20 @@ impl FakeEngine {
 
     pub(super) fn do_cleanup(&self, root: &Path, req: &CleanupRequest) -> Result<(), SvnError> {
         self.with_wc(root, |wc| {
+            // As the real engine: another program's lock blocks cleanup until the user confirms
+            // its removal; then only the lock goes.
+            if req.break_foreign_locks.unwrap_or(false) {
+                wc.foreign_locks.clear();
+            } else if !wc.foreign_locks.is_empty() {
+                return Err(SvnError::new(
+                    ErrorCode::WcBusy,
+                    format!(
+                        "the working copy is locked by another program ({}); close it and run \
+                         cleanup again",
+                        wc.foreign_locks.join(", ")
+                    ),
+                ));
+            }
             let drop_unversioned = req.remove_unversioned.unwrap_or(false);
             let drop_ignored = req.remove_ignored.unwrap_or(false);
             let doomed: Vec<RelPath> = wc

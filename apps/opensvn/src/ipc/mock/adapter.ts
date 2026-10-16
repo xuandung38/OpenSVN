@@ -3,7 +3,9 @@ import {
   type AppError,
   type CertDecision,
   type CopyLocationRequest,
+  type DiagnosticsOptions,
   type EngineCapabilities,
+  type Layout,
   type LockRequest,
   type LogGetRequest,
   type OperationHandle,
@@ -45,6 +47,12 @@ const listeners = new Map<string, Set<Handler>>();
 export function mockEmit(name: string, payload: unknown = null): void {
   if (!isValidEventName(name)) throw new Error(`mock: illegal event name ${name}`);
   for (const h of listeners.get(name) ?? []) h(payload);
+}
+
+/** Layouts stored with `layoutSet`, by repository UUID (`resetMockLayouts` empties it). */
+const mockLayouts = new Map<string, Layout>();
+export function resetMockLayouts(): void {
+  mockLayouts.clear();
 }
 
 const ok = <T>(data: T) => Promise.resolve({ status: "ok" as const, data });
@@ -198,6 +206,7 @@ const {
   emit: mockEmit,
 });
 
+let lastDiagnosticsToken: string | null = null;
 const CERT_DECISIONS: CertDecision[] = ["reject", "acceptOnce", "acceptAlways", "replacePin"];
 
 const PROGRAM_KEYS = {
@@ -328,7 +337,22 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     ok(simulateOp("remote-edit", req.message || "Remote edit", null)),
   copyLocation: (req: CopyLocationRequest) =>
     ok(simulateOp("remote-edit", `Copy to ${req.toUrl}`, null)),
-  layoutGet: () => ok({ mode: "auto" as const }),
+  layoutGet: (repoUuid: string) => ok(mockLayouts.get(repoUuid) ?? { mode: "auto" as const }),
+  layoutSet: (repoUuid: string, layout: Layout) => {
+    mockLayouts.set(repoUuid, layout);
+    return ok(null);
+  },
+  layoutDetect: () =>
+    ok({
+      found: true,
+      layout: {
+        mode: "custom" as const,
+        trunk: "/trunk",
+        branches: ["/branches"],
+        tags: ["/tags"],
+      },
+      current: null,
+    }),
   branchesList: () => ok(mockBranches),
   accountsList: () =>
     ok([
@@ -429,6 +453,39 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     Object.assign(mockSettings, patch);
     return ok({ ...mockSettings });
   },
+  // The real backend reads its logs and settings and removes secrets; the mock shows the shape.
+  diagnosticsPreview: (options: DiagnosticsOptions) => {
+    const home = options.hidePaths ? "<home>" : "/Users/dev";
+    const message = options.hideCommitMessages ? "<message removed>" : "Fix the jump height";
+    const files = [
+      {
+        name: "system.txt",
+        content: "OpenSVN 0.0.0 (mock)\nplatform: browser\n",
+      },
+      {
+        name: "working-copies.txt",
+        content: `game-assets\t${home}/projects/game-assets\n`,
+      },
+      {
+        name: "logs/opensvn.log",
+        content: `INFO commit r48212 "${message}" in ${home}/projects/game-assets\n`,
+      },
+    ];
+    lastDiagnosticsToken = `diag-${Date.now()}`;
+    return ok({
+      token: lastDiagnosticsToken,
+      entries: files.map((f) => ({ ...f, size: new TextEncoder().encode(f.content).length })),
+    });
+  },
+  // The real backend asks for the destination in a native save dialog; the token is single use.
+  diagnosticsExport: (token: string) => {
+    if (token !== lastDiagnosticsToken) {
+      return errCode("invalid-argument", "This preview has expired. Build it again.");
+    }
+    lastDiagnosticsToken = null;
+    return ok("/Users/dev/Downloads/opensvn-diagnostics.zip");
+  },
+  logsReveal: () => ok(null),
 };
 
 // Commands are looked up lazily; anything not mocked resolves to a typed AppError instead of throwing.

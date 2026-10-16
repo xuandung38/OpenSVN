@@ -184,6 +184,28 @@ pub struct LockInfo {
     pub mine: bool,
 }
 
+/// One versioned property of a working copy item, local changes included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PropEntry {
+    pub name: String,
+    /// The value as text; bytes that are not UTF-8 show as U+FFFD (see `binary`).
+    pub value: String,
+    /// The value is not UTF-8 text: shown, never edited (saving the text back would change it).
+    pub binary: bool,
+}
+
+/// Properties of one item (`props_get`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemProps {
+    /// Working copy relative path (`""` is the root).
+    pub path: String,
+    pub kind: FileKind,
+    /// Sorted by name.
+    pub props: Vec<PropEntry>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteStatus {

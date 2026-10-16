@@ -75,6 +75,13 @@ const CASES: [string, WcDialog][] = [
   ["switch", { kind: "switch" }],
   ["cleanup", { kind: "cleanup" }],
   ["choose folders", { kind: "sparse" }],
+  ["cleanup (another program's lock)", { kind: "cleanup", foreignLock: true }],
+  ["properties (root)", { kind: "properties", paths: [""] }],
+  [
+    "properties (several items)",
+    { kind: "properties", paths: ["assets/audio/theme.ogg", "src/engine/renderer.ts"] },
+  ],
+  ["repository layout", { kind: "layout" }],
   ["rename repository", { kind: "repo-rename", wcId: MOCK_WC_ID, name: "game-client" }],
   ["remove repository", { kind: "repo-remove", wcId: MOCK_WC_ID, name: "game-client" }],
   ["conflict resolver (text conflict)", { kind: "resolver", path: "src/engine/physics.ts" }],

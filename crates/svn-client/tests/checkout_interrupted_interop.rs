@@ -6,7 +6,9 @@
 //!   finishes it.
 //! - svn → ours: `svn checkout` is killed mid-drive (a real interruption, retried until one
 //!   leaves incomplete folders); after the `svn cleanup` svn itself asks for, our Continue (an
-//!   update to the revision the incomplete folders record) finishes it.
+//!   update to the revision the incomplete folders record) finishes it. A kill can land between
+//!   the rename of a working file and the commit of its BASE row (svn 1.15 installs the file
+//!   inside that transaction); the last test builds that state on purpose.
 //!
 //! The fake RA replays the svn repository's history under its own URL and UUID, so the
 //! working copy's repository row is rewritten when it changes hands (what `svn relocate` would
@@ -230,6 +232,55 @@ async fn a_checkout_svn_left_incomplete_is_finished_by_our_continue() {
     );
     assert!(incomplete(&left).is_empty());
     // And svn agrees there is nothing left to do.
+    let st = svn_status(&oracle, &left, &[]);
+    assert!(st.is_empty(), "{st}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_svn_installed_without_its_row_is_adopted_by_our_continue() {
+    let Some(oracle) = oracle() else { return };
+    let repo = Repo::new(&oracle);
+    build(&repo);
+    let uuid = repo_uuid(&repo);
+    // What a kill between svn's rename of `d05/f03.txt` and the commit of its row leaves: the
+    // file on disk, no row, the folders on its way `incomplete` (no timing involved).
+    let left = reference(&repo, "left", 1);
+    open_db(&left)
+        .with_write(|tx| {
+            tx.execute("DELETE FROM nodes WHERE local_relpath = 'd05/f03.txt'", [])
+                .expect("drop row");
+            tx.execute(
+                "UPDATE nodes SET presence = 'incomplete' \
+                 WHERE local_relpath IN ('', 'd05') AND op_depth = 0",
+                [],
+            )
+            .expect("incomplete");
+            Ok(())
+        })
+        .expect("interrupt");
+    assert!(left.join("d05/f03.txt").is_file());
+    assert_eq!(resume_rev(&left), 1);
+
+    relocate(&left, common::ROOT_URL, "uuid-demo");
+    update(
+        &ctx(),
+        &repo.fake(None),
+        &left,
+        Some(Revnum(1)),
+        Depth::Unknown,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("continue");
+    relocate(&left, &repo.url, &uuid);
+    let theirs = reference(&repo, "theirs-c", 1);
+    assert_same(
+        &oracle,
+        &theirs,
+        &left,
+        "an install without its row, adopted",
+    );
+    assert!(incomplete(&left).is_empty());
     let st = svn_status(&oracle, &left, &[]);
     assert!(st.is_empty(), "{st}");
 }

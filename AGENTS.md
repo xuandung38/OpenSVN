@@ -1,8 +1,8 @@
 # AGENTS.md: hướng dẫn và tiến độ cho người và agent cùng làm OpenSVN
 
+Cập nhật lần cuối: 2026-10-15, main tại `c5eba85`.
 Đọc file này trước khi nhận việc. Lệnh build/test, quy tắc đặt tên nhánh và cấu trúc repo nằm ở `docs/contributing.md`. Kiến trúc nằm ở `docs/system-architecture.md`.
 
-Cập nhật lần cuối: 2026-10-15, main tại `56d1f06`.
 
 ---
 
@@ -45,6 +45,9 @@ cargo test -p svn-wc --features failpoints && cargo test -p svn-client --feature
 # FE (apps/opensvn):
 pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm lint:safety && pnpm test && pnpm build
 pnpm gen:ipc   # không được để lại diff
+# Tùy chọn, khi chạm UI: axe WCAG 2.2 A/AA (có color-contrast) trên `dev:mock`, phím mũi tên trên slider,
+# screenshot các trạng thái và /__gallery ở 2 theme, Chromium và WebKit (trình duyệt chưa cài thì bỏ qua và ghi chú)
+pnpm test:browser   # ảnh ở apps/opensvn/test-results/browser
 ```
 
 - **Chạm transport/RA:** chạy thêm DAV suite `real_engine_dav -- --ignored` với Apache + mod_dav_svn 1.14.3 và 1.15.0, chạy thẳng và qua `scripts/test-env/flaky-tls-proxy.py`.
@@ -82,7 +85,15 @@ Build bộ cài:
 | Thanh bên History hiện trạng thái đang tải, lỗi kèm nút Thử lại và danh sách trống, giống màn History chính | #174 |
 | Phản hồi hỏng từ server (XML/UTF-8/base64/svndiff lỗi, editor drive sai) báo mã `server-protocol-error` (engine: `ErrorCode::ProtocolViolation`), không còn gợi ý Cleanup; `Corrupt` chỉ dành cho dữ liệu local | #175 |
 | Browse báo số mục bị ẩn vì tên không an toàn, không còn hiện "thư mục trống" (chỉ gửi số đếm qua IPC) | #176 |
-| Sparse checkout: cây thư mục chọn depth cho từng thư mục, dùng chung cho hộp thoại Checkout và `menu://wc/sparse`; `set_depth` tự đưa vào target thiếu hoặc bị exclude (như `--parents`). Browse upload/download, History so sánh hai revision (`diff_rev`), màn Welcome nhớ URL gần đây (giới hạn trong `app.sqlite`, xóa được) | `feat/remote-browse-sparse` |
+| Lock/unlock lỗi khi chưa mở được kết nối (connect timeout, reset lúc handshake) báo lỗi mạng thường, thử lại được; `WriteOutcomeUnknown` chỉ còn khi yêu cầu có thể đã tới server (`SvnError::not_sent`) | #191 |
+| "Retry now" và đánh thức sau ngủ chỉ đánh thức thao tác đang chờ mạng, không để lại permit cho lần chờ sau | #191 |
+| Test IPC qua mock runtime cho `add_paths`, `diff_external`, `status_refresh`, `menu_set_layout`, `op_retry_now`; proptest diagnostics preview→export quét byte zip (sửa lộ cookie thứ hai của header `Cookie` và giá trị cờ `--password=`) | #191 |
+| Biến thể Samba AD DC của `visualsvn-like.sh` (`VSVN_KDC=samba`, AES-only, service account có SPN), `visualsvn_like` 18/18 và DAV suite 27/27 với mod_dav_svn 1.14.3 và 1.15.0; Secret Service round trip trên Linux headless; bộ nhớ 1 GiB tải lên/xuống (+3–4 MiB) chạy nightly | #191 |
+| Switch tự tải tiếp khi REPORT/GET bị cắt (neo lại tại thư mục đích, `link_path` cho phần chưa tới, cuối drive ghi lại `repos_relpath` cả cây như svn 1.15); switch dừng hẳn để lại WC nhất quán, "Tiếp tục switch" (bảng `switch_journal`) hoàn tất bằng chính switch đó. Parser chấp nhận `delete-entry rev="-1"` (switch giữa hai thư mục không cùng lịch sử). MERGE của remote edit/copy mất kết quả: xóa txn có kiểm tra, không để txn lại trên server. Suite DAV qua flaky proxy có kỳ vọng tường minh (`OPENSVN_COMPAT_FAULTS`, `write_op!`) | #193 |
+| Continue checkout do svn 1.15 bỏ dở: file svn đã đặt lên đĩa nhưng chưa kịp commit hàng BASE (bị kill giữa rename và commit) được nhận lại khi nội dung khớp, không còn tree-conflict và hàng `base-deleted`; file khác nội dung vẫn giữ nguyên làm vật cản | #172 (follow-up) |
+| Sparse checkout: cây thư mục chọn depth cho từng thư mục, dùng chung cho hộp thoại Checkout và `menu://wc/sparse`; `set_depth` tự đưa vào target thiếu hoặc bị exclude (như `--parents`). Browse upload/download, History so sánh hai revision (`diff_rev`), màn Welcome nhớ URL gần đây (giới hạn trong `app.sqlite`, xóa được) | #196 |
+| Menu View: hiện/ẩn file unversioned và ignored, nhóm theo changelist, dạng cây (nhớ theo người dùng); Compare with branch/another folder; Help: tài liệu, thư mục log (`logs_reveal`), Report a problem (xem trước gói chẩn đoán rồi lưu zip); diff ảnh có onion skin và swipe; `?os=mac\|win` cho mock/dev; `pnpm test:browser` | #189 |
+| Dialog Properties (xem/thêm/sửa/xóa, kiểm giá trị `svn:*` như `svn propset` 1.15, lệnh `props_get`); dialog Repository layout; banner `wc-busy` khi chương trình khác giữ lock, cleanup "gỡ lock của chương trình khác" chỉ chạy khi người dùng tick xác nhận và không còn tiến trình nào mở `wc.db` (Linux), không xóa file nào; banner out-of-date và tag | #190 |
 
 Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #144, #145, #146.
 
@@ -94,9 +105,11 @@ Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #
 | #171 `feat/parent-path-repo-list` | URL server VisualSVN `https://host/svn/` hiện danh sách repo để chọn | #133 | Đang review |
 | #169 `ci/release-gating-publish` | Quy trình phát hành: environment có duyệt, ký số tùy chọn, tự đẩy sang `OpenSVN-releases` | #22 | Đang review |
 | #170 `perf/bench-100k-crash-soak` | Benchmark 100k file với svn 1.15, crash test cho switch, soak 2 giờ, test chạy đồng thời với svn CLI | #121, #21 | Đang code |
+| #192 `test/app-crash-rss-soak` | Crash e2e qua app thật (SIGKILL cả process group, relaunch cùng profile), RSS với 100k file, soak 10 phút/2 giờ; svn 1.15 cho nightly; svn 1.14.5 dùng WC do engine tạo. Kèm 2 bản sửa: WC biến mất sau crash lúc commit, không có watcher sau khi mở lại app | #20, #21 | Draft |
 | #180 `fix/cleanup-vacuum-race` | `svn cleanup` của client khác giữa lúc update/checkout: transaction NODES kiểm tra file pristine dùng lại (khôi phục từ bản giữ lại hoặc dừng), kiểm tra lock còn là của mình, release không xóa row của client khác | | Đang review |
 | `chore/release-prep` | Phần #22 làm được khi chưa có secret: `check-token-scope.sh` kiểm scope token đọc của updater, release notes sinh từ conventional commit, checklist kiểm tay chữ ký và N-1→N trên macOS/Windows, ghi chú cần quyết định bundle id | #22 | Draft |
 | #167 `test/fixtures-hostile-repo` | Fixture WC format 31 từ svn 1.15 (42 trạng thái) và f32 (43 trạng thái); repo "độc" + evil server chạy không cần Docker; e2e `hostile.test.mjs`; `xtask compat fixtures` chạy các generator; log/author có UTF-8 hỏng hiển thị bằng U+FFFD | #8, #18 | Đang review |
+| #185 `fix/switch-exclude-ancestry` | Switch với `--depth` hẹp khớp svn 1.15: node ngoài depth (cả dòng `exclude`) giữ vị trí cũ, chỉ node được bump mới dời sang vị trí mới (bỏ `relocate_subtree` cho cả cây); test oracle cho dòng `exclude` ở mọi depth, switch thư mục cha của thư mục đã switch, ancestry (nhánh/tag/file copy được, không chung lịch sử bị từ chối); DAV so với svn 1.15 | — | Đang review |
 
 Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: xem/diff file Word/Excel, hiển thị %/ETA khi checkout, giữ nguyên byte đường dẫn (NFC/NFD), build Mac. Hỏi chủ repo trước khi làm những mảng này.
 
@@ -105,16 +118,21 @@ Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: xem/dif
 Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo, để không trùng.
 
 1. **Nối `-g` qua `svn-ra-api::LogRequest` (#164, follow-up).** `LogProgress::accept` giờ chịu được entry merge lồng, nhưng `LogRequest` (`crates/svn-ra-api/src/session.rs:68-81`) chưa có field cho `include_merged_revisions` hay chọn revprop, và `log.rs` vẫn gán cứng `include_merged_revisions: false`. Thêm field, nối qua `log_request`/`WireLogRequest`, cập nhật IPC nếu UI cần hiện entry merge.
-2. **Lock bị lỗi connect báo `WriteOutcomeUnknown` (#166, follow-up).** Lỗi connect nghĩa là yêu cầu chưa được gửi, nên phải báo lỗi mạng thường. Sửa nhỏ ở `outcome_unknown` trong `apps/opensvn/src-tauri/src/engine/real/locks.rs` (có thể cần `svn-ra` phân biệt lỗi connect).
-3. **Hiệu năng macOS/Windows (#121).** Hai nền tảng này vẫn fsync từng file (`BATCHED_SYNC` trong `crates/svn-wc/src/durable.rs`). Cần đo trên máy thật và tìm cách gộp (F_FULLFSYNC/FlushFileBuffers theo lô).
-4. **Watcher và menu native (#11).** Kiểm tay menu trên macOS và Windows.
-5. **Spike WebView (#12).** Chạy trên Linux (Intel/AMD/NVIDIA) và Windows 11 theo `plans/**/reports/from-dev-p09-webview-perf-spike-report.md`, rồi bỏ trạng thái "conditional" trong ADR-002.
-6. **Crash test qua app thật (#20, #21).** Dùng tauri-driver: kill app lúc commit hoặc update, mở lại, app phải tự phục hồi. Sau đó bật `real-engine` làm feature mặc định.
-7. **RAM của app (#21).** Kiểm dưới 400 MB với working copy 100k file. Ngoài ra còn ma trận compat đầy đủ, bộ test bảo mật và một tuần dùng thật (dogfood).
-8. **"Retry now" bấm khi thao tác chưa chờ mạng (#172, follow-up).** `OperationManager::retry_now` gọi `Notify::notify_one`, nên một lần bấm (hoặc một lần thức dậy) khi thao tác đang chạy bình thường để lại permit; lần mất mạng sau bỏ qua khoảng chờ đầu tiên. Vô hại nhưng nên chỉ đánh thức khi đang chờ.
-9. **Đếm ngược "thử lại sau Ns" đọc lại mỗi giây (#172, follow-up).** `connection-wait.tsx` đặt `role="status"` lên đoạn chữ đổi mỗi giây, nên trình đọc màn hình đọc liên tục. Nên để vùng live chỉ báo "Mất kết nối" và ẩn phần đếm ngược khỏi vùng live.
-10. **"Update lên bản mới nhất" của checkout dở bỏ qua lựa chọn ignore-externals (#172, follow-up).** Nút này chạy update thường, nên tải cả externals dù checkout ban đầu chọn bỏ qua. Nên đọc journal checkout như `wc_continue`.
-11. **DAV suite qua `flaky-tls-proxy.py --reset-after 2 --idle-reset 2` (#186, ghi nhận).** Trên main cũng có 14/26 test fail. Mọi lỗi đều do proxy reset một thao tác ghi (commit, copy, lock), và engine cố ý không gửi lại thao tác ghi. Tài liệu `docs/visualsvn-test-env.md` nói cả suite chạy được qua proxy: cần chọn lại cấu hình proxy cho suite, hoặc cho các test ghi chạy thẳng.
+2. **Hiệu năng macOS/Windows (#121).** Hai nền tảng này vẫn fsync từng file (`BATCHED_SYNC` trong `crates/svn-wc/src/durable.rs`). Cần đo trên máy thật và tìm cách gộp (F_FULLFSYNC/FlushFileBuffers theo lô).
+3. **Watcher và menu native (#11).** Kiểm tay menu trên macOS và Windows.
+4. **Spike WebView (#12).** Chạy trên Linux (Intel/AMD/NVIDIA) và Windows 11 theo `plans/**/reports/from-dev-p09-webview-perf-spike-report.md`, rồi bỏ trạng thái "conditional" trong ADR-002.
+5. **Bật `real-engine` làm feature mặc định (#20, #21).** Crash test qua app thật đã có (`e2e/crash.test.mjs`, #192). Còn bật feature mặc định, cùng ma trận compat đầy đủ, bộ test bảo mật và một tuần dùng thật (dogfood).
+6. **RAM của app (#21).** Đo bằng `e2e/rss.test.mjs`, `e2e/soak.test.mjs` (#192). Dưới Xvfb, cả cây tiến trình đã 582 MB RSS khi app vừa mở, trong đó `WebKitWebProcess` chiếm 344 MB. `WEBKIT_DISABLE_DMABUF_RENDERER=1` hạ còn 389 MB. Cần đo trên máy có GPU và quyết định mặc định cho Linux, gắn với spike WebView (#12).
+7. **Đếm ngược "thử lại sau Ns" đọc lại mỗi giây (#172, follow-up).** `connection-wait.tsx` đặt `role="status"` lên đoạn chữ đổi mỗi giây, nên trình đọc màn hình đọc liên tục. Nên để vùng live chỉ báo "Mất kết nối" và ẩn phần đếm ngược khỏi vùng live.
+8. **"Update lên bản mới nhất" của checkout dở bỏ qua lựa chọn ignore-externals (#172, follow-up).** Nút này chạy update thường, nên tải cả externals dù checkout ban đầu chọn bỏ qua. Nên đọc journal checkout như `wc_continue`.
+9. **`log_get` giữ khóa đọc working copy suốt lời gọi mạng (#192, follow-up).** `commands/remote.rs` chạy `engine.log` cho `LogTarget::Wc` bên trong `wc_read`. Thanh History tải log ngay khi mở app. Một revision có nhiều đường dẫn thay đổi (import 50k–100k file, Apache có authz) làm REPORT log mất 40–90 s và được gọi lại liên tục. Trong lúc đó, một thao tác ghi xếp hàng (mở WC, Update) chặn mọi lần đọc, nên refresh và danh sách báo busy. Update trong soak 50k file không bao giờ bắt đầu. Cần chỉ tra vị trí node dưới khóa đọc, rồi gọi log qua mạng ngoài khóa.
+10. **Commit qua proxy/middlebox reset kết nối sau N request (#193, follow-up).** Với `--reset-after 2`, request ghi thứ 3 trên một kết nối luôn bị reset, nên commit không bao giờ qua được (đúng thiết kế #166: không gửi lại). Hướng sửa: gửi MERGE/LOCK/UNLOCK trên kết nối mới, hoặc giới hạn số request ghi mỗi kết nối. Cần đo chi phí handshake với VisualSVN thật.
+11. **Lỗi PUT bị cắt hiện thông báo transport thô (#193, follow-up).** Txn đã được xóa nên chưa có gì được commit, nhưng người dùng chỉ thấy "Connection reset by peer". Nên bọc lỗi thành "chưa commit gì, có thể làm lại" khi DELETE txn trả về `Deleted`.
+12. **Fake server chưa mô phỏng `link_path` khi update (#193, follow-up).** `svn-ra-api::fake` chỉ đọc nguồn của `link_path` khi switch. Khi update, svn_repos còn theo link ở phía đích, nên test update với subtree đã switch trên fake chưa phản ánh đúng.
+13. **Switch dừng giữa chừng với `--depth` hẹp (#193, follow-up).** Khi resume neo tại thư mục đích, bump chỉ ghi lại `repos_relpath` trong phạm vi depth. Thư mục con nằm ngoài depth giữ URL cũ. App luôn switch với depth `Unknown` nên chưa gặp.
+14. **`pnpm test:browser` trên WebKit (#12, follow-up).** Máy dev chưa có WebKit của Playwright nên mới chạy Chromium. Cần chạy `pnpm exec playwright-core install webkit` (hoặc dùng máy có sẵn), chạy script rồi xem ảnh trong `test-results/browser`.
+15. **Mục View dạng check trong menu native (#18, follow-up).** Show unversioned/ignored, Group by changelist, Show as tree hiện là mục thường và báo trạng thái bằng toast. Nên dùng `CheckMenuItem` và đồng bộ trạng thái từ UI (cần lệnh IPC như `menu_set_layout`).
+16. **Compare ở revision cụ thể hoặc tính cả thay đổi local (#18, follow-up).** Compare hiện so hai URL ở HEAD và so từng thư mục theo last-changed revision và kích thước. Muốn chính xác theo nội dung hoặc gồm working copy thì cần lệnh diff URL↔URL ở backend.
 
 ## 6. Việc cần người thật (không tự động được)
 

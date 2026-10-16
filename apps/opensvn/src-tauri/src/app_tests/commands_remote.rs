@@ -344,6 +344,18 @@ async fn working_copy_edits_and_depth_through_commands() {
             .unwrap()
             .needs_lock
     );
+    let props = commands::props_get(f.state(), wc.id.clone(), vec!["README.md".into()])
+        .await
+        .unwrap();
+    assert_eq!(props.len(), 1);
+    assert_eq!(props[0].path, "README.md");
+    assert!(
+        props[0]
+            .props
+            .iter()
+            .any(|p| p.name == "svn:needs-lock" && p.value == "*" && !p.binary),
+        "{props:?}"
+    );
 
     let h = commands::revert(
         f.state(),
@@ -394,6 +406,7 @@ async fn working_copy_edits_and_depth_through_commands() {
             remove_unversioned: Some(true),
             remove_ignored: Some(true),
             vacuum_pristines: None,
+            break_foreign_locks: None,
         },
     )
     .await

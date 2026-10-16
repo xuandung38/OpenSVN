@@ -56,14 +56,58 @@ pub(crate) const RECONNECT_DELAYS: [Duration; 2] = [Duration::from_secs(1), Dura
 /// count against [`RECONNECT_DELAYS`]; this cap bounds a connection that keeps breaking anyway.
 const MAX_RESUMES: usize = 20;
 
-/// Whether a failed drive is resumed automatically: an update or checkout (not a switch, whose
-/// half-applied state is left for the user to finish) that broke off because the connection
-/// failed (see [`svn_types::ConnectionFailure`]).
-fn can_reconnect(ctx: &ClientCtx, kind: &UpdateKind, err: &SvnError) -> bool {
-    matches!(kind, UpdateKind::Update)
-        && err.code != ErrorCode::Cancelled
+/// Whether a failed drive is resumed automatically: an update, checkout or switch that broke off
+/// because the connection failed (see [`svn_types::ConnectionFailure`]). A switch is resumed
+/// like an update: the next drive reports what the broken one committed (see
+/// [`switch_resume`]).
+fn can_reconnect(ctx: &ClientCtx, err: &SvnError) -> bool {
+    err.code != ErrorCode::Cancelled
         && (err.connection_failure().is_some()
             || (ctx.network_wait.is_some() && err.is_unreachable()))
+}
+
+/// How a broken switch drive is driven again.
+enum SwitchResume {
+    /// The target was not moved yet: the same drive again.
+    AsBefore,
+    /// The target directory already points to the switch URL (the broken drive committed it,
+    /// `incomplete`, and part of what is below it): the drive is anchored at the target
+    /// itself, through a session at the switch URL, like svn's `svn_wc_get_actual_target2` for
+    /// a switched directory. Its report then describes the moved directories with `set_path`
+    /// and the ones still at their old location with `link_path`, so the server sends what
+    /// each one lacks; the end of the drive moves the rest (see `bump_revisions_post_switch`).
+    AtTarget(Box<dyn RaSession>),
+    /// A file target that was already moved (the drive finished it, only the closing revision
+    /// bump is missing), or a session that cannot be rooted at the switch URL: not driven
+    /// again; the same switch finishes it.
+    No,
+}
+
+/// Decides how a switch of `target_wc` to `url` (`relpath` below the repository root) is
+/// resumed, from what the broken drive committed.
+fn switch_resume(
+    db: &WcDb,
+    target_wc: &RelPath,
+    url: &RepoUrl,
+    relpath: &str,
+    session: &dyn RaSession,
+) -> Result<SwitchResume> {
+    let Some(node) = db.read_base(target_wc)? else {
+        return Ok(SwitchResume::AsBefore);
+    };
+    if node.repos_relpath.as_deref() != Some(relpath) {
+        return Ok(SwitchResume::AsBefore);
+    }
+    if node.kind != NodeKind::Dir {
+        return Ok(SwitchResume::No);
+    }
+    match session.reparented(url) {
+        Ok(s) => Ok(SwitchResume::AtTarget(s)),
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot resume the switch at its target");
+            Ok(SwitchResume::No)
+        }
+    }
 }
 
 /// Network outages in a row, without progress in between, that a drive waits out before it
@@ -352,6 +396,9 @@ pub async fn drive_update(
         ),
     };
     let (root, uuid) = wc::repos_identity(&db)?;
+    // A resumed switch whose target already moved is anchored at the target (see
+    // [`SwitchResume::AtTarget`]).
+    let mut at_target: Option<Box<dyn RaSession>> = None;
     let mut revision = params.revision;
     // Notifications of drives that broke off on a failed connection.
     let mut earlier_events: Vec<UpdateEvent> = Vec::new();
@@ -370,6 +417,10 @@ pub async fn drive_update(
         let clean = match clean.take() {
             Some(c) => c,
             None => clean_target(&db, &target_wc, &params.kind)?,
+        };
+        let (drive_session, anchor, target) = match at_target.as_deref() {
+            Some(s) => (s, target_wc.clone(), RelPath::root()),
+            None => (session, anchor.clone(), target.clone()),
         };
         let setup = UpdateSetup {
             db: Arc::clone(&db),
@@ -409,7 +460,7 @@ pub async fn drive_update(
             send_copyfrom: false,
             ignore_ancestry: params.ignore_ancestry,
         };
-        let result = session
+        let result = drive_session
             .do_update(req, report, Box::new(editor), cancel)
             .await;
         let Err(e) = result else {
@@ -425,8 +476,16 @@ pub async fn drive_update(
         let db2 = Arc::clone(&db);
         let _ = blocking(move || crate::wc::run_work_queue(&db2, &CancelToken::new()).map(|_| ()))
             .await;
-        if !can_reconnect(ctx, &params.kind, &e) || reconnects - outage_resumes >= MAX_RESUMES {
+        if !can_reconnect(ctx, &e) || reconnects - outage_resumes >= MAX_RESUMES {
             return Err(e);
+        }
+        if let (UpdateKind::Switch(url), Some(relpath)) = (&params.kind, switch_relpath.as_deref())
+        {
+            match switch_resume(&db, &target_wc, url, relpath, session)? {
+                SwitchResume::AsBefore => {}
+                SwitchResume::AtTarget(s) => at_target = Some(s),
+                SwitchResume::No => return Err(e),
+            }
         }
         // The working copy is consistent: directories the broken drive did not finish are
         // still `incomplete`, so the next report asks only for what is missing (the way an

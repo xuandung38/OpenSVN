@@ -8,6 +8,7 @@ mod checkout_journal;
 mod clock;
 mod data_dir;
 mod migrations;
+mod switch_journal;
 mod wc_rows;
 
 use std::path::Path;

@@ -75,6 +75,9 @@ pub enum BannerKind {
     MixedRev,
     LockStolen,
     NeedsCleanup,
+    /// Another program (svn, TortoiseSVN, an IDE) holds the working copy lock. `data` lists the
+    /// locked directories (`""` is the root).
+    WcBusy,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]

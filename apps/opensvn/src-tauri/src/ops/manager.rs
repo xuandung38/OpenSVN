@@ -318,10 +318,13 @@ impl OperationManager {
 
     /// "Retry now": an operation waiting for a lost connection tries again at once. A finished
     /// operation, or one that is not waiting, ignores it; an unknown id is an error.
+    ///
+    /// Only an operation already waiting is woken (`notify_waiters`): a press while it still
+    /// works must not be kept for later and cut short its next wait for the network.
     pub fn retry_now(&self, op_id: &OpId) -> Result<(), AppError> {
         let st = self.state();
         if let Some(r) = st.running.get(&op_id.0) {
-            r.retry_now.notify_one();
+            r.retry_now.notify_waiters();
             return Ok(());
         }
         if st.finished.iter().any(|h| h.op_id == *op_id) {
@@ -333,7 +336,7 @@ impl OperationManager {
     /// Wakes every running operation that waits for a lost connection (the system woke up).
     pub fn retry_all_now(&self) {
         for r in self.state().running.values() {
-            r.retry_now.notify_one();
+            r.retry_now.notify_waiters();
         }
     }
 

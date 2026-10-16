@@ -64,6 +64,8 @@ pub fn classify_status(status: u16) -> Option<ErrorCode> {
 /// classified in [`SvnError::connection`].
 pub(crate) fn classify_error(err: reqwest::Error) -> SvnError {
     let err = err.without_url();
+    // No connection was opened, so nothing of the request reached the server.
+    let not_sent = err.is_connect();
     let failure = connection_failure(&err);
     let code = if err.is_timeout() || failure == Some(ConnectionFailure::Timeout) {
         ErrorCode::Timeout
@@ -78,6 +80,7 @@ pub(crate) fn classify_error(err: reqwest::Error) -> SvnError {
     } else {
         e
     };
+    let e = if not_sent { e.with_not_sent() } else { e };
     match failure {
         Some(f) => e.with_connection(f),
         None => e,

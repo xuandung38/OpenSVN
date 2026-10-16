@@ -1,11 +1,15 @@
 import { useEffect, useRef } from "react";
 import { useEventBus } from "../../app/providers";
 import { useToast } from "../../components/ui/toast";
+import { ipc, toAppError, unwrap } from "../../ipc/client";
+import { openExternalUrl } from "../../lib/external-link";
 import { useT } from "../../lib/i18n/i18n";
 import type { ThemeChoice } from "../../lib/theme";
+import { DOCS_URL } from "./help/help-links";
 import { matchShortcut, SHORTCUTS, type ShortcutId } from "./shortcuts";
 import { runUiCommand } from "./ui-commands";
 import { useWcActions } from "./use-wc-actions";
+import { toggleViewPref, type ViewPref } from "./view-prefs";
 import { changedFiles, isConflicted } from "./wc-model";
 import { useWcSession } from "./wc-session";
 import { wcStrings } from "./wc-strings";
@@ -37,9 +41,20 @@ export type MenuAction =
   | "delete"
   | "conflicts"
   | "showOnServer"
+  | "properties"
+  | "selProperties"
+  | "layout"
   | "themeSystem"
   | "themeLight"
   | "themeDark"
+  | "toggleUnversioned"
+  | "toggleIgnored"
+  | "toggleGroupChangelist"
+  | "toggleTree"
+  | "compare"
+  | "docs"
+  | "logsFolder"
+  | "reportProblem"
   /** Planned for a later phase: says so instead of doing nothing. */
   | "notYet";
 
@@ -66,10 +81,10 @@ export const MENU_ACTIONS: Readonly<Record<string, MenuAction>> = {
   "menu://view/sidebar": "toggleSidebar",
   "menu://view/diff-mode": "toggleDiffMode",
   "menu://view/hide-whitespace": "toggleWhitespace",
-  "menu://view/show-unversioned": "notYet",
-  "menu://view/show-ignored": "notYet",
-  "menu://view/group-changelist": "notYet",
-  "menu://view/tree": "notYet",
+  "menu://view/show-unversioned": "toggleUnversioned",
+  "menu://view/show-ignored": "toggleIgnored",
+  "menu://view/group-changelist": "toggleGroupChangelist",
+  "menu://view/tree": "toggleTree",
   "menu://view/theme-system": "themeSystem",
   "menu://view/theme-light": "themeLight",
   "menu://view/theme-dark": "themeDark",
@@ -80,8 +95,8 @@ export const MENU_ACTIONS: Readonly<Record<string, MenuAction>> = {
   "menu://wc/discard-all": "discardAll",
   "menu://wc/sparse": "sparse",
   "menu://wc/cleanup": "cleanup",
-  "menu://wc/properties": "notYet",
-  "menu://wc/layout": "notYet",
+  "menu://wc/properties": "properties",
+  "menu://wc/layout": "layout",
   "menu://wc/upgrade": "notYet",
   "menu://wc/reveal": "reveal",
   "menu://wc/terminal": "terminal",
@@ -90,9 +105,9 @@ export const MENU_ACTIONS: Readonly<Record<string, MenuAction>> = {
   "menu://branch/new": "newBranch",
   "menu://branch/new-tag": "newTag",
   "menu://branch/merge": "notYet",
-  "menu://branch/compare": "notYet",
+  "menu://branch/compare": "compare",
   "menu://branch/show-on-server": "showOnServer",
-  "menu://branch/layout": "notYet",
+  "menu://branch/layout": "layout",
   "menu://sel/discard": "discard",
   "menu://sel/lock": "lock",
   "menu://sel/unlock": "unlock",
@@ -103,13 +118,21 @@ export const MENU_ACTIONS: Readonly<Record<string, MenuAction>> = {
   "menu://sel/blame": "blame",
   "menu://sel/rename": "rename",
   "menu://sel/delete": "delete",
-  "menu://sel/properties": "notYet",
+  "menu://sel/properties": "selProperties",
   "menu://window/conflicts": "conflicts",
-  "menu://help/docs": "notYet",
+  "menu://help/docs": "docs",
   "menu://help/shortcuts": "showShortcuts",
-  "menu://help/logs": "notYet",
-  "menu://help/report": "notYet",
+  "menu://help/logs": "logsFolder",
+  "menu://help/report": "reportProblem",
 };
+
+/** View menu toggles: the pref each flips and its label in the confirmation toast. */
+const VIEW_TOGGLES = {
+  toggleUnversioned: ["showUnversioned", "viewShowUnversioned"],
+  toggleIgnored: ["showIgnored", "viewShowIgnored"],
+  toggleGroupChangelist: ["groupByChangelist", "viewGroupChangelist"],
+  toggleTree: ["tree", "viewTree"],
+} as const satisfies Record<string, readonly [ViewPref, keyof (typeof wcStrings)["en"]]>;
 
 /**
  * App-level keyboard shortcuts (doc 01 section 8) and every native-menu event. A key press and
@@ -179,6 +202,19 @@ export function useWcShortcuts(props: {
         case "sparse":
           if (!wc) return false;
           s.openDialog({ kind: "sparse" });
+          return true;
+        case "properties":
+          // The working copy itself (its root folder).
+          if (!wc) return false;
+          s.openDialog({ kind: "properties", paths: [""] });
+          return true;
+        case "selProperties":
+          if (!wc || !versioned) return false;
+          s.openDialog({ kind: "properties", paths: selPaths });
+          return true;
+        case "layout":
+          if (!wc) return false;
+          s.openDialog({ kind: "layout" });
           return true;
         case "conflicts":
           if (!wc) return false;
@@ -306,6 +342,33 @@ export function useWcShortcuts(props: {
         case "toggleDiffMode":
         case "toggleWhitespace":
           return runUiCommand(id);
+        case "toggleUnversioned":
+        case "toggleIgnored":
+        case "toggleGroupChangelist":
+        case "toggleTree": {
+          // Native menu items carry no check mark: the toast says what the toggle did.
+          const [pref, label] = VIEW_TOGGLES[id];
+          const on = toggleViewPref(pref);
+          toast.show(t(on ? "viewOn" : "viewOff", { name: t(label) }));
+          return true;
+        }
+        case "compare":
+          if (!wc) return false;
+          s.openDialog({ kind: "compare" });
+          return true;
+        case "docs":
+          openExternalUrl(DOCS_URL).catch((e: unknown) =>
+            toast.show(t("docsFailed", { message: toAppError(e).message })),
+          );
+          return true;
+        case "logsFolder":
+          unwrap(ipc().commands.logsReveal()).catch((e: unknown) =>
+            toast.show(t("logsFailed", { message: toAppError(e).message })),
+          );
+          return true;
+        case "reportProblem":
+          s.openDialog({ kind: "report" });
+          return true;
         case "notYet":
           toast.show(t("menuNotYet"));
           return true;

@@ -454,3 +454,18 @@ fn ui_shortcuts_use_the_same_keys_as_the_menu_accelerators() {
     }
     assert!(checked >= 25, "only {checked} accelerators compared");
 }
+
+/// Items the UI still answers with "not available yet" (planned for later phases). Every other
+/// item must do something; implementing one of these removes it from the list.
+#[test]
+fn only_planned_items_are_not_yet_available() {
+    let not_yet: Vec<String> = ui_menu_actions()
+        .into_iter()
+        .filter(|(_, action)| action == "notYet")
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(
+        not_yet,
+        ["app.check-app-updates", "wc.upgrade", "branch.merge",]
+    );
+}

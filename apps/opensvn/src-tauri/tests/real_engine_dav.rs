@@ -315,6 +315,127 @@ impl Drop for Scratch {
     }
 }
 
+// ---- the suite through scripts/test-env/flaky-tls-proxy.py ----
+//
+// `OPENSVN_COMPAT_FAULTS` names the faults of a flaky proxy that `OPENSVN_COMPAT_LOCAL_URL`
+// goes through (e.g. `--reset-after 2 --idle-reset 2`), `OPENSVN_COMPAT_PROXY_LOG` its log
+// (written with `--log-requests`). Reads must then still succeed (they are sent again or
+// resumed). A write whose connection the proxy breaks is never sent again (#166): it fails, and
+// the suite checks that it failed for that reason and left nothing behind, then repeats it like
+// a user would (`write_op!`). The tests that start their own proxy are skipped.
+
+fn behind_a_faulty_proxy() -> bool {
+    std::env::var("OPENSVN_COMPAT_FAULTS").is_ok_and(|f| !f.trim().is_empty())
+}
+
+fn proxy_log() -> String {
+    let path = std::env::var_os("OPENSVN_COMPAT_PROXY_LOG")
+        .expect("OPENSVN_COMPAT_PROXY_LOG names the log of the flaky proxy");
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// Checks a write that failed with `err` after line `mark` of the proxy log:
+///
+/// - the proxy broke a connection of this repository while it carried a write (reset or closed
+///   under it, or cut while idle right after it): the failure is the injected fault, not a
+///   read that was not sent again;
+/// - no write was sent twice;
+/// - no transaction of the failed write is left in the repository.
+fn check_broken_write(scratch: &Scratch, mark: usize, err: &SvnError) {
+    let log = proxy_log();
+    let lines: Vec<&str> = log.lines().skip(mark).collect();
+    let conn_of = |l: &str| {
+        l.strip_prefix("flaky-tls-proxy: conn ")
+            .and_then(|r| r.split_once(':'))
+            .map(|(c, _)| c.to_owned())
+    };
+    let ours: std::collections::HashSet<String> = lines
+        .iter()
+        .filter(|l| l.contains(": request ") && l.contains(&format!("/{}", scratch.name)))
+        .filter_map(|l| conn_of(l))
+        .collect();
+    // Method of the request the fault hit: named by the fault line, or the last request the
+    // connection carried.
+    let mut last: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut hit = Vec::new();
+    for l in &lines {
+        let Some(conn) = conn_of(l).filter(|c| ours.contains(c)) else {
+            continue;
+        };
+        if let Some((_, req)) = l.split_once(": request ") {
+            last.insert(conn, req.split(' ').next().unwrap_or("").to_owned());
+        } else if let Some(m) = l
+            .split_once(" before request ")
+            .and_then(|(_, r)| r.split_once('('))
+            .map(|(_, m)| {
+                m.trim_end_matches(')')
+                    .split([',', ')'])
+                    .next()
+                    .unwrap_or("")
+            })
+        {
+            hit.push(m.to_owned());
+        } else if l.contains("idle") || l.contains("truncated") {
+            hit.push(last.get(&conn).cloned().unwrap_or_default());
+        }
+    }
+    assert!(
+        hit.iter().any(|m| WRITE_METHODS.contains(&m.as_str())),
+        "{err:?} without a write broken by the proxy (faults on: {hit:?}):\n{}",
+        lines.join("\n")
+    );
+    let mut writes: Vec<&str> = lines
+        .iter()
+        .filter_map(|l| l.split_once(": request ").map(|(_, r)| r))
+        .filter(|r| r.contains(&format!("/{}", scratch.name)))
+        .filter(|r| {
+            WRITE_METHODS
+                .iter()
+                .any(|m| r.starts_with(&format!("{m} ")))
+        })
+        .collect();
+    let all = writes.len();
+    writes.sort_unstable();
+    writes.dedup();
+    assert_eq!(
+        writes.len(),
+        all,
+        "a write was sent twice:\n{}",
+        lines.join("\n")
+    );
+    let txns = scratch.transactions();
+    assert!(txns.is_empty(), "transactions left after {err:?}: {txns:?}");
+}
+
+impl Scratch {
+    /// Names of the transactions in the repository (`svnadmin lstxns`).
+    fn transactions(&self) -> Vec<String> {
+        let mut c = match &self.host {
+            Host::Docker { container, .. } => {
+                let mut c = Command::new("docker");
+                c.args(["exec", "-u", "33:33", container, "svnadmin", "lstxns"])
+                    .arg(format!("/var/svn/repos/{}", self.name));
+                c
+            }
+            Host::Local { repos, .. } => {
+                let mut c = Command::new(
+                    std::env::var_os("OPENSVN_COMPAT_LOCAL_SVNADMIN")
+                        .unwrap_or_else(|| "svnadmin".into()),
+                );
+                c.arg("lstxns").arg(repos.join(&self.name));
+                c
+            }
+        };
+        let out = c.output().expect("svnadmin lstxns");
+        assert!(out.status.success(), "svnadmin lstxns: {out:?}");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_owned)
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+}
+
 /// The real engine over the app's HTTP connector, against one scratch repository.
 struct DavHarness {
     engine: RealEngine,
@@ -363,6 +484,19 @@ impl Harness for DavHarness {
     }
     fn scratch_dir(&self) -> PathBuf {
         self.tmp.path().to_path_buf()
+    }
+    fn writes_may_break(&self) -> bool {
+        behind_a_faulty_proxy()
+    }
+    fn write_mark(&self) -> usize {
+        if behind_a_faulty_proxy() {
+            proxy_log().lines().count()
+        } else {
+            0
+        }
+    }
+    fn check_broken_write(&self, mark: usize, err: &SvnError) {
+        check_broken_write(&self.scratch, mark, err);
     }
     fn plant_lock(&self, root: &Path, dir: &str, owner: PlantedOwner) -> Result<(), SvnError> {
         let db = WcDb::open(root)?;
@@ -418,6 +552,7 @@ scenario!(repo_info_at_a_peg_revision);
 scenario!(cancellation_and_errors);
 scenario!(working_copy_metadata_operations);
 scenario!(switch_to_a_branch);
+scenario!(branch_detection_follows_a_switch);
 scenario!(repository_content_tools);
 scenario!(open_recovers_dead_locks_and_reports_foreign_ones);
 scenario!(locked_unmodified_file_in_status);
@@ -526,8 +661,9 @@ async fn authz_denied_at_root_allowed_on_trunk() {
 
     h.write_file(&a.root, "README.md", "hello authz\n").unwrap();
     h.write_file(&a.root, "added.txt", "added\n").unwrap();
-    let rev = e
-        .commit(
+    let rev = opensvn_lib::write_op!(
+        &h,
+        e.commit(
             &a,
             &CommitRequest {
                 wc_id: a.id.clone(),
@@ -538,8 +674,8 @@ async fn authz_denied_at_root_allowed_on_trunk() {
             },
             &ctx(),
         )
-        .await
-        .expect("commit in trunk");
+    )
+    .expect("commit in trunk");
     assert_eq!(rev.0, 2);
 
     let scan = e.status_remote(&b, &ctx()).await.expect("status_remote");
@@ -600,8 +736,9 @@ async fn authz_denied_at_root_allowed_on_trunk() {
         .expect("log of trunk");
     assert_eq!(log.entries.len(), 2, "{:?}", log.entries);
 
-    let err = e
-        .copy_location(
+    let err = opensvn_lib::write_op!(
+        &h,
+        e.copy_location(
             &CopyLocationRequest {
                 from_url: format!("{url}/trunk"),
                 from_rev: None,
@@ -613,8 +750,8 @@ async fn authz_denied_at_root_allowed_on_trunk() {
             None,
             &ctx(),
         )
-        .await
-        .expect_err("writing outside trunk is refused");
+    )
+    .expect_err("writing outside trunk is refused");
     assert_eq!(
         err.code,
         ErrorCode::Forbidden,
@@ -636,19 +773,21 @@ async fn commit_with_changes_below_a_switched_subtree() {
         let h = harness(&host, "switched-commit");
         let url = h.repo_url();
         let e = h.engine();
-        e.copy_location(
-            &CopyLocationRequest {
-                from_url: format!("{url}/trunk/src"),
-                from_rev: None,
-                to_url: format!("{url}/branches/b"),
-                message: "Branch src".into(),
-                switch_wc_id: None,
-                from_wc: None,
-            },
-            None,
-            &ctx(),
+        opensvn_lib::write_op!(
+            &h,
+            e.copy_location(
+                &CopyLocationRequest {
+                    from_url: format!("{url}/trunk/src"),
+                    from_rev: None,
+                    to_url: format!("{url}/branches/b"),
+                    message: "Branch src".into(),
+                    switch_wc_id: None,
+                    from_wc: None,
+                },
+                None,
+                &ctx(),
+            )
         )
-        .await
         .expect("branch");
         let root = h.work_dir().join("switched");
         let info = e
@@ -706,8 +845,9 @@ async fn commit_with_changes_below_a_switched_subtree() {
             .unwrap();
         h.write_file(&wc.root, "src/main.rs", "fn main() { branch(); }\n")
             .unwrap();
-        let rev = e
-            .commit(
+        let rev = opensvn_lib::write_op!(
+            &h,
+            e.commit(
                 &wc,
                 &CommitRequest {
                     wc_id: wc.id.clone(),
@@ -718,8 +858,8 @@ async fn commit_with_changes_below_a_switched_subtree() {
                 },
                 &ctx(),
             )
-            .await
-            .expect("commit");
+        )
+        .expect("commit");
         for (path, expected) in [
             ("trunk/README.md", "hello trunk\n"),
             ("branches/b/main.rs", "fn main() { branch(); }\n"),
@@ -738,8 +878,9 @@ async fn commit_with_changes_below_a_switched_subtree() {
             .unwrap();
         h.write_file(&wc.root, "src/new.rs", "fn new() {}\n")
             .unwrap();
-        let rev = e
-            .commit(
+        let rev = opensvn_lib::write_op!(
+            &h,
+            e.commit(
                 &wc,
                 &CommitRequest {
                     wc_id: wc.id.clone(),
@@ -750,8 +891,8 @@ async fn commit_with_changes_below_a_switched_subtree() {
                 },
                 &ctx(),
             )
-            .await
-            .expect("switched-only commit");
+        )
+        .expect("switched-only commit");
         for (path, expected) in [
             ("branches/b/main.rs", "fn main() { again(); }\n"),
             ("branches/b/new.rs", "fn new() {}\n"),
@@ -792,19 +933,21 @@ async fn switch_checks_ancestry_with_location_segments() {
             ],
         ));
         // r3: a branch of trunk as it was in r1.
-        e.copy_location(
-            &CopyLocationRequest {
-                from_url: format!("{url}/trunk"),
-                from_rev: Some(opensvn_ipc::Rev(1)),
-                to_url: format!("{url}/branches/rel"),
-                message: "Branch".into(),
-                switch_wc_id: None,
-                from_wc: None,
-            },
-            None,
-            &ctx(),
+        opensvn_lib::write_op!(
+            &h,
+            e.copy_location(
+                &CopyLocationRequest {
+                    from_url: format!("{url}/trunk"),
+                    from_rev: Some(opensvn_ipc::Rev(1)),
+                    to_url: format!("{url}/branches/rel"),
+                    message: "Branch".into(),
+                    switch_wc_id: None,
+                    from_wc: None,
+                },
+                None,
+                &ctx(),
+            )
         )
-        .await
         .expect("branch");
 
         let cancel = svn_types::CancelToken::new();
@@ -999,9 +1142,11 @@ async fn update_and_switch_again_of_a_switched_folder_with_mixed_children() {
             keep_locks: false,
             auto_add_remove: true,
         };
-        e.commit(&wc, &commit(vec![String::new()], "x, y, n"), &ctx())
-            .await
-            .expect("commit x, y, n");
+        opensvn_lib::write_op!(
+            &h,
+            e.commit(&wc, &commit(vec![String::new()], "x, y, n"), &ctx())
+        )
+        .expect("commit x, y, n");
         let branch = |to: &'static str| CopyLocationRequest {
             from_url: format!("{url}/trunk/src"),
             from_rev: None,
@@ -1010,13 +1155,9 @@ async fn update_and_switch_again_of_a_switched_folder_with_mixed_children() {
             switch_wc_id: None,
             from_wc: None,
         };
-        let rev_b = e
-            .copy_location(&branch("b"), None, &ctx())
-            .await
+        let rev_b = opensvn_lib::write_op!(&h, e.copy_location(&branch("b"), None, &ctx()))
             .expect("branch b");
-        e.copy_location(&branch("c"), None, &ctx())
-            .await
-            .expect("branch c");
+        opensvn_lib::write_op!(&h, e.copy_location(&branch("c"), None, &ctx())).expect("branch c");
 
         let cancel = CancelToken::new();
         let at = |u: String| {
@@ -1077,9 +1218,11 @@ async fn update_and_switch_again_of_a_switched_folder_with_mixed_children() {
         // A change on the branch, so the later update has something to bring.
         h.write_file(&wc.root, "src/y/b.txt", "b on the branch\n")
             .unwrap();
-        e.commit(&wc, &commit(vec!["src".into()], "y on b"), &ctx())
-            .await
-            .expect("commit on the branch");
+        opensvn_lib::write_op!(
+            &h,
+            e.commit(&wc, &commit(vec!["src".into()], "y on b"), &ctx())
+        )
+        .expect("commit on the branch");
         // A child at another revision (anchored at its switched parent, as svn does).
         svn_client::update(
             &client,
@@ -1453,6 +1596,10 @@ impl Drop for FlakyProxy {
 async fn update_cut_at_the_same_offset_stops_after_two_stalled_resumes() {
     const SMALL: usize = 12;
     const BIG: usize = 2 << 20;
+    if behind_a_faulty_proxy() {
+        eprintln!("SKIPPED: starts its own flaky proxy, so it runs against the server directly");
+        return;
+    }
     let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
         eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
         return;
@@ -1661,6 +1808,10 @@ const WRITE_METHODS: [&str; 11] = [
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
 async fn writes_after_a_pause_survive_a_proxy_that_dropped_the_idle_connection() {
+    if behind_a_faulty_proxy() {
+        eprintln!("SKIPPED: starts its own flaky proxy, so it runs against the server directly");
+        return;
+    }
     let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
         eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
         return;
@@ -1770,6 +1921,10 @@ async fn writes_after_a_pause_survive_a_proxy_that_dropped_the_idle_connection()
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
 async fn a_write_the_proxy_cuts_is_never_sent_again() {
+    if behind_a_faulty_proxy() {
+        eprintln!("SKIPPED: starts its own flaky proxy, so it runs against the server directly");
+        return;
+    }
     let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
         eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
         return;
@@ -1873,6 +2028,10 @@ async fn writes_of_one_commit_survive_a_pause_longer_than_the_proxy_keeps_idle_c
     use opensvn_lib::engine::real::SessionConnector as _;
     use svn_types::{Checksum, RepoUrl, Revnum};
 
+    if behind_a_faulty_proxy() {
+        eprintln!("SKIPPED: starts its own flaky proxy, so it runs against the server directly");
+        return;
+    }
     let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
         eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
         return;
@@ -2133,6 +2292,601 @@ async fn sparse_checkout_matches_svn() {
         // svn keeps working with the result.
         svn_cli(&oracle, &ours, &["update", "-q"]);
         svn_cli(&oracle, &ours, &["status"]);
+    }
+    assert_no_prompt();
+}
+
+// ---- a switch whose answer is cut off ----
+
+/// Every BASE node of the working copy at `root` is where its place in the tree puts it below
+/// `prefix` (nothing left switched, nothing incomplete).
+fn assert_all_below(root: &Path, prefix: &str) {
+    let db = WcDb::open(root).unwrap();
+    let rows: Vec<(String, String, String)> = db
+        .with_read(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT local_relpath, COALESCE(repos_path, ''), presence FROM nodes \
+                     WHERE op_depth = 0 ORDER BY local_relpath",
+                )
+                .map_err(svn_wc::db::sql_err)?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .map_err(svn_wc::db::sql_err)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(svn_wc::db::sql_err)?;
+            Ok(rows)
+        })
+        .unwrap();
+    for (local, repos, presence) in &rows {
+        let expected = if local.is_empty() {
+            prefix.to_owned()
+        } else {
+            format!("{prefix}/{local}")
+        };
+        assert_eq!(repos, &expected, "{local}: {rows:?}");
+        assert_eq!(presence, "normal", "{local}: {rows:?}");
+    }
+}
+
+/// Status entries other than plain unmodified ones.
+async fn changes(e: &dyn EngineFacade, wc: &WcRef) -> Vec<opensvn_ipc::FileStatus> {
+    e.status(
+        wc,
+        StatusQuery {
+            include_ignored: false,
+            include_unversioned: true,
+        },
+        &ctx(),
+    )
+    .await
+    .expect("status")
+    .into_iter()
+    .filter(|s| {
+        s.text != opensvn_ipc::NodeStatus::Normal
+            || !matches!(
+                s.props,
+                opensvn_ipc::PropStatus::None | opensvn_ipc::PropStatus::Normal
+            )
+    })
+    .collect()
+}
+
+/// A proxy that starts `faults` on a port the working copy already uses (the previous proxy
+/// there was dropped).
+fn proxy_on(base: &str, port: u16, faults: &[&str], log: PathBuf) -> FlakyProxy {
+    (0..50)
+        .find_map(|_| {
+            let p = FlakyProxy::start_on(base, port, faults, log.clone());
+            if p.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            p
+        })
+        .expect("a proxy on the same port")
+}
+
+/// A working copy of `trunk` checked out through a plain proxy, with a local edit, and a
+/// branch `branches/sw` whose folders hold `files` more files than trunk. Returns the
+/// harness pieces the switch tests need.
+async fn switch_setup(
+    host: &Host,
+    base: &str,
+    tag: &str,
+    files: Vec<(String, Vec<u8>)>,
+) -> Option<(DavHarness, WcRef, u16)> {
+    let h = harness(host, tag);
+    let e = h.engine();
+    e.copy_location(
+        &CopyLocationRequest {
+            from_url: format!("{}/trunk", h.repo_url()),
+            from_rev: None,
+            to_url: format!("{}/branches/sw", h.repo_url()),
+            message: "branch".into(),
+            switch_wc_id: None,
+            from_wc: None,
+        },
+        None,
+        &ctx(),
+    )
+    .await
+    .expect("branch");
+    let mut dirs: Vec<String> = files
+        .iter()
+        .filter_map(|(p, _)| {
+            Path::new(p)
+                .parent()
+                .map(|d| d.to_string_lossy().into_owned())
+        })
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+    h.scratch.load(&add_dump(&dirs, &files));
+    let healthy = FlakyProxy::start(base, &[], h.scratch_dir().join("proxy-0.log"))?;
+    let port = healthy.port;
+    let info = e
+        .checkout(
+            &CheckoutPlan {
+                url: format!("{}/{}/trunk", healthy.url(base), h.scratch.name),
+                path: h.work_dir().join("wc"),
+                rev: None,
+                depth: Depth::Infinity,
+                sparse: None,
+                format: WcFormat::V31,
+                store_pristine: true,
+                ignore_externals: false,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("checkout through the proxy");
+    let wc = WcRef {
+        id: WcId("wc".to_owned()),
+        root: PathBuf::from(info.root_path),
+    };
+    h.write_file(&wc.root, "README.md", "local edit\n").unwrap();
+    std::fs::write(wc.root.join("notes.txt"), "unversioned\n").unwrap();
+    drop(healthy);
+    Some((h, wc, port))
+}
+
+/// Only the local edits of [`switch_setup`] differ after a switch.
+fn assert_only_local_edits(changed: &[opensvn_ipc::FileStatus]) {
+    let mut paths: Vec<&str> = changed.iter().map(|s| s.path.as_str()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["README.md", "notes.txt"], "{changed:?}");
+}
+
+/// A proxy that cuts every `REPORT` answer after 128 KiB: the switch's answer (send-all, the
+/// texts inline) is cut, and every resumed drive gets further, since it asks only for what the
+/// broken drives did not commit. The switch finishes, every node ends up below the branch,
+/// and the local edits are kept.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
+async fn switch_cut_mid_answer_resumes_until_done() {
+    const DIRS: usize = 6;
+    const FILES: usize = 12;
+    const SIZE: usize = 8192;
+    if behind_a_faulty_proxy() {
+        eprintln!("SKIPPED: starts its own flaky proxy, so it runs against the server directly");
+        return;
+    }
+    let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
+        eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
+        return;
+    };
+    let Host::Local { base, .. } = &host else {
+        unreachable!()
+    };
+    let mut files = Vec::new();
+    for d in 0..DIRS {
+        for f in 0..FILES {
+            files.push((format!("branches/sw/d{d}/f{f:02}.bin"), noise(SIZE)));
+        }
+    }
+    let Some((h, wc, port)) = switch_setup(&host, base, "switchcut", files).await else {
+        eprintln!("SKIPPED: no server certificate next to the CA for the flaky proxy");
+        return;
+    };
+    let e = h.engine();
+    let cutting = proxy_on(
+        base,
+        port,
+        &[
+            "--truncate-every",
+            "1",
+            "--truncate-at",
+            "131072",
+            "--truncate-method",
+            "REPORT",
+        ],
+        h.scratch_dir().join("proxy-1.log"),
+    );
+    let target = format!("{}/{}/branches/sw", cutting.url(base), h.scratch.name);
+    let reached = e
+        .switch(&wc, &target, None, false, &ctx())
+        .await
+        .unwrap_or_else(|err| {
+            panic!(
+                "switch through a cutting proxy: {err:?}\n{}",
+                std::fs::read_to_string(&cutting.log).unwrap_or_default()
+            )
+        });
+    assert!(
+        cutting.cuts() >= 2,
+        "{}",
+        std::fs::read_to_string(&cutting.log).unwrap_or_default()
+    );
+    let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
+    assert_eq!(info.base_rev, reached);
+    assert!(info.url.ends_with("/branches/sw"), "{}", info.url);
+    assert!(!info.incomplete);
+    assert_all_below(&wc.root, "branches/sw");
+    for d in 0..DIRS {
+        assert_eq!(count_files(&wc.root.join(format!("d{d}"))), FILES, "d{d}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(wc.root.join("README.md")).unwrap(),
+        "local edit\n"
+    );
+    assert_only_local_edits(&changes(e, &wc).await);
+    assert_no_prompt();
+}
+
+/// A proxy that always cuts the switch's answer at the same offset, inside a file bigger than
+/// the offset: the switch gives up after two resumes that commit nothing new and leaves the
+/// working copy half-switched but consistent (the root at the branch and incomplete, local
+/// edits untouched, nothing queued). Once the connection works, the same switch (what
+/// "Continue switch" runs) finishes it: every node below the branch.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
+async fn switch_cut_at_the_same_offset_is_finished_by_the_same_switch() {
+    const BIG: usize = 2 << 20;
+    if behind_a_faulty_proxy() {
+        eprintln!("SKIPPED: starts its own flaky proxy, so it runs against the server directly");
+        return;
+    }
+    let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
+        eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
+        return;
+    };
+    let Host::Local { base, .. } = &host else {
+        unreachable!()
+    };
+    let mut files = Vec::new();
+    for f in 0..8 {
+        files.push((format!("branches/sw/aaa/s{f}.txt"), vec![b'x'; 2048]));
+    }
+    files.push(("branches/sw/zzz/z-big.bin".to_owned(), noise(BIG)));
+    let Some((h, wc, port)) = switch_setup(&host, base, "switchstall", files).await else {
+        eprintln!("SKIPPED: no server certificate next to the CA for the flaky proxy");
+        return;
+    };
+    let e = h.engine();
+    let cutting = proxy_on(
+        base,
+        port,
+        &[
+            "--truncate-every",
+            "1",
+            "--truncate-at",
+            "262144",
+            "--truncate-method",
+            "REPORT,GET",
+        ],
+        h.scratch_dir().join("proxy-1.log"),
+    );
+    let target = format!("{}/{}/branches/sw", cutting.url(base), h.scratch.name);
+    let err = e
+        .switch(&wc, &target, None, false, &ctx())
+        .await
+        .expect_err("a switch that never gets past the cut");
+    assert!(
+        err.connection_failure().is_some(),
+        "connection failure expected: {err:?}"
+    );
+    // The first drive, then two resumes that committed nothing new.
+    assert_eq!(
+        cutting.cuts(),
+        3,
+        "{}",
+        std::fs::read_to_string(&cutting.log).unwrap_or_default()
+    );
+    drop(cutting);
+    let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
+    assert!(info.url.ends_with("/branches/sw"), "{}", info.url);
+    assert!(info.incomplete, "a half-switched working copy is resumable");
+    assert!(!wc.root.join("zzz/z-big.bin").exists(), "no partial file");
+    assert_eq!(
+        std::fs::read_to_string(wc.root.join("README.md")).unwrap(),
+        "local edit\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wc.root.join("notes.txt")).unwrap(),
+        "unversioned\n"
+    );
+
+    let _healthy = proxy_on(base, port, &[], h.scratch_dir().join("proxy-2.log"));
+    e.switch(&wc, &target, info.resume_rev, false, &ctx())
+        .await
+        .expect("the same switch finishes");
+    assert_all_below(&wc.root, "branches/sw");
+    assert_eq!(
+        std::fs::metadata(wc.root.join("zzz/z-big.bin"))
+            .unwrap()
+            .len(),
+        BIG as u64
+    );
+    assert_eq!(count_files(&wc.root.join("aaa")), 8);
+    assert_only_local_edits(&changes(e, &wc).await);
+    assert_no_prompt();
+}
+
+// ---- switch keeps excluded children (svn 1.15) ----
+
+/// BASE rows that do not depend on the client or the repository URL.
+fn base_rows(wc: &Path) -> Vec<String> {
+    let db = WcDb::open(wc).unwrap();
+    db.with_read(|c| {
+        let mut s = c
+            .prepare(
+                "SELECT local_relpath, presence, kind, revision, repos_path, depth FROM nodes \
+                 WHERE op_depth = 0 ORDER BY local_relpath",
+            )
+            .unwrap();
+        let rows = s
+            .query_map([], |r| {
+                Ok(format!(
+                    "{}|{}|{}|{:?}|{:?}|{:?}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .unwrap();
+        Ok(rows.map(|r| r.unwrap()).collect::<Vec<_>>())
+    })
+    .unwrap()
+}
+
+/// An excluded folder stays excluded when the working copy is switched to a branch over
+/// mod_dav_svn: its BASE row moves to the branch at the new revision, like `svn switch` leaves
+/// it. With a local server and svn 1.15 (`OPENSVN_SVN_BIN`), the rows are compared with svn's
+/// own switch of the same repository (over `file://`).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn switch_keeps_an_excluded_folder_excluded_like_svn() {
+    use opensvn_lib::engine::real::SessionConnector as _;
+    for (version, host) in servers() {
+        eprintln!("server {version}");
+        let h = harness(&host, "switch-excluded");
+        let url = h.repo_url();
+        let e = h.engine();
+        let root = h.work_dir().join("excluded");
+        let info = e
+            .checkout(
+                &CheckoutPlan {
+                    url: format!("{url}/trunk"),
+                    path: root.clone(),
+                    rev: None,
+                    depth: Depth::Infinity,
+                    sparse: None,
+                    format: WcFormat::V31,
+                    store_pristine: true,
+                    ignore_externals: false,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("checkout");
+        let wc = WcRef {
+            id: WcId("excluded".into()),
+            root: PathBuf::from(info.root_path),
+        };
+        // `svn update --set-depth exclude src`, through a session at the folder.
+        let cancel = svn_types::CancelToken::new();
+        let src_url = svn_types::RepoUrl::parse(&format!("{url}/trunk/src")).unwrap();
+        let session = connector()
+            .connect_with(
+                &src_url,
+                &opensvn_lib::engine::real::ConnectOptions::at_url(&ctx()),
+                &cancel,
+            )
+            .await
+            .expect("session");
+        let client = svn_client::ClientCtx::new(LockOwner {
+            store: h.store.clone() as Arc<dyn LockOwnershipStore>,
+            pid: std::process::id(),
+            boot_id: THIS_BOOT.to_owned(),
+        });
+        svn_client::set_depth(
+            &client,
+            session.as_ref(),
+            &wc.root.join("src"),
+            None,
+            svn_types::Depth::Exclude,
+            &cancel,
+        )
+        .await
+        .expect("exclude src");
+        let branched = opensvn_lib::write_op!(
+            &h,
+            e.copy_location(
+                &CopyLocationRequest {
+                    from_url: format!("{url}/trunk"),
+                    from_rev: None,
+                    to_url: format!("{url}/branches/b"),
+                    message: "Branch".into(),
+                    switch_wc_id: None,
+                    from_wc: None,
+                },
+                None,
+                &ctx(),
+            )
+        )
+        .expect("branch");
+        let reached = e
+            .switch(&wc, &format!("{url}/branches/b"), None, false, &ctx())
+            .await
+            .expect("switch");
+        assert_eq!(reached, branched);
+        let rows = base_rows(&wc.root);
+        assert!(
+            rows.contains(&format!(
+                "src|excluded|dir|Some({})|Some(\"branches/b/src\")|None",
+                reached.0
+            )),
+            "{rows:#?}"
+        );
+        assert!(!wc.root.join("src").exists());
+
+        // The same with svn 1.15 on the same repository.
+        let (Host::Local { repos, .. }, Some(oracle)) = (
+            &host,
+            opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15)
+                .ok()
+                .flatten(),
+        ) else {
+            eprintln!("no local repository or svn 1.15: the svn comparison is skipped");
+            continue;
+        };
+        let file_url = opensvn_svn_oracle::Oracle::file_url(&repos.join(&h.scratch.name));
+        let theirs = h.tmp.path().join("svn-wc");
+        let svn = |args: &[&str]| {
+            let out = oracle.svn().args(args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "svn {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let t = theirs.to_str().unwrap();
+        svn(&["checkout", "-q", &format!("{file_url}/trunk@1"), t]);
+        svn(&[
+            "update",
+            "-q",
+            "--set-depth",
+            "exclude",
+            &format!("{t}/src"),
+        ]);
+        svn(&[
+            "switch",
+            "-q",
+            &format!("{file_url}/branches/b@{}", branched.0),
+            t,
+        ]);
+        assert_eq!(rows, base_rows(&theirs), "server {version}");
+    }
+    assert_no_prompt();
+}
+
+/// Switching the working copy while `src` is switched on its own to an unrelated location:
+/// `src` comes back below the root at the new branch, read from where it was switched to
+/// (`link_path`), as svn 1.15 leaves it on the same repository.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn switching_the_parent_of_a_switched_folder_matches_svn() {
+    use opensvn_lib::engine::real::SessionConnector as _;
+    for (version, host) in servers() {
+        eprintln!("server {version}");
+        let h = harness(&host, "switch-parent");
+        let url = h.repo_url();
+        let e = h.engine();
+        for to in ["branches/b", "branches/c"] {
+            opensvn_lib::write_op!(
+                &h,
+                e.copy_location(
+                    &CopyLocationRequest {
+                        from_url: format!("{url}/trunk"),
+                        from_rev: None,
+                        to_url: format!("{url}/{to}"),
+                        message: "Branch".into(),
+                        switch_wc_id: None,
+                        from_wc: None,
+                    },
+                    None,
+                    &ctx(),
+                )
+            )
+            .expect("copy");
+        }
+        let root = h.work_dir().join("parent");
+        let info = e
+            .checkout(
+                &CheckoutPlan {
+                    url: format!("{url}/trunk"),
+                    path: root.clone(),
+                    rev: None,
+                    depth: Depth::Infinity,
+                    sparse: None,
+                    format: WcFormat::V31,
+                    store_pristine: true,
+                    ignore_externals: false,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("checkout");
+        let wc = WcRef {
+            id: WcId("parent".into()),
+            root: PathBuf::from(info.root_path),
+        };
+        // `src` to the whole branch `b` (another path, so ancestry is ignored, as svn needs).
+        let cancel = svn_types::CancelToken::new();
+        let session = connector()
+            .connect_with(
+                &svn_types::RepoUrl::parse(&format!("{url}/trunk")).unwrap(),
+                &opensvn_lib::engine::real::ConnectOptions::at_url(&ctx()),
+                &cancel,
+            )
+            .await
+            .expect("session");
+        let client = svn_client::ClientCtx::new(LockOwner {
+            store: h.store.clone() as Arc<dyn LockOwnershipStore>,
+            pid: std::process::id(),
+            boot_id: THIS_BOOT.to_owned(),
+        });
+        svn_client::switch(
+            &client,
+            session.as_ref(),
+            &wc.root.join("src"),
+            &svn_types::RepoUrl::parse(&format!("{url}/branches/b")).unwrap(),
+            None,
+            svn_types::Depth::Unknown,
+            true,
+            &cancel,
+        )
+        .await
+        .expect("switch src");
+        assert!(wc.root.join("src/README.md").exists());
+        e.switch(&wc, &format!("{url}/branches/c"), None, false, &ctx())
+            .await
+            .expect("switch the working copy");
+        let rows = base_rows(&wc.root);
+        assert!(
+            rows.iter()
+                .any(|r| r.starts_with("src/main.rs|normal|file|")
+                    && r.contains("branches/c/src/main.rs")),
+            "{rows:#?}"
+        );
+        assert!(!wc.root.join("src/README.md").exists());
+
+        let (Host::Local { repos, .. }, Some(oracle)) = (
+            &host,
+            opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15)
+                .ok()
+                .flatten(),
+        ) else {
+            eprintln!("no local repository or svn 1.15: the svn comparison is skipped");
+            continue;
+        };
+        let file_url = opensvn_svn_oracle::Oracle::file_url(&repos.join(&h.scratch.name));
+        let theirs = h.tmp.path().join("svn-wc");
+        let t = theirs.to_str().unwrap();
+        let src = format!("{t}/src");
+        for args in [
+            vec!["checkout", "-q", &format!("{file_url}/trunk@1")[..], t],
+            vec![
+                "switch",
+                "-q",
+                "--ignore-ancestry",
+                &format!("{file_url}/branches/b@3")[..],
+                &src[..],
+            ],
+            vec!["switch", "-q", &format!("{file_url}/branches/c@3")[..], t],
+        ] {
+            let out = oracle.svn().args(&args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "svn {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        assert_eq!(rows, base_rows(&theirs), "server {version}");
     }
     assert_no_prompt();
 }

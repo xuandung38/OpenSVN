@@ -80,7 +80,12 @@ export function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () 
       title={t("shortcutsTitle")}
       footer={<Button onClick={onClose}>{c("close")}</Button>}
     >
-      <dl className="grid max-h-[60vh] grid-cols-[1fr_auto] gap-x-4 gap-y-1 overflow-auto text-[13px]">
+      <dl
+        // A scrollable region must be reachable by keyboard.
+        tabIndex={0}
+        aria-label={t("shortcutsTitle")}
+        className="grid max-h-[60vh] grid-cols-[1fr_auto] gap-x-4 gap-y-1 overflow-auto text-[13px]"
+      >
         {(Object.keys(SHORTCUTS) as ShortcutId[]).map((id) => (
           <div key={id} className="contents">
             <dt>{n(id)}</dt>

@@ -57,6 +57,7 @@
     "allow-reveal-in-os",
     "allow-open-external",
     "allow-diagnostics-export",
+    "allow-logs-reveal",
     "allow-wc-list",
     "allow-wc-add-existing",
     "allow-wc-remove",
@@ -92,6 +93,7 @@
     "allow-wc-depths",
     "allow-upgrade-format",
     "allow-resolve",
+    "allow-props-get",
     "allow-props-set"
   ]
 }

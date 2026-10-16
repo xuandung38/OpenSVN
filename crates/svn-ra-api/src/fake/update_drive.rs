@@ -51,27 +51,42 @@ pub(super) async fn drive_update(
     } = at;
     let mut reporter = CollectingReporter::default();
     report(&mut reporter)?;
+    // Like svn_repos: a switch reads a linked path from its link (an update would follow the
+    // link in the target as well; the fake does not model that and treats links as set_path).
+    if matches!(req.mode, UpdateMode::Switch(_)) {
+        for e in &mut reporter.entries {
+            if let Some(url) = &e.link_url {
+                e.link = Some(url_to_rel(repos_root, url)?);
+            }
+        }
+    }
 
     let tree_target = match &req.mode {
         UpdateMode::Switch(url) => url_to_rel(repos_root, url)?,
         _ => super::prefixed::join(session_rel, &req.target)?,
     };
-    let (target_rev, target_tree, base_trees) = {
+    let (target_rev, target_tree, base_trees, full_trees) = {
         let st = lock_state(state);
         let (rev, rv) = st.revision(req.revision)?;
         let mut bases: HashMap<Revnum, Tree> = HashMap::new();
+        let mut full: HashMap<Revnum, Tree> = HashMap::new();
+        let linked = reporter.entries.iter().any(|e| e.link.is_some());
         // `start_empty` entries too: the reported path itself exists at its revision.
         for e in reporter.entries.iter().filter(|e| !e.deleted) {
             let (r, brv) = st.revision(Some(e.rev))?;
             // Report paths are session-relative: so are the base trees.
             bases.insert(r, super::prefixed::subtree(&brv.tree, session_rel)?);
+            if linked {
+                full.insert(r, brv.tree.clone());
+            }
         }
-        (rev, rv.tree.clone(), bases)
+        (rev, rv.tree.clone(), bases, full)
     };
     let input = PlanInput {
         target_rev,
         target_tree: &target_tree,
         base_trees: &base_trees,
+        full_trees: &full_trees,
         entries: &reporter.entries,
         anchor_target: req.target.clone(),
         tree_target,

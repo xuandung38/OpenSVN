@@ -11,6 +11,7 @@ import type {
   DiffTarget,
   FileStatus,
   IgnoreAddRequest,
+  ItemProps,
   LockConflict,
   LockInfo,
   LockRequest,
@@ -21,6 +22,7 @@ import type {
   ResolveRequest,
   RevertRequest,
   SparseEntry,
+  StatusGetRequest,
   UnlockRequest,
   UpdateRequest,
   WcEntry,
@@ -64,6 +66,8 @@ interface State {
    * after a plain local status): only a lock attempt reveals them.
    */
   serverLocks: Map<string, LockInfo>;
+  /** Versioned properties by `wcId\0path` (the root is `""`). */
+  props: Map<string, Map<string, string>>;
 }
 
 /** A registered working copy whose folder was moved, for the repository manager demo. */
@@ -111,6 +115,16 @@ function initialState(): State {
           token: null,
           mine: false,
         },
+      ],
+    ]),
+    props: new Map([
+      [`${MOCK_WC_ID}\0`, new Map([["svn:ignore", "*.log\nbuild\n"]])],
+      [
+        `${MOCK_WC_ID}\0assets/audio/theme.ogg`,
+        new Map([
+          ["svn:needs-lock", "*"],
+          ["svn:mime-type", "audio/ogg"],
+        ]),
       ],
     ]),
   };
@@ -164,6 +178,12 @@ export function markMockWcIncomplete(wcId: string, rev = 1200, checkout = true):
     wc.incomplete = true;
     wc.resume = { rev, checkout };
   }
+}
+
+/** Puts a sample working copy on `branch` (tests: the "On a tag" banner). */
+export function setMockWcBranch(wcId: string, branch: WorkingCopy["branch"]): void {
+  const wc = state.wcs.find((w) => w.id === wcId);
+  if (wc) wc.branch = branch;
 }
 
 const FOLDER_NAMES = ["game-assets", "tools-sandbox", "level-editor", "audio-bank"];
@@ -331,7 +351,15 @@ export function wcMockCommands(deps: MockDeps) {
         kind: "dir" as const,
       });
     },
-    statusGet: (req: { wcId: string }) => ok([...statusOf(req.wcId)]),
+    // Like the backend: ignored entries only on request, unversioned ones unless refused.
+    statusGet: (req: StatusGetRequest) =>
+      ok(
+        statusOf(req.wcId).filter(
+          (f) =>
+            (f.text !== "ignored" || req.includeIgnored === true) &&
+            (f.text !== "unversioned" || req.includeUnversioned !== false),
+        ),
+      ),
     statusRefresh: (wcId: string) => ok(simulateOp("status-refresh", "Refresh status", wcId)),
     statusRemote: (wcId: string) =>
       op("status-remote", "Check for updates", wcId, () =>
@@ -452,7 +480,7 @@ export function wcMockCommands(deps: MockDeps) {
       setStatus(
         deps,
         req.wcId,
-        statusOf(req.wcId).filter((f) => !hidden(f)),
+        statusOf(req.wcId).map((f) => (hidden(f) ? { ...f, text: "ignored" as const } : f)),
       );
       return ok(null);
     },
@@ -662,6 +690,47 @@ export function wcMockCommands(deps: MockDeps) {
         { kind: "newRev", newRev: rev ?? state.youngest },
       ),
     cleanup: (req: { wcId: string }) => op("cleanup", "Clean up", req.wcId, () => {}),
+    propsGet: (wcId: string, paths: string[]) => {
+      if (!forWc(wcId)) return fail("not-a-working-copy", "unknown working copy");
+      const items: ItemProps[] = [];
+      for (const path of paths) {
+        const f = statusOf(wcId).find((x) => x.path === path);
+        if (f && (f.text === "unversioned" || f.text === "ignored"))
+          return fail("path-not-found", `'${path}' is not under version control`);
+        const props = state.props.get(`${wcId}\0${path}`) ?? new Map<string, string>();
+        items.push({
+          path,
+          kind: path === "" || f?.kind === "dir" ? "dir" : (f?.kind ?? "file"),
+          props: [...props]
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([name, value]) => ({ name, value, binary: false })),
+        });
+      }
+      return ok(items);
+    },
+    propsSet: (wcId: string, path: string, name: string, value: string | null) => {
+      if (!forWc(wcId)) return fail("not-a-working-copy", "unknown working copy");
+      if (
+        name.startsWith("svn:") &&
+        value !== null &&
+        name === "svn:eol-style" &&
+        !["native", "LF", "CR", "CRLF"].includes(value)
+      )
+        return fail(
+          "wc-invalid-operation",
+          `unrecognized line ending style '${value}' for '${path}'`,
+        );
+      const key = `${wcId}\0${path}`;
+      const props = state.props.get(key) ?? new Map<string, string>();
+      if (value === null) props.delete(name);
+      else
+        props.set(
+          name,
+          ["svn:needs-lock", "svn:executable", "svn:special"].includes(name) ? "*" : value,
+        );
+      state.props.set(key, props);
+      return ok(null);
+    },
   };
 }
 

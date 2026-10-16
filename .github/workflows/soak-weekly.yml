@@ -1,0 +1,79 @@
+name: soak-weekly
+
+# The real app (release build, tauri-driver under Xvfb) left open for 2 hours on a 50k-file working
+# copy with the watcher and the poller running, local edits every 15 s, another user's commit every
+# minute and an update every 2 minutes; RSS of the app process tree must stay under 400 MB and not
+# creep (apps/opensvn/e2e/soak.test.mjs). The nightly job runs the same test for 10 minutes.
+on:
+  schedule:
+    - cron: "41 20 * * 6" # Sunday 03:41 Asia/Ho_Chi_Minh
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Soak duration in minutes
+        default: "120"
+      app_env:
+        description: Extra app environment, e.g. MALLOC_ARENA_MAX=2
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: soak-weekly-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 200
+    env:
+      OPENSVN_SOAK_MINUTES: ${{ inputs.minutes || '120' }}
+      OPENSVN_SOAK_APP_ENV: ${{ inputs.app_env || '' }}
+      OPENSVN_E2E_ARTIFACTS: ${{ github.workspace }}/soak-report
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Tauri libraries, WebKitWebDriver, Xvfb, a Secret Service and Apache
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev patchelf webkit2gtk-driver xvfb dbus-x11 gnome-keyring libjemalloc2
+          scripts/test-env/visualsvn-like.sh install
+      - name: Install Subversion 1.15 (oracle client)
+        uses: ./.github/actions/install-svn-115
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --version 2.1.0 --locked
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install frontend dependencies
+        working-directory: apps/opensvn
+        run: pnpm install --frozen-lockfile
+      - name: Start Apache + mod_dav_svn (HTTPS, Basic)
+        run: |
+          scripts/test-env/visualsvn-like.sh up
+          scripts/test-env/visualsvn-like.sh env | sed -n "s/^export \([A-Z_]*\)='\(.*\)'$/\1=\2/p" >> "$GITHUB_ENV"
+          echo "OPENSVN_COMPAT_LOCAL_URL=https://svn.opensvn.test:18443/svn-basic" >> "$GITHUB_ENV"
+          echo "NO_PROXY=svn.opensvn.test,svnhost" >> "$GITHUB_ENV"
+      - name: Soak
+        working-directory: apps/opensvn
+        run: pnpm e2e:soak
+      - name: Summary
+        if: always()
+        run: cat soak-report/soak-report.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: soak-report
+          path: soak-report
+          retention-days: 90

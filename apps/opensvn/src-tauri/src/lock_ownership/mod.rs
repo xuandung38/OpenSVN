@@ -19,6 +19,7 @@
 //! when the path exists and removes the Windows verbatim prefix so one folder has one key.
 
 mod alive_probe;
+mod open_files;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,6 +30,7 @@ use svn_types::{ErrorCode, LockOwnershipStore, RelPath, Result, SvnError};
 use crate::db::{AppDb, DbError, now_iso};
 
 pub use alive_probe::{OsProcessProbe, ProcessProbe, current_boot_id};
+pub use open_files::{OpenBy, other_processes_with_open};
 
 /// State of a recorded lock owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

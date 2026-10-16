@@ -50,6 +50,8 @@ sha1 = { workspace = true, optional = true }
 svn-protocol = { workspace = true, optional = true }
 # Case-insensitive matching of request paths against wc.db (macOS, Windows).
 unicode-normalization = { workspace = true, optional = true }
+# Arms a failpoint from the environment for the app-level crash tests (`failpoints` only).
+fail = { workspace = true, optional = true }
 # `fake` ships the in-memory repository that backs FakeEngine (the engine of builds without the
 # `real-engine` feature, and of `OPENSVN_ENGINE=fake`).
 svn-ra-api = { workspace = true, features = ["fake"] }
@@ -129,7 +131,7 @@ gen-ipc = []
 engine-conformance = []
 # Crash-injection points of the working copy layer, for the real engine's crash recovery tests
 # (`cargo test -p opensvn --features failpoints`). Never enabled in a release build.
-failpoints = ["real-engine", "svn-client/failpoints"]
+failpoints = ["real-engine", "svn-client/failpoints", "dep:fail"]
 
 [dev-dependencies]
 # Paused clock for deterministic select-ordering tests.

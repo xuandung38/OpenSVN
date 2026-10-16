@@ -132,10 +132,12 @@ impl RealEngine {
 }
 
 /// A lock or unlock whose connection broke: the request is never sent again, and the server may
-/// or may not have carried it out, so the user refreshes before trying again. Other errors are
-/// returned as they are.
+/// or may not have carried it out, so the user refreshes before trying again. A connection that
+/// could not even be opened ([`SvnError::is_not_sent`]: refused, handshake reset, connect
+/// timeout) sent nothing, so it stays a plain network error the user may simply retry. Other
+/// errors are returned as they are.
 fn outcome_unknown(e: SvnError, what: &str) -> SvnError {
-    if e.connection_failure().is_none() {
+    if e.connection_failure().is_none() || e.is_not_sent() {
         return e;
     }
     SvnError::new(
@@ -402,6 +404,27 @@ mod tests {
         let app = AppError::from(&e);
         assert!(!app.retryable);
         assert!(app.actions.is_none());
+    }
+
+    #[test]
+    fn a_lock_whose_connection_could_not_be_opened_is_a_plain_network_error() {
+        for failure in [
+            ConnectionFailure::ConnectionReset,
+            ConnectionFailure::Timeout,
+        ] {
+            let code = if failure == ConnectionFailure::Timeout {
+                ErrorCode::Timeout
+            } else {
+                ErrorCode::Network
+            };
+            let connect = SvnError::new(code, "HTTP request failed: error trying to connect")
+                .with_connection(failure)
+                .with_not_sent();
+            let e = outcome_unknown(connect, "lock");
+            assert_eq!(e.code, code, "{e:?}");
+            assert!(!e.message.contains("may or may not"), "{e:?}");
+            assert!(AppError::from(&e).retryable, "{e:?}");
+        }
     }
 
     #[test]
