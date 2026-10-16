@@ -3036,7 +3036,7 @@ async fn update_of_a_switched_folder_takes_it_from_its_branch_like_svn() {
         );
         let rows = nodes_rows(&wc.root)
             .into_iter()
-            .map(|r| r.rsplitn(2, '|').nth(1).unwrap().to_owned())
+            .map(|r| r.rsplit_once('|').unwrap().0.to_owned())
             .collect::<Vec<_>>();
         assert!(
             rows.iter()
@@ -3078,7 +3078,7 @@ async fn update_of_a_switched_folder_takes_it_from_its_branch_like_svn() {
         // Authors differ (svn over file:// commits as the local user): compared without them.
         let theirs_rows = nodes_rows(&theirs)
             .into_iter()
-            .map(|r| r.rsplitn(2, '|').nth(1).unwrap().to_owned())
+            .map(|r| r.rsplit_once('|').unwrap().0.to_owned())
             .collect::<Vec<_>>();
         assert_eq!(rows, theirs_rows, "server {version}");
     }
@@ -3493,6 +3493,58 @@ async fn dav_cache_matches_svn() {
         update().await;
         svn(&theirs, &["update", "-q"]);
         compare("update to HEAD");
+
+        // svn 1.14 and 1.15 work on the engine's working copy while its cache is filled: each
+        // reads, updates and commits through a copy of it (the copies leave `ours` as it is).
+        assert!(
+            dav_rows(&ours, &ours_name)
+                .iter()
+                .any(|r| r.contains("ra_dav:version-url")),
+            "server {version}: the engine's cache is empty before the svn round trip"
+        );
+        for (name, bin) in [
+            ("svn14", Some(PathBuf::from("/usr/bin/svn"))),
+            ("svn15", None),
+        ] {
+            if bin.as_ref().is_some_and(|b| !b.exists()) {
+                continue;
+            }
+            let copy = tmp.join(format!("ours-{name}"));
+            let mut cp = Command::new("cp");
+            cp.arg("-a").arg(&ours).arg(&copy);
+            run(cp, None);
+            let cli = |args: &[&str]| {
+                let mut c = bin.as_ref().map_or_else(|| oracle.svn(), Command::new);
+                c.current_dir(&copy)
+                    .env("LC_ALL", "C.UTF-8")
+                    .args([
+                        "--username",
+                        "tester",
+                        "--password",
+                        "tester-pass",
+                        "--no-auth-cache",
+                        "--non-interactive",
+                        "--config-option",
+                    ])
+                    .arg(format!(
+                        "servers:global:ssl-authority-files={}",
+                        ca_path().display()
+                    ))
+                    .args(args);
+                run(c, None);
+            };
+            cli(&["status"]);
+            cli(&["info", "-R"]);
+            cli(&["update", "-q"]);
+            std::fs::write(
+                copy.join("Tài liệu/Đọc tôi %#.txt"),
+                format!("odd\nedited\n{name}\n"),
+            )
+            .unwrap();
+            cli(&["commit", "-q", "-m", name]);
+            cli(&["update", "-q"]);
+            cli(&["status"]);
+        }
 
         // Cleanup empties it.
         e.cleanup(
