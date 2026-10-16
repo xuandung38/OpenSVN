@@ -353,10 +353,29 @@ pub async fn drive_update(
     }
 
     db.wc_lock_obtain(&lock_dir, -1, ObtainMode::Cleanup)?;
-    let _guard = LockGuard {
+    let guard = LockGuard {
         db: Arc::clone(&db),
         dir: lock_dir,
     };
+    // `svn cleanup` may break the lock mid-drive and empty `.svn/tmp`: a temp file or pristine
+    // install then fails on a vanished path before the next transaction sees the lost lock.
+    drive_locked(ctx, session, db, target_wc, target, anchor, params, cancel)
+        .await
+        .map_err(|e| guard.db.wc_lock_explain_failure(&guard.dir, e))
+}
+
+/// The part of [`drive_update`] that runs under the working copy lock.
+#[allow(clippy::too_many_arguments)]
+async fn drive_locked(
+    ctx: &ClientCtx,
+    session: &dyn RaSession,
+    db: Arc<WcDb>,
+    target_wc: RelPath,
+    target: RelPath,
+    anchor: RelPath,
+    params: UpdateParams,
+    cancel: &CancelToken,
+) -> Result<UpdateSummary> {
     // An earlier operation may have been interrupted: finish its queued work first.
     {
         let (db, cancel) = (Arc::clone(&db), cancel.clone());
@@ -580,7 +599,7 @@ pub async fn drive_update(
             tracing::warn!("could not cache inherited properties: {e}");
         }
     }
-    let out = outcome.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut out = outcome.lock().unwrap_or_else(PoisonError::into_inner);
     let mut events: Vec<UpdateEvent> = restored
         .into_iter()
         .map(|(path, kind)| UpdateEvent {
@@ -590,7 +609,7 @@ pub async fn drive_update(
         })
         .collect();
     events.extend(earlier_events);
-    events.extend(out.events.iter().cloned());
+    events.append(&mut out.events);
     if reconnects > 0 {
         // A resumed drive sends again the directories the broken one had opened: report each
         // notification once.
