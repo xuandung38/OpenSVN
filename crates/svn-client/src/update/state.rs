@@ -176,6 +176,11 @@ pub struct FileState {
     pub base: Option<Node>,
     /// An unversioned file already occupies the path and is adopted.
     pub adopt_existing: bool,
+    /// The unversioned file in the way of this add lies in a directory an interrupted update
+    /// left incomplete: it is adopted, instead of becoming a tree conflict, when its text and
+    /// kind are those of the incoming file (an install the interrupted client made just before
+    /// it stopped, whose BASE row was never committed).
+    pub maybe_interrupted_install: bool,
     /// Incoming property changes.
     pub prop_changes: Vec<PropChange>,
     /// Entry properties.

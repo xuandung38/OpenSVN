@@ -58,7 +58,7 @@ impl Write for HashWriter {
 }
 
 /// SHA-1 of the working file converted to repository-normal form (what a commit would send).
-fn normalized_sha1(path: &std::path::Path, info: &TranslateInfo) -> Result<[u8; 20]> {
+pub fn normalized_sha1(path: &std::path::Path, info: &TranslateInfo) -> Result<[u8; 20]> {
     let meta = fs::symlink_metadata(path)
         .map_err(|e| SvnError::from_io(format!("cannot stat '{}'", path.display()), &e))?;
     let mut hasher = HashWriter(Sha1::new());
