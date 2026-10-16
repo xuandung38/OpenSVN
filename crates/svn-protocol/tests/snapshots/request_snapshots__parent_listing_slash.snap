@@ -1,0 +1,5 @@
+---
+source: crates/svn-protocol/tests/request_snapshots.rs
+expression: "render(&parent_listing_request(&RepoUrl::parse(url).unwrap()).unwrap())"
+---
+GET https://svn.test.local/svn/

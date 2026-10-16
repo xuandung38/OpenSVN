@@ -29,11 +29,17 @@ pub enum ErrorCode {
     RepositoryMoved,
     PristineNotHydrated,
     WcInvalidOperation,
+    /// A switch target shares no history with the working copy (svn E195012). Nothing changed;
+    /// the switch can be asked for again with `ignore_ancestry`.
+    UnrelatedResources,
     PathNotFound,
     DiskFull,
     PermissionDenied,
     FileInUse,
     Cancelled,
+    /// The server sent a malformed response (bad XML or encoding, an impossible editor drive).
+    /// Nothing local is damaged, so cleanup is not offered; the message names what was wrong.
+    ServerProtocolError,
     /// The request itself is invalid (bad value, expired path grant, unsupported option).
     InvalidArgument,
     Internal,
@@ -213,7 +219,10 @@ impl From<&SvnError> for AppError {
 }
 
 /// Engine error code -> (IPC code, retryable, UI actions).
-/// `Corrupt` maps to `wc-needs-cleanup`; `UnsafePath` and `ServerUnsupported` map to `internal`;
+/// `Corrupt` (local data: wc.db, pristines, work queue) maps to `wc-needs-cleanup` with the
+/// Cleanup action; `ProtocolViolation` (a malformed server response) maps to
+/// `server-protocol-error` without it, since cleanup cannot repair the server; `UnsafePath` and
+/// `ServerUnsupported` map to `internal`;
 /// `CommitOutcomeUnknown` and `WriteOutcomeUnknown` map to a non-retryable `network`; `LimitExceeded` maps to a
 /// non-retryable `invalid-argument` with no actions.
 /// The match is exhaustive on purpose: a new engine code must be mapped explicitly.
@@ -239,6 +248,8 @@ pub fn map_svn_error_code(code: SvnErrorCode) -> (ErrorCode, bool, &'static [Err
         S::RepositoryMoved => (ErrorCode::RepositoryMoved, false, &[]),
         S::PristineNotHydrated => (ErrorCode::PristineNotHydrated, false, &[]),
         S::WcInvalidOperation => (ErrorCode::WcInvalidOperation, false, &[]),
+        // Asking again gives the same answer: only the user can choose to ignore ancestry.
+        S::UnrelatedResources => (ErrorCode::UnrelatedResources, false, &[]),
         S::PathNotFound => (ErrorCode::PathNotFound, false, &[]),
         S::UnsafePath => (ErrorCode::Internal, false, &[]),
         S::DiskFull => (ErrorCode::DiskFull, false, &[]),
@@ -253,6 +264,8 @@ pub fn map_svn_error_code(code: SvnErrorCode) -> (ErrorCode, bool, &'static [Err
         // A size cap, not corruption: the same request fails again, and cleanup cannot help.
         S::LimitExceeded => (ErrorCode::InvalidArgument, false, &[]),
         S::Corrupt => (ErrorCode::WcNeedsCleanup, false, &[A::Cleanup]),
+        // Not retryable: the server answers the same request the same way.
+        S::ProtocolViolation => (ErrorCode::ServerProtocolError, false, &[]),
         S::ServerUnsupported => (ErrorCode::Internal, false, &[]),
         S::Internal => (ErrorCode::Internal, false, &[]),
     }

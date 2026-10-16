@@ -116,7 +116,8 @@ async fn info_and_list_report_authors_dates_and_directories_first() {
         .engine
         .repo_list(&format!("{URL}/trunk"), Some(Rev(1)), &ctx())
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     assert_eq!(entries[0].name, "src");
     assert_eq!(entries[0].kind, EntryKind::Dir);
     let readme = entries.iter().find(|e| e.name == "README.md").unwrap();
@@ -411,7 +412,8 @@ async fn url_locks_are_visible_in_listings_until_released() {
         .engine
         .repo_list(&format!("{URL}/trunk"), None, &ctx())
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     let lock = list
         .iter()
         .find(|e| e.name == "README.md")
@@ -436,7 +438,8 @@ async fn url_locks_are_visible_in_listings_until_released() {
         .engine
         .repo_list(&format!("{URL}/trunk"), None, &ctx())
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     assert!(
         list.iter()
             .find(|e| e.name == "README.md")
@@ -475,10 +478,11 @@ async fn dav_listings_get_their_locks_from_get_locks() {
         .engine
         .repo_list(&format!("{URL}/trunk"), None, &ctx())
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     let lock = lock_of(&head).expect("lock in a HEAD listing");
     assert_eq!(lock.comment.as_deref(), Some("editing"));
-    let root = f.engine.repo_list(URL, None, &ctx()).await.unwrap();
+    let root = f.engine.repo_list(URL, None, &ctx()).await.unwrap().entries;
     assert!(
         root.iter().all(|e| e.lock.is_none()),
         "a lock below a child is not the child's: {root:?}"
@@ -487,7 +491,8 @@ async fn dav_listings_get_their_locks_from_get_locks() {
         .engine
         .repo_list(&format!("{URL}/trunk"), Some(Rev(1)), &ctx())
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     assert!(lock_of(&old).is_none(), "{old:?}");
 }
 
@@ -516,7 +521,8 @@ async fn working_copy_locks_are_recorded_in_wc_db_and_cleared_on_unlock() {
         .engine
         .repo_list(&format!("{URL}/trunk"), None, &ctx())
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     assert!(
         on_server
             .iter()
@@ -535,7 +541,8 @@ async fn working_copy_locks_are_recorded_in_wc_db_and_cleared_on_unlock() {
         .engine
         .repo_list(&format!("{URL}/trunk"), None, &ctx())
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     assert!(
         on_server
             .iter()
@@ -572,7 +579,8 @@ async fn working_copy_locks_wait_for_a_directory_locked_by_another_program() {
         .engine
         .repo_list(&format!("{URL}/trunk"), None, &ctx())
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     let readme = on_server.iter().find(|e| e.name == "README.md").unwrap();
     assert!(readme.lock.is_none(), "the server was never asked");
 }
@@ -791,4 +799,36 @@ async fn revision_diff_over_the_display_budget_is_flagged_too_complex() {
         .unwrap();
     assert_eq!(d.too_complex, None);
     assert_eq!(d.left.unwrap().content, "hello\n");
+}
+
+/// Entries the session refuses (unsafe names) stay out of the listing, but their number reaches
+/// Browse so it does not show the folder as empty.
+#[tokio::test]
+async fn a_listing_reports_how_many_entries_were_refused() {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use super::support::{ScriptedConnector, ScriptedSession, fixture_on, standard_repo};
+    let repo = standard_repo();
+    let session = Arc::new(ScriptedSession::new(repo.clone(), None));
+    let f = fixture_on(
+        repo,
+        Arc::new(ScriptedConnector(session.clone())),
+        Arc::new(crate::engine::real::ClientRecovery),
+    );
+    let plain = f
+        .engine
+        .repo_list(&format!("{URL}/trunk"), None, &ctx())
+        .await
+        .unwrap();
+    assert_eq!(plain.hidden, 0);
+
+    session.refused_in_listings.store(3, Ordering::SeqCst);
+    let listing = f
+        .engine
+        .repo_list(&format!("{URL}/trunk"), None, &ctx())
+        .await
+        .unwrap();
+    assert_eq!(listing.hidden, 3);
+    assert_eq!(listing.entries, plain.entries);
 }

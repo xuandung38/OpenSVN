@@ -23,6 +23,24 @@ pub enum Theme {
     Dark,
 }
 
+/// Row spacing of lists and tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum Density {
+    Comfortable,
+    Compact,
+}
+
+/// Most detailed level written to the log. There is no `trace`: it would log transport internals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "lowercase")]
 pub enum DiffMode {
@@ -147,9 +165,18 @@ settings_structs! {
     plain {
         general_check_interval_min: u32 = "general.checkIntervalMin",
         general_language: Language = "general.language",
+        /// Open the most recently used working copy when the app starts; off starts with none.
+        general_open_last_wc: bool = "general.openLastWc",
+        /// Log level of the app's own modules; other libraries stay at `info` at most.
+        general_log_level: LogLevel = "general.logLevel",
         appearance_theme: Theme = "appearance.theme",
+        /// Base UI font size in pixels. Range: `SETTING_RANGES`.
+        appearance_font_size: u32 = "appearance.fontSize",
+        appearance_density: Density = "appearance.density",
         diff_mode: DiffMode = "diff.mode",
         diff_ignore_whitespace: bool = "diff.ignoreWhitespace",
+        /// Columns per tab in diff, blame and file views. Range: `SETTING_RANGES`.
+        diff_tab_width: u32 = "diff.tabWidth",
         /// Range: `SETTING_RANGES` (validator in the app crate).
         network_max_connections: u8 = "network.maxConnections",
         network_timeout_sec: u32 = "network.timeoutSec",
@@ -163,6 +190,9 @@ settings_structs! {
         network_negotiate: bool = "network.negotiate",
         wc_default_format: WcFormat = "wc.defaultFormat",
         wc_read_subversion_config: bool = "wc.readSubversionConfig",
+        /// Whitespace-separated `global-ignores` patterns used instead of svn's configuration
+        /// (`~/.subversion/config` or the built-in list). Empty: use svn's configuration.
+        wc_global_ignores: String = "wc.globalIgnores",
         cache_max_size_gb: u32 = "cache.maxSizeGb",
         integrations_web_revision_url: String = "integrations.webRevisionUrl",
         integrations_web_file_url: String = "integrations.webFileUrl",

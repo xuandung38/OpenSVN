@@ -52,7 +52,7 @@ export function BranchSwitchList({
   const start = async (node: BranchNode) => {
     setBusy(true);
     try {
-      const h = await unwrap(ipc().commands.switch(wc.id, node.url, null));
+      const h = await unwrap(ipc().commands.switch(wc.id, node.url, null, false));
       toast.show(w("opStarted", { title: h.title }));
       setPending(null);
       onSwitched();

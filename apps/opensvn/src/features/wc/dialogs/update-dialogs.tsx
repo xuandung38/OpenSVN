@@ -64,6 +64,7 @@ export function SwitchDialog({ onClose }: { onClose: () => void }) {
   const { wc } = useWcSession();
   const [url, setUrl] = useState(wc?.url ?? "");
   const [revText, setRevText] = useState("");
+  const [ignoreAncestry, setIgnoreAncestry] = useState(false);
   const rev = parseRevision(revText);
   const root = wc?.repoRootUrl ?? "";
   const trimmed = url.trim().replace(/\/+$/, "");
@@ -85,7 +86,7 @@ export function SwitchDialog({ onClose }: { onClose: () => void }) {
       onClose={onClose}
       onSubmit={async () => {
         if (!wc || rev === "invalid") return;
-        const h = await unwrap(ipc().commands.switch(wc.id, trimmed, rev));
+        const h = await unwrap(ipc().commands.switch(wc.id, trimmed, rev, ignoreAncestry));
         toast.show(t("opStarted", { title: h.title }));
         onClose();
       }}
@@ -115,6 +116,21 @@ export function SwitchDialog({ onClose }: { onClose: () => void }) {
         />
       </label>
       <span className="text-[12px] text-muted-text">{d("switchBody")}</span>
+      <label className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={ignoreAncestry}
+          onChange={(e) => setIgnoreAncestry(e.target.checked)}
+          aria-describedby="switch-ignore-ancestry-hint"
+          className="accent-[var(--accent)]"
+        />
+        {d("switchIgnoreAncestry")}
+      </label>
+      {ignoreAncestry ? (
+        <WarnBox>
+          <span id="switch-ignore-ancestry-hint">{d("switchIgnoreAncestryHint")}</span>
+        </WarnBox>
+      ) : null}
     </ActionDialog>
   );
 }

@@ -4,7 +4,7 @@
 mod common;
 
 use bytes::Bytes;
-use common::{load, run_split};
+use common::{DATA_SETS, for_each_set, load, run_split, use_set};
 use proptest::prelude::*;
 use svn_protocol::commit::{MergeResponseParser, parse_create_txn_response, parse_merge_response};
 use svn_protocol::file_revs::{FileRevEvent, FileRevsParser, parse_file_revs};
@@ -13,11 +13,13 @@ use svn_types::{ErrorCode, Revnum};
 
 #[test]
 fn create_txn_answer_names_the_transaction() {
-    let f = load("commit/full-create-txn");
-    assert_eq!(f.status, 201);
-    let name = parse_create_txn_response(&f.head(), &f.resp_body).unwrap();
-    assert_eq!(name.name, f.resp_headers.get("SVN-Txn-Name").unwrap());
-    assert!(!name.virtual_);
+    for_each_set(|| {
+        let f = load("commit/full-create-txn");
+        assert_eq!(f.status, 201);
+        let name = parse_create_txn_response(&f.head(), &f.resp_body).unwrap();
+        assert_eq!(name.name, f.resp_headers.get("SVN-Txn-Name").unwrap());
+        assert!(!name.virtual_);
+    });
 }
 
 #[test]
@@ -29,7 +31,7 @@ fn create_txn_answer_is_validated() {
     let head = ResponseHead::new(201, Headers::new());
     assert_eq!(
         parse_create_txn_response(&head, b"").unwrap_err().code,
-        ErrorCode::Corrupt
+        ErrorCode::ProtocolViolation
     );
     let virt = ResponseHead::new(201, Headers::from_pairs([("SVN-VTxn-Name", "ab-12")]));
     assert_eq!(
@@ -40,23 +42,25 @@ fn create_txn_answer_is_validated() {
 
 #[test]
 fn merge_answer_gives_the_new_revision() {
-    let f = load("commit/full-merge");
-    let m = parse_merge_response(&f.head(), &f.resp_body).unwrap();
-    assert!(m.new_rev.0 > 0);
-    assert_eq!(m.author.as_deref(), Some("alice"));
-    assert!(m.date.is_some());
-    assert_eq!(m.post_commit_error, None);
-    for name in ["commit/merge", "commit/lock-merge"] {
-        let f = load(name);
-        assert!(
-            parse_merge_response(&f.head(), &f.resp_body)
-                .unwrap()
-                .new_rev
-                .0
-                > 0,
-            "{name}"
-        );
-    }
+    for_each_set(|| {
+        let f = load("commit/full-merge");
+        let m = parse_merge_response(&f.head(), &f.resp_body).unwrap();
+        assert!(m.new_rev.0 > 0);
+        assert_eq!(m.author.as_deref(), Some("alice"));
+        assert!(m.date.is_some());
+        assert_eq!(m.post_commit_error, None);
+        for name in ["commit/merge", "commit/lock-merge"] {
+            let f = load(name);
+            assert!(
+                parse_merge_response(&f.head(), &f.resp_body)
+                    .unwrap()
+                    .new_rev
+                    .0
+                    > 0,
+                "{name}"
+            );
+        }
+    });
 }
 
 #[test]
@@ -80,12 +84,14 @@ fn full_merge_response_picks_the_baseline_not_a_resource() {
 
 #[test]
 fn merge_failures_use_the_error_chain() {
-    let f = load("errors/out-of-date-409");
-    let err = parse_merge_response(&f.head(), &f.resp_body).unwrap_err();
-    assert_eq!(err.code, ErrorCode::OutOfDate);
-    let ok = ResponseHead::new(200, Headers::new());
-    assert!(parse_merge_response(&ok, b"<D:merge-response xmlns:D='DAV:'/>").is_err());
-    assert!(parse_merge_response(&ok, b"<html/>").is_err());
+    for_each_set(|| {
+        let f = load("errors/out-of-date-409");
+        let err = parse_merge_response(&f.head(), &f.resp_body).unwrap_err();
+        assert_eq!(err.code, ErrorCode::OutOfDate);
+        let ok = ResponseHead::new(200, Headers::new());
+        assert!(parse_merge_response(&ok, b"<D:merge-response xmlns:D='DAV:'/>").is_err());
+        assert!(parse_merge_response(&ok, b"<html/>").is_err());
+    });
 }
 
 #[test]
@@ -206,11 +212,14 @@ fn blame_rejects_broken_input() {
 proptest! {
     #[test]
     fn chunking_never_changes_blame_or_merge(cuts in proptest::collection::vec(0usize..16384, 0..16)) {
-        let f = load("file_revs/blame");
-        prop_assert_eq!(joined(parse_file_revs(&f.resp_body).unwrap()), joined(run_split(FileRevsParser::new(), &f.resp_body, &cuts)));
-        let m = load("commit/full-merge");
-        let whole = parse_merge_response(&m.head(), &m.resp_body).unwrap();
-        let split = run_split(MergeResponseParser::new(), &m.resp_body, &cuts);
-        prop_assert_eq!(vec![whole], split);
+        for set in DATA_SETS {
+            use_set(set);
+            let f = load("file_revs/blame");
+            prop_assert_eq!(joined(parse_file_revs(&f.resp_body).unwrap()), joined(run_split(FileRevsParser::new(), &f.resp_body, &cuts)));
+            let m = load("commit/full-merge");
+            let whole = parse_merge_response(&m.head(), &m.resp_body).unwrap();
+            let split = run_split(MergeResponseParser::new(), &m.resp_body, &cuts);
+            prop_assert_eq!(vec![whole], split);
+        }
     }
 }

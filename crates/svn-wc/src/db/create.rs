@@ -4,9 +4,11 @@
 //! rows: it is built as `.svn/tmp/wc.db.creating`, closed, and renamed into place. A process
 //! killed before the rename leaves a `.svn` *skeleton* that no client takes for a working copy:
 //! `tmp` holding the creation lock file `wc.db.creating.lock` and maybe the half-built database
-//! and its journal, and maybe an empty `pristine`. The next [`WcDb::create`] takes the skeleton
-//! over in place, unless its creator still holds the lock. A process killed after the rename
-//! leaves a regular working copy whose root is `incomplete`, which an update finishes.
+//! and its journal, and maybe an empty `pristine`; or, killed between the `mkdir` of `.svn` and
+//! the lock file, an empty `.svn` or a `.svn` holding only an empty `tmp`. The next
+//! [`WcDb::create`] takes the skeleton over in place, unless its creator still holds the lock. A
+//! process killed after the rename leaves a regular working copy whose root is `incomplete`,
+//! which an update finishes.
 //!
 //! Earlier versions created `wc.db` in place, so a kill in the first milliseconds left an empty
 //! or schema-less `.svn/wc.db` (plus `tmp` and `pristine`). [`WcDb::open`] reports such a file as
@@ -15,13 +17,15 @@
 //! # Ownership
 //! Whoever holds the OS lock on `.svn/tmp/wc.db.creating.lock` owns `.svn`. A creator makes
 //! `.svn` and `tmp` with exclusive `mkdir`s, then creates and locks the lock file; until it holds
-//! the lock it never deletes anything. Another caller takes a skeleton over only when it holds
-//! that same lock (checked to still be the file at that path) and the skeleton, inspected again
-//! under the lock, holds nothing but the names above. It then deletes only those files, one by
-//! one, never a directory, and reuses `tmp` and `pristine`. The lock file itself is deleted only
-//! by its holder: after the database is in place, or with the whole `.svn` when the creation
-//! fails. Anything else in `.svn` (user files, svn's own files, a complete or unreadable
-//! `wc.db`) makes the area foreign: it is rejected and never touched.
+//! the lock it never deletes anything. An empty `.svn` holds nothing to lose: a caller that finds
+//! one makes `tmp` in it with the same exclusive `mkdir`, and of two callers only the one whose
+//! `mkdir` succeeds goes on (the other reports the area busy). Another caller takes a skeleton
+//! over only when it holds that same lock (checked to still be the file at that path) and the
+//! skeleton, inspected again under the lock, holds nothing but the names above. It then deletes
+//! only those files, one by one, never a directory, and reuses `tmp` and `pristine`. The lock
+//! file itself is deleted only by its holder: after the database is in place, or with the whole
+//! `.svn` when the creation fails. Anything else in `.svn` (user files, svn's own files, a
+//! complete or unreadable `wc.db`) makes the area foreign: it is rejected and never touched.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -64,6 +68,11 @@ fn real_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir())
 }
 
+/// Whether `path` is a real directory (not a symlink) with nothing in it.
+fn empty_real_dir(path: &Path) -> bool {
+    real_dir(path) && fs::read_dir(path).is_ok_and(|mut d| d.next().is_none())
+}
+
 /// Whether `path` is a regular file (not a symlink).
 fn regular_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
@@ -104,6 +113,7 @@ fn inspect_skeleton(adm: &Path) -> Result<Option<Skeleton>> {
     }
     let mut junk = Vec::new();
     let (mut has_tmp, mut has_lock, mut has_db, mut has_db_journal) = (false, false, false, false);
+    let (mut tmp_files, mut has_pristine) = (0usize, false);
     for entry in fs::read_dir(adm).map_err(|e| io_err("cannot read", adm, &e))? {
         let entry = entry.map_err(|e| io_err("cannot read", adm, &e))?;
         let path = entry.path();
@@ -116,6 +126,7 @@ fn inspect_skeleton(adm: &Path) -> Result<Option<Skeleton>> {
                     if !regular_file(&p) {
                         return Ok(None);
                     }
+                    tmp_files += 1;
                     match inner.file_name().to_str() {
                         Some(CREATING_LOCK) => has_lock = true,
                         Some(CREATING_DB | CREATING_JOURNAL) => junk.push(p),
@@ -124,6 +135,7 @@ fn inspect_skeleton(adm: &Path) -> Result<Option<Skeleton>> {
                 }
             }
             Some("pristine") if real_dir(&path) => {
+                has_pristine = true;
                 let mut it = fs::read_dir(&path).map_err(|e| io_err("cannot read", &path, &e))?;
                 if it.next().is_some() {
                     return Ok(None);
@@ -140,9 +152,12 @@ fn inspect_skeleton(adm: &Path) -> Result<Option<Skeleton>> {
             _ => return Ok(None),
         }
     }
-    // Ours only with the evidence of a creation: the lock file of this version, or the empty
-    // in-place database of earlier ones. An empty `.svn`, or a `tmp` alone, proves nothing.
-    if !has_tmp || !(has_lock || has_db) || (has_db_journal && !has_db) {
+    // Ours with the evidence of a creation: the lock file of this version, or the empty
+    // in-place database of earlier ones. Without either, only an empty `tmp` and nothing else
+    // (a creator killed between its `mkdir` of `tmp` and the lock file) is taken over: it holds
+    // nothing to lose, and the creation lock decides between callers as for any skeleton.
+    let bare_tmp = tmp_files == 0 && !has_pristine && !has_db_journal;
+    if !has_tmp || !(has_lock || has_db || bare_tmp) || (has_db_journal && !has_db) {
         return Ok(None);
     }
     Ok(Some(Skeleton { junk }))
@@ -247,10 +262,10 @@ impl WcDb {
     /// `.svn/{wc.db,format,entries,tmp,pristine}` plus the REPOSITORY, WCROOT and root BASE rows
     /// exactly as `svn_wc__db_init` inserts them.
     ///
-    /// An existing `.svn` is rejected without being touched, except the verified skeleton of an
-    /// interrupted creation whose creator is gone, which is taken over (see the module
-    /// documentation for the ownership rules). On failure, the caller that holds the creation
-    /// lock removes `.svn` again.
+    /// An existing `.svn` is rejected without being touched, except an empty one, one holding only
+    /// an empty `tmp`, or the verified skeleton of an interrupted creation whose creator is gone,
+    /// which is taken over (see the module documentation for the ownership rules). On failure,
+    /// the caller that holds the creation lock removes `.svn` again.
     pub fn create(wcroot: &Path, new: &NewWc) -> Result<WcDb> {
         let adm = wcroot.join(ADM_DIR);
         let tmp = adm.join("tmp");
@@ -259,9 +274,15 @@ impl WcDb {
             Err(e) if e.kind() == ErrorKind::AlreadyExists => false,
             Err(e) => return Err(io_err("cannot create", &adm, &e)),
         };
-        if fresh {
-            // Not ours to clean up until the lock is held: never delete on these errors.
-            fs::create_dir(&tmp).map_err(|e| io_err("cannot create", &tmp, &e))?;
+        if fresh || empty_real_dir(&adm) {
+            // An empty `.svn` that is not ours is a creator killed between its two `mkdir`s, or
+            // one about to make `tmp`: whoever makes `tmp` goes on to the lock, the other
+            // stops. Not ours to clean up until the lock is held: never delete on these errors.
+            match fs::create_dir(&tmp) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => return Err(busy(wcroot)),
+                Err(e) => return Err(io_err("cannot create", &tmp, &e)),
+            }
         } else if inspect_skeleton(&adm)?.is_none() {
             return Err(existing_adm(wcroot));
         }
@@ -335,6 +356,7 @@ impl WcDb {
             owned_locks: Mutex::new(Default::default()),
             lock_owner: Mutex::new(None),
             lock_gate: Mutex::new(()),
+            lock_markers: Mutex::default(),
         })
     }
 
