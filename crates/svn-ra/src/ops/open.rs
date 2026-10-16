@@ -21,7 +21,7 @@ use svn_types::{
 use tokio::io::AsyncWrite;
 
 use super::update::RaWire;
-use super::{commit, file_revs, history, locks, log, read, update};
+use super::{commit, file_revs, history, iprops, locks, log, read, update};
 use crate::transport::HttpTransport;
 
 /// Repository session over Subversion's HTTP protocol v2 (mod_dav_svn 1.8 and newer).
@@ -258,6 +258,15 @@ impl RaSession for HttpRaSession {
         cancel: &CancelToken,
     ) -> Result<()> {
         locks::unlock(&self.wire, path, token, break_lock, cancel).await
+    }
+
+    async fn inherited_props(
+        &self,
+        repos_relpath: &RelPath,
+        rev: Revnum,
+        cancel: &CancelToken,
+    ) -> Result<Vec<svn_ra_api::InheritedItem>> {
+        iprops::inherited_props(&self.wire, repos_relpath, rev, cancel).await
     }
 
     async fn file_revs(

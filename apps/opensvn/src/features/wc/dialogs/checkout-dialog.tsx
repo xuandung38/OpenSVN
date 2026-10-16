@@ -4,7 +4,7 @@ import { Dialog } from "../../../components/ui/dialog";
 import { Input, Select } from "../../../components/ui/fields";
 import { SafeLink } from "../../../components/ui/safe-link";
 import { SafeText } from "../../../components/ui/safe-text";
-import type { Depth, IncompleteCheckout, PathGrantInfo } from "../../../ipc/bindings";
+import type { Depth, IncompleteCheckout, PathGrantInfo, SparseDepth } from "../../../ipc/bindings";
 import { ipc, toAppError, unwrap } from "../../../ipc/client";
 import {
   useEngineCapabilities,
@@ -29,6 +29,9 @@ import {
 } from "../repos/repo-model";
 import { resumeStrings } from "../resume/resume-strings";
 import { useResumeActions } from "../resume/use-resume-actions";
+import { FolderDepthTree } from "../sparse/folder-depth-tree";
+import { checkoutEntries, choose, prune } from "../sparse/sparse-model";
+import { sparseStrings } from "../sparse/sparse-strings";
 import { isCheckoutUrl } from "../wc-model";
 import { pickFolder } from "../welcome/use-path-grant";
 import { dialogStrings } from "./dialog-strings";
@@ -97,6 +100,10 @@ export function CheckoutDialog({
   const [url, setUrl] = useState(initialUrl);
   const [revText, setRevText] = useState("");
   const [depth, setDepth] = useState<Depth>("infinity");
+  // "Choose folders": a depth per folder below the root (sparse checkout).
+  const [showFolders, setShowFolders] = useState(false);
+  const [choices, setChoices] = useState<ReadonlyMap<string, SparseDepth>>(new Map());
+  const sp = useT(sparseStrings);
   // `null` = the default checkout folder; a grant once the user picked another parent.
   const [picked, setPicked] = useState<PathGrantInfo | null>(null);
   const [needsRepick, setNeedsRepick] = useState(false);
@@ -112,6 +119,12 @@ export function CheckoutDialog({
   const rs = useT(resumeStrings);
 
   const trimmedUrl = url.trim();
+  // Folder choices belong to one URL: another URL starts without them.
+  const [choicesUrl, setChoicesUrl] = useState(trimmedUrl);
+  if (choicesUrl !== trimmedUrl) {
+    setChoicesUrl(trimmedUrl);
+    if (choices.size > 0) setChoices(new Map());
+  }
   const rev = parseRevision(revText);
   // A pasted VisualSVN web link is replaced by the repository URL once the server confirms it;
   // an `r<N>` link names the path as it was at N, so N replaces the revision field.
@@ -186,7 +199,7 @@ export function CheckoutDialog({
           destName: folderName,
           rev,
           depth,
-          sparse: null,
+          sparse: choices.size > 0 ? checkoutEntries(choices) : null,
           format: 31,
           storePristine: true,
           ignoreExternals: externals === true && ignoreExternals,
@@ -398,7 +411,14 @@ export function CheckoutDialog({
             </label>
             <label className="flex flex-col gap-1">
               {d("depth")}
-              <Select value={depth} onChange={(e) => setDepth(e.target.value as Depth)}>
+              <Select
+                value={depth}
+                onChange={(e) => {
+                  const next = e.target.value as Depth;
+                  setDepth(next);
+                  setChoices((c) => prune(new Map(c), next));
+                }}
+              >
                 {DEPTHS.map((o) => (
                   <option key={o.value} value={o.value}>
                     {d(o.label)}
@@ -411,6 +431,30 @@ export function CheckoutDialog({
             <span className="text-bad-text" role="alert">
               {d("revisionInvalid")}
             </span>
+          )}
+          <div className="flex items-center gap-2">
+            <Button
+              aria-expanded={showFolders}
+              disabled={!urlOk || rev === "invalid"}
+              onClick={() => setShowFolders((s) => !s)}
+            >
+              {showFolders ? sp("hideFolders") : sp("chooseFolders")}
+            </Button>
+            {choices.size > 0 && (
+              <span className="text-[12px] text-muted-text">
+                {sp("chosen", { n: choices.size })}
+              </span>
+            )}
+          </div>
+          {showFolders && urlOk && rev !== "invalid" && (
+            <FolderDepthTree
+              rootUrl={trimmedUrl}
+              rev={rev}
+              rootDepth={depth}
+              choices={choices}
+              onChoose={(path, value) => setChoices((c) => choose(c, depth, path, value))}
+              className="max-h-64"
+            />
           )}
           {externals === true && (
             <label className="flex items-center gap-2">

@@ -16,7 +16,8 @@
 //! name), `{wc}` (container path of the step's working copy).
 //!
 //! A step with `fails_with: E155021` is a negative step: it passes only when the command exits
-//! non-zero and its stderr contains the given text.
+//! non-zero and its stderr contains the given text (for an engine step: when it returns an error
+//! whose message contains it).
 
 use std::path::Path;
 
@@ -113,7 +114,8 @@ pub struct Step {
     #[serde(default)]
     pub note: Option<String>,
     /// Negative step: the command must exit non-zero and its stderr must contain this text
-    /// (e.g. `E155021` when an old client refuses a newer working copy format).
+    /// (e.g. `E155021` when an old client refuses a newer working copy format). An engine step
+    /// must return an error whose message contains it.
     #[serde(default)]
     pub fails_with: Option<String>,
 }
@@ -151,6 +153,18 @@ pub struct Compare {
     /// format-32 working copies are never read by 1.14).
     #[serde(default = "default_reader")]
     pub reader: SvnVersion,
+    /// `wcdb` differences accepted on purpose (default: none).
+    #[serde(default)]
+    pub ignore: Vec<Ignored>,
+}
+
+/// A `wc.db` difference a comparison accepts on purpose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ignored {
+    /// `NODES.dav_cache`: svn's ra_serf caches `svn:wc:ra_dav:version-url` there, the engine
+    /// leaves it empty (svn asks the server when the cache is empty).
+    DavCache,
 }
 
 fn default_reader() -> SvnVersion {
@@ -307,10 +321,8 @@ impl Scenario {
                 if step.svn.is_none() && step.sh.is_none() {
                     return Err(bad(format!("step {i}: fails_with needs svn or sh")));
                 }
-                if step.on == Actor::Engine || needle.trim().is_empty() {
-                    return Err(bad(format!(
-                        "step {i}: fails_with needs non-empty text and an svn actor"
-                    )));
+                if needle.trim().is_empty() {
+                    return Err(bad(format!("step {i}: fails_with needs non-empty text")));
                 }
             }
             if step.svn.as_ref().is_some_and(Vec::is_empty) {
@@ -418,6 +430,6 @@ compare:
         assert!(Scenario::from_yaml(empty).is_err());
         let engine =
             "name: n\nrepo: r\nsteps:\n  - { on: engine, wc: a, svn: [status], fails_with: E1 }\n";
-        assert!(Scenario::from_yaml(engine).is_err());
+        assert!(Scenario::from_yaml(engine).is_ok());
     }
 }

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use opensvn_ipc::{
     ChangeAction, CleanupRequest, CommitRequest, CopyLocationRequest, Depth, EntryKind, FileStatus,
     IgnoreAddRequest, IgnoreScope, Layout, LogGetRequest, LogTarget, NodeStatus, ResolveChoice,
-    ResolveRequest, Rev, RevertRequest, UpdateRequest, WcFormat, WcId,
+    ResolveRequest, Rev, RevertRequest, SparseDepth, SparseEntry, UpdateRequest, WcFormat, WcId,
 };
 use svn_types::{ErrorCode, SvnError};
 
@@ -752,6 +752,165 @@ pub async fn mark_move_and_set_depth(h: &dyn Harness) {
         .expect("set_depth");
 }
 
+fn sparse(entries: &[(&str, SparseDepth)]) -> Vec<SparseEntry> {
+    entries
+        .iter()
+        .map(|(path, depth)| SparseEntry {
+            path: (*path).to_owned(),
+            depth: *depth,
+        })
+        .collect()
+}
+
+/// Whether the working copy has `path` as a versioned file: an edit shows as a modification,
+/// not as an unversioned file. The edit is reverted afterwards.
+async fn has_file(h: &dyn Harness, wc: &WcRef, path: &str) -> bool {
+    h.write_file(&wc.root, path, "probe\n")
+        .expect("write probe");
+    let st = status(h, wc).await;
+    let s = find(&st, path).unwrap_or_else(|| panic!("{path}: {st:?}"));
+    let versioned = s.text == NodeStatus::Modified;
+    if versioned {
+        h.engine()
+            .revert(
+                wc,
+                &RevertRequest {
+                    wc_id: wc.id.clone(),
+                    paths: vec![path.to_owned()],
+                    remove_unversioned: None,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("revert probe");
+    } else {
+        h.remove_file(&wc.root, path).expect("remove probe");
+    }
+    versioned
+}
+
+/// "Choose folders": a checkout with a depth per folder, the depths it records, and changing
+/// them on the existing working copy (bringing folders in, excluding and restoring them).
+pub async fn sparse_checkout_and_choose_folders(h: &dyn Harness) {
+    let e = h.engine();
+    let root = h.work_dir().join("sparse");
+    let info = e
+        .checkout(
+            &CheckoutPlan {
+                url: h.repo_url(),
+                path: root.clone(),
+                rev: None,
+                depth: Depth::Empty,
+                sparse: Some(sparse(&[
+                    ("trunk/src", SparseDepth::Infinity),
+                    ("branches", SparseDepth::Empty),
+                ])),
+                format: WcFormat::V31,
+                store_pristine: true,
+                ignore_externals: false,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("sparse checkout");
+    let wc = WcRef {
+        id: WcId("sparse".to_owned()),
+        root: PathBuf::from(&info.root_path),
+    };
+    let depths = e.wc_depths(&wc, &ctx()).await.expect("wc_depths");
+    assert_eq!(
+        depths,
+        sparse(&[
+            ("", SparseDepth::Empty),
+            ("branches", SparseDepth::Empty),
+            ("trunk", SparseDepth::Empty),
+            ("trunk/src", SparseDepth::Infinity),
+        ])
+    );
+    assert!(has_file(h, &wc, "trunk/src/main.rs").await);
+    assert!(!has_file(h, &wc, "trunk/README.md").await);
+
+    // Parents first: `files` on trunk drops trunk/src (as svn does), then it comes back empty.
+    e.sparse_apply(
+        &wc,
+        &sparse(&[
+            ("trunk/src", SparseDepth::Empty),
+            ("trunk", SparseDepth::Files),
+            ("tags", SparseDepth::Empty),
+        ]),
+        &ctx(),
+    )
+    .await
+    .expect("sparse_apply");
+    assert_eq!(
+        e.wc_depths(&wc, &ctx()).await.expect("wc_depths"),
+        sparse(&[
+            ("", SparseDepth::Empty),
+            ("branches", SparseDepth::Empty),
+            ("tags", SparseDepth::Empty),
+            ("trunk", SparseDepth::Files),
+            ("trunk/src", SparseDepth::Empty),
+        ])
+    );
+    assert!(has_file(h, &wc, "trunk/README.md").await);
+    assert!(!has_file(h, &wc, "trunk/src/main.rs").await);
+
+    e.sparse_apply(
+        &wc,
+        &sparse(&[
+            ("trunk", SparseDepth::Infinity),
+            ("trunk/src", SparseDepth::Exclude),
+        ]),
+        &ctx(),
+    )
+    .await
+    .expect("sparse_apply exclude");
+    assert_eq!(
+        e.wc_depths(&wc, &ctx()).await.expect("wc_depths"),
+        sparse(&[
+            ("", SparseDepth::Empty),
+            ("branches", SparseDepth::Empty),
+            ("tags", SparseDepth::Empty),
+            ("trunk", SparseDepth::Infinity),
+            ("trunk/src", SparseDepth::Exclude),
+        ])
+    );
+
+    e.sparse_apply(&wc, &sparse(&[("trunk", SparseDepth::Infinity)]), &ctx())
+        .await
+        .expect("sparse_apply infinity");
+    assert!(has_file(h, &wc, "trunk/src/main.rs").await);
+    assert_eq!(
+        e.wc_depths(&wc, &ctx()).await.expect("wc_depths"),
+        sparse(&[
+            ("", SparseDepth::Empty),
+            ("branches", SparseDepth::Empty),
+            ("tags", SparseDepth::Empty),
+            ("trunk", SparseDepth::Infinity),
+            ("trunk/src", SparseDepth::Infinity),
+        ])
+    );
+
+    // The root itself can change depth but never be excluded; a folder is listed once.
+    e.sparse_apply(&wc, &sparse(&[("", SparseDepth::Files)]), &ctx())
+        .await
+        .expect("root depth");
+    assert_eq!(
+        e.wc_depths(&wc, &ctx()).await.expect("wc_depths"),
+        sparse(&[("", SparseDepth::Files)])
+    );
+    for bad in [
+        sparse(&[("", SparseDepth::Exclude)]),
+        sparse(&[("tags", SparseDepth::Empty), ("tags", SparseDepth::Files)]),
+    ] {
+        let err = e
+            .sparse_apply(&wc, &bad, &ctx())
+            .await
+            .expect_err("refused");
+        assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{err}");
+    }
+}
+
 /// Switch moves a working copy to another URL of the same repository.
 pub async fn switch_to_a_branch(h: &dyn Harness) {
     let e = h.engine();
@@ -1441,6 +1600,7 @@ pub async fn run_all<H: Harness>(make: impl Fn() -> H) {
     cancellation_and_errors(&make()).await;
     working_copy_metadata_operations(&make()).await;
     mark_move_and_set_depth(&make()).await;
+    sparse_checkout_and_choose_folders(&make()).await;
     switch_to_a_branch(&make()).await;
     branch_detection_follows_a_switch(&make()).await;
     repository_content_tools(&make()).await;

@@ -1,0 +1,22 @@
+# Switch trunk -> branches/feature-x -> back, taking turns. A target with no common history
+# (trunk/docs is not a copy of trunk) is refused by everyone, E195012, until --ignore-ancestry.
+name: op-switch
+repo: basic
+steps:
+  - { on: engine, wc: e, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: s, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn14, wc: e, svn: [switch, "{url}/branches/feature-x", "."] }
+  - { on: engine, wc: s, svn: [switch, "{url}/branches/feature-x"] }
+  - { on: svn15, wc: o, svn: [switch, "{url}/branches/feature-x", "."] }
+  - { on: engine, wc: u, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: v, svn: [checkout, "{url}/trunk", "."] }
+  - { on: engine, wc: u, svn: [switch, "{url}/trunk/docs"], fails_with: E195012 }
+  - { on: svn14, wc: u, svn: [switch, "{url}/trunk/docs", "."], fails_with: E195012 }
+  - { on: svn15, wc: v, svn: [switch, "{url}/trunk/docs", "."], fails_with: E195012 }
+  - { on: engine, wc: u, svn: [switch, --ignore-ancestry, "{url}/trunk/docs"] }
+  - { on: svn15, wc: v, svn: [switch, --ignore-ancestry, "{url}/trunk/docs", "."] }
+compare:
+  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: s, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: u, right: v, checks: [tree, status, info, wcdb], ignore: [dav_cache] }

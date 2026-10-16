@@ -93,4 +93,5 @@ scenario!(lock_held_elsewhere_and_steal);
 scenario!(commit_with_auto_add_remove);
 scenario!(update_ends_in_conflict);
 scenario!(mark_move_and_set_depth);
+scenario!(sparse_checkout_and_choose_folders);
 scenario!(update_of_sub_paths);

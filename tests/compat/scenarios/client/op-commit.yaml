@@ -1,0 +1,22 @@
+# svn commits from the engine's working copy and the engine commits from svn's; every working
+# copy then updates to HEAD and must equal a fresh svn checkout.
+name: op-commit
+repo: basic
+fresh_repo: true
+steps:
+  - { on: engine, wc: e, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: s, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: e, sh: "printf 'engine wc, svn commit\\n' >> README.txt && printf 'new\\n' > from-e.txt" }
+  - { on: engine, wc: e, svn: [add, from-e.txt] }
+  - { on: svn14, wc: e, svn: [commit, -m, "svn 1.14 commits the engine's working copy"] }
+  - { on: svn15, wc: s, svn: [update] }
+  - { on: svn15, wc: s, sh: "printf 'svn wc, engine commit\\n' >> docs/index.md && printf 'x\\n' > from-s.txt" }
+  - { on: svn15, wc: s, svn: [add, from-s.txt] }
+  - { on: svn15, wc: s, svn: [propset, custom:by, svn15, from-s.txt] }
+  - { on: engine, wc: s, svn: [commit, -m, "the engine commits svn's working copy"] }
+  - { on: engine, wc: e, svn: [update] }
+  - { on: engine, wc: s, svn: [update] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/trunk", "."] }
+compare:
+  - { left: e, right: o, checks: [tree, status, info] }
+  - { left: s, right: o, checks: [tree, status, info] }

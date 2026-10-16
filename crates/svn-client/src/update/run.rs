@@ -269,13 +269,17 @@ pub async fn drive_update(
     session.ensure_authenticated(cancel).await?;
     cancel.check()?;
 
-    let node = db.read_base(&target_wc)?.ok_or_else(|| {
-        SvnError::new(
+    let node = db.read_base(&target_wc)?;
+    // `--set-depth` may bring in a node the working copy does not have yet (see
+    // `build_report`): the drive then adds it below its parent, which is locked instead.
+    let absent = params.sticky_depth && node.as_ref().is_none_or(|n| !n.presence.is_present());
+    if node.is_none() && !absent {
+        return Err(SvnError::new(
             ErrorCode::PathNotFound,
             format!("'{target_wc}' is not under version control"),
-        )
-    })?;
-    let lock_dir = if node.kind == NodeKind::Dir {
+        ));
+    }
+    let lock_dir = if !absent && node.as_ref().is_some_and(|n| n.kind == NodeKind::Dir) {
         target_wc.clone()
     } else {
         target_wc.parent().unwrap_or_else(RelPath::root)
@@ -285,7 +289,12 @@ pub async fn drive_update(
     // `set_path("")`. A `link_path` for it with entries below would make svn_repos read freed
     // memory (`reporter.c`, `delta_dirs`), and mod_dav_svn's child dies on an assertion.
     let reparented: Box<dyn RaSession>;
-    let (session, anchor) = match switched_dir_url(&db, &target_wc, &node, session)? {
+    // A node being brought in is never switched: it is added below its parent.
+    let switched = match node.as_ref().filter(|_| !absent) {
+        Some(n) => switched_dir_url(&db, &target_wc, n, session)?,
+        None => None,
+    };
+    let (session, anchor) = match switched {
         Some(url) => {
             check_identity(&db, session)?;
             let session: &dyn RaSession = if session.session_url() == &url {
@@ -352,6 +361,13 @@ pub async fn drive_update(
     {
         let (db, cancel) = (Arc::clone(&db), cancel.clone());
         blocking(move || crate::wc::run_work_queue(&db, &cancel).map(|_| ())).await?;
+    }
+
+    // Nodes whose inherited-properties cache the drive refreshes (svn collects them before it
+    // drives, `svn_client__get_inheritable_props`); the target itself is decided afterwards.
+    let mut iprop_paths = super::iprops::targets(&db, &target_wc, params.depth)?;
+    if !iprop_paths.contains(&target_wc) {
+        iprop_paths.insert(0, target_wc.clone());
     }
 
     // Decided before anything is restored, like svn (`is_empty_wc` runs before the crawl).
@@ -552,6 +568,16 @@ pub async fn drive_update(
                 return Err(e);
             }
             tracing::warn!("could not record children outside the update depth: {e}");
+        }
+    }
+    if let Some(rev) = reached {
+        // Like the markers above: the update succeeded, a cache that cannot be read only stays
+        // as it was; svn refreshes it on its next update.
+        if let Err(e) = super::iprops::refresh(session, &db, &iprop_paths, rev, cancel).await {
+            if e.code == ErrorCode::Cancelled {
+                return Err(e);
+            }
+            tracing::warn!("could not cache inherited properties: {e}");
         }
     }
     let out = outcome.lock().unwrap_or_else(PoisonError::into_inner);

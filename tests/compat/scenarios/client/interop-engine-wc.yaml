@@ -1,0 +1,50 @@
+# DAV interop, engine -> svn: the engine checks out and changes a working copy; svn 1.14 and
+# 1.15 then run status, update, cleanup and commit on it. Snapshots (`cp -a`) are compared with
+# a working copy svn made through the same steps.
+name: interop-engine-wc
+repo: basic
+fresh_repo: true
+steps:
+  - { on: engine, wc: e, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/trunk", "."] }
+  # The same local changes: the engine schedules them in e, svn in o.
+  - { on: svn15, wc: e, sh: "printf 'edited\\n' >> README.txt && printf 'new\\n' > new.txt && mkdir newdir && printf 'f\\n' > newdir/f.txt" }
+  - { on: svn15, wc: o, sh: "printf 'edited\\n' >> README.txt && printf 'new\\n' > new.txt && mkdir newdir && printf 'f\\n' > newdir/f.txt" }
+  - { on: engine, wc: e, svn: [add, new.txt, newdir] }
+  - { on: svn15, wc: o, svn: [add, new.txt, newdir] }
+  - { on: engine, wc: e, svn: [delete, crlf.txt] }
+  - { on: svn15, wc: o, svn: [delete, crlf.txt] }
+  - { on: engine, wc: e, svn: [move, src/app.c, src/renamed.c] }
+  - { on: svn15, wc: o, svn: [move, src/app.c, src/renamed.c] }
+  - { on: engine, wc: e, svn: [propset, custom:p, v, docs/index.md] }
+  - { on: svn15, wc: o, svn: [propset, custom:p, v, docs/index.md] }
+  - { on: svn15, wc: e-edited, sh: "cp -a ../e/. ." }
+  - { on: svn15, wc: o-edited, sh: "cp -a ../o/. ." }
+  # svn takes over the engine's working copy: read, no-op update, cleanup.
+  - { on: svn14, wc: e, svn: [status] }
+  - { on: svn15, wc: e, svn: [status, -u] }
+  - { on: svn14, wc: e, svn: [update] }
+  - { on: svn15, wc: e, svn: [update] }
+  - { on: svn14, wc: e, svn: [cleanup] }
+  - { on: svn15, wc: e, svn: [cleanup] }
+  - { on: svn15, wc: o, svn: [update] }
+  - { on: svn15, wc: e-taken, sh: "cp -a ../e/. ." }
+  - { on: svn15, wc: o-taken, sh: "cp -a ../o/. ." }
+  # svn 1.14 commits the engine's changes, svn 1.15 updates, and both clean up.
+  - { on: svn14, wc: e, svn: [commit, -m, "svn 1.14 commits what the engine scheduled"] }
+  - { on: svn15, wc: e, svn: [update] }
+  - { on: svn14, wc: e, svn: [cleanup] }
+  - { on: svn15, wc: e, svn: [cleanup, --vacuum-pristines] }
+  - { on: svn15, wc: f, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: f, svn: [cleanup, --vacuum-pristines] }
+  # And the engine keeps working on it.
+  - { on: engine, wc: e, svn: [update] }
+  - { on: engine, wc: e, svn: [status] }
+compare:
+  - { left: e-edited, right: o-edited, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e-edited, right: o-edited, checks: [status, info], reader: svn14 }
+  - { left: e-taken, right: o-taken, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  # Not wcdb: svn itself records a committed node differently from a checked-out one (NULL
+  # instead of empty properties, cached dav props), so a committed and a fresh copy differ.
+  - { left: e, right: f, checks: [tree, status, info] }
+  - { left: e, right: f, checks: [status, info], reader: svn14 }

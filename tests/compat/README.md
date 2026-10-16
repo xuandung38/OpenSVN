@@ -125,7 +125,7 @@ Run one: `cargo xtask compat run tests/compat/scenarios/wc/my-scenario.yaml` (fi
 | `scenarios/protocol/` | P03 |
 | `scenarios/wc/` | 07A / 07B |
 | `scenarios/ra/read/`, `scenarios/ra/write/` | 10a, 10b |
-| `scenarios/client/` | 11U, 11C |
+| `scenarios/client/` | 11U, 11C; engine vs svn on shared working copies (see its README) |
 | `scenarios/e2e/` | 12b, 15 |
 
 Windows E2E cannot use Docker Linux on hosted runners: use an internal VisualSVN test server or a
@@ -140,11 +140,64 @@ dev-dependency instead of calling `Command::new("svn")`; see its crate docs for 
 `OPENSVN_REQUIRE_SVN=1` makes only a *missing* svn fatal; an svn older than the test's
 `MinVersion` always skips with a message (Windows only has SlikSVN 1.14.5).
 
+The svn-client oracle suite (`crates/svn-client/tests/*_vs_svn.rs`) asks for svn 1.14 or newer:
+1.14.x and 1.15.0 write the same working copies for everything it compares. Run it against
+either client:
+
+```sh
+OPENSVN_SVN_BIN=/usr/bin/svn OPENSVN_SVNADMIN_BIN=/usr/bin/svnadmin OPENSVN_REQUIRE_SVN=1 \
+  cargo test -p svn-client            # svn 1.14.x (Ubuntu 24.04: 1.14.3, SlikSVN 1.14.5)
+OPENSVN_SVN_BIN=target/svn-1.15/bin/svn OPENSVN_REQUIRE_SVN=1 cargo test -p svn-client
+```
+
+One case needs 1.15 (`update_empty_target_vs_svn`, working rows below an empty target: svn
+1.14.3 fails that update itself) and skips with a message on 1.14 (`oracle_1_15()` in
+`tests/common/oracle.rs`). A new test that differs between the two asks for `oracle_1_15()`.
+
 ### Engine steps
 
 `on: engine` steps are executed by an `EngineDriver` (trait in `runner.rs`) that the owning crate's
 test supplies via `Runner::with_engine`; `compat-run` has no engine attached and fails such
-scenarios with a clear error.
+scenarios with a clear error. The driver of the real engine is
+`apps/opensvn/src-tauri/tests/compat_two_way.rs`: it maps `svn`-style command lines (`checkout`,
+`update [--set-depth]`, `switch [--ignore-ancestry]`, `commit`, `revert`, `add`, `delete`, `move`, `lock`, `unlock`,
+`cleanup`, `resolve`, `propset`, `propdel`, `status`) onto `RealEngine` over HTTPS. An engine step
+takes `fails_with` too, matched against the error as the app shows it: message and detail
+with the svn code, so `fails_with: E195012` checks the engine and svn alike.
+
+Engine steps need the **local backend** (below): the engine runs on the host, so it must see the
+same working copies, URLs and CA as the svn clients.
+
+### Local backend (servers and clients on the host, no Docker)
+
+`LocalBackend` (`src/local.rs`) runs svn clients on the host against Apache + `mod_dav_svn`
+started by `scripts/test-env/visualsvn-like.sh` (distribution 1.14.x on `:18443`, self-built
+1.15.0 on `:18444`; see `docs/visualsvn-test-env.md` for building 1.15.0). Build the 1.15.0
+client with serf (`./configure --with-serf ...`, same tarball) so one prefix gives both.
+
+```sh
+scripts/test-env/visualsvn-like.sh up
+eval "$(scripts/test-env/visualsvn-like.sh env)"
+export OPENSVN_COMPAT_LOCAL_URL14=https://svn.opensvn.test:18443/svn-basic
+export OPENSVN_COMPAT_LOCAL_URL15=https://svn.opensvn.test:18444/svn-basic
+export OPENSVN_COMPAT_SVN14_BIN=/usr/bin/svn OPENSVN_COMPAT_SVN15_BIN=/opt/svn115/bin/svn
+# Fixture repos into the shared SVNParentPath (owned by the Apache user):
+for r in basic nolayout; do
+  fixtures/repos/make-$r.sh /tmp/fx-$r && mv /tmp/fx-$r "$OPENSVN_COMPAT_LOCAL_REPOS/$r"
+  chown -R www-data "$OPENSVN_COMPAT_LOCAL_REPOS/$r"
+done
+OPENSVN_COMPAT_BACKEND=local cargo run -p opensvn-compat --bin compat-run -- tests/compat/scenarios/harness
+cargo test -p opensvn --features real-engine,engine-conformance --test compat_two_way -- --ignored
+```
+
+- `scenario.server: svn14` uses `OPENSVN_COMPAT_LOCAL_URL14`, anything else `..._URL15`; clients
+  get a private `--config-dir`, the test CA (`ssl-authority-files`) and `--no-auth-cache`.
+- `compat_two_way` runs each scenario of `scenarios/client/` once per server (names suffixed
+  `-svn14` / `-svn15`); `OPENSVN_COMPAT_SERVERS=svn15` and `OPENSVN_COMPAT_ONLY=op-lock,op-commit`
+  narrow it. Work dirs: `target/compat/work-engine/`.
+- A comparison may list `ignore: [dav_cache]`: svn's ra_serf caches
+  `svn:wc:ra_dav:version-url` in `NODES.dav_cache`, the engine leaves it empty (svn asks the
+  server when it is empty). Nothing else is masked beyond the normalisations above.
 
 ## Capturing new fixtures
 

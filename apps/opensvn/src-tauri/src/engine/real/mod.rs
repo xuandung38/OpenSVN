@@ -530,6 +530,23 @@ impl EngineFacade for RealEngine {
         self.do_set_depth(wc, path, depth, ctx).await
     }
 
+    async fn wc_depths(
+        &self,
+        wc: &WcRef,
+        ctx: &OpContext,
+    ) -> EngineResult<Vec<opensvn_ipc::SparseEntry>> {
+        self.do_wc_depths(wc, ctx).await
+    }
+
+    async fn sparse_apply(
+        &self,
+        wc: &WcRef,
+        entries: &[opensvn_ipc::SparseEntry],
+        ctx: &OpContext,
+    ) -> EngineResult<()> {
+        self.do_sparse_apply(wc, entries, ctx).await
+    }
+
     async fn upgrade_format(&self, wc: &WcRef, to: u8, ctx: &OpContext) -> EngineResult<()> {
         self.do_upgrade_format(wc, to, ctx).await
     }

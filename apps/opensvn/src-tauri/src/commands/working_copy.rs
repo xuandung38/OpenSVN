@@ -2,8 +2,8 @@
 
 use opensvn_ipc::{
     AppError, DiffGetRequest, DiffSideKind, DiffTarget, FileDiff, FileStatus, IgnoreAddRequest,
-    NodeStatus, OpResult, OperationHandle, OperationKind, PathGrantId, StatusGetRequest, WcId,
-    WorkingCopy,
+    NodeStatus, OpResult, OperationHandle, OperationKind, PathGrantId, SparseEntry,
+    StatusGetRequest, WcId, WorkingCopy,
 };
 use tauri::State;
 
@@ -308,6 +308,27 @@ pub(crate) async fn fetch_diff(
             .await
             .map_err(|e| AppError::from(&e)),
     }
+}
+
+/// The recorded depth of every folder of the working copy, the root (`""`) first, then parents
+/// before children (excluded folders as `exclude`): what the "Choose folders" dialog starts from. Folders it does not list are not
+/// in the working copy.
+#[tauri::command]
+#[specta::specta]
+pub async fn wc_depths(
+    state: State<'_, AppState>,
+    wc_id: WcId,
+) -> Result<Vec<SparseEntry>, AppError> {
+    guard(async {
+        state
+            .wc_read(&wc_id, move |engine, wc| async move {
+                engine
+                    .wc_depths(&wc, &crate::engine::OpContext::detached())
+                    .await
+            })
+            .await
+    })
+    .await
 }
 
 #[tauri::command]

@@ -3,7 +3,8 @@ import type { FileStatus, LockConflict, WorkingCopy } from "../../ipc/bindings";
 
 /** Dialogs and panes the working-copy screens can open. Paths are working-copy relative. */
 export type WcDialog =
-  | { kind: "checkout" }
+  | { kind: "checkout"; url?: string }
+  | { kind: "sparse" }
   | { kind: "discard"; paths: string[]; all: boolean }
   | { kind: "ignore"; path: string }
   | { kind: "rename"; path: string }

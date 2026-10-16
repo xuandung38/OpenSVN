@@ -8,8 +8,8 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::compare::{diff_lines_unordered, diff_text, diff_trees, normalize_xml, snapshot_tree};
-use crate::scenario::{Actor, Check, Compare, Expect, Scenario, Step, SvnVersion};
-use crate::wcdb_dump::{dump_wc_db, work_queue_rows};
+use crate::scenario::{Actor, Check, Compare, Expect, Ignored, Scenario, Step, SvnVersion};
+use crate::wcdb_dump::{DumpOptions, dump_wc_db_with, work_queue_rows};
 
 /// Test-only Basic credentials baked into the compat server image.
 pub const TEST_USER: &str = "tester";
@@ -40,14 +40,60 @@ pub enum Target {
 }
 
 /// Command execution abstraction so the runner is testable without Docker.
+///
+/// The defaults describe the compose environment: repositories in `/var/svn/repos` of the
+/// server containers, working copies below `/work` in the client containers. [`LocalBackend`]
+/// overrides them for servers and clients running on the host.
 pub trait Backend {
-    /// Run `argv` on `target` with working directory `cwd` (container path).
+    /// Run `argv` on `target` with working directory `cwd` (a path as the client sees it).
     fn exec(&self, target: Target, cwd: &str, argv: &[String]) -> Result<CmdOutput>;
+
+    /// URL of repository `repo` on `server`, as clients (and the engine) use it.
+    fn repo_url(&self, server: SvnVersion, repo: &str) -> String {
+        format!("https://{}.test.local:8443/svn/{repo}", server.tag())
+    }
+
+    /// Path of `<work_root>/<scenario>/<wc>` as a client sees it.
+    fn client_path(&self, _work_root: &Path, scenario: &str, wc: &str) -> String {
+        format!("{CONTAINER_WORK}/{scenario}/{wc}")
+    }
+
+    /// Whether the engine (running on the host) shares working copies and server URLs with the
+    /// clients of this backend, so `on: engine` steps may run.
+    fn hosts_engine(&self) -> bool {
+        false
+    }
+
+    /// Copy fixture repository `from` to a new repository `to` on `server`.
+    fn copy_repo(&self, server: SvnVersion, from: &str, to: &str) -> Result<()> {
+        server_sh(
+            self,
+            server,
+            &format!(
+                "svnadmin hotcopy /var/svn/repos/'{from}' /var/svn/repos/'{to}' && chown -R www-data:www-data /var/svn/repos/'{to}'"
+            ),
+        )
+    }
+
+    /// Delete repository `name` on `server` (best effort).
+    fn remove_repo(&self, server: SvnVersion, name: &str) -> Result<()> {
+        server_sh(self, server, &format!("rm -rf /var/svn/repos/'{name}'"))
+    }
+}
+
+fn server_sh<B: Backend + ?Sized>(backend: &B, server: SvnVersion, script: &str) -> Result<()> {
+    let argv = vec!["sh".to_string(), "-c".into(), script.to_string()];
+    let out = backend.exec(Target::Server(server), "/", &argv)?;
+    if out.code != 0 {
+        bail!("server command failed ({}): {}", out.code, out.stderr);
+    }
+    Ok(())
 }
 
 /// Drives the OpenSVN engine for `on: engine` steps.
 pub trait EngineDriver {
-    /// Execute an `svn`-style step against the working copy directory on the host.
+    /// Execute an `svn`-style step against the working copy directory on the host. An `Err`
+    /// is a failed step (or, with `fails_with`, the expected failure: its text is matched).
     fn run(&self, step: &Step, wc_dir: &Path, svn_args: &[String]) -> Result<()>;
 }
 
@@ -150,9 +196,25 @@ impl<'a> Runner<'a> {
         }
         fs::create_dir_all(&host_dir)?;
 
+        if self.engine.is_some()
+            && !self.backend.hosts_engine()
+            && scn.steps.iter().any(|s| s.on == Actor::Engine)
+        {
+            bail!(
+                "scenario {} has engine steps, which need the local backend (servers and clients on the host, see tests/compat/README.md)",
+                scn.name
+            );
+        }
         let repo_name = if scn.fresh_repo {
             let name = format!("{}-{}", scn.name, std::process::id());
-            self.hotcopy(scn.server, &scn.repo, &name)?;
+            self.backend
+                .copy_repo(scn.server, &scn.repo, &name)
+                .with_context(|| {
+                    format!(
+                        "copy fixture repo '{}' (did `cargo xtask compat fixtures` run?)",
+                        scn.repo
+                    )
+                })?;
             name
         } else {
             scn.repo.clone()
@@ -160,16 +222,13 @@ impl<'a> Runner<'a> {
         let result = self.run_inner(scn, &repo_name, &host_dir);
         if scn.fresh_repo {
             // Best effort: a leftover copy only wastes volume space.
-            let _ = self.server_sh(scn.server, &format!("rm -rf /var/svn/repos/'{repo_name}'"));
+            let _ = self.backend.remove_repo(scn.server, &repo_name);
         }
         result
     }
 
     fn run_inner(&self, scn: &Scenario, repo_name: &str, host_dir: &Path) -> Result<Report> {
-        let url = format!(
-            "https://{}.test.local:8443/svn/{repo_name}",
-            scn.server.tag()
-        );
+        let url = self.backend.repo_url(scn.server, repo_name);
         let mut report = Report {
             scenario: scn.name.clone(),
             ..Report::default()
@@ -177,7 +236,9 @@ impl<'a> Runner<'a> {
         for (i, step) in scn.steps.iter().enumerate() {
             let wc_host = host_dir.join(&step.wc);
             fs::create_dir_all(&wc_host)?;
-            let wc_container = format!("{CONTAINER_WORK}/{}/{}", scn.name, step.wc);
+            let wc_container = self
+                .backend
+                .client_path(&self.work_root, &scn.name, &step.wc);
             let subst = |s: &str| {
                 s.replace("{url}", &url)
                     .replace("{repo}", repo_name)
@@ -195,9 +256,24 @@ impl<'a> Runner<'a> {
                         anyhow!("step {i}: engine step but no EngineDriver configured")
                     })?;
                     let args: Vec<String> = step.svn.iter().flatten().map(|a| subst(a)).collect();
-                    driver
-                        .run(step, &wc_host, &args)
-                        .with_context(|| format!("step {i} (engine)"))?;
+                    if args.is_empty() {
+                        bail!("step {i}: engine steps take `svn:` arguments");
+                    }
+                    let res = driver.run(step, &wc_host, &args);
+                    match (&step.fails_with, res) {
+                        (None, res) => {
+                            res.with_context(|| format!("step {i} (engine {})", args.join(" ")))?
+                        }
+                        (Some(needle), Err(e)) if format!("{e:#}").contains(needle.as_str()) => {}
+                        (Some(needle), Err(e)) => bail!(
+                            "step {i} (engine {}) should fail with '{needle}' but failed with: {e:#}",
+                            args.join(" ")
+                        ),
+                        (Some(needle), Ok(())) => bail!(
+                            "step {i} (engine {}) should fail with '{needle}' but succeeded",
+                            args.join(" ")
+                        ),
+                    }
                 }
                 Actor::Svn18 | Actor::Svn19 | Actor::Svn110 | Actor::Svn14 | Actor::Svn15 => {
                     let version = step
@@ -272,10 +348,15 @@ impl<'a> Runner<'a> {
                     let r = self.wc_xml(scn, reader, &cmp.right, sub)?;
                     diff_text(&l, &r)
                 }
-                Check::Wcdb => diff_lines_unordered(
-                    &dump_wc_db(&host_dir.join(&cmp.left))?,
-                    &dump_wc_db(&host_dir.join(&cmp.right))?,
-                ),
+                Check::Wcdb => {
+                    let opts = DumpOptions {
+                        mask_dav_cache: cmp.ignore.contains(&Ignored::DavCache),
+                    };
+                    diff_lines_unordered(
+                        &dump_wc_db_with(&host_dir.join(&cmp.left), opts)?,
+                        &dump_wc_db_with(&host_dir.join(&cmp.right), opts)?,
+                    )
+                }
             };
             let mut diffs = diffs;
             if *check == Check::Wcdb {
@@ -315,7 +396,7 @@ impl<'a> Runner<'a> {
         wc: &str,
         sub: &[&str],
     ) -> Result<String> {
-        let cwd = format!("{CONTAINER_WORK}/{}/{wc}", scn.name);
+        let cwd = self.backend.client_path(&self.work_root, &scn.name, wc);
         let mut argv: Vec<String> = vec!["svn".into()];
         argv.extend(sub.iter().map(ToString::to_string));
         argv.extend(auth_args());
@@ -325,25 +406,6 @@ impl<'a> Runner<'a> {
             bail!("{} failed in {wc}: {}", argv.join(" "), out.stderr);
         }
         Ok(normalize_xml(&out.stdout, &cwd))
-    }
-
-    fn hotcopy(&self, server: SvnVersion, from: &str, to: &str) -> Result<()> {
-        self.server_sh(
-            server,
-            &format!(
-                "svnadmin hotcopy /var/svn/repos/'{from}' /var/svn/repos/'{to}' && chown -R www-data:www-data /var/svn/repos/'{to}'"
-            ),
-        )
-        .with_context(|| format!("hotcopy fixture repo '{from}' (did `cargo xtask compat fixtures` run?)"))
-    }
-
-    fn server_sh(&self, server: SvnVersion, script: &str) -> Result<()> {
-        let argv = vec!["sh".to_string(), "-c".into(), script.to_string()];
-        let out = self.backend.exec(Target::Server(server), "/", &argv)?;
-        if out.code != 0 {
-            bail!("server command failed ({}): {}", out.code, out.stderr);
-        }
-        Ok(())
     }
 }
 

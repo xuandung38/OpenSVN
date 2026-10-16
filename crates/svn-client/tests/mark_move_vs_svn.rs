@@ -1,7 +1,7 @@
 //! `mark_move` against svn 1.15: TortoiseSVN's "Repair move" (revert what svn recorded for the
 //! two paths, rename the destination back, `svn move`) on one checkout, `svn_client::local::
 //! mark_move` without touching the disk on another. The wc.db rows, `svn status` and the files
-//! on disk must be identical. Skipped when no svn 1.15 is installed (fails instead when
+//! on disk must be identical. Skipped when no svn 1.14 or newer is installed (fails instead when
 //! `OPENSVN_REQUIRE_SVN=1`).
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
