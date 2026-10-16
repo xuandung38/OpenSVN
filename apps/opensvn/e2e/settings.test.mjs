@@ -186,6 +186,7 @@ test("Settings: Updates shows the version and the token state; a build without u
   // This build has no `plugins.updater` config: the dialog says so and no request is made.
   await app.click("button", "Check for updates");
   await app.waitText("This build cannot update itself");
+  mkdirSync(ARTIFACTS, { recursive: true });
   await app.screenshot(join(ARTIFACTS, "settings-updates-not-configured.png"));
   if ((await app.bodyText()).includes("Configured")) {
     await app.click("button", "Close");
