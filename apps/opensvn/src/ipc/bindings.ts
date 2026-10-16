@@ -38,10 +38,12 @@ export const commands = {
 	 */
 	checkoutRootChoose: () => typedError<Settings, AppError>(__TAURI_INVOKE("checkout_root_choose")),
 	/**
-	 *  Status from the engine, or from the snapshot while a write is running on the working copy
-	 *  (the running operation in `op_list` is the "updating" indicator).
+	 *  Status of a working copy. The Changes list (no ignored items) is the published snapshot with
+	 *  its id, kept current by `wc://status-changed` deltas; other queries scan, or filter the
+	 *  snapshot while a write is running on the working copy (the running operation in `op_list`
+	 *  is the "updating" indicator).
 	 */
-	statusGet: (request: StatusGetRequest) => typedError<FileStatus[], AppError>(__TAURI_INVOKE("status_get", { request })),
+	statusGet: (request: StatusGetRequest) => typedError<StatusSnapshot, AppError>(__TAURI_INVOKE("status_get", { request })),
 	statusRefresh: (wcId: WcId, paths: string[] | null) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("status_refresh", { wcId, paths })),
 	/**  Checks the repository for newer revisions; announces `wc://incoming` and updates remote info. */
 	statusRemote: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("status_remote", { wcId })),
@@ -819,7 +821,6 @@ export type LogGetRequest = {
 /**  Most detailed level written to the log. There is no `trace`: it would log transport internals. */
 export type LogLevel = "error" | "warn" | "info" | "debug";
 
-/**  Result of `log_get`. */
 export type LogPage = {
 	entries: LogEntry[],
 	nextRev: Rev | null,
@@ -1326,17 +1327,35 @@ export type SparseEntry = {
 	depth: SparseDepth,
 };
 
-/**  Status delta for a working copy. */
+/**
+ *  Status delta for a working copy: applied to snapshot `base` it yields snapshot `snapshot`
+ *  (see [`crate::models::StatusSnapshot`]). A holder of another snapshot than `base` fetches
+ *  the status again, unless it already holds `snapshot` or a later one. `base` is `None` when
+ *  the delta is against a snapshot nobody was given.
+ */
 export type StatusChanged = {
 	wcId: WcId,
 	changed: FileStatus[],
 	removed: string[],
+	base: number | null,
+	snapshot: number,
 };
 
 export type StatusGetRequest = {
 	wcId: WcId,
 	includeIgnored: boolean | null,
 	includeUnversioned: boolean | null,
+};
+
+/**
+ *  Result of `log_get`.
+ *  Result of `status_get`. `snapshot` identifies the list for the deltas of
+ *  `wc://status-changed`; it is `None` for queries the deltas do not cover (ignored items).
+ *  Ids grow over the app's lifetime, so a larger id is a later snapshot.
+ */
+export type StatusSnapshot = {
+	snapshot: number | null,
+	files: FileStatus[],
 };
 
 export type TextSide = {

@@ -15,7 +15,7 @@ pub use externals::{
     CASE_INSENSITIVE_FS, EXTERNALS_PROP, ExternalPaths, external_targets, is_wc_root_dir,
 };
 pub use ignore::{DEFAULT_GLOBAL_IGNORES, fnmatch};
-pub use local::local_status;
+pub use local::{local_status, local_status_of_paths};
 pub use remote::{RemoteChange, RemoteInfo};
 
 use crate::ctx::ClientCtx;
@@ -120,4 +120,66 @@ pub async fn status_remote(
     )
     .await?;
     Ok(remote::merge(local, &info))
+}
+
+/// The entries of [`status_remote`] that carry repository information (out of date or locked in
+/// the repository), without the local status of the rest of the tree: the server is asked first,
+/// then only the nodes it named are looked at locally (`opts.show_unmodified` is implied for
+/// them). Items that only exist in the repository are included as in [`status_remote`].
+pub async fn status_remote_changes(
+    ctx: &ClientCtx,
+    session: &dyn RaSession,
+    path: &Path,
+    opts: &StatusOptions,
+    cancel: &CancelToken,
+) -> Result<Vec<WcStatus>> {
+    session.ensure_authenticated(cancel).await?;
+    let (owner, p) = (ctx.lock_owner.clone(), path.to_path_buf());
+    let (db, rel) = tokio::task::spawn_blocking(move || wc::open_containing(&owner, &p))
+        .await
+        .map_err(|e| SvnError::new(ErrorCode::Internal, format!("worker failed: {e}")))??;
+    let db = Arc::new(db);
+    let anchor = crate::update::anchor_of(&db, session)?;
+    let target = wc::strip_rel(&rel, &anchor).ok_or_else(|| {
+        SvnError::new(
+            ErrorCode::WcInvalidOperation,
+            format!("'{rel}' is not below the session URL"),
+        )
+    })?;
+    let info = remote::fetch(
+        session,
+        Arc::clone(&db),
+        anchor,
+        target,
+        opts.depth,
+        root_string(session),
+        cancel,
+    )
+    .await?;
+    let wanted: std::collections::BTreeSet<svn_types::RelPath> = info
+        .changes
+        .keys()
+        .chain(info.locks.keys())
+        .cloned()
+        .collect();
+    let local = if wanted.is_empty() {
+        Vec::new()
+    } else {
+        let (opts, cancel, globals) = (
+            StatusOptions {
+                show_unmodified: true,
+                ..opts.clone()
+            },
+            cancel.clone(),
+            ctx.config.global_ignores.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            local_status_of_paths(&db, &rel, &opts, globals.as_deref(), &wanted, &cancel)
+        })
+        .await
+        .map_err(|e| SvnError::new(ErrorCode::Internal, format!("worker failed: {e}")))??
+    };
+    let mut out = remote::merge(local, &info);
+    out.retain(|s| s.remote.is_some());
+    Ok(out)
 }

@@ -181,10 +181,18 @@ pub(crate) const NODE_COLUMNS: &str = "local_relpath, op_depth, presence, kind, 
     file_external";
 
 pub(crate) fn node_from_row(r: &Row<'_>) -> Result<Node> {
+    let (mut node, props) = node_from_row_raw(r)?;
+    node.properties = props.as_deref().map(decode_props).transpose()?;
+    Ok(node)
+}
+
+/// [`node_from_row`] with the `properties` column returned undecoded (and
+/// [`Node::properties`] left `None`), for readers that look at the properties of few rows.
+pub(crate) fn node_from_row_raw(r: &Row<'_>) -> Result<(Node, Option<Vec<u8>>)> {
     let g = |e: rusqlite::Error| sql_err(e);
     let props: Option<Vec<u8>> = r.get(15).map_err(g)?;
     let moved_to: Option<String> = r.get(17).map_err(g)?;
-    Ok(Node {
+    let node = Node {
         relpath: rel(r.get(0).map_err(g)?)?,
         op_depth: u32::try_from(r.get::<_, i64>(1).map_err(g)?)
             .map_err(|_| corrupt("negative op_depth"))?,
@@ -204,7 +212,7 @@ pub(crate) fn node_from_row(r: &Row<'_>) -> Result<Node> {
         changed_author: r.get(12).map_err(g)?,
         translated_size: r.get(13).map_err(g)?,
         last_mod_time: r.get(14).map_err(g)?,
-        properties: props.as_deref().map(decode_props).transpose()?,
+        properties: None,
         moved_here: r
             .get::<_, Option<i64>>(16)
             .map_err(g)?
@@ -214,7 +222,8 @@ pub(crate) fn node_from_row(r: &Row<'_>) -> Result<Node> {
             .get::<_, Option<i64>>(18)
             .map_err(g)?
             .is_some_and(|v| v != 0),
-    })
+    };
+    Ok((node, props))
 }
 
 /// SQL boolean expression: `child` is a strict descendant of `parent` (both SQL operands).

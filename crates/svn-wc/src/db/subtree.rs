@@ -4,7 +4,9 @@
 //!
 //! The rows are decoded by the same code as the single-node readers, so a walker that looks
 //! them up here sees exactly what [`WcDb::read_node`], [`WcDb::actual_props`] and friends
-//! would return for the same paths.
+//! would return for the same paths. The pristine properties of NODES rows are the exception:
+//! they are kept as stored ([`LazyProps`]) and decoded only for the rows a walker asks about,
+//! since a status walk of a large tree needs them for few nodes.
 
 use rusqlite::params;
 use svn_types::{RelPath, Result};
@@ -14,7 +16,7 @@ use super::connection::sql_err;
 use super::connection::{OpenMode, open_connection};
 use super::misc::LockInfo;
 use super::nodes::{
-    NODE_COLUMNS, Node, Props, decode_props, node_from_row, rel, strict_descendant,
+    NODE_COLUMNS, Node, Props, decode_props, node_from_row_raw, rel, strict_descendant,
 };
 use super::{ADM_DIR, DB_FILE, WcDb, failpoint};
 use crate::skel::Skel;
@@ -43,12 +45,62 @@ pub struct LockRow {
     pub lock: LockInfo,
 }
 
+/// The `properties` column of one NODES row, decoded when first asked for.
+#[derive(Debug, Clone, Default)]
+pub struct LazyProps {
+    raw: Option<Box<[u8]>>,
+    decoded: std::sync::OnceLock<Props>,
+}
+
+impl LazyProps {
+    fn new(raw: Option<Vec<u8>>) -> Self {
+        Self {
+            raw: raw.map(Vec::into_boxed_slice),
+            decoded: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The properties, as [`Node::properties`] of the same row would hold them (`None` when
+    /// the row records no property information).
+    pub fn get(&self) -> Result<Option<&Props>> {
+        let Some(raw) = &self.raw else {
+            return Ok(None);
+        };
+        if let Some(p) = self.decoded.get() {
+            return Ok(Some(p));
+        }
+        let p = decode_props(raw)?;
+        Ok(Some(self.decoded.get_or_init(|| p)))
+    }
+
+    /// True when [`Self::get`] yields no property (no information, an empty blob or an empty
+    /// list), decided without decoding: a non-empty list holds at least one atom.
+    pub fn is_empty(&self) -> bool {
+        self.raw.as_deref().is_none_or(|r| {
+            r.iter()
+                .all(|b| matches!(b, b'(' | b')') || b.is_ascii_whitespace())
+        })
+    }
+
+    /// False when the stored list certainly has no property `name` (its name does not occur
+    /// in the bytes), so a caller looking for one property decodes only the lists that may.
+    pub fn may_have(&self, name: &str) -> bool {
+        let needle = name.as_bytes();
+        self.raw
+            .as_deref()
+            .is_some_and(|r| !needle.is_empty() && r.windows(needle.len()).any(|w| w == needle))
+    }
+}
+
 /// Rows of the subtree of one path, see [`WcDb::read_subtree`].
 #[derive(Debug, Clone, Default)]
 pub struct SubtreeRows {
     /// NODES rows of the root and everything below it, ordered by path (bytewise) then
-    /// `op_depth`.
+    /// `op_depth`. [`Node::properties`] is always `None` here; the properties of
+    /// `nodes[i]` are `pristine[i]`.
     pub nodes: Vec<Node>,
+    /// Pristine properties of each row of `nodes`, at the same index.
+    pub pristine: Vec<LazyProps>,
     /// ACTUAL_NODE rows of the root and everything below it, ordered by path (bytewise).
     pub actual: Vec<ActualRow>,
     /// The whole LOCK cache (locks are matched by repository location, not by local path).
@@ -62,8 +114,10 @@ impl WcDb {
         let wc_id = self.wc_id;
         self.with_read(|c| {
             let tx = c.unchecked_transaction().map_err(sql_err)?;
+            let (nodes, pristine) = self.node_rows_split(&tx, root)?.into_iter().unzip();
             let out = SubtreeRows {
-                nodes: self.node_rows_split(&tx, root)?,
+                nodes,
+                pristine,
                 actual: actual_rows(&tx, wc_id, root)?,
                 locks: lock_rows(&tx)?,
             };
@@ -80,7 +134,7 @@ impl WcDb {
     /// with it SQLite's shared lock), so no writer can commit while the parts are read: every
     /// connection sees the same database. A part whose connection cannot be opened is read on
     /// `tx`.
-    fn node_rows_split(&self, tx: &rusqlite::Connection, root: &RelPath) -> Result<Vec<Node>> {
+    fn node_rows_split(&self, tx: &rusqlite::Connection, root: &RelPath) -> Result<Vec<Row>> {
         let wc_id = self.wc_id;
         let (lo, hi): (Option<i64>, Option<i64>) = tx
             .query_row("SELECT min(rowid), max(rowid) FROM nodes", [], |r| {
@@ -104,7 +158,7 @@ impl WcDb {
             })
             .collect();
         let path = self.wcroot.join(ADM_DIR).join(DB_FILE);
-        let helpers: Vec<Option<Result<Vec<Node>>>> = std::thread::scope(|scope| {
+        let helpers: Vec<Option<Result<Vec<Row>>>> = std::thread::scope(|scope| {
             let handles: Vec<_> = ranges[1..]
                 .iter()
                 .map(|&(a, b)| {
@@ -138,12 +192,12 @@ impl WcDb {
 /// commit takes PENDING and waits for `tx` to finish; a new connection cannot take a shared
 /// lock past PENDING, so waiting here would deadlock both until the busy timeout (`WcBusy`).
 /// A busy helper gives its part back to `tx`, which can still read.
-fn helper_rows(path: &std::path::Path, wc_id: i64, a: i64, b: i64) -> Option<Result<Vec<Node>>> {
+fn helper_rows(path: &std::path::Path, wc_id: i64, a: i64, b: i64) -> Option<Result<Vec<Row>>> {
     let conn = open_connection(path, OpenMode::ReadOnly).ok()?;
     if conn.busy_timeout(std::time::Duration::ZERO).is_err() {
         return None;
     }
-    let read = || -> Result<Vec<Node>> {
+    let read = || -> Result<Vec<Row>> {
         failpoint!("wc.subtree.helper_before_read");
         rowid_rows(&conn, wc_id, a, b)
     };
@@ -154,21 +208,25 @@ fn helper_rows(path: &std::path::Path, wc_id: i64, a: i64, b: i64) -> Option<Res
 const SPLIT_ROWS: i64 = 4096;
 
 /// NODES rows of the working copy with a rowid in `a..=b`.
-fn rowid_rows(conn: &rusqlite::Connection, wc_id: i64, a: i64, b: i64) -> Result<Vec<Node>> {
+fn rowid_rows(conn: &rusqlite::Connection, wc_id: i64, a: i64, b: i64) -> Result<Vec<Row>> {
     let sql =
         format!("SELECT {NODE_COLUMNS} FROM nodes WHERE rowid BETWEEN ?2 AND ?3 AND wc_id = ?1");
     let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
     let mut rows = stmt.query(params![wc_id, a, b]).map_err(sql_err)?;
     let mut out = Vec::new();
     while let Some(r) = rows.next().map_err(sql_err)? {
-        out.push(node_from_row(r)?);
+        let (node, props) = node_from_row_raw(r)?;
+        out.push((node, LazyProps::new(props)));
     }
     Ok(out)
 }
 
+/// One NODES row with its undecoded properties.
+type Row = (Node, LazyProps);
+
 /// Orders rows by path (bytewise, like SQLite's BINARY collation) then `op_depth`.
-fn sort_nodes(rows: &mut [Node]) {
-    fn key(n: &Node) -> (&[u8], u32) {
+fn sort_nodes(rows: &mut [Row]) {
+    fn key((n, _): &Row) -> (&[u8], u32) {
         (n.relpath.as_str().as_bytes(), n.op_depth)
     }
     // Rows usually come in path order already (the table grows in checkout order).
@@ -193,7 +251,7 @@ fn subtree_filter(root: &RelPath) -> String {
 /// NODES rows of the subtree, ordered by path (bytewise, like SQLite's BINARY collation) then
 /// `op_depth`. Sorted here rather than with `ORDER BY`, which makes SQLite copy every row into
 /// a temporary b-tree before it returns the first.
-fn node_rows(conn: &rusqlite::Connection, wc_id: i64, root: &RelPath) -> Result<Vec<Node>> {
+fn node_rows(conn: &rusqlite::Connection, wc_id: i64, root: &RelPath) -> Result<Vec<Row>> {
     let sql = format!(
         "SELECT {NODE_COLUMNS} FROM nodes WHERE {}",
         subtree_filter(root)
@@ -202,7 +260,8 @@ fn node_rows(conn: &rusqlite::Connection, wc_id: i64, root: &RelPath) -> Result<
     let mut rows = stmt.query(params![wc_id, root.as_str()]).map_err(sql_err)?;
     let mut out = Vec::new();
     while let Some(r) = rows.next().map_err(sql_err)? {
-        out.push(node_from_row(r)?);
+        let (node, props) = node_from_row_raw(r)?;
+        out.push((node, LazyProps::new(props)));
     }
     sort_nodes(&mut out);
     Ok(out)
@@ -284,4 +343,31 @@ fn lock_rows(conn: &rusqlite::Connection) -> Result<Vec<LockRow>> {
         })
         .map_err(sql_err)?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(sql_err)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::db::nodes::encode_props;
+
+    #[test]
+    fn lazy_props_answer_without_decoding_and_decode_like_the_reader() {
+        let none = LazyProps::new(None);
+        assert!(none.is_empty() && none.get().unwrap().is_none() && !none.may_have("a"));
+        let empty = LazyProps::new(Some(encode_props(&Vec::new())));
+        assert!(empty.is_empty());
+        assert_eq!(empty.get().unwrap(), Some(&Vec::new()));
+        let props: Props = vec![
+            (b"svn:eol-style".to_vec(), b"native".to_vec()),
+            (b"svn:mime-type".to_vec(), b"text/x".to_vec()),
+        ];
+        let blob = encode_props(&props);
+        let lazy = LazyProps::new(Some(blob.clone()));
+        assert!(!lazy.is_empty());
+        assert!(lazy.may_have("svn:mime-type") && !lazy.may_have("svn:special"));
+        assert_eq!(lazy.get().unwrap(), Some(&decode_props(&blob).unwrap()));
+        // Decoded once, then served from the cell.
+        assert!(std::ptr::eq(lazy.get().unwrap().unwrap(), lazy.get().unwrap().unwrap()));
+    }
 }

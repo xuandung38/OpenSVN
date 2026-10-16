@@ -302,6 +302,7 @@ async fn working_copy_edits_and_depth_through_commands() {
         )
         .await
         .unwrap()
+        .files
     };
 
     commands::ignore_add(

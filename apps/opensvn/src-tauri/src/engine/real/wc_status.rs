@@ -599,7 +599,8 @@ impl RealEngine {
             .connector
             .connect_with(&url, &ConnectOptions::at_url(ctx), &ctx.cancel)
             .await?;
-        // Unmodified nodes too: the repository side of a clean file is what this call is about.
+        // Only the nodes the server named are looked at locally (unmodified ones too: the
+        // repository side of a clean file is what this call is about).
         let opts = StatusOptions {
             depth: Depth::Infinity,
             show_unmodified: true,
@@ -607,7 +608,7 @@ impl RealEngine {
             include_ignored: false,
             include_needs_lock: false,
         };
-        let statuses = svn_client::status_remote(
+        let statuses = svn_client::status_remote_changes(
             &self.client_ctx(ctx),
             session.as_ref(),
             &wc.root,
@@ -626,11 +627,8 @@ impl RealEngine {
             &ctx.cancel,
         )
         .await?;
-        let mut statuses: Vec<FileStatus> = statuses
-            .iter()
-            .filter(|s| s.remote.is_some())
-            .filter_map(wc_map::file_status)
-            .collect();
+        let mut statuses: Vec<FileStatus> =
+            statuses.iter().filter_map(wc_map::file_status).collect();
         statuses.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(RemoteScan {
             statuses,

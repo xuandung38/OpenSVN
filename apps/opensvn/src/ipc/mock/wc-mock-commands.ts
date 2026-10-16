@@ -201,7 +201,7 @@ function statusOf(wcId: string): FileStatus[] {
 /** Replaces the status list immutably (so query results change identity) and announces it. */
 function setStatus(deps: MockDeps, wcId: string, next: FileStatus[]) {
   state.status.set(wcId, next);
-  deps.emit("wc://status-changed", { wcId, changed: [], removed: [] });
+  deps.emit("wc://status-changed", { wcId, changed: [], removed: [], base: null, snapshot: 0 });
 }
 function mapPaths(wcId: string, paths: string[], fn: (f: FileStatus) => FileStatus | null) {
   return statusOf(wcId).flatMap((f) => (paths.includes(f.path) ? (fn(f) ?? []) : [f]));
@@ -352,14 +352,16 @@ export function wcMockCommands(deps: MockDeps) {
       });
     },
     // Like the backend: ignored entries only on request, unversioned ones unless refused.
+    // The mock has no snapshot ids: every status-changed refetches.
     statusGet: (req: StatusGetRequest) =>
-      ok(
-        statusOf(req.wcId).filter(
+      ok({
+        snapshot: null,
+        files: statusOf(req.wcId).filter(
           (f) =>
             (f.text !== "ignored" || req.includeIgnored === true) &&
             (f.text !== "unversioned" || req.includeUnversioned !== false),
         ),
-      ),
+      }),
     statusRefresh: (wcId: string) => ok(simulateOp("status-refresh", "Refresh status", wcId)),
     statusRemote: (wcId: string) =>
       op("status-remote", "Check for updates", wcId, () =>

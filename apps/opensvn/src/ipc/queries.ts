@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { Banner, CommitRequest, UpdateRequest, WcId } from "./bindings";
+import type { Banner, CommitRequest, StatusSnapshot, UpdateRequest, WcId } from "./bindings";
 import { ipc, unwrap } from "./client";
 import type { OpOutcome, OpState } from "./events";
 import { queryKeys } from "./query-keys";
+import { keepLaterSnapshot } from "./status-delta";
 
 export function useWorkingCopies() {
   return useQuery({
@@ -37,7 +38,10 @@ export function useRecentUrls() {
   });
 }
 
-/** Status of a working copy; ignored entries only with `includeIgnored` (View > Show ignored files). */
+/**
+ * Status of a working copy; ignored entries only with `includeIgnored` (View > Show ignored files).
+ * The cache holds the backend's snapshot, which `wc://status-changed` deltas keep current.
+ */
 export function useStatus(wcId: WcId | null, includeIgnored = false) {
   return useQuery({
     // Under the status key, so every status invalidation refreshes both variants.
@@ -46,6 +50,8 @@ export function useStatus(wcId: WcId | null, includeIgnored = false) {
     // Keeps the list on screen while the other variant of the same working copy loads (never
     // another working copy's files).
     placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === wcId ? prev : undefined),
+    structuralSharing: keepLaterSnapshot,
+    select: (d: StatusSnapshot) => d.files,
     queryFn: () =>
       unwrap(
         ipc().commands.statusGet({

@@ -19,7 +19,7 @@ use svn_types::{
     RepoDisplayPath, Result, Timestamp, WcStatus, safe_join_child,
 };
 use svn_wc::conflicts::ConflictSkel;
-use svn_wc::db::{ActualRow, ConflictRecord, Node, Presence, Props, SubtreeRows, WcDb};
+use svn_wc::db::{ActualRow, ConflictRecord, LazyProps, Node, Presence, Props, SubtreeRows, WcDb};
 
 use super::StatusOptions;
 use super::externals::ExternalPaths;
@@ -98,6 +98,8 @@ struct Snapshot<'a> {
     root: RelPath,
     /// Rows of each path, lowest `op_depth` first.
     nodes: HashMap<&'a str, &'a [Node]>,
+    /// Pristine properties of the current (highest `op_depth`) row of each path.
+    props: HashMap<&'a str, &'a LazyProps>,
     /// Distinct child paths of each path that has rows, sorted.
     children: HashMap<&'a str, Vec<&'a RelPath>>,
     actual: HashMap<&'a str, &'a ActualRow>,
@@ -109,6 +111,7 @@ impl<'a> Snapshot<'a> {
     /// Indexes `rows`, the [`WcDb::read_subtree`] of `root`.
     fn new(db: &'a WcDb, root: &RelPath, rows: &'a SubtreeRows) -> Self {
         let mut nodes: HashMap<&'a str, &'a [Node]> = HashMap::with_capacity(rows.nodes.len());
+        let mut props: HashMap<&'a str, &'a LazyProps> = HashMap::with_capacity(rows.nodes.len());
         let mut children: HashMap<&'a str, Vec<&'a RelPath>> = HashMap::new();
         // Rows come ordered by path then `op_depth`: each run of equal paths is one node, and
         // each path is listed under its parent once and in order.
@@ -124,12 +127,16 @@ impl<'a> Snapshot<'a> {
                 children.entry(parent).or_default().push(path);
             }
             nodes.insert(path.as_str(), &rows.nodes[start..end]);
+            if let Some(p) = rows.pristine.get(end - 1) {
+                props.insert(path.as_str(), p);
+            }
             start = end;
         }
         Self {
             db,
             root: root.clone(),
             nodes,
+            props,
             children,
             actual: rows
                 .actual
@@ -181,15 +188,48 @@ impl<'a> Snapshot<'a> {
     /// [`WcDb::pristine_props`].
     fn pristine_props(&self, rel: &RelPath) -> Result<Cow<'_, Props>> {
         if self.inside(rel)
-            && let Some(cur) = self.nodes.get(rel.as_str()).and_then(|v| v.last())
+            && let Some((cur, props)) = self.current(rel)
         {
-            return Ok(match (&cur.properties, cur.presence.is_present()) {
+            return Ok(match (props.get()?, cur.presence.is_present()) {
                 (Some(p), true) => Cow::Borrowed(p),
                 _ => Cow::Owned(Vec::new()),
             });
         }
         // Outside the subtree, or no node (the reader reports that error).
         Ok(Cow::Owned(self.db.pristine_props(rel)?))
+    }
+
+    /// Current row of a path inside the subtree, with its undecoded pristine properties.
+    fn current(&self, rel: &RelPath) -> Option<(&'a Node, &'a LazyProps)> {
+        let cur = self.nodes.get(rel.as_str()).and_then(|v| v.last())?;
+        Some((cur, self.props.get(rel.as_str())?))
+    }
+
+    /// True when the pristine properties of `rel` are empty, without decoding them when the
+    /// node is inside the subtree.
+    fn pristine_is_empty(&self, rel: &RelPath) -> Result<bool> {
+        if self.inside(rel)
+            && let Some((cur, props)) = self.current(rel)
+        {
+            return Ok(!cur.presence.is_present() || props.is_empty());
+        }
+        Ok(self.pristine_props(rel)?.is_empty())
+    }
+
+    /// Value of the working property `name` of `rel` ([`WcDb::actual_props`]); pristine
+    /// properties that cannot hold it are not decoded.
+    fn actual_prop(&self, rel: &RelPath, name: &str) -> Result<Option<Vec<u8>>> {
+        if let Some(changed) = self.changed_props(rel)? {
+            return Ok(inspect::prop_value(&changed, name).map(<[u8]>::to_vec));
+        }
+        if self.inside(rel)
+            && let Some((_, props)) = self.current(rel)
+            && !props.may_have(name)
+        {
+            return Ok(None);
+        }
+        let props = self.pristine_props(rel)?;
+        Ok(inspect::prop_value(&props, name).map(<[u8]>::to_vec))
     }
 
     /// Locally changed properties recorded in ACTUAL_NODE, if any.
@@ -266,8 +306,7 @@ fn special_mismatch(snap: &Snapshot<'_>, rel: &RelPath, md: &fs::Metadata) -> Re
     if !cfg!(unix) {
         return Ok(false);
     }
-    let props = snap.actual_props(rel)?;
-    let special = inspect::prop_value(&props, "svn:special").is_some();
+    let special = snap.actual_prop(rel, "svn:special")?.is_some();
     Ok(special != md.file_type().is_symlink())
 }
 
@@ -331,19 +370,23 @@ fn node_status(
         }
     }
     let changed = snap.changed_props(rel)?;
-    let pristine = snap.pristine_props(rel)?;
-    let actual: &Props = changed.as_deref().unwrap_or(&pristine);
-    // `inspect::props_modified`: the working set differs from the pristine one.
-    let mut props = if changed
-        .as_deref()
-        .is_some_and(|c| sorted(c) != sorted(&pristine))
-    {
-        PropStatus::Modified
-    } else if pristine.is_empty() && actual.is_empty() {
-        PropStatus::None
-    } else {
-        PropStatus::Normal
+    // `inspect::props_modified`: the working set differs from the pristine one. The pristine
+    // set is only decoded when there is a working set to compare it with.
+    let mut props = match changed.as_deref() {
+        Some(c) => {
+            let pristine = snap.pristine_props(rel)?;
+            if sorted(c) != sorted(&pristine) {
+                PropStatus::Modified
+            } else if c.is_empty() {
+                PropStatus::None
+            } else {
+                PropStatus::Normal
+            }
+        }
+        None if snap.pristine_is_empty(rel)? => PropStatus::None,
+        None => PropStatus::Normal,
     };
+    drop(changed);
     let mut tree_conflict = false;
     let conflict = if snap.inside(rel) {
         snap.conflict(rel).cloned()
@@ -386,8 +429,12 @@ fn node_status(
     } else {
         None
     };
-    let mime =
-        inspect::prop_value(actual, "svn:mime-type").and_then(|v| std::str::from_utf8(v).ok());
+    let mime = if cur.kind == NodeKind::File {
+        snap.actual_prop(rel, "svn:mime-type")?
+    } else {
+        None
+    };
+    let mime = mime.as_deref().and_then(|v| std::str::from_utf8(v).ok());
     Ok(Some(WcStatus {
         path: rel.clone(),
         kind: cur.kind,
@@ -407,7 +454,7 @@ fn node_status(
         },
         lock_is_mine: lock.is_some(),
         lock,
-        needs_lock: inspect::prop_value(actual, "svn:needs-lock").is_some(),
+        needs_lock: snap.actual_prop(rel, "svn:needs-lock")?.is_some(),
         binary: cur.kind == NodeKind::File && diff_as_binary_by_mime(mime),
         size: if cur.kind == NodeKind::File {
             size
@@ -505,6 +552,38 @@ fn child_depth(depth: Depth) -> Depth {
     }
 }
 
+/// The paths a filtered walk reports, see [`local_status_of_paths`].
+struct Only {
+    paths: BTreeSet<String>,
+}
+
+impl Only {
+    fn new(paths: &BTreeSet<RelPath>) -> Self {
+        Self {
+            paths: paths.iter().map(|p| p.as_str().to_owned()).collect(),
+        }
+    }
+
+    fn contains(&self, rel: &RelPath) -> bool {
+        self.paths.contains(rel.as_str())
+    }
+
+    /// True when a path below `dir` (not `dir` itself) is wanted.
+    fn has_below(&self, dir: &RelPath) -> bool {
+        if dir.is_root() {
+            return self.paths.iter().any(|p| !p.is_empty());
+        }
+        let prefix = format!("{}/", dir.as_str());
+        self.paths
+            .range::<str, _>((
+                std::ops::Bound::Included(prefix.as_str()),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+            .is_some_and(|p| p.starts_with(&prefix))
+    }
+}
+
 /// One directory whose children the walk lists.
 struct DirJob {
     rel: RelPath,
@@ -542,6 +621,8 @@ struct Lister<'a> {
     global: &'a [String],
     /// Job index of each directory the walk descends into.
     index: HashMap<&'a str, usize>,
+    /// Only these paths are reported, see [`local_status_of_paths`].
+    only: Option<&'a Only>,
 }
 
 impl Lister<'_> {
@@ -615,12 +696,16 @@ impl Lister<'_> {
                 let Some(cur) = snap.read_node(&child)? else {
                     continue;
                 };
-                if let Some(s) = node_status(snap, &child, &child_abs, &cur, child_disk.as_ref())?
+                if self.only.is_none_or(|o| o.contains(&child))
+                    && let Some(s) =
+                        node_status(snap, &child, &child_abs, &cur, child_disk.as_ref())?
                     && wanted(self.opts, &s)
                 {
                     items.push(Item::Status(Box::new(s)));
                 }
-                if descends(&cur, child_depth(depth)) {
+                if descends(&cur, child_depth(depth))
+                    && self.only.is_none_or(|o| o.has_below(&child))
+                {
                     let Some(&j) = self.index.get(child.as_str()) else {
                         return Err(svn_types::SvnError::new(
                             ErrorCode::Internal,
@@ -629,6 +714,8 @@ impl Lister<'_> {
                     };
                     items.push(Item::Dir(j));
                 }
+            } else if self.only.is_some_and(|o| !o.contains(&child)) {
+                continue;
             } else {
                 let text = if self.opts.include_unversioned || self.opts.include_ignored {
                     let ignores = local_ignores.get_or_insert_with(|| {
@@ -662,12 +749,18 @@ impl Lister<'_> {
 }
 
 /// The directories a walk of `target` (with `depth`) descends into, parents before children.
-fn dir_jobs(snap: &Snapshot<'_>, target: &RelPath, depth: Depth) -> Result<Vec<(RelPath, Depth)>> {
+/// With `only`, just those leading to one of its paths.
+fn dir_jobs(
+    snap: &Snapshot<'_>,
+    target: &RelPath,
+    depth: Depth,
+    only: Option<&Only>,
+) -> Result<Vec<(RelPath, Depth)>> {
     let mut out = Vec::new();
     let Some(cur) = snap.read_node(target)? else {
         return Ok(out);
     };
-    if !descends(&cur, depth) {
+    if !descends(&cur, depth) || only.is_some_and(|o| !o.has_below(target)) {
         return Ok(out);
     }
     out.push((target.clone(), depth));
@@ -682,6 +775,7 @@ fn dir_jobs(snap: &Snapshot<'_>, target: &RelPath, depth: Depth) -> Result<Vec<(
         for c in snap.children(&dir) {
             if let Some(n) = snap.read_node(c)?
                 && descends(&n, child_depth(d))
+                && only.is_none_or(|o| o.has_below(c))
             {
                 out.push(((*c).clone(), child_depth(d)));
             }
@@ -808,6 +902,33 @@ pub fn local_status(
     global_ignores: Option<&[String]>,
     cancel: &CancelToken,
 ) -> Result<Vec<WcStatus>> {
+    walk(db, rel, opts, global_ignores, None, cancel)
+}
+
+/// [`local_status`] reporting only the nodes at `paths` (working copy relative). Directories
+/// that lead to none of them are not walked and other nodes are not looked at, so a caller that
+/// needs a few entries of a large tree (the paths a remote check found out of date) does not
+/// pay for the whole tree. `opts` still applies to the listed paths.
+pub fn local_status_of_paths(
+    db: &WcDb,
+    rel: &RelPath,
+    opts: &StatusOptions,
+    global_ignores: Option<&[String]>,
+    paths: &BTreeSet<RelPath>,
+    cancel: &CancelToken,
+) -> Result<Vec<WcStatus>> {
+    let only = Only::new(paths);
+    walk(db, rel, opts, global_ignores, Some(&only), cancel)
+}
+
+fn walk(
+    db: &WcDb,
+    rel: &RelPath,
+    opts: &StatusOptions,
+    global_ignores: Option<&[String]>,
+    only: Option<&Only>,
+    cancel: &CancelToken,
+) -> Result<Vec<WcStatus>> {
     if db.read_node(rel)?.is_none() {
         return Err(svn_types::SvnError::new(
             ErrorCode::PathNotFound,
@@ -818,7 +939,7 @@ pub fn local_status(
         .map(<[String]>::to_vec)
         .unwrap_or_else(|| split_global(DEFAULT_GLOBAL_IGNORES));
     let rows = db.read_subtree(rel)?;
-    let result = status_of_rows(db, rel, &rows, opts, &global, cancel);
+    let result = status_of_rows(db, rel, &rows, opts, &global, only, cancel);
     // Freeing tens of thousands of rows takes milliseconds the caller need not wait for.
     std::thread::spawn(move || drop(rows));
     result
@@ -831,6 +952,7 @@ fn status_of_rows(
     rows: &SubtreeRows,
     opts: &StatusOptions,
     global: &[String],
+    only: Option<&Only>,
     cancel: &CancelToken,
 ) -> Result<Vec<WcStatus>> {
     let snap = Snapshot::new(db, rel, rows);
@@ -848,7 +970,8 @@ fn status_of_rows(
     let Some(cur) = snap.read_node(rel)? else {
         return Ok(out);
     };
-    if let Some(s) = node_status(&snap, rel, &abs, &cur, disk.as_ref())?
+    if only.is_none_or(|o| o.contains(rel))
+        && let Some(s) = node_status(&snap, rel, &abs, &cur, disk.as_ref())?
         && wanted(opts, &s)
     {
         out.push(s);
@@ -856,7 +979,7 @@ fn status_of_rows(
     drop(cur);
 
     // Everything below it: list the directories (in parallel), then replay in walk order.
-    let dirs = dir_jobs(&snap, rel, depth)?;
+    let dirs = dir_jobs(&snap, rel, depth, only)?;
     if dirs.is_empty() {
         return Ok(out);
     }
@@ -879,6 +1002,7 @@ fn status_of_rows(
             .enumerate()
             .map(|(i, j)| (j.rel.as_str(), i))
             .collect(),
+        only,
     };
     let listed = list_all(&lister, &jobs);
     assemble(&snap, &jobs, listed, 0, opts, &mut externals, &mut out)?;

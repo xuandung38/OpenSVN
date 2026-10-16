@@ -38,8 +38,24 @@ test("event bus folds op://* events into the ops cache and invalidates on wc://*
   expect(ops.o1?.state).toBe("failed");
   expect(ops.o1?.error).toBe("offline");
 
-  mockEmit("wc://status-changed", { wcId: "wc-main", changed: [], removed: [] });
-  expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.status("wc-main") });
+  const listKey = [...queryKeys.status("wc-main"), { includeIgnored: false }];
+  qc.setQueryData(listKey, { snapshot: 3, files: [] });
+  mockEmit("wc://status-changed", {
+    wcId: "wc-main",
+    changed: [],
+    removed: [],
+    base: 1,
+    snapshot: 2,
+  });
+  expect(invalidate).not.toHaveBeenCalled();
+  mockEmit("wc://status-changed", {
+    wcId: "wc-main",
+    changed: [],
+    removed: [],
+    base: 5,
+    snapshot: 6,
+  });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: listKey, exact: true });
 
   const menu = vi.fn();
   bus.onMenu(menu);

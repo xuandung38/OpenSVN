@@ -241,7 +241,8 @@ function simulateOp(
     }
     onDone?.();
     mockEmit("op://finished", { opId: handle.opId, result });
-    if (wcId) mockEmit("wc://status-changed", { wcId, changed: [], removed: [] });
+    if (wcId)
+      mockEmit("wc://status-changed", { wcId, changed: [], removed: [], base: null, snapshot: 0 });
   }, opDurationMs);
   return handle;
 }

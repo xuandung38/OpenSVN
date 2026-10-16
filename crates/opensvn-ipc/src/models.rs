@@ -728,6 +728,16 @@ pub struct LayoutDetection {
 }
 
 /// Result of `log_get`.
+/// Result of `status_get`. `snapshot` identifies the list for the deltas of
+/// `wc://status-changed`; it is `None` for queries the deltas do not cover (ignored items).
+/// Ids grow over the app's lifetime, so a larger id is a later snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusSnapshot {
+    pub snapshot: Option<u32>,
+    pub files: Vec<FileStatus>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct LogPage {
