@@ -22,6 +22,9 @@ const ENTRY_COMMITTED_REV: &str = "svn:entry:committed-rev";
 const ENTRY_COMMITTED_DATE: &str = "svn:entry:committed-date";
 const ENTRY_LAST_AUTHOR: &str = "svn:entry:last-author";
 const ENTRY_UUID: &str = "svn:entry:uuid";
+/// The wcprop ra_serf caches for every file it receives: the `D:checked-in` href (the file at
+/// its last changed revision), stored in `NODES.dav_cache`.
+const WC_VERSION_URL: &str = "svn:wc:ra_dav:version-url";
 
 fn corrupt(msg: impl Into<String>) -> SvnError {
     SvnError::new(ErrorCode::ProtocolViolation, msg)
@@ -243,20 +246,27 @@ impl<'a> EventBridge<'a> {
                 });
                 Ok(())
             }
-            E::OpenFile { path, base_rev, .. } => {
+            E::OpenFile {
+                path,
+                base_rev,
+                checked_in,
+            } => {
                 let parent = self.top_dir()?;
                 let id = self.editor.open_file(&path, parent, base_rev).await?;
                 self.push_file(path, id);
-                Ok(())
+                self.version_url(id, checked_in.as_ref()).await
             }
             E::AddFile {
-                path, copy_from, ..
+                path,
+                copy_from,
+                checked_in,
+                ..
             } => {
                 let parent = self.top_dir()?;
                 let copy = copy_from.as_ref().map(|(p, r)| (p.as_str(), *r));
                 let id = self.editor.add_file(&path, parent, copy).await?;
                 self.push_file(path, id);
-                Ok(())
+                self.version_url(id, checked_in.as_ref()).await
             }
             E::DeleteEntry { path, rev } => {
                 let parent = self.top_dir()?;
@@ -324,6 +334,22 @@ impl<'a> EventBridge<'a> {
             E::CloseFile { path, md5 } => self.close_file(&path, md5).await,
             E::CloseDir { path } => self.close_dir(&path).await,
         }
+    }
+
+    /// Hands the file's `D:checked-in` href to the editor as the `svn:wc:ra_dav:version-url`
+    /// wcprop, as ra_serf does, so the working copy caches it like svn's (`NODES.dav_cache`).
+    /// The path is kept as the server encoded it.
+    async fn version_url(
+        &self,
+        id: FileId,
+        href: Option<&svn_protocol::AcceptedHref>,
+    ) -> Result<()> {
+        let Some(href) = href.filter(|_| self.send_text) else {
+            return Ok(());
+        };
+        self.editor
+            .change_file_prop(id, set(WC_VERSION_URL, href.url.path().as_bytes().to_vec()))
+            .await
     }
 
     fn push_file(&mut self, path: RelPath, id: FileId) {

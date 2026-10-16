@@ -15,5 +15,5 @@ steps:
   - { on: engine, wc: s, svn: [update, --set-depth, empty, docs] }
   - { on: svn15, wc: o, svn: [update, --set-depth, empty, docs] }
 compare:
-  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
-  - { left: s, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e, right: o, checks: [tree, status, info, wcdb] }
+  - { left: s, right: o, checks: [tree, status, info, wcdb] }

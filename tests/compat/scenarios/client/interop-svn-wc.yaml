@@ -51,7 +51,7 @@ steps:
   - { on: svn15, wc: f, svn: [checkout, "{url}/trunk", "."] }
   - { on: svn14, wc: f14, svn: [checkout, "{url}/trunk", "."] }
 compare:
-  - { left: s-updated, right: o-updated, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
-  - { left: s14-updated, right: o14-updated, checks: [tree, status, info, wcdb], reader: svn14, ignore: [dav_cache] }
+  - { left: s-updated, right: o-updated, checks: [tree, status, info, wcdb] }
+  - { left: s14-updated, right: o14-updated, checks: [tree, status, info, wcdb], reader: svn14 }
   - { left: s, right: f, checks: [tree, status, info] }
   - { left: s14, right: f14, checks: [tree, status, info], reader: svn14 }

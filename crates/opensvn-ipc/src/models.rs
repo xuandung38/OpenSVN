@@ -844,6 +844,11 @@ pub enum ResolveChoice {
     Theirs,
     Working,
     Base,
+    /// Tree conflict "local moved away, incoming edit" (svn's `mine-conflict`): the incoming
+    /// changes are applied to the move destination. `Working` keeps the destination as it is
+    /// and turns the move into a copy.
+    #[serde(rename = "mineConflict")]
+    MineConflict,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]

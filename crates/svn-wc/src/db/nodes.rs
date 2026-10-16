@@ -164,7 +164,7 @@ pub(crate) fn decode_props(blob: &[u8]) -> Result<Props> {
 }
 
 /// Encodes properties sorted by name, so equal sets always produce equal bytes.
-pub(crate) fn encode_props(props: &Props) -> Vec<u8> {
+pub fn encode_props(props: &Props) -> Vec<u8> {
     let mut sorted = props.clone();
     sorted.sort();
     skel::unparse_proplist(&sorted).unparse()

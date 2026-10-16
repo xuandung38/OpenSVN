@@ -24,8 +24,7 @@ pub(super) struct ReportEntry {
     pub depth: Depth,
     /// `link_path`: the URL the working copy has this path (and what is below it) from.
     pub link_url: Option<RepoUrl>,
-    /// [`Self::link_url`] below the repository root, for a switch (see
-    /// [`PlanInput::full_trees`]); `None` otherwise.
+    /// [`Self::link_url`] below the repository root (see [`PlanInput::full_trees`]).
     pub link: Option<RelPath>,
 }
 
@@ -136,9 +135,9 @@ pub(super) struct PlanInput<'a> {
     pub target_rev: Revnum,
     pub target_tree: &'a Tree,
     pub base_trees: &'a HashMap<Revnum, Tree>,
-    /// Whole repository trees at the revisions of linked entries: in a switch, a path below a
-    /// `link_path` is what the working copy has from the link's source (svn_repos' `s_path`),
-    /// while the target stays where the switch puts it.
+    /// Whole repository trees at the revisions of linked entries: a path below a `link_path` is
+    /// what the working copy has from the link's source (svn_repos' `s_path`). In a switch the
+    /// target stays where the switch puts it; an update also takes the target from the link.
     pub full_trees: &'a HashMap<Revnum, Tree>,
     pub entries: &'a [ReportEntry],
     /// Anchor-relative path being updated.
@@ -151,6 +150,8 @@ pub(super) struct PlanInput<'a> {
     pub max_open_files: usize,
     /// Depth of the update request (`Unknown`: the depths the working copy reports).
     pub requested_depth: Depth,
+    /// A switch: links are followed on the working copy's side only.
+    pub is_switch: bool,
 }
 
 struct Planner<'a> {
@@ -285,8 +286,26 @@ impl Planner<'_> {
         tree.get(&at).map(|n| (n, e.rev))
     }
 
+    /// Where `path` lies in the target tree: below the update target as the request maps it,
+    /// or, in an update, below the nearest linked entry at or above it (svn_repos follows
+    /// `link_path` in the target for every operation but a switch).
+    fn target_path(&self, path: &RelPath) -> Result<RelPath> {
+        if !self.input.is_switch
+            && let Some((e, l)) = self
+                .input
+                .entries
+                .iter()
+                .filter(|e| e.link.is_some() && !e.deleted && path.starts_with(&e.path))
+                .max_by_key(|e| e.path.as_str().len())
+                .and_then(|e| e.link.as_ref().map(|l| (e, l)))
+        {
+            return remap(path, &e.path, l);
+        }
+        remap(path, &self.input.anchor_target, &self.input.tree_target)
+    }
+
     fn new_node(&self, path: &RelPath) -> Result<Option<&Node>> {
-        let t = remap(path, &self.input.anchor_target, &self.input.tree_target)?;
+        let t = self.target_path(path)?;
         Ok(self.input.target_tree.get(&t))
     }
 
@@ -429,7 +448,7 @@ impl Planner<'_> {
                     .filter_map(|e| e.path.file_name().map(str::to_owned)),
             );
         }
-        let tdir = remap(dir, &self.input.anchor_target, &self.input.tree_target)?;
+        let tdir = self.target_path(dir)?;
         names.extend(
             super::repo::children(self.input.target_tree, &tdir)
                 .filter_map(|(k, _)| k.file_name().map(str::to_owned)),

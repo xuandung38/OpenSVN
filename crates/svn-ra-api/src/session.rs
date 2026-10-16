@@ -184,6 +184,15 @@ pub trait RaSession: Send + Sync {
         ))
     }
 
+    /// The wcprops (`svn:wc:*`) the RA layer caches with a file it hands to the working copy
+    /// outside a report drive, for the file at `repos_relpath` (below the repository root) last
+    /// changed in `created_rev`: over DAV, ra_serf's `svn:wc:ra_dav:version-url`, the href the
+    /// server would send as the file's `D:checked-in` (`NODES.dav_cache`). None by default.
+    fn file_wcprops(&self, repos_relpath: &RelPath, created_rev: Revnum) -> Vec<PropChange> {
+        let _ = (repos_relpath, created_rev);
+        Vec::new()
+    }
+
     /// User name this session authenticates as, when known (the Basic user name the server
     /// last accepted). `None` before authentication, for anonymous access and for mechanisms
     /// that do not reveal a name (Negotiate). Commits journal it so that recovery can match

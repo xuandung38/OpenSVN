@@ -1167,7 +1167,13 @@ export type RepoListing = {
 	hidden: number,
 };
 
-export type ResolveChoice = "mine" | "theirs" | "working" | "base";
+export type ResolveChoice = "mine" | "theirs" | "working" | "base" | 
+/**
+ *  Tree conflict "local moved away, incoming edit" (svn's `mine-conflict`): the incoming
+ *  changes are applied to the move destination. `Working` keeps the destination as it is
+ *  and turns the move into a copy.
+ */
+"mineConflict";
 
 export type ResolveRequest = {
 	wcId: WcId,

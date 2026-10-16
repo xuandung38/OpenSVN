@@ -382,6 +382,13 @@ async fn drive_locked(
         blocking(move || crate::wc::run_work_queue(&db, &cancel).map(|_| ())).await?;
     }
 
+    // A switch empties the RA layer's cache (`dav_cache`) of the whole target before it
+    // drives, like svn's (file externals below it included): the nodes the drive sends get
+    // theirs again, the others keep none.
+    if matches!(params.kind, UpdateKind::Switch(_)) {
+        db.with_txn(|t| t.clear_dav_cache(&target_wc))?;
+    }
+
     // Nodes whose inherited-properties cache the drive refreshes (svn collects them before it
     // drives, `svn_client__get_inheritable_props`); the target itself is decided afterwards.
     let mut iprop_paths = super::iprops::targets(&db, &target_wc, params.depth)?;
@@ -574,15 +581,38 @@ async fn drive_locked(
         .unwrap_or_else(PoisonError::into_inner)
         .revision;
     if !params.sticky_depth
-        && matches!(params.kind, UpdateKind::Update)
         && let Some(rev) = reached
     {
         // The update itself succeeded; markers it cannot record leave the working copy as it
-        // was before this was implemented, so only cancellation is reported.
-        if let Err(e) =
-            record_unseen_children(session, &db, &target_wc, &target, params.depth, rev, cancel)
+        // was before this was implemented, so only cancellation is reported. A switch lists the
+        // target at its new location, through a session there (svn's switch editor fetches the
+        // entries of the switch URL the same way).
+        let narrow = matches!(
+            params.depth,
+            Depth::Empty | Depth::Files | Depth::Immediates
+        );
+        let listed = match &params.kind {
+            UpdateKind::Switch(url) if narrow => {
+                session.reparented(url).map(|s| (Some(s), RelPath::root()))
+            }
+            _ => Ok((None, target.clone())),
+        };
+        let result = match listed {
+            Ok((at, dir)) => {
+                record_unseen_children(
+                    at.as_deref().unwrap_or(session),
+                    &db,
+                    &target_wc,
+                    &dir,
+                    params.depth,
+                    rev,
+                    cancel,
+                )
                 .await
-        {
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = result {
             if e.code == ErrorCode::Cancelled {
                 return Err(e);
             }

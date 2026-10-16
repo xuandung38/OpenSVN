@@ -72,6 +72,29 @@ impl WcTxn<'_> {
         nodes::read_base(self.conn, self.wc_id, path)
     }
 
+    /// `dav_cache` of the BASE node at `path` (see [`WcDb::dav_cache`]).
+    pub fn dav_cache(&self, path: &RelPath) -> Result<Option<Props>> {
+        super::misc::base_blob(self.conn, self.wc_id, path, "dav_cache")?
+            .map(|b| nodes::decode_props(&b))
+            .transpose()
+    }
+
+    /// Empties the `dav_cache` of every BASE node at or below `root`, like svn's
+    /// `svn_wc__db_base_clear_dav_cache_recursive` (run by `svn cleanup`).
+    pub fn clear_dav_cache(&self, root: &RelPath) -> Result<()> {
+        super::connection::cached_exec(
+            self.conn,
+            &format!(
+                "UPDATE nodes SET dav_cache = NULL WHERE wc_id = ?1 AND op_depth = 0 \
+                 AND dav_cache IS NOT NULL AND (?2 = '' OR {})",
+                scope_sql()
+            ),
+            params![self.wc_id, root.as_str()],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
     /// The `conflict_data` skel recorded for `path`.
     pub fn conflict_skel(&self, path: &RelPath) -> Result<Option<Skel>> {
         Ok(actual::read_conflict(self.conn, self.wc_id, path)?.map(|r| r.skel))
@@ -269,6 +292,14 @@ impl WcTxn<'_> {
 
     /// Rows of `path` and its descendants at `op_depth`, keyed by the part of the path below
     /// `path` (`""` or `/name...`), with properties decoded so their order does not matter.
+    pub fn layer(
+        &self,
+        path: &RelPath,
+        op_depth: u32,
+    ) -> Result<std::collections::BTreeMap<String, LayerRow>> {
+        self.layer_rows(path.as_str(), i64::from(op_depth))
+    }
+
     fn layer_rows(
         &self,
         path: &str,
@@ -1017,15 +1048,25 @@ impl WcTxn<'_> {
     }
 }
 
-/// One `NODES` row as [`WcTxn::bump_moved_away`] compares and copies it.
-struct LayerRow {
-    presence: String,
-    kind: String,
-    checksum: Option<String>,
-    props: Props,
-    repos_path: Option<String>,
-    revision: Option<i64>,
-    changed_revision: Option<i64>,
-    changed_date: Option<i64>,
-    changed_author: Option<String>,
+/// One `NODES` row of a layer, as [`WcTxn::layer`] returns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerRow {
+    /// `presence` word.
+    pub presence: String,
+    /// `kind` word.
+    pub kind: String,
+    /// Pristine checksum (`$sha1$...`).
+    pub checksum: Option<String>,
+    /// Pristine properties, sorted.
+    pub props: Props,
+    /// Repository path.
+    pub repos_path: Option<String>,
+    /// Revision.
+    pub revision: Option<i64>,
+    /// Last changed revision.
+    pub changed_revision: Option<i64>,
+    /// Last changed date.
+    pub changed_date: Option<i64>,
+    /// Last changed author.
+    pub changed_author: Option<String>,
 }

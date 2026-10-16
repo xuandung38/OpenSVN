@@ -17,6 +17,6 @@ steps:
   - { on: engine, wc: u, svn: [switch, --ignore-ancestry, "{url}/trunk/docs"] }
   - { on: svn15, wc: v, svn: [switch, --ignore-ancestry, "{url}/trunk/docs", "."] }
 compare:
-  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
-  - { left: s, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
-  - { left: u, right: v, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e, right: o, checks: [tree, status, info, wcdb] }
+  - { left: s, right: o, checks: [tree, status, info, wcdb] }
+  - { left: u, right: v, checks: [tree, status, info, wcdb] }

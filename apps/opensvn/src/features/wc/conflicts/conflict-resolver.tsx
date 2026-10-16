@@ -20,7 +20,8 @@ type Choice = { id: ResolveChoice; label: string; hint: string };
 
 /**
  * Conflict resolver (doc 01 section 5). Text conflicts: take mine, theirs, base, or keep the merged
- * file on disk. Tree conflicts: an explanation plus the two outcomes the engine supports. Binary
+ * file on disk. Tree conflicts: an explanation plus the two outcomes the engine supports (for an
+ * item moved away: apply the incoming changes to the destination, or keep it). Binary
  * files only offer mine / theirs. Content is shown as text, never as markup.
  */
 export function ConflictResolver({
@@ -148,21 +149,37 @@ function ConflictDetail({
       ? d("conflictText")
       : d("conflictProps");
 
-  const choices: Choice[] = tree
+  // A tree conflict on an item moved away (its destination is known): svn applies the
+  // incoming changes to the destination, or keeps it and breaks the move.
+  const movedTo = tree ? file.movedTo : null;
+  const choices: Choice[] = movedTo
     ? [
-        { id: "working", label: d("treeKeepLocal"), hint: d("treeKeepLocalHint") },
-        { id: "theirs", label: d("treeTakeIncoming"), hint: d("treeTakeIncomingHint") },
+        {
+          id: "mineConflict",
+          label: d("treeMovedApply", { path: movedTo }),
+          hint: d("treeMovedApplyHint"),
+        },
+        {
+          id: "working",
+          label: d("treeMovedKeep", { path: movedTo }),
+          hint: d("treeMovedKeepHint"),
+        },
       ]
-    : [
-        { id: "mine", label: d("choiceMine"), hint: d("choiceMineHint") },
-        { id: "theirs", label: d("choiceTheirs"), hint: d("choiceTheirsHint") },
-        ...(file.binary
-          ? []
-          : [
-              { id: "base" as const, label: d("choiceBase"), hint: d("choiceBaseHint") },
-              { id: "working" as const, label: d("choiceMerged"), hint: d("choiceMergedHint") },
-            ]),
-      ];
+    : tree
+      ? [
+          { id: "working", label: d("treeKeepLocal"), hint: d("treeKeepLocalHint") },
+          { id: "theirs", label: d("treeTakeIncoming"), hint: d("treeTakeIncomingHint") },
+        ]
+      : [
+          { id: "mine", label: d("choiceMine"), hint: d("choiceMineHint") },
+          { id: "theirs", label: d("choiceTheirs"), hint: d("choiceTheirsHint") },
+          ...(file.binary
+            ? []
+            : [
+                { id: "base" as const, label: d("choiceBase"), hint: d("choiceBaseHint") },
+                { id: "working" as const, label: d("choiceMerged"), hint: d("choiceMergedHint") },
+              ]),
+        ];
 
   return (
     <div className="flex flex-col gap-3">
@@ -176,9 +193,11 @@ function ConflictDetail({
         <div className="rounded-md bg-warn-soft px-3 py-2">
           <p className="m-0">{d("treeExplain")}</p>
           <p className="m-0">
-            {file.text === "missing" || file.text === "deleted"
-              ? d("treeLocalDeleted")
-              : d("treeLocalMissing")}
+            {movedTo
+              ? d("treeLocalMoved", { path: movedTo })
+              : file.text === "missing" || file.text === "deleted"
+                ? d("treeLocalDeleted")
+                : d("treeLocalMissing")}
           </p>
         </div>
       )}

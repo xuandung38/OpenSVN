@@ -21,6 +21,7 @@ pub mod props;
 pub mod resolve;
 pub mod revert;
 pub mod state;
+mod update_move;
 
 pub use add::{AddOptions, AddOutcome, add, add_reporting};
 pub use autoprops::AddConfig;
