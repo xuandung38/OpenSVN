@@ -328,6 +328,12 @@ fn behind_a_faulty_proxy() -> bool {
     std::env::var("OPENSVN_COMPAT_FAULTS").is_ok_and(|f| !f.trim().is_empty())
 }
 
+/// The proxy cuts answers: the svn command line client, which the comparisons with svn run
+/// through the same URL, does not resume a cut answer (E120106), so they cannot run.
+fn proxy_cuts_answers() -> bool {
+    std::env::var("OPENSVN_COMPAT_FAULTS").is_ok_and(|f| f.contains("--truncate"))
+}
+
 fn proxy_log() -> String {
     let path = std::env::var_os("OPENSVN_COMPAT_PROXY_LOG")
         .expect("OPENSVN_COMPAT_PROXY_LOG names the log of the flaky proxy");
@@ -2210,6 +2216,10 @@ async fn sparse_checkout_matches_svn() {
         eprintln!("skipping: svn is given Basic credentials");
         return;
     }
+    if proxy_cuts_answers() {
+        eprintln!("SKIPPED: svn cannot resume an answer the proxy cuts (E120106)");
+        return;
+    }
     let entry = |path: &str, depth: SparseDepth| SparseEntry {
         path: path.to_owned(),
         depth,
@@ -3276,6 +3286,10 @@ async fn dav_cache_matches_svn() {
     };
     if negotiate_mode() {
         eprintln!("skipping: svn is given Basic credentials");
+        return;
+    }
+    if proxy_cuts_answers() {
+        eprintln!("SKIPPED: svn cannot resume an answer the proxy cuts (E120106)");
         return;
     }
     for (version, host) in servers() {
