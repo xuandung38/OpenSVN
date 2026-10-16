@@ -256,6 +256,84 @@ async fn decisions_that_do_not_fit_the_failure_are_rejected_server_side() {
 }
 
 #[tokio::test]
+async fn replace_pin_is_accepted_only_for_a_pin_mismatch_and_never_for_a_hard_failure() {
+    // The trust dialog answers `replacePin` for a changed certificate. Sent for any other failure
+    // (a compromised or buggy webview), it is rejected and nothing is pinned or replaced.
+    let (broker, events, db) = setup(PROMPT_TIMEOUT);
+    db.cert_trust(
+        "svn.test.local",
+        8443,
+        &"01".repeat(32),
+        "CN=old",
+        "2030-01-01T00:00:00Z",
+    )
+    .unwrap();
+    let hard = [
+        CertFailure::HostnameMismatch,
+        CertFailure::Expired,
+        CertFailure::NotYetValid,
+        CertFailure::Revoked,
+        CertFailure::Other("bad signature".into()),
+        CertFailure::UnknownIssuer,
+        CertFailure::SelfSigned,
+    ];
+    for (asked, failure) in hard.iter().enumerate() {
+        let b = broker.clone();
+        let f = failure.clone();
+        let task = tokio::spawn(async move { b.confirm_certificate(&cert(f)).await });
+        let prompt = next_prompt_after(&events, asked).await;
+        broker
+            .respond(
+                &prompt.request_id,
+                AuthResponse::Certificate {
+                    decision: IpcDecision::ReplacePin,
+                },
+            )
+            .unwrap();
+        assert_eq!(task.await.unwrap(), CertDecision::Reject, "{failure:?}");
+        assert!(
+            db.cert_is_trusted("svn.test.local", 8443, &"01".repeat(32))
+                .unwrap(),
+            "{failure:?}: the old pin stays"
+        );
+        assert!(
+            !db.cert_is_trusted("svn.test.local", 8443, &"ab".repeat(32))
+                .unwrap(),
+            "{failure:?}: the presented certificate is not pinned"
+        );
+    }
+
+    // A pin mismatch (the transport reports `Changed` only on an otherwise valid chain) is the
+    // one case `replacePin` swaps the pin.
+    let b = broker.clone();
+    let task = tokio::spawn(async move {
+        b.confirm_certificate(&cert(CertFailure::Changed {
+            old_sha256: [1; 32],
+            new_sha256: [0xab; 32],
+        }))
+        .await
+    });
+    let prompt = next_prompt_after(&events, hard.len()).await;
+    broker
+        .respond(
+            &prompt.request_id,
+            AuthResponse::Certificate {
+                decision: IpcDecision::ReplacePin,
+            },
+        )
+        .unwrap();
+    assert_eq!(task.await.unwrap(), CertDecision::ReplacePin);
+    assert!(
+        db.cert_is_trusted("svn.test.local", 8443, &"ab".repeat(32))
+            .unwrap()
+    );
+    assert!(
+        !db.cert_is_trusted("svn.test.local", 8443, &"01".repeat(32))
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn replace_pin_swaps_the_pinned_fingerprint_for_a_changed_certificate_only() {
     let (broker, events, db) = setup(PROMPT_TIMEOUT);
     db.cert_trust(

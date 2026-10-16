@@ -15,6 +15,7 @@ pub mod get;
 pub mod http;
 pub mod limits;
 pub mod list_report;
+pub mod location_segments;
 pub mod locks;
 pub mod log;
 pub mod propfind;

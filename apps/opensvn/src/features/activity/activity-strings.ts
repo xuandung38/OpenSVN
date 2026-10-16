@@ -53,6 +53,8 @@ export const activityStrings = defineStrings({
     backgroundFailed: "A background check failed",
     backgroundFailedMany: "{count} background checks failed",
     backgroundDismiss: "Dismiss",
+    errUnrelated:
+      "This URL shares no history with the working copy, so nothing was switched. To switch anyway, open Switch again and tick “Ignore ancestry”.",
     // Transport errors
     errWriteUnsure:
       "The connection was cut while sending; the change may or may not have reached the server. Refresh before trying again.",
@@ -116,6 +118,8 @@ export const activityStrings = defineStrings({
     backgroundFailed: "Một lần kiểm tra nền thất bại",
     backgroundFailedMany: "{count} lần kiểm tra nền thất bại",
     backgroundDismiss: "Bỏ qua",
+    errUnrelated:
+      "URL này không có lịch sử chung với working copy nên OpenSVN chưa thay đổi gì. Để vẫn switch, hãy mở lại hộp thoại Switch và chọn “Bỏ qua kiểm tra nguồn gốc”.",
     errWriteUnsure:
       "Kết nối bị ngắt khi đang gửi; thay đổi có thể đã tới máy chủ hoặc chưa. Hãy làm mới trước khi thử lại.",
     errCommitUnsure:

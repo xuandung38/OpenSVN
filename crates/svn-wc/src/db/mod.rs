@@ -116,6 +116,9 @@ pub struct WcDb {
     /// Serializes obtain/release/steal/cleanup of this handle (check, row, record and marker
     /// must not interleave between threads).
     lock_gate: Mutex<()>,
+    /// Marker files of the locks in `owned_locks`, and locks another client broke while we
+    /// held them (see [`WcTxn::verify_wc_lock`]).
+    lock_markers: Mutex<wc_lock::HeldMarkers>,
 }
 
 /// Returns the working copy root containing `path`, searching `path` and then its ancestors for
@@ -243,6 +246,7 @@ impl WcDb {
             owned_locks: Mutex::new(BTreeMap::new()),
             lock_owner: Mutex::new(None),
             lock_gate: Mutex::new(()),
+            lock_markers: Mutex::default(),
         })
     }
 

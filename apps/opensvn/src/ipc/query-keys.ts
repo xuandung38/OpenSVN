@@ -6,6 +6,8 @@ export const queryKeys = {
   /** Under `workingCopies`, so invalidating the list also refreshes the repository manager. */
   wcEntries: ["wcs", "entries"] as const,
   recentUrls: ["recent-urls"] as const,
+  /** Prefix of every `status` key (Clear cache refreshes them all). */
+  statusAll: ["status"] as const,
   status: (wcId: WcId) => ["status", wcId] as const,
   logRoot: ["log"] as const,
   log: (wcId: WcId, path: string, limit: number) => ["log", wcId, path, limit] as const,
@@ -23,6 +25,7 @@ export const queryKeys = {
   branches: (repoRootUrl: string, atUrl: string | null) =>
     ["branches", repoRootUrl, atUrl] as const,
   accounts: ["accounts"] as const,
+  trustedCerts: ["trusted-certs"] as const,
   ops: ["ops"] as const,
   opOutcomes: ["op-outcomes"] as const,
   settings: ["settings"] as const,

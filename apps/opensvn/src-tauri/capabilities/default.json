@@ -53,6 +53,7 @@
     "allow-menu-set-layout",
     "allow-certs-list",
     "allow-certs-remove",
+    "allow-cache-clear",
     "allow-reveal-in-os",
     "allow-open-external",
     "allow-diagnostics-export",

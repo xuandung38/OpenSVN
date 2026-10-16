@@ -1,0 +1,10 @@
+HTTP/1.1 200 OK
+Date: Mon, 01 Jan 2024 00:00:00 GMT
+Server: Apache
+Cache-Control: max-age=604800
+ETag: "10//trunk/many-props.txt"
+Accept-Ranges: bytes
+Content-Type: text/plain
+Content-Length: 16
+
+many properties

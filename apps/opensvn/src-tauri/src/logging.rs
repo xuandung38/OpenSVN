@@ -8,11 +8,14 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
+use opensvn_ipc::LogLevel;
 use svn_ra::transport::RedactingMakeWriter;
+use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::{Registry, reload};
 
 /// File name of the current log inside the logs folder.
 pub const LOG_FILE: &str = "opensvn.log";
@@ -24,9 +27,70 @@ pub fn redacted<M>(make: M) -> RedactingMakeWriter<M> {
     RedactingMakeWriter::new(make)
 }
 
-/// Subscriber writing to both sinks through [`redacted`]. Generic over the sinks so tests can
-/// capture what each one receives.
-pub fn subscriber<A, B>(console: A, file: Option<B>) -> impl tracing::Subscriber + Send + Sync
+/// The app's own crates: `general.logLevel` applies to them. Every other library logs at `info`
+/// at most, so `debug` never turns on HTTP or TLS internals of dependencies.
+const OWN_CRATES: [&str; 11] = [
+    "opensvn_lib",
+    "opensvn",
+    "opensvn_ipc",
+    "secure_store",
+    "svn_client",
+    "svn_delta",
+    "svn_diff",
+    "svn_protocol",
+    "svn_ra",
+    "svn_ra_api",
+    "svn_wc",
+];
+
+fn level_filter(level: LogLevel) -> LevelFilter {
+    match level {
+        LogLevel::Error => LevelFilter::ERROR,
+        LogLevel::Warn => LevelFilter::WARN,
+        LogLevel::Info => LevelFilter::INFO,
+        LogLevel::Debug => LevelFilter::DEBUG,
+    }
+}
+
+/// Filter for `level`: the app's crates at `level`, everything else at `level` or `info`,
+/// whichever is less verbose.
+pub fn targets(level: LogLevel) -> Targets {
+    let own = level_filter(level);
+    OWN_CRATES
+        .iter()
+        .fold(Targets::new(), |t, c| t.with_target(*c, own))
+        .with_default(own.min(LevelFilter::INFO))
+}
+
+/// Changes the level of a running subscriber.
+#[derive(Clone)]
+pub struct LevelHandle(reload::Handle<Targets, Registry>);
+
+impl LevelHandle {
+    /// Applies `level` from now on.
+    pub fn set(&self, level: LogLevel) {
+        if let Err(e) = self.0.reload(targets(level)) {
+            tracing::warn!(error = %e, "could not change the log level");
+        }
+    }
+}
+
+/// Handle of the global subscriber, once [`init`] installed it.
+static GLOBAL_LEVEL: OnceLock<LevelHandle> = OnceLock::new();
+
+/// Applies `general.logLevel` to the global subscriber (nothing before [`init`]).
+pub fn set_level(level: LogLevel) {
+    if let Some(h) = GLOBAL_LEVEL.get() {
+        h.set(level);
+    }
+}
+
+/// Subscriber writing to both sinks through [`redacted`], starting at `info`, plus the handle that
+/// changes its level. Generic over the sinks so tests can capture what each one receives.
+pub fn subscriber<A, B>(
+    console: A,
+    file: Option<B>,
+) -> (impl tracing::Subscriber + Send + Sync, LevelHandle)
 where
     A: for<'a> MakeWriter<'a> + Send + Sync + 'static,
     B: for<'a> MakeWriter<'a> + Send + Sync + 'static,
@@ -39,10 +103,12 @@ where
             .with_ansi(false)
             .with_writer(redacted(f))
     });
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::filter::LevelFilter::INFO)
+    let (filter, handle) = reload::Layer::new(targets(LogLevel::Info));
+    let sub = tracing_subscriber::registry()
+        .with(filter)
         .with(console)
-        .with(file)
+        .with(file);
+    (sub, LevelHandle(handle))
 }
 
 /// Creates `logs` (owner-only on Unix), rotates an oversized log and opens it for appending.
@@ -102,7 +168,10 @@ pub fn init(logs_dir: &Path) {
             None
         }
     };
-    let _ = tracing::subscriber::set_global_default(subscriber(io::stderr, file));
+    let (sub, handle) = subscriber(io::stderr, file);
+    if tracing::subscriber::set_global_default(sub).is_ok() {
+        let _ = GLOBAL_LEVEL.set(handle);
+    }
 }
 
 #[cfg(test)]
@@ -143,7 +212,7 @@ mod tests {
     fn every_sink_receives_redacted_records() {
         let console = Capture::default();
         let file = Capture::default();
-        let sub = subscriber(console.clone(), Some(file.clone()));
+        let (sub, _) = subscriber(console.clone(), Some(file.clone()));
         tracing::subscriber::with_default(sub, || {
             tracing::warn!(
                 "request failed: url=https://alice:hunter2@svn.example.com/repo Authorization: Bearer ghp_topsecret"
@@ -160,6 +229,31 @@ mod tests {
             }
             assert!(!text.contains("below the level"), "{name}");
         }
+    }
+
+    #[test]
+    fn the_level_changes_at_runtime_and_libraries_never_go_below_info() {
+        let console = Capture::default();
+        let (sub, level) = subscriber(console.clone(), None::<Capture>);
+        tracing::subscriber::with_default(sub, || {
+            tracing::debug!("own debug before");
+            level.set(LogLevel::Debug);
+            tracing::debug!("own debug after");
+            tracing::debug!(target: "hyper::proto", "library debug");
+            tracing::info!(target: "hyper::proto", "library info");
+            level.set(LogLevel::Error);
+            tracing::warn!("own warn at error level");
+            tracing::info!(target: "hyper::proto", "library info at error level");
+            tracing::error!("own error");
+        });
+        let text = console.text();
+        assert!(!text.contains("own debug before"), "{text}");
+        assert!(text.contains("own debug after"), "{text}");
+        assert!(!text.contains("library debug"), "{text}");
+        assert!(text.contains("library info"), "{text}");
+        assert!(!text.contains("own warn at error level"), "{text}");
+        assert!(!text.contains("library info at error level"), "{text}");
+        assert!(text.contains("own error"), "{text}");
     }
 
     #[test]

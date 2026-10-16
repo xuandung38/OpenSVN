@@ -463,6 +463,7 @@ async fn switch_matches_svn_switch() {
         &target,
         Some(svn_types::Revnum(2)),
         Depth::Unknown,
+        true,
         &CancelToken::new(),
     )
     .await

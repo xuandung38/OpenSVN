@@ -1,6 +1,7 @@
 import type { Commands, IpcAdapter } from "../adapter";
 import {
   type AppError,
+  type CertDecision,
   type CopyLocationRequest,
   type DiagnosticsOptions,
   type EngineCapabilities,
@@ -14,10 +15,11 @@ import {
   SETTING_RANGES,
   type Settings,
   type SettingsPatch_Deserialize,
+  type TrustedCertKey,
   type UnlockRequest,
 } from "../bindings";
 import { isValidEventName } from "../events";
-import { mockSettings } from "./data";
+import { mockSettings, mockTrustedCerts } from "./data";
 import {
   MOCK_REPO_ROOT,
   MOCK_REPO_UUID,
@@ -198,6 +200,7 @@ const {
 });
 
 let lastDiagnosticsToken: string | null = null;
+const CERT_DECISIONS: CertDecision[] = ["reject", "acceptOnce", "acceptAlways", "replacePin"];
 
 const PROGRAM_KEYS = {
   "diff-tool": "diff.externalTool",
@@ -339,20 +342,44 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
       },
     ]),
   accountsSignOut: () => ok(null),
+  // Like serde: only variants of the contract are accepted.
   authRespond: (requestId: string, response: unknown) => {
-    // Like serde: only variants of the contract are accepted (credentials, certificate, cancel).
-    const kind = (response as { kind?: unknown } | null)?.kind;
-    if (kind !== "credentials" && kind !== "certificate" && kind !== "cancel") {
+    const r = response as { kind?: unknown; decision?: unknown } | null;
+    const kind = r?.kind;
+    if (
+      kind !== "credentials" &&
+      kind !== "certificate" &&
+      kind !== "negotiate" &&
+      kind !== "cancel"
+    ) {
       return errCode(
         "internal",
         `invalid args \`response\` for command \`auth_respond\`: unknown variant ${String(kind)}`,
       );
     }
+    if (kind === "certificate" && !CERT_DECISIONS.includes(r?.decision as CertDecision)) {
+      return errCode(
+        "internal",
+        `invalid args \`response\` for command \`auth_respond\`: unknown variant ${String(r?.decision)}`,
+      );
+    }
     mockAuthResponses.push({ requestId, response });
     return ok(null);
   },
+  // The mock keeps no status cache, so there is nothing to drop.
+  cacheClear: () => ok(null),
+  certsList: () => ok(mockTrustedCerts.map((c) => ({ ...c }))),
+  certsRemove: (key: TrustedCertKey) => {
+    const i = mockTrustedCerts.findIndex(
+      (c) => c.host === key.host && c.port === key.port && c.sha256 === key.sha256,
+    );
+    // Like the backend: a certificate that is not listed (any more) is refused.
+    if (i < 0) return errCode("invalid-argument", "This certificate is not in the list.");
+    mockTrustedCerts.splice(i, 1);
+    return ok(null);
+  },
   // The real backend shows a native file picker and a confirmation; the mock pretends the user
-  // picked a diff tool and confirmed.
+  // picked a program and confirmed.
   programChoose: (kind: ProgramKind, args: string[]) => {
     const key = PROGRAM_KEYS[kind];
     Object.assign(mockSettings, { [key]: { path: "/usr/bin/meld", args } });

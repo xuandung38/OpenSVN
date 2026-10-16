@@ -229,6 +229,14 @@ pub async fn certs_remove(state: State<'_, AppState>, key: TrustedCertKey) -> Re
     .await
 }
 
+/// Empties the disposable cache (`cache.sqlite`: status snapshots). Working copies, settings,
+/// accounts and trusted certificates are not touched; the next scan rebuilds what was removed.
+#[tauri::command]
+#[specta::specta]
+pub async fn cache_clear(state: State<'_, AppState>) -> Result<(), AppError> {
+    guard(async { state.status.clear_cache() }).await
+}
+
 /// Shows a working copy item in the file manager. `path` is relative to the working copy root;
 /// an empty path reveals the root folder itself. Items reached through a symbolic link are
 /// refused, so the file manager never opens a folder outside the working copy.

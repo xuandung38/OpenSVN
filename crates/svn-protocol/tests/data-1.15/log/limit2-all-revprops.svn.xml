@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<log>
+<logentry
+   revision="5">
+<author>alice</author>
+<date>2026-10-15T15:12:52.260251Z</date>
+<paths>
+<path
+   copyfrom-path="/trunk/src"
+   copyfrom-rev="4"
+   action="A"
+   prop-mods="false"
+   text-mods="false"
+   kind="dir">/branches/b1</path>
+</paths>
+<msg>branch b1 copy</msg>
+</logentry>
+<logentry
+   revision="4">
+<author>alice</author>
+<date>2026-10-15T15:12:51.865285Z</date>
+<paths>
+<path
+   prop-mods="false"
+   text-mods="false"
+   kind="file"
+   action="D">/trunk/docs/readme.md</path>
+</paths>
+<msg>delete readme</msg>
+</logentry>
+</log>

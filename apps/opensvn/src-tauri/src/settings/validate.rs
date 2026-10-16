@@ -16,7 +16,9 @@ use serde_json::Value;
 /// - `network.reconnectWaitMin`: how long a checkout or update waits for a lost connection;
 ///   up to 2 hours (a long outage, a laptop closed for a meeting).
 /// - `cache.maxSizeGb`: up to 4 TB.
-pub const SETTING_RANGES: [(&str, SettingRange); 5] = [
+/// - `appearance.fontSize`: base UI font size in pixels; the layout is tested from 11 to 20.
+/// - `diff.tabWidth`: columns per tab character in diff, blame and file views.
+pub const SETTING_RANGES: [(&str, SettingRange); 7] = [
     (
         "general.checkIntervalMin",
         SettingRange { min: 1, max: 1440 },
@@ -28,7 +30,12 @@ pub const SETTING_RANGES: [(&str, SettingRange); 5] = [
         SettingRange { min: 1, max: 120 },
     ),
     ("cache.maxSizeGb", SettingRange { min: 1, max: 4096 }),
+    ("appearance.fontSize", SettingRange { min: 11, max: 20 }),
+    ("diff.tabWidth", SettingRange { min: 1, max: 16 }),
 ];
+
+/// Longest `wc.globalIgnores` value, in bytes.
+pub const MAX_GLOBAL_IGNORES: usize = 4096;
 
 /// The range of a key of [`SETTING_RANGES`].
 pub fn range_of(key: &str) -> Option<SettingRange> {
@@ -113,6 +120,19 @@ fn check_proxy(p: &ProxySetting) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Whitespace-separated patterns, as in svn's `global-ignores`: no control characters other
+/// than whitespace, and a bounded length.
+fn check_global_ignores(v: &str) -> Result<(), AppError> {
+    const KEY: &str = "wc.globalIgnores";
+    if v.len() > MAX_GLOBAL_IGNORES {
+        return Err(invalid(KEY, "too long"));
+    }
+    if v.chars().any(|c| c.is_control() && !c.is_whitespace()) {
+        return Err(invalid(KEY, "contains an invalid character"));
+    }
+    Ok(())
+}
+
 fn check_program(key: &str, tool: &ExternalDiffTool) -> Result<(), AppError> {
     if tool.path.trim().is_empty() || tool.path.contains('\0') {
         return Err(invalid(key, "program path is empty or invalid"));
@@ -136,6 +156,9 @@ pub fn validate(s: &Settings) -> Result<(), AppError> {
     check_range("network.timeoutSec", s.network_timeout_sec)?;
     check_range("network.reconnectWaitMin", s.network_reconnect_wait_min)?;
     check_range("cache.maxSizeGb", s.cache_max_size_gb)?;
+    check_range("appearance.fontSize", s.appearance_font_size)?;
+    check_range("diff.tabWidth", s.diff_tab_width)?;
+    check_global_ignores(&s.wc_global_ignores)?;
     if s.wc_default_format != WcFormat::V31 {
         return Err(invalid("wc.defaultFormat", "only format 31 can be written"));
     }
@@ -209,6 +232,8 @@ mod tests {
                     "network.timeoutSec" => s.network_timeout_sec = v,
                     "network.reconnectWaitMin" => s.network_reconnect_wait_min = v,
                     "cache.maxSizeGb" => s.cache_max_size_gb = v,
+                    "appearance.fontSize" => s.appearance_font_size = v,
+                    "diff.tabWidth" => s.diff_tab_width = v,
                     other => panic!("no field for ranged key {other}"),
                 }
                 validate(&s)
@@ -286,5 +311,21 @@ mod tests {
             url: "http://proxy:3128".into(),
         };
         validate(&s).unwrap();
+    }
+
+    #[test]
+    fn global_ignores_accept_patterns_and_refuse_control_characters_and_huge_values() {
+        let mut s = defaults(None);
+        s.wc_global_ignores = "*.o *.obj\n.DS_Store\tbuild".into();
+        validate(&s).unwrap();
+        for bad in [
+            "a\0b".to_owned(),
+            "a\u{1b}[31m".to_owned(),
+            "x".repeat(MAX_GLOBAL_IGNORES + 1),
+        ] {
+            s.wc_global_ignores = bad;
+            let e = validate(&s).unwrap_err();
+            assert_eq!(e.detail.as_deref(), Some("wc.globalIgnores"));
+        }
     }
 }

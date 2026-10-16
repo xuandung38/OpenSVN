@@ -6,6 +6,7 @@
 //! transaction per file or directory, together with the work items that make the disk match), and
 //! honours the caller's [`svn_types::CancelToken`].
 
+pub mod ancestry;
 pub mod checkout;
 pub mod commit;
 pub mod ctx;
@@ -19,6 +20,7 @@ pub mod status;
 pub mod update;
 pub mod wc;
 
+pub use ancestry::{Location, youngest_common_ancestor};
 pub use checkout::checkout;
 pub use ctx::{
     ClientConfig, ClientCtx, ExternalAction, ExternalReport, ProgressFn, UpdateAction, UpdateEvent,

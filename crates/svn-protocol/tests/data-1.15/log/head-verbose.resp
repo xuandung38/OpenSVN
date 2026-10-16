@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:log-report xmlns:S="svn:" xmlns:D="DAV:">
+<S:log-item>
+<S:modified-path node-kind="file" text-mods="true" prop-mods="false">/trunk/a.txt</S:modified-path>
+<S:added-path node-kind="dir" text-mods="false" prop-mods="false">/trunk/newdir</S:added-path>
+<S:added-path node-kind="file" text-mods="true" prop-mods="false">/trunk/newdir/n.txt</S:added-path>
+<D:version-name>6</D:version-name>
+<S:date>2026-10-15T15:12:59.042408Z</S:date>
+<D:comment>second commit: add dir &amp; edit</D:comment>
+<D:creator-displayname>alice</D:creator-displayname>
+</S:log-item>
+<S:log-item>
+<S:deleted-path node-kind="file" text-mods="false" prop-mods="false">/trunk/docs/readme.md</S:deleted-path>
+<D:version-name>4</D:version-name>
+<S:date>2026-10-15T15:12:51.865285Z</S:date>
+<D:comment>delete readme</D:comment>
+<D:creator-displayname>alice</D:creator-displayname>
+</S:log-item>
+<S:log-item>
+<S:modified-path node-kind="file" text-mods="true" prop-mods="false">/trunk/a.txt</S:modified-path>
+<D:version-name>3</D:version-name>
+<S:date>2026-10-15T15:12:51.633372Z</S:date>
+<D:comment>edit a.txt</D:comment>
+<D:creator-displayname>alice</D:creator-displayname>
+</S:log-item>
+<S:log-item>
+<S:added-path node-kind="file" text-mods="true" prop-mods="true">/trunk/a.txt</S:added-path>
+<S:added-path node-kind="dir" text-mods="false" prop-mods="false">/trunk/docs</S:added-path>
+<S:added-path node-kind="file" text-mods="true" prop-mods="false">/trunk/docs/readme.md</S:added-path>
+<S:added-path node-kind="dir" text-mods="false" prop-mods="false">/trunk/src</S:added-path>
+<S:added-path node-kind="file" text-mods="true" prop-mods="true">/trunk/src/b.txt</S:added-path>
+<S:added-path node-kind="dir" text-mods="false" prop-mods="false">/trunk/src/deep</S:added-path>
+<S:added-path node-kind="file" text-mods="true" prop-mods="false">/trunk/src/deep/c.cfg</S:added-path>
+<S:added-path node-kind="file" text-mods="true" prop-mods="false">/trunk/unicodé file.txt</S:added-path>
+<D:version-name>2</D:version-name>
+<S:date>2026-10-15T15:12:51.435464Z</S:date>
+<D:comment>initial: files &amp; props &lt;&amp;&gt; unicode é</D:comment>
+<D:creator-displayname>alice</D:creator-displayname>
+</S:log-item>
+<S:log-item>
+<S:added-path node-kind="dir" text-mods="false" prop-mods="false">/branches</S:added-path>
+<S:added-path node-kind="dir" text-mods="false" prop-mods="false">/trunk</S:added-path>
+<D:version-name>1</D:version-name>
+<S:date>2026-10-15T15:12:50.432705Z</S:date>
+<D:comment>layout</D:comment>
+<D:creator-displayname>alice</D:creator-displayname>
+</S:log-item>
+</S:log-report>
