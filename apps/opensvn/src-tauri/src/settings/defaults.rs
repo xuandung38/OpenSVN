@@ -23,6 +23,7 @@ pub fn defaults(locale: Option<&str>) -> Settings {
         general_language: language_from_locale(locale),
         general_open_last_wc: true,
         general_log_level: LogLevel::Info,
+        updates_auto_check: true,
         appearance_theme: Theme::System,
         appearance_font_size: 13,
         appearance_density: Density::Comfortable,

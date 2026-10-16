@@ -213,6 +213,11 @@ pub struct AppState {
     pub updates: Arc<dyn UpdateControl>,
     /// Credential store (updater token).
     pub secrets: Arc<dyn SecretStore>,
+    /// The release API refused the stored update token at the last check (reset when the token
+    /// changes or a check succeeds). Memory only.
+    pub update_token_rejected: std::sync::atomic::AtomicBool,
+    /// An update was installed in this session, so `update_restart` may restart the app.
+    pub update_installed: std::sync::atomic::AtomicBool,
     /// Serializes native dialogs (a second request cannot stack dialogs).
     pub path_dialog_open: tokio::sync::Mutex<()>,
     /// Program settings (native pick and confirm).
@@ -261,6 +266,8 @@ impl AppState {
             menu: deps.menu,
             updates: deps.updates,
             secrets: deps.secrets,
+            update_token_rejected: std::sync::atomic::AtomicBool::new(false),
+            update_installed: std::sync::atomic::AtomicBool::new(false),
             poller: Mutex::new(None),
             auth,
             watchers,

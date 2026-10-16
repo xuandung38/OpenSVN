@@ -55,6 +55,7 @@ export type MenuAction =
   | "docs"
   | "logsFolder"
   | "reportProblem"
+  | "checkAppUpdates"
   /** Planned for a later phase: says so instead of doing nothing. */
   | "notYet";
 
@@ -70,7 +71,7 @@ export const MENU_ACTIONS: Readonly<Record<string, MenuAction>> = {
   "menu://file/recent": "recent",
   "menu://file/close-wc": "closeWc",
   "menu://app/settings": "settings",
-  "menu://app/check-app-updates": "notYet",
+  "menu://app/check-app-updates": "checkAppUpdates",
   "menu://edit/find": "filter",
   "menu://edit/copy-path": "copyPath",
   "menu://edit/copy-url": "copyUrl",
@@ -148,6 +149,8 @@ export function useWcShortcuts(props: {
   /** Opens the "Current repository" picker (Mod+T). */
   onSwitchRepo?: () => void;
   onOpenSettings?: () => void;
+  /** Help › Check for app updates… (the app menu on macOS). */
+  onCheckAppUpdates?: () => void;
   onToggleSidebar?: () => void;
   /** Closes the current working copy (it stays in the repository list). */
   onCloseWc?: () => void;
@@ -368,6 +371,10 @@ export function useWcShortcuts(props: {
           return true;
         case "reportProblem":
           s.openDialog({ kind: "report" });
+          return true;
+        case "checkAppUpdates":
+          if (!p.onCheckAppUpdates) return false;
+          p.onCheckAppUpdates();
           return true;
         case "notYet":
           toast.show(t("menuNotYet"));

@@ -146,13 +146,14 @@ GitHub moves release assets to another host, add it to `REDIRECT_HOSTS` in `upda
 
 ## Provisioning the update token
 
-The app never carries the GitHub token. Updates stay disabled (UI hint, no network calls) until
-the read-only fine-grained token for `OpenSVN-releases` (Contents: read, see
-`packaging/updater/README.md`) is in the OS keychain under the app's key `updater/github-token`
-(service and account naming follow `secure-store`; the app side lands with the updater
-registration in M2, so confirm the exact names with dev-p08 before scripting a fleet rollout):
+The app never carries the GitHub token. Updates stay disabled (the update dialog says "not
+configured", no network calls) until the read-only fine-grained token for `OpenSVN-releases`
+(Contents: read, see `packaging/updater/README.md`) is in the OS keychain under the app's key
+`updater/github-token` (service and account naming follow `secure-store`; confirm the exact names
+before scripting a fleet rollout):
 
-* **Single user**: paste the token in Settings > Updates; the app stores it in the keychain.
+* **Single user**: paste the token in **Settings › Updates** and press **Save token**; the app
+  stores it in the keychain and shows only its status (Not configured / Configured / Invalid).
 * **Managed fleet (MDM / login script)**, illustrative commands, adjust the names once fixed:
   macOS `security add-generic-password -s <service> -a updater/github-token -w <token> -U`;
   Windows `cmdkey /generic:<service>:updater/github-token /user:updater /pass:<token>`;

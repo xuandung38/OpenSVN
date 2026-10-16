@@ -1,0 +1,103 @@
+import { defineStrings } from "../../lib/i18n/i18n";
+
+export const updateStrings = defineStrings({
+  en: {
+    updates: "Updates",
+    currentVersion: "Current version",
+    tokenTitle: "Release access token",
+    tokenIntro:
+      "Updates come from a private GitHub repository. Paste a read-only token for it; the app keeps it in the OS credential store and never shows it again.",
+    tokenLabel: "New token",
+    tokenSave: "Save token",
+    tokenSaved: "Token saved",
+    tokenClear: "Clear token",
+    tokenClearConfirm: "Remove the stored token? Updates stop until a new one is saved.",
+    tokenCleared: "Token removed",
+    tokenStatus: "Status",
+    tokenMissing: "Not configured",
+    tokenStored: "Configured",
+    tokenRejected: "Invalid: the release server refused it at the last check",
+    tokenSaveFailed: "Could not save the token: {message}",
+    autoCheck: "Check for updates once a day when the app starts",
+    autoCheckHint:
+      "Only when a token is stored. A new version shows as a notice; nothing installs by itself.",
+    checkNow: "Check for updates",
+    dialogTitle: "App updates",
+    checking: "Checking for updates…",
+    upToDate: "OpenSVN {version} is the newest version.",
+    available: "OpenSVN {version} is available.",
+    youHave: "You have {version}.",
+    notes: "What's new",
+    noNotes: "This release has no notes.",
+    install: "Install",
+    installing: "Downloading the update…",
+    installProgress: "{done} of {total}",
+    installProgressUnknown: "{done} downloaded",
+    installFailed: "The update could not be installed: {message}",
+    installed: "The update is installed. Restart OpenSVN to use it.",
+    restartNow: "Restart now",
+    later: "Later",
+    notConfiguredToken:
+      "Updates are not configured: no release access token is stored. Add one in Settings › Updates.",
+    notConfiguredBuild:
+      "This build cannot update itself (no update source is configured). Install new versions from the release page.",
+    openSettings: "Open Settings",
+    checkFailed: "Could not check for updates.",
+    errForbidden:
+      "The release server refused the token. Check that it is valid, not expired and can read the releases repository.",
+    errNetwork: "The release server could not be reached. Check your connection and try again.",
+    backgroundAvailable: "OpenSVN {version} is available. Open Settings › Updates to install it.",
+    progressLabel: "Download progress",
+  },
+  vi: {
+    updates: "Cập nhật",
+    currentVersion: "Phiên bản hiện tại",
+    tokenTitle: "Token truy cập bản phát hành",
+    tokenIntro:
+      "Bản cập nhật nằm trong một repository GitHub riêng tư. Dán token chỉ đọc của repository đó; ứng dụng lưu token trong kho thông tin xác thực của hệ điều hành và không bao giờ hiện lại.",
+    tokenLabel: "Token mới",
+    tokenSave: "Lưu token",
+    tokenSaved: "Đã lưu token",
+    tokenClear: "Xóa token",
+    tokenClearConfirm:
+      "Xóa token đã lưu? Ứng dụng ngừng kiểm tra cập nhật cho tới khi có token mới.",
+    tokenCleared: "Đã xóa token",
+    tokenStatus: "Trạng thái",
+    tokenMissing: "Chưa cấu hình",
+    tokenStored: "Đã cấu hình",
+    tokenRejected: "Không hợp lệ: máy chủ phát hành đã từ chối token ở lần kiểm tra gần nhất",
+    tokenSaveFailed: "Không lưu được token: {message}",
+    autoCheck: "Kiểm tra cập nhật mỗi ngày một lần khi mở ứng dụng",
+    autoCheckHint:
+      "Chỉ chạy khi đã lưu token. Phiên bản mới hiện dưới dạng thông báo, ứng dụng không tự cài.",
+    checkNow: "Kiểm tra cập nhật",
+    dialogTitle: "Cập nhật ứng dụng",
+    checking: "Đang kiểm tra cập nhật…",
+    upToDate: "OpenSVN {version} là phiên bản mới nhất.",
+    available: "Đã có OpenSVN {version}.",
+    youHave: "Bạn đang dùng {version}.",
+    notes: "Có gì mới",
+    noNotes: "Bản phát hành này không có ghi chú.",
+    install: "Cài bản cập nhật",
+    installing: "Đang tải bản cập nhật…",
+    installProgress: "{done} / {total}",
+    installProgressUnknown: "Đã tải {done}",
+    installFailed: "Không cài được bản cập nhật: {message}",
+    installed: "Đã cài bản cập nhật. Khởi động lại OpenSVN để dùng phiên bản mới.",
+    restartNow: "Khởi động lại ngay",
+    later: "Để sau",
+    notConfiguredToken:
+      "Chưa cấu hình cập nhật: chưa lưu token truy cập bản phát hành. Thêm token trong Cài đặt › Cập nhật.",
+    notConfiguredBuild:
+      "Bản build này không tự cập nhật được (chưa cấu hình nguồn cập nhật). Hãy cài phiên bản mới từ trang phát hành.",
+    openSettings: "Mở Cài đặt",
+    checkFailed: "Không kiểm tra được cập nhật.",
+    errForbidden:
+      "Máy chủ phát hành từ chối token. Kiểm tra token còn hiệu lực, chưa hết hạn và đọc được repository phát hành.",
+    errNetwork: "Không kết nối được máy chủ phát hành. Kiểm tra kết nối mạng rồi thử lại.",
+    backgroundAvailable: "Đã có OpenSVN {version}. Mở Cài đặt › Cập nhật để cài.",
+    progressLabel: "Tiến độ tải",
+  },
+});
+
+export type UpdateKey = keyof (typeof updateStrings)["en"];

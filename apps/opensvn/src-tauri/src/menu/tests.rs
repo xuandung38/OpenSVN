@@ -464,8 +464,5 @@ fn only_planned_items_are_not_yet_available() {
         .filter(|(_, action)| action == "notYet")
         .map(|(id, _)| id)
         .collect();
-    assert_eq!(
-        not_yet,
-        ["app.check-app-updates", "wc.upgrade", "branch.merge",]
-    );
+    assert_eq!(not_yet, ["wc.upgrade", "branch.merge"]);
 }

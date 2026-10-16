@@ -1,6 +1,11 @@
 //! App self-update from a private GitHub releases repository.
 //!
-//! * The check is user initiated (`update_check`); nothing runs on a timer here.
+//! * The check is started by the UI (`update_check`): from Settings or the menu, or once a day at
+//!   most after start when a token is stored and `updates.autoCheck` allows it (the UI decides
+//!   when). Nothing runs on a timer here. Without a token or an updater config, the check reports
+//!   "not configured" and sends no request.
+//! * A check the release API refuses with the stored token marks it rejected (shown as "invalid"
+//!   in Settings) until the token is replaced, cleared, or a later check succeeds.
 //! * The GitHub read token lives only in the OS credential store (macOS Keychain, Windows
 //!   Credential Manager, Linux Secret Service) under [`TOKEN_KEY`]. It is write-only from the UI:
 //!   it can be set or cleared, and only its presence can be read back. When no OS store is
@@ -13,7 +18,8 @@
 //! * Redirects are followed only over `https` to GitHub's API and release asset hosts, and the
 //!   `Authorization` header is marked sensitive. Any updater `dangerous*` TLS option in the config
 //!   fails the build (`build.rs`) and is refused at runtime too.
-//! * `install` re-reads the token: if it was cleared after the check, none is sent.
+//! * `install` re-reads the token: if it was cleared after the check, none is sent. It reports
+//!   download progress and does not restart; the UI asks, then calls `update_restart`.
 
 use std::sync::Arc;
 #[cfg(test)]
@@ -43,6 +49,63 @@ pub struct UpdateInfo {
     /// Release notes, if any.
     pub notes: Option<String>,
 }
+
+/// Why a check sent no request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum NotConfiguredReason {
+    /// This build has no (valid) updater configuration, for example a development build.
+    Build,
+    /// No read token is stored.
+    Token,
+}
+
+/// Result of `update_check`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum UpdateCheck {
+    /// The running version is the newest.
+    UpToDate,
+    /// A newer version can be installed with `update_install`.
+    #[serde(rename_all = "camelCase")]
+    Available {
+        /// Version string.
+        version: String,
+        /// Release notes, if any.
+        notes: Option<String>,
+    },
+    /// Nothing was asked: updates cannot run yet.
+    NotConfigured {
+        /// What is missing.
+        reason: NotConfiguredReason,
+    },
+}
+
+/// State of the stored update token. The value itself is never readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum TokenStatus {
+    /// No token is stored.
+    Missing,
+    /// A token is stored and was not refused.
+    Stored,
+    /// A token is stored but the release API refused it at the last check (wrong, expired or
+    /// without access to the releases repository).
+    Rejected,
+}
+
+/// Download progress of `update_install` (`app://update-progress`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProgress {
+    /// Bytes downloaded so far.
+    pub downloaded: opensvn_ipc::Size,
+    /// Size of the download, when the server announced it.
+    pub total: Option<opensvn_ipc::Size>,
+}
+
+/// Receives download progress from [`UpdateControl::install`].
+pub type ProgressSink<'a> = &'a (dyn Fn(UpdateProgress) + Send + Sync);
 
 /// Whether `url` is the GitHub REST API under `/repos/{repo}/`: `https`, host exactly
 /// `api.github.com`, default port, no userinfo, and no dot segments or encoded separators that
@@ -287,10 +350,25 @@ pub fn os_secret_store() -> Arc<dyn SecretStore> {
 /// Performs the actual check and installation.
 #[async_trait]
 pub trait UpdateControl: Send + Sync + 'static {
+    /// Version of the running app.
+    fn current_version(&self) -> String;
+    /// Whether this build can check for updates at all (a valid updater configuration). When it
+    /// cannot, no request is ever sent.
+    fn configured(&self) -> bool;
     /// Looks for a newer version using `token` for GitHub; remembers the update for `install`.
+    /// A refusal of the release API (the token has no access) is [`ErrorCode::Forbidden`].
+    ///
+    /// [`ErrorCode::Forbidden`]: opensvn_ipc::ErrorCode::Forbidden
     async fn check(&self, token: Option<SecretString>) -> Result<Option<UpdateInfo>, AppError>;
-    /// Downloads and installs the update found by the last `check`, then restarts the app.
-    async fn install(&self, token: Option<SecretString>) -> Result<(), AppError>;
+    /// Downloads and installs the update found by the last `check`, reporting progress. Does not
+    /// restart (on Windows the installer may close the app itself).
+    async fn install(
+        &self,
+        token: Option<SecretString>,
+        progress: ProgressSink<'_>,
+    ) -> Result<(), AppError>;
+    /// Restarts the app so an installed update takes effect.
+    fn restart(&self) -> Result<(), AppError>;
 }
 
 /// [`UpdateControl`] over the Tauri updater plugin (must be registered, see `lib.rs`).
@@ -344,14 +422,48 @@ fn updater_error(e: impl std::fmt::Display) -> AppError {
     AppError::internal("The update check failed.").with_detail(e.to_string())
 }
 
+/// Maps a failed check. The plugin reports every non-success status of the endpoint as
+/// `ReleaseNotFound`; since the endpoint is the private releases repository (validated above),
+/// that means the token was refused (GitHub answers 401, or 404 for a repository the token cannot
+/// see) or nothing is published there yet.
+fn check_error(e: tauri_plugin_updater::Error) -> AppError {
+    match e {
+        tauri_plugin_updater::Error::ReleaseNotFound => AppError {
+            code: opensvn_ipc::ErrorCode::Forbidden,
+            retryable: false,
+            ..AppError::internal(
+                "The release server refused the update token, or has no release yet.",
+            )
+        }
+        .with_detail(e.to_string()),
+        tauri_plugin_updater::Error::Reqwest(ref r) if r.is_connect() || r.is_timeout() => {
+            AppError {
+                code: opensvn_ipc::ErrorCode::Network,
+                retryable: true,
+                ..AppError::internal("The release server could not be reached.")
+            }
+            .with_detail(e.to_string())
+        }
+        other => updater_error(other),
+    }
+}
+
 #[async_trait]
 impl<R: tauri::Runtime> UpdateControl for TauriUpdater<R> {
+    fn current_version(&self) -> String {
+        self.app.package_info().version.to_string()
+    }
+
+    fn configured(&self) -> bool {
+        self.endpoints.is_ok()
+    }
+
     async fn check(&self, token: Option<SecretString>) -> Result<Option<UpdateInfo>, AppError> {
         let updater = self
             .builder(token.as_ref())?
             .build()
             .map_err(updater_error)?;
-        let update = updater.check().await.map_err(updater_error)?;
+        let update = updater.check().await.map_err(check_error)?;
         let info = update.as_ref().map(|u| UpdateInfo {
             version: u.version.clone(),
             notes: u.body.clone(),
@@ -360,7 +472,11 @@ impl<R: tauri::Runtime> UpdateControl for TauriUpdater<R> {
         Ok(info)
     }
 
-    async fn install(&self, token: Option<SecretString>) -> Result<(), AppError> {
+    async fn install(
+        &self,
+        token: Option<SecretString>,
+        progress: ProgressSink<'_>,
+    ) -> Result<(), AppError> {
         let update = self.found.lock().await.take();
         let Some(mut update) = update else {
             return Err(invalid_argument("Check for updates first."));
@@ -369,10 +485,27 @@ impl<R: tauri::Runtime> UpdateControl for TauriUpdater<R> {
         // `token` is read from the credential store for this call; the headers the check used are
         // dropped so a token cleared since then is not sent.
         update.headers = request_headers(token.as_ref())?;
-        update
-            .download_and_install(|_, _| {}, || {})
-            .await
-            .map_err(updater_error)?;
+        let mut downloaded = 0_u64;
+        let result = update
+            .download_and_install(
+                |chunk, total| {
+                    downloaded = downloaded.saturating_add(chunk as u64);
+                    progress(UpdateProgress {
+                        downloaded: opensvn_ipc::Size(downloaded),
+                        total: total.map(opensvn_ipc::Size),
+                    });
+                },
+                || {},
+            )
+            .await;
+        if result.is_err() {
+            // Not installed: the update stays found, so Install can be tried again.
+            *self.found.lock().await = Some(update);
+        }
+        result.map_err(updater_error)
+    }
+
+    fn restart(&self) -> Result<(), AppError> {
         self.app.restart()
     }
 }

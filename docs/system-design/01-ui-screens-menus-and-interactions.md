@@ -317,6 +317,7 @@ Discard changes… · Lock… `Mod+L` · Unlock · Add to changelist ▸ · Igno
 | Diff & Merge | Split/Unified mặc định, hide whitespace, tab width, công cụ diff/merge ngoài (Beyond Compare, Meld, KDiff3, VS Code…) |
 | Integrations | Editor ngoài, terminal; **mẫu URL web VisualSVN**: file/thư mục `https://{server}/!/#{repo}/view/{revSpec}/{path}` (đã đối chiếu server thật; `{revSpec}` = `head` \| `r<N>`, `{path}` tính từ gốc repo, không có `/` đầu, mã hóa UTF-8 từng đoạn); revision `https://{server}/!/#{repo}/commit/r{rev}/` (chưa đối chiếu) |
 | Network | Proxy (system/manual), timeout, số kết nối song song (mặc định 4, tối đa 8: giới hạn của transport HTTP) |
+| Updates | Phiên bản hiện tại; token đọc bản phát hành (dán rồi lưu vào kho credential của OS, không bao giờ hiện lại, chỉ hiện trạng thái Chưa cấu hình / Đã cấu hình / Không hợp lệ; Xóa token có xác nhận); tự kiểm tra mỗi ngày một lần khi mở app (mặc định bật, chỉ khi có token, kết quả là toast); nút Check for updates mở dialog cập nhật: bản mới nhất / có bản mới (phiên bản, ghi chú dạng text, Install có thanh tiến độ rồi hỏi khởi động lại) / chưa cấu hình (không gửi request) / lỗi kèm Retry. Menu Check for app updates… mở cùng dialog |
 | Advanced | Định dạng WC mặc định khi checkout; global-ignores; đọc config `~/.subversion` (on/off); mức log; xóa cache |
 
 ## 10. Luồng tương tác chính

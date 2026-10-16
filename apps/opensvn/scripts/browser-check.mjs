@@ -4,6 +4,7 @@
 //   - runs axe-core (WCAG 2.2 A/AA rules) on the main window, the tree view with ignored files, the image onion skin and
 //     the shortcuts dialog, including `color-contrast` (jsdom cannot compute it);
 //   - checks that the image sliders move with the arrow keys (jsdom does not step range inputs);
+//   - runs axe-core on Settings › Updates and on the app update dialog (`?update=available`);
 //   - takes screenshots of those states and of `/__gallery` into `test-results/browser/`.
 // A browser that is not installed is skipped with a note (Playwright's WebKit needs
 // `playwright install webkit`); the run fails when no browser ran or axe finds a violation.
@@ -98,6 +99,11 @@ const LABELS = {
     opacity: "Opacity of the new image",
     swipePos: "Swipe position",
     shortcuts: "Keyboard shortcuts",
+    settings: "Settings",
+    updates: "Updates",
+    checkNow: "Check for updates",
+    updateDialog: "App updates",
+    install: "Install",
   },
   vi: {
     imageMode: "Cách so sánh ảnh",
@@ -106,6 +112,11 @@ const LABELS = {
     opacity: "Độ đậm của ảnh mới",
     swipePos: "Vị trí thanh trượt",
     shortcuts: "Phím tắt",
+    settings: "Cài đặt",
+    updates: "Cập nhật",
+    checkNow: "Kiểm tra cập nhật",
+    updateDialog: "Cập nhật ứng dụng",
+    install: "Cài bản cập nhật",
   },
 };
 
@@ -180,6 +191,25 @@ async function checkTheme(browser, browserName, theme, url) {
   await page.getByRole("dialog", { name: L.shortcuts }).waitFor();
   failures += await axe(page, `${tag} shortcuts dialog`);
   await shot(page, `${tag}-shortcuts`);
+
+  // Settings › Updates and the update dialog with a new version (`?update=available`).
+  await page.goto(`${url}/?os=win&update=available`);
+  await page
+    .getByRole("option", { name: /hero-diffuse\.png/ })
+    .first()
+    .waitFor();
+  await page.keyboard.press("Control+,");
+  const sheet = page.getByRole("dialog", { name: L.settings });
+  await sheet.waitFor();
+  await sheet.getByRole("navigation").getByRole("button", { name: L.updates }).click();
+  await sheet.getByText("0.1.0").waitFor();
+  failures += await axe(page, `${tag} settings updates`);
+  await shot(page, `${tag}-settings-updates`);
+  await sheet.getByRole("button", { name: L.checkNow }).click();
+  const update = page.getByRole("dialog", { name: L.updateDialog });
+  await update.getByRole("button", { name: L.install }).waitFor();
+  failures += await axe(page, `${tag} update available`);
+  await shot(page, `${tag}-update-available`);
 
   // Component gallery.
   await page.goto(`${url}/__gallery`);

@@ -14,6 +14,7 @@ import type {
   PathAction,
   RevisionChanged,
   StatusChanged,
+  UpdateProgress,
 } from "./bindings";
 import { queryKeys } from "./query-keys";
 
@@ -28,6 +29,7 @@ export interface EventPayloads {
   "wc://incoming": Incoming;
   "wc://banner": Banner;
   "auth://prompt": AuthPromptEvent;
+  "app://update-progress": UpdateProgress;
 }
 export type EventName = keyof EventPayloads;
 
@@ -41,6 +43,7 @@ export const EVENT_NAMES: EventName[] = [
   "wc://incoming",
   "wc://banner",
   "auth://prompt",
+  "app://update-progress",
 ];
 
 /**
@@ -454,7 +457,8 @@ function applyToCache(qc: QueryClient, name: EventName, payload: unknown): void 
       break;
     }
     case "auth://prompt":
-      // Handled by subscribers (auth dialog), not cached.
+    case "app://update-progress":
+      // Handled by subscribers (auth dialog, update dialog), not cached.
       break;
   }
 }

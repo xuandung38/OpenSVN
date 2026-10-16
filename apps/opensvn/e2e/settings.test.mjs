@@ -158,3 +158,39 @@ test("Settings: Network refuses 16 connections inline and saves 8 through the re
     "8,60,10",
   );
 });
+
+test("Settings: Updates shows the version and the token state; a build without update source checks nothing", async () => {
+  const secret = "github_pat_E2E_NEVER_SHOWN";
+  await app.click("button", "Settings");
+  await waitSettingsVisible();
+  await app.click("button", "Updates");
+  await app.waitText("Current version");
+  await app.waitText("Not configured");
+  // The token goes to the OS credential store (or is refused when there is none); either way the
+  // field empties and the value never shows anywhere.
+  await app.fill("New token", secret);
+  await app.click("button", "Save token");
+  await app.waitFor(
+    async () => {
+      const text = await app.bodyText();
+      return /Token saved|Could not save the token/.test(text) ? text : null;
+    },
+    15_000,
+    "the token to be saved or refused",
+  );
+  assert.doesNotMatch(await app.bodyText(), new RegExp(secret));
+  assert.equal(
+    await app.exec(`return document.querySelector('dialog[open] input[type=password]')?.value`),
+    (await app.bodyText()).includes("Token saved") ? "" : secret,
+  );
+  // This build has no `plugins.updater` config: the dialog says so and no request is made.
+  await app.click("button", "Check for updates");
+  await app.waitText("This build cannot update itself");
+  await app.screenshot(join(ARTIFACTS, "settings-updates-not-configured.png"));
+  if ((await app.bodyText()).includes("Configured")) {
+    await app.click("button", "Close");
+    await app.click("button", "Clear token");
+    await app.click("button", "Confirm");
+    await app.waitText("Not configured");
+  }
+});
