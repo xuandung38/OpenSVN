@@ -72,3 +72,32 @@ every 2 minutes.
   `log_get` cause applies: the sidebar's log of the 50k-path import takes 86 s on the server and is
   requested again every minute, so the working copy is always read-held and the update (a write)
   never gets its turn.
+
+## Engine soak `soak_short` (`tests/crash/tests/soak.rs`, 2026-10-16)
+
+Reported failing on main 45210f1 (RSS +39%); reproduced here with main 662b6ef merged in ("main"
+rows). Same VM, release build, 2000 files, 40 changed per cycle by each side.
+
+| Run | Allocator | Warm-up ends | RSS after warm-up | RSS at the end | Growth |
+|---|---|---|---:|---:|---:|
+| main, 2 min | glibc default | cycle 19 | 23.6 MB | 31.4 MB | **+32.9%** (fail) |
+| main, 10 min | glibc default | cycle 85 | 29.7 MB | 33.2 MB | **+11.7%** (fail) |
+| main, 2 min | `MALLOC_ARENA_MAX=2` | cycle ~18 | | 22.6 MB | +7.3% |
+| main, 2 min | `MALLOC_ARENA_MAX=1` | cycle ~18 | | 20.9 MB | +5.5% |
+| main, 2 min | jemalloc (`LD_PRELOAD`) | cycle 14 | 25.7 MB | 27.3 MB | +5.9% |
+| fixed, 2 min | `MALLOC_ARENA_MAX=2` | cycle 50 | 20.9 MB | 21.9 MB | +5.0% |
+| fixed, 10 min | `MALLOC_ARENA_MAX=2` | cycle 89 | 21.3 MB | 22.5 MB | +5.4% (flat from 380 s) |
+
+- **Not a leak.** heaptrack over 5 minutes: the live heap returns to about 1.24 MiB after every cycle
+  (2–2.7 MiB at the peak of a cycle) from the first minute to the last.
+- The RSS growth came from two things:
+  - **glibc arenas.** Freed pages stay in the arenas of tokio's worker and blocking threads. Bounding
+    the arenas, or switching to jemalloc, removes most of the growth.
+  - **The warm-up ended too early.** The log of the newest 100 entries with changed paths only
+    reaches 100 entries at cycle 50, so until then each cycle legitimately reads more history.
+- **Fix (test only):**
+  - the warm-up also waits for a full log window;
+  - the test starts itself again under `MALLOC_ARENA_MAX=2` when the variable is unset;
+  - the report names the allocator setting.
+- **Real app:** `MALLOC_ARENA_MAX=2` changed nothing measurable in the 10 min app soak above
+  (+3.9 MB vs +8.0 MB growth, peaks within 15 MB). The engine needs no allocator change.
