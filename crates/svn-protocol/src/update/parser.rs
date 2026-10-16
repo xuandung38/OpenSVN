@@ -9,9 +9,18 @@ use super::events::{Md5, Sha1, UpdateEvent};
 use crate::caps::{AcceptedHref, UrlBuilder};
 use crate::http::{ResponseParser, parse_chunked};
 use crate::limits::ParserLimits;
-use crate::util::{Base64Stream, corrupt, parse_hex, parse_optional_revnum, parse_revnum};
+use crate::util::{Base64Stream, corrupt, parse_hex, parse_revnum};
 use crate::xml::{Ns, StartTag, XmlEvent, XmlReader};
 
+/// The `rev` of a `delete-entry`: svn_repos sends `SVN_INVALID_REVNUM` (`-1`) when it cannot
+/// name the revision the entry was deleted in (a switch to a location the entry never
+/// existed at), which ra_serf reads as "no revision" (`svn_cstring_atoi64`).
+fn deleted_rev(s: &str) -> Result<Option<Revnum>> {
+    if s.trim() == "-1" {
+        return Ok(None);
+    }
+    parse_revnum(s).map(Some)
+}
 /// Deepest directory nesting accepted.
 const MAX_NODE_DEPTH: usize = 256;
 
@@ -350,11 +359,7 @@ impl UpdateParser {
                 out.push(match tag.name.local.as_str() {
                     "delete-entry" => UpdateEvent::DeleteEntry {
                         path,
-                        rev: tag
-                            .attr("rev")
-                            .map(parse_optional_revnum)
-                            .transpose()?
-                            .flatten(),
+                        rev: tag.attr("rev").map(deleted_rev).transpose()?.flatten(),
                     },
                     "absent-file" => UpdateEvent::AbsentFile { path },
                     _ => UpdateEvent::AbsentDir { path },

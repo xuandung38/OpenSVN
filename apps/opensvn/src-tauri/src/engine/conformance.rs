@@ -44,6 +44,73 @@ pub trait Harness {
     /// Leaves the lock situation of a crashed or foreign process on `dir` of a working copy,
     /// as it would be found when the working copy is opened.
     fn plant_lock(&self, root: &Path, dir: &str, owner: PlantedOwner) -> Result<(), SvnError>;
+    /// The suite runs over a connection that breaks under requests on purpose (a test proxy
+    /// that resets connections): a write may then fail the way a write whose connection broke
+    /// must fail ([`broken_write`]), instead of succeeding. Default: no.
+    fn writes_may_break(&self) -> bool {
+        false
+    }
+    /// A position in the harness's record of what was sent (the proxy's request log), taken
+    /// before each attempt of a write.
+    fn write_mark(&self) -> usize {
+        0
+    }
+    /// Checks a write that failed with `err` after `mark` against what a broken write must do,
+    /// and panics otherwise: the connection really broke under a write, no write was sent
+    /// twice, and nothing is left behind on the server (no transaction).
+    fn check_broken_write(&self, mark: usize, err: &SvnError) {
+        let _ = (mark, err);
+    }
+}
+
+/// Whether `err` is how a write ends when its connection broke: never sent again (#166), it
+/// fails with an unknown outcome (`CommitOutcomeUnknown`, `WriteOutcomeUnknown`), with the
+/// connection failure itself, or, once settled, with an error that has one of those as cause.
+pub fn broken_write(err: &SvnError) -> bool {
+    let mut cur = Some(err);
+    while let Some(e) = cur {
+        if matches!(
+            e.code,
+            ErrorCode::CommitOutcomeUnknown | ErrorCode::WriteOutcomeUnknown
+        ) || e.connection_failure().is_some()
+        {
+            return true;
+        }
+        cur = e.child.as_deref();
+    }
+    false
+}
+
+/// Whether a write that failed with `err` (sent after `mark`) ends the scenario: over a
+/// connection that breaks on purpose ([`Harness::writes_may_break`]), a broken write
+/// ([`broken_write`]) is the expected outcome once the harness checked it (the connection broke
+/// under a write, nothing was sent twice, nothing is left on the server). Repeating it would
+/// meet the same fault, so the steps after it are left to the runs without faults.
+pub fn broken_write_ends_scenario(h: &dyn Harness, mark: usize, err: &SvnError) -> bool {
+    if !h.writes_may_break() || !broken_write(err) {
+        return false;
+    }
+    h.check_broken_write(mark, err);
+    eprintln!(
+        "ends as designed: the connection broke under a write, which was not sent again: {err}"
+    );
+    true
+}
+
+/// Runs the write `$op` (an engine call, without `.await`) and returns its result. Over a
+/// connection that breaks on purpose, a checked broken write returns from the scenario
+/// ([`broken_write_ends_scenario`]); otherwise this is `$op.await`.
+#[macro_export]
+macro_rules! write_op {
+    ($h:expr, $op:expr) => {{
+        let mark = $h.write_mark();
+        match $op.await {
+            Err(e) if $crate::engine::conformance::broken_write_ends_scenario($h, mark, &e) => {
+                return;
+            }
+            result => result,
+        }
+    }};
 }
 
 /// Who owns a planted lock.
@@ -213,8 +280,9 @@ pub async fn commit_and_update_cycle(h: &dyn Harness) {
     assert_eq!(diff.right.expect("right").content, "hello world\n");
 
     let (wc2, _) = checkout(h, "cycle-2", None).await;
-    let new_rev = e
-        .commit(
+    let new_rev = write_op!(
+        h,
+        e.commit(
             &wc1,
             &CommitRequest {
                 wc_id: wc1.id.clone(),
@@ -225,8 +293,8 @@ pub async fn commit_and_update_cycle(h: &dyn Harness) {
             },
             &ctx(),
         )
-        .await
-        .expect("commit");
+    )
+    .expect("commit");
     assert_eq!(new_rev.0, head.0 + 1);
     assert!(
         status(h, &wc1).await.is_empty(),
@@ -370,15 +438,11 @@ pub async fn conflict_blocks_commit_until_resolved(h: &dyn Harness) {
         .unwrap();
     h.write_file(&b.root, "src/main.rs", "fn main() { b(); }\n")
         .unwrap();
-    e.commit(&a, &commit_req(&a, "from a"), &ctx())
-        .await
-        .expect("commit a");
+    write_op!(h, e.commit(&a, &commit_req(&a, "from a"), &ctx())).expect("commit a");
 
     // b is out of date: commit is refused
-    let err = e
-        .commit(&b, &commit_req(&b, "from b"), &ctx())
-        .await
-        .expect_err("out of date");
+    let err =
+        write_op!(h, e.commit(&b, &commit_req(&b, "from b"), &ctx())).expect_err("out of date");
     assert_eq!(err.code, ErrorCode::OutOfDate);
 
     e.update(
@@ -397,10 +461,7 @@ pub async fn conflict_blocks_commit_until_resolved(h: &dyn Harness) {
         find(&status(h, &b).await, "src/main.rs").unwrap().text,
         NodeStatus::Conflicted
     );
-    let err = e
-        .commit(&b, &commit_req(&b, "from b"), &ctx())
-        .await
-        .expect_err("conflict");
+    let err = write_op!(h, e.commit(&b, &commit_req(&b, "from b"), &ctx())).expect_err("conflict");
     assert_eq!(err.code, ErrorCode::ConflictBlocksCommit);
 
     e.resolve(
@@ -428,15 +489,13 @@ pub async fn lock_and_unlock(h: &dyn Harness) {
         wc: wc.clone(),
         paths: vec!["README.md".into()],
     };
-    e.lock(&scope, Some("editing"), false, &ctx())
-        .await
-        .expect("lock");
+    write_op!(h, e.lock(&scope, Some("editing"), false, &ctx())).expect("lock");
     let st = status(h, &wc).await;
     let lock = find(&st, "README.md")
         .and_then(|s| s.lock.clone())
         .expect("lock in status");
     assert!(lock.mine);
-    e.unlock(&scope, false, &ctx()).await.expect("unlock");
+    write_op!(h, e.unlock(&scope, false, &ctx())).expect("unlock");
     assert!(find(&status(h, &wc).await, "README.md").is_none_or(|s| s.lock.is_none()));
 }
 
@@ -445,8 +504,9 @@ pub async fn remote_edit_and_copy(h: &dyn Harness) {
     let e = h.engine();
     let url = h.repo_url();
     let head = e.repo_info(&url, &ctx()).await.unwrap().youngest_rev;
-    let rev = e
-        .remote_edit(
+    let rev = write_op!(
+        h,
+        e.remote_edit(
             &RemoteEditPlan {
                 ops: vec![EditOp::Mkdir {
                     url: format!("{url}/trunk/extra"),
@@ -455,11 +515,12 @@ pub async fn remote_edit_and_copy(h: &dyn Harness) {
             },
             &ctx(),
         )
-        .await
-        .expect("remote_edit");
+    )
+    .expect("remote_edit");
     assert_eq!(rev.0, head.0 + 1);
-    let copied = e
-        .copy_location(
+    let copied = write_op!(
+        h,
+        e.copy_location(
             &CopyLocationRequest {
                 from_url: format!("{url}/trunk"),
                 from_rev: None,
@@ -471,8 +532,8 @@ pub async fn remote_edit_and_copy(h: &dyn Harness) {
             None,
             &ctx(),
         )
-        .await
-        .expect("copy");
+    )
+    .expect("copy");
     assert_eq!(copied.0, rev.0 + 1);
     let branches = e.branches_list(&url, &Layout::Auto, &ctx()).await.unwrap();
     assert!(
@@ -488,25 +549,28 @@ pub async fn repo_info_at_a_peg_revision(h: &dyn Harness) {
     let url = h.repo_url();
     let before = e.repo_info(&url, &ctx()).await.unwrap().youngest_rev;
     let gone = format!("{url}/trunk/gone");
-    e.remote_edit(
-        &RemoteEditPlan {
-            ops: vec![EditOp::Mkdir { url: gone.clone() }],
-            message: "Add gone".into(),
-        },
-        &ctx(),
+    write_op!(
+        h,
+        e.remote_edit(
+            &RemoteEditPlan {
+                ops: vec![EditOp::Mkdir { url: gone.clone() }],
+                message: "Add gone".into(),
+            },
+            &ctx(),
+        )
     )
-    .await
     .expect("mkdir");
-    let deleted = e
-        .remote_edit(
+    let deleted = write_op!(
+        h,
+        e.remote_edit(
             &RemoteEditPlan {
                 ops: vec![EditOp::Delete { url: gone.clone() }],
                 message: "Delete gone".into(),
             },
             &ctx(),
         )
-        .await
-        .expect("delete");
+    )
+    .expect("delete");
     let at_head = e
         .repo_info(&gone, &ctx())
         .await
@@ -677,19 +741,21 @@ pub async fn mark_move_and_set_depth(h: &dyn Harness) {
 pub async fn switch_to_a_branch(h: &dyn Harness) {
     let e = h.engine();
     let url = h.repo_url();
-    e.copy_location(
-        &CopyLocationRequest {
-            from_url: format!("{url}/trunk"),
-            from_rev: None,
-            to_url: format!("{url}/branches/switch-target"),
-            message: "Branch for switch".into(),
-            switch_wc_id: None,
-            from_wc: None,
-        },
-        None,
-        &ctx(),
+    write_op!(
+        h,
+        e.copy_location(
+            &CopyLocationRequest {
+                from_url: format!("{url}/trunk"),
+                from_rev: None,
+                to_url: format!("{url}/branches/switch-target"),
+                message: "Branch for switch".into(),
+                switch_wc_id: None,
+                from_wc: None,
+            },
+            None,
+            &ctx(),
+        )
     )
-    .await
     .expect("copy");
     let (wc, _) = checkout(h, "switch", None).await;
     let reached = e
@@ -722,19 +788,21 @@ pub async fn branch_detection_follows_a_switch(h: &dyn Harness) {
     let e = h.engine();
     let url = h.repo_url();
     for to in ["branches/feature-y", "lib-copy"] {
-        e.copy_location(
-            &CopyLocationRequest {
-                from_url: format!("{url}/trunk"),
-                from_rev: None,
-                to_url: format!("{url}/{to}"),
-                message: format!("Copy to {to}"),
-                switch_wc_id: None,
-                from_wc: None,
-            },
-            None,
-            &ctx(),
+        write_op!(
+            h,
+            e.copy_location(
+                &CopyLocationRequest {
+                    from_url: format!("{url}/trunk"),
+                    from_rev: None,
+                    to_url: format!("{url}/{to}"),
+                    message: format!("Copy to {to}"),
+                    switch_wc_id: None,
+                    from_wc: None,
+                },
+                None,
+                &ctx(),
+            )
         )
-        .await
         .expect("copy");
     }
     let (wc, info) = checkout(h, "branch-detect", None).await;
@@ -878,9 +946,7 @@ pub async fn locked_unmodified_file_in_status(h: &dyn Harness) {
         wc: wc.clone(),
         paths: vec!["README.md".into()],
     };
-    e.lock(&scope, Some("hold"), false, &ctx())
-        .await
-        .expect("lock");
+    write_op!(h, e.lock(&scope, Some("hold"), false, &ctx())).expect("lock");
     let lock_of = |st: &[FileStatus]| find(st, "README.md").and_then(|s| s.lock.clone());
     for query in [
         ALL,
@@ -908,9 +974,7 @@ pub async fn locked_unmodified_file_in_status(h: &dyn Harness) {
     };
     h.write_file(&wc.root, "src/main.rs", "fn main() { locked(); }\n")
         .unwrap();
-    e.commit(&wc, &commit("src/main.rs"), &ctx())
-        .await
-        .expect("commit another file");
+    write_op!(h, e.commit(&wc, &commit("src/main.rs"), &ctx())).expect("commit another file");
     let st = status(h, &wc).await;
     assert!(
         lock_of(&st).is_some_and(|l| l.mine),
@@ -919,9 +983,7 @@ pub async fn locked_unmodified_file_in_status(h: &dyn Harness) {
 
     h.write_file(&wc.root, "README.md", "locked change\n")
         .unwrap();
-    e.commit(&wc, &commit("README.md"), &ctx())
-        .await
-        .expect("commit the locked file");
+    write_op!(h, e.commit(&wc, &commit("README.md"), &ctx())).expect("commit the locked file");
     assert!(
         status(h, &wc).await.is_empty(),
         "committing the locked file releases its lock"
@@ -936,18 +998,20 @@ pub async fn needs_lock_unmodified_file_in_status(h: &dyn Harness) {
     e.props_set(&wc, "README.md", "svn:needs-lock", Some("*"), &ctx())
         .await
         .expect("props_set");
-    e.commit(
-        &wc,
-        &CommitRequest {
-            wc_id: wc.id.clone(),
-            paths: vec!["README.md".into()],
-            message: "needs lock".into(),
-            keep_locks: false,
-            auto_add_remove: false,
-        },
-        &ctx(),
+    write_op!(
+        h,
+        e.commit(
+            &wc,
+            &CommitRequest {
+                wc_id: wc.id.clone(),
+                paths: vec!["README.md".into()],
+                message: "needs lock".into(),
+                keep_locks: false,
+                auto_add_remove: false,
+            },
+            &ctx(),
+        )
     )
-    .await
     .expect("commit the property");
     let only_readme = |st: &[FileStatus]| {
         assert_eq!(st.len(), 1, "only the needs-lock file is listed: {st:?}");
@@ -974,14 +1038,12 @@ pub async fn needs_lock_unmodified_file_in_status(h: &dyn Harness) {
         wc: wc.clone(),
         paths: vec!["README.md".into()],
     };
-    e.lock(&scope, Some("lock to edit"), false, &ctx())
-        .await
-        .expect("lock");
+    write_op!(h, e.lock(&scope, Some("lock to edit"), false, &ctx())).expect("lock");
     let lock = only_readme(&status(h, &wc).await)
         .lock
         .expect("lock in status");
     assert!(lock.mine);
-    e.unlock(&scope, false, &ctx()).await.expect("unlock");
+    write_op!(h, e.unlock(&scope, false, &ctx())).expect("unlock");
     assert!(only_readme(&status(h, &wc).await).lock.is_none());
 }
 
@@ -996,9 +1058,11 @@ pub async fn lock_held_elsewhere_and_steal(h: &dyn Harness) {
         wc: wc.clone(),
         paths: vec!["README.md".into()],
     };
-    e.lock(&scope(&holder), Some("held elsewhere"), false, &ctx())
-        .await
-        .expect("lock in the first working copy");
+    write_op!(
+        h,
+        e.lock(&scope(&holder), Some("held elsewhere"), false, &ctx())
+    )
+    .expect("lock in the first working copy");
     assert!(
         e.lock_conflicts(&scope(&holder), &ctx())
             .await
@@ -1007,10 +1071,8 @@ pub async fn lock_held_elsewhere_and_steal(h: &dyn Harness) {
         "the holder's own lock is not a conflict"
     );
 
-    let err = e
-        .lock(&scope(&other), None, false, &ctx())
-        .await
-        .expect_err("locked elsewhere");
+    let err =
+        write_op!(h, e.lock(&scope(&other), None, false, &ctx())).expect_err("locked elsewhere");
     assert_eq!(err.code, ErrorCode::LockedByOther, "{err}");
     let conflicts = e
         .lock_conflicts(&scope(&other), &ctx())
@@ -1037,9 +1099,7 @@ pub async fn lock_held_elsewhere_and_steal(h: &dyn Harness) {
         "a refused lock records nothing"
     );
 
-    e.lock(&scope(&other), Some("stolen"), true, &ctx())
-        .await
-        .expect("steal");
+    write_op!(h, e.lock(&scope(&other), Some("stolen"), true, &ctx())).expect("steal");
     let lock = find(&status(h, &other).await, "README.md")
         .and_then(|s| s.lock.clone())
         .expect("stolen lock in status");
@@ -1053,17 +1113,14 @@ pub async fn lock_held_elsewhere_and_steal(h: &dyn Harness) {
 
     // The first working copy's token is stale now: a plain unlock is refused, and only an
     // explicit break removes the lock held elsewhere.
-    e.unlock(&scope(&holder), false, &ctx())
-        .await
+    write_op!(h, e.unlock(&scope(&holder), false, &ctx()))
         .expect_err("a stolen lock cannot be released with the old token");
     assert_eq!(
         by_url_conflicts(h).await.len(),
         1,
         "the refused unlock kept the lock"
     );
-    e.unlock(&scope(&holder), true, &ctx())
-        .await
-        .expect("break the lock held elsewhere");
+    write_op!(h, e.unlock(&scope(&holder), true, &ctx())).expect("break the lock held elsewhere");
     assert!(by_url_conflicts(h).await.is_empty(), "the lock is broken");
     assert!(
         find(&status(h, &holder).await, "README.md").is_none_or(|s| s.lock.is_none()),
@@ -1092,8 +1149,9 @@ pub async fn commit_with_auto_add_remove(h: &dyn Harness) {
     assert_eq!(find(&st, "new.txt").unwrap().text, NodeStatus::Unversioned);
     assert_eq!(find(&st, "README.md").unwrap().text, NodeStatus::Missing);
 
-    let rev = e
-        .commit(
+    let rev = write_op!(
+        h,
+        e.commit(
             &wc,
             &CommitRequest {
                 wc_id: wc.id.clone(),
@@ -1104,8 +1162,8 @@ pub async fn commit_with_auto_add_remove(h: &dyn Harness) {
             },
             &ctx(),
         )
-        .await
-        .expect("commit");
+    )
+    .expect("commit");
     assert_eq!(rev.0, head.0 + 1);
     assert!(status(h, &wc).await.is_empty(), "nothing left to commit");
 
@@ -1200,14 +1258,15 @@ pub async fn update_of_sub_paths(h: &dyn Harness) {
         .expect("write");
     h.write_file(&wc1.root, "src/lib.rs", "pub fn run() {}\n")
         .expect("write");
-    let r2 = e
-        .commit(
+    let r2 = write_op!(
+        h,
+        e.commit(
             &wc1,
             &commit(&["README.md", "src/main.rs", "src/lib.rs"], "r2"),
             &ctx(),
         )
-        .await
-        .expect("commit r2");
+    )
+    .expect("commit r2");
 
     // A folder.
     let reached = e
@@ -1232,10 +1291,8 @@ pub async fn update_of_sub_paths(h: &dyn Harness) {
     // A file inside a folder, then a top-level file.
     h.write_file(&wc1.root, "src/main.rs", "fn main() { run(); run(); }\n")
         .expect("write");
-    let r3 = e
-        .commit(&wc1, &commit(&["src/main.rs"], "r3"), &ctx())
-        .await
-        .expect("commit r3");
+    let r3 =
+        write_op!(h, e.commit(&wc1, &commit(&["src/main.rs"], "r3"), &ctx())).expect("commit r3");
     let reached = e
         .update(&wc2, &update(&["src/main.rs"]), &ctx())
         .await
@@ -1264,8 +1321,9 @@ pub async fn update_ends_in_conflict(h: &dyn Harness) {
         .unwrap();
     h.write_file(&a.root, "src/main.rs", "fn main() { a(); }\n")
         .unwrap();
-    let theirs = e
-        .commit(
+    let theirs = write_op!(
+        h,
+        e.commit(
             &a,
             &CommitRequest {
                 wc_id: a.id.clone(),
@@ -1276,8 +1334,8 @@ pub async fn update_ends_in_conflict(h: &dyn Harness) {
             },
             &ctx(),
         )
-        .await
-        .expect("commit a");
+    )
+    .expect("commit a");
 
     h.write_file(&b.root, "README.md", "hello from b\n")
         .unwrap();
@@ -1331,8 +1389,9 @@ pub async fn update_ends_in_conflict(h: &dyn Harness) {
         NodeStatus::Modified,
         "{st:?}"
     );
-    let rev = e
-        .commit(
+    let rev = write_op!(
+        h,
+        e.commit(
             &b,
             &CommitRequest {
                 wc_id: b.id.clone(),
@@ -1343,8 +1402,8 @@ pub async fn update_ends_in_conflict(h: &dyn Harness) {
             },
             &ctx(),
         )
-        .await
-        .expect("commit after resolving");
+    )
+    .expect("commit after resolving");
     assert_eq!(rev.0, theirs.0 + 1);
     assert_eq!(
         e.repo_cat(&format!("{url}/trunk/README.md"), None, &ctx())

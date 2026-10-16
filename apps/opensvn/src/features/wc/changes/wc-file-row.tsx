@@ -19,6 +19,10 @@ export interface WcFileRowProps {
   lock?: "me" | "other";
   needsLock: boolean;
   outOfDate: boolean;
+  /** Tree view level: the row then shows the file name only, indented. */
+  depth?: number;
+  /** False for rows listed for reference only (ignored files): no commit checkbox. */
+  tickable?: boolean;
   /** Localised labels for the non-colour badges. */
   labels: { needsLock: string; outOfDate: string };
   onToggle: (path: string) => void;
@@ -36,6 +40,8 @@ export const WcFileRow = memo(function WcFileRow(p: WcFileRowProps) {
   const slash = p.path.lastIndexOf("/");
   const dir = slash >= 0 ? shown.slice(0, slash + 1) : "";
   const name = slash >= 0 ? shown.slice(slash + 1) : shown;
+  const tree = p.depth !== undefined;
+  const tickable = p.tickable !== false;
   return (
     // biome-ignore lint/a11y/useFocusableInteractive: roving focus lives on the owning listbox (aria-activedescendant)
     // biome-ignore lint/a11y/useKeyWithClickEvents: keyboard activation is handled by the listbox (Enter/Space)
@@ -43,7 +49,7 @@ export const WcFileRow = memo(function WcFileRow(p: WcFileRowProps) {
       id={p.id}
       role="option"
       aria-selected={p.selected}
-      aria-checked={p.checked}
+      aria-checked={tickable ? p.checked : undefined}
       onClick={() => {
         p.onPointerActivate();
         p.onSelect(p.path);
@@ -55,21 +61,32 @@ export const WcFileRow = memo(function WcFileRow(p: WcFileRowProps) {
       className={cn(
         "grid h-full cursor-default grid-cols-[18px_20px_1fr_auto] items-center gap-1.5 px-2.5 py-[5px]",
         p.selected ? "bg-sel" : "hover:bg-surface-2",
+        !tickable && "text-muted-text",
         p.active &&
           "group-focus-visible:outline-2 group-focus-visible:-outline-offset-2 group-focus-visible:outline-accent",
       )}
     >
-      <RowCheck
-        checked={p.checked}
-        onToggle={() => p.onToggle(p.path)}
-        onPointerActivate={p.onPointerActivate}
-      />
+      {tickable ? (
+        <RowCheck
+          checked={p.checked}
+          onToggle={() => p.onToggle(p.path)}
+          onPointerActivate={p.onPointerActivate}
+        />
+      ) : (
+        <span />
+      )}
       <StatusGlyph code={p.glyph} />
-      <span className="min-w-0 truncate font-mono text-[12px]" title={shown}>
-        <SafeText as="span" className="text-muted-text">
-          {dir}
-        </SafeText>
-        <SafeText as="span" className="text-fg">
+      <span
+        className="min-w-0 truncate font-mono text-[12px]"
+        title={shown}
+        style={tree ? { paddingLeft: (p.depth ?? 0) * 14 } : undefined}
+      >
+        {!tree && (
+          <SafeText as="span" className="text-muted-text">
+            {dir}
+          </SafeText>
+        )}
+        <SafeText as="span" className={tickable ? "text-fg" : "text-muted-text"}>
           {name}
         </SafeText>
       </span>

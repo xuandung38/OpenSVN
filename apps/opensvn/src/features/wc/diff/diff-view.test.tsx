@@ -1,7 +1,9 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeAll, expect, test, vi } from "vitest";
 import type { DiffTarget, FileDiff } from "../../../ipc/bindings";
 import { mockCalls } from "../../../ipc/mock/adapter";
+import { expectNoSeriousA11yViolations } from "../../../test-axe";
 import { renderWithQuery, setupMockIpc } from "../../../test-utils";
 import { displayPath } from "../wc-model";
 import { DiffBody } from "./diff-view";
@@ -162,4 +164,82 @@ test("legacy Office files offer no open buttons and point to the external tool",
   );
   expect(screen.queryByRole("button", { name: /^Open (r\d|base|working)/ })).toBeNull();
   expect(screen.getByRole("note").textContent).toMatch(/external diff tool/);
+});
+
+const png = (fill: string) =>
+  `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg"><rect fill="${fill}"/></svg>`)}`;
+
+test("images: side by side, onion skin with an opacity slider, swipe; all by keyboard", async () => {
+  const user = userEvent.setup();
+  const { container } = renderWithQuery(
+    <DiffBody
+      diff={{
+        ...base,
+        binary: true,
+        mime: "image/png",
+        image: { leftUrl: png("red"), rightUrl: png("blue") },
+      }}
+      file={null}
+      mode="split"
+      path="hero.png"
+      onLoadFull={vi.fn()}
+      onOpenExternal={vi.fn()}
+      onOpenDefault={vi.fn()}
+    />,
+  );
+  const modes = screen.getByRole("group", { name: "Image comparison" });
+  const side = within(modes).getByRole("button", { name: "Side by side" });
+  expect(side.getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getAllByRole("img")).toHaveLength(2);
+  await expectNoSeriousA11yViolations("image side by side", container);
+
+  // Keyboard only: Tab to the mode buttons, Enter to pick onion skin, arrows on the slider.
+  side.focus();
+  await user.tab();
+  await user.keyboard("{Enter}");
+  expect(
+    within(modes).getByRole("button", { name: "Onion skin" }).getAttribute("aria-pressed"),
+  ).toBe("true");
+  const opacity = screen.getByRole("slider", { name: "Opacity of the new image" });
+  const overlay = () => container.querySelector<HTMLImageElement>("img[data-overlay]");
+  expect(overlay()?.style.opacity).toBe("0.5");
+  // The slider is the next tab stop after the mode buttons. jsdom does not step a range input on
+  // arrow keys (browsers do natively; `pnpm test:browser` covers that), so set its value.
+  await user.tab();
+  await user.tab();
+  expect(document.activeElement).toBe(opacity);
+  fireEvent.change(opacity, { target: { value: "60" } });
+  expect(overlay()?.style.opacity).toBe("0.6");
+  expect(opacity.getAttribute("aria-valuetext")).toBe("60%");
+  await expectNoSeriousA11yViolations("image onion skin", container);
+
+  await user.click(within(modes).getByRole("button", { name: "Swipe" }));
+  const swipe = screen.getByRole("slider", { name: "Swipe position" });
+  fireEvent.change(swipe, { target: { value: "0" } });
+  expect(overlay()?.style.clipPath).toBe("inset(0 100% 0 0)");
+  fireEvent.change(swipe, { target: { value: "100" } });
+  expect(overlay()?.style.clipPath).toBe("inset(0 0% 0 0)");
+  await expectNoSeriousA11yViolations("image swipe", container);
+});
+
+test("an image with one side only offers side by side alone", () => {
+  renderWithQuery(
+    <DiffBody
+      diff={{
+        ...base,
+        binary: true,
+        mime: "image/png",
+        image: { leftUrl: null, rightUrl: png("blue") },
+      }}
+      file={null}
+      mode="split"
+      path="new.png"
+      onLoadFull={vi.fn()}
+      onOpenExternal={vi.fn()}
+      onOpenDefault={vi.fn()}
+    />,
+  );
+  expect(screen.queryByRole("group", { name: "Image comparison" })).toBeNull();
+  expect(screen.getByText(/only side by side is available/)).toBeTruthy();
+  expect(screen.getAllByRole("img")).toHaveLength(1);
 });

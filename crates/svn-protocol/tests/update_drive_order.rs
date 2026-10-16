@@ -234,7 +234,7 @@ fn copy_sources_and_delete_revisions_are_passed_on() {
 <S:add-directory name="d" copyfrom-path="/trunk/old" copyfrom-rev="4"/>
 <S:add-file name="f" copyfrom-path="/trunk/a.txt" copyfrom-rev="3"><S:txdelta>U1ZOAA==</S:txdelta></S:add-file>
 <S:delete-entry name="gone" rev="7"/><S:delete-entry name="gone2"/>
-<S:delete-entry name="gone3" rev="-1"/>
+<S:delete-entry name="never-there" rev="-1"/>
 </S:open-directory>"#,
     ))
     .unwrap();
@@ -245,17 +245,18 @@ fn copy_sources_and_delete_revisions_are_passed_on() {
     assert!(evs.iter().any(
         |e| matches!(e, UpdateEvent::DeleteEntry { path, rev: None } if path.as_str() == "gone2")
     ));
-    // A switch deletes with no revision: mod_dav_svn sends SVN_INVALID_REVNUM as "-1".
+    // mod_dav_svn writes SVN_INVALID_REVNUM when svn_repos cannot name the revision (a switch
+    // deletes an entry that never existed at the target location); ra_serf reads it as none.
     assert!(evs.iter().any(
-        |e| matches!(e, UpdateEvent::DeleteEntry { path, rev: None } if path.as_str() == "gone3")
+        |e| matches!(e, UpdateEvent::DeleteEntry { path, rev: None } if path.as_str() == "never-there")
     ));
     for bad in [
         r#"<S:add-file name="f" copyfrom-path="/a"/>"#,
         r#"<S:add-file name="f" copyfrom-rev="3"/>"#,
         r#"<S:add-file name="f" copyfrom-path="/a" copyfrom-rev="x"/>"#,
         r#"<S:open-file name="f" rev="1" copyfrom-path="/a" copyfrom-rev="3"/>"#,
-        r#"<S:delete-entry name="g" rev="-2"/>"#,
-        r#"<S:delete-entry name="g" rev="x"/>"#,
+        r#"<S:delete-entry name="f" rev="x"/>"#,
+        r#"<S:delete-entry name="f" rev="-2"/>"#,
     ] {
         corrupt(&root(bad), bad);
     }

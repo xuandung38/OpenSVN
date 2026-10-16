@@ -305,6 +305,7 @@ impl UpdateEditor {
             (Some(new), Some(old)) if !old.is_empty() => Some((old.to_owned(), new.clone())),
             _ => None,
         };
+        let switch_to = self.s.switch_relpath.clone();
         let skipped = self.skipped.clone();
         let depth = self.s.depth;
         let sticky = self.s.sticky_depth;
@@ -313,7 +314,12 @@ impl UpdateEditor {
             if let Some((old, new)) = &relocation {
                 t.relocate_subtree(&target, old, new)?;
             }
-            t.bump_revisions_post_update(&target, rev, depth, &skipped)?;
+            match &switch_to {
+                Some(new) => {
+                    t.bump_revisions_post_switch(&target, rev, depth, &skipped, new)?;
+                }
+                None => t.bump_revisions_post_update(&target, rev, depth, &skipped)?,
+            }
             if sticky {
                 // Directories the server had nothing to send for were never opened; they get
                 // their new depth here (svn's server opens them on a depth upgrade).

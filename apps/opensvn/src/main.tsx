@@ -2,7 +2,8 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./app/app";
 import { FatalError } from "./app/fatal-error";
-import { initIpc, isTauriRuntime } from "./ipc/client";
+import { setShortcutOs, shortcutOsFromQuery } from "./features/wc/shortcuts";
+import { initIpc, isTauriRuntime, MOCK_ALLOWED } from "./ipc/client";
 import { installTauriOpener } from "./lib/external-link";
 import "./styles/globals.css";
 
@@ -20,6 +21,9 @@ if (
 ) {
   history.replaceState(null, "", "/__perf?auto=1");
 }
+
+// Dev/mock only: `?os=mac` or `?os=win` shows the shortcuts of that platform (labels and keys).
+if (MOCK_ALLOWED) setShortcutOs(shortcutOsFromQuery(location.search));
 
 async function boot(): Promise<void> {
   await initIpc();
