@@ -74,6 +74,10 @@ pub struct ClientCtx {
     /// How an update or checkout drive waits for the network when the server cannot be
     /// reached; `None` fails such a drive once its resumes are spent (see [`crate::netwait`]).
     pub network_wait: Option<crate::netwait::NetworkWait>,
+    /// Keep every notification of an update, switch or checkout in
+    /// [`UpdateSummary::events`] (default). A caller that only follows [`Self::progress`] turns
+    /// it off: a checkout of 100k files otherwise holds 100k events until it returns.
+    pub keep_events: bool,
     /// How many externals deep the current operation runs (0 for the user's own operation).
     pub(crate) external_nesting: u32,
     /// `(repository UUID, repository path)` of every directory whose definition led to the
@@ -103,6 +107,7 @@ impl ClientCtx {
             progress: None,
             externals: None,
             network_wait: None,
+            keep_events: true,
             external_nesting: 0,
             external_chain: Vec::new(),
             external_budget: None,

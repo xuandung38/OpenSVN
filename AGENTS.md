@@ -97,25 +97,28 @@ Build bộ cài:
 | Sparse checkout: cây thư mục chọn depth cho từng thư mục, dùng chung cho hộp thoại Checkout và `menu://wc/sparse`; `set_depth` tự đưa vào target thiếu hoặc bị exclude (như `--parents`). Browse upload/download, History so sánh hai revision (`diff_rev`), màn Welcome nhớ URL gần đây (giới hạn trong `app.sqlite`, xóa được) | #196 |
 | Menu View: hiện/ẩn file unversioned và ignored, nhóm theo changelist, dạng cây (nhớ theo người dùng); Compare with branch/another folder; Help: tài liệu, thư mục log (`logs_reveal`), Report a problem (xem trước gói chẩn đoán rồi lưu zip); diff ảnh có onion skin và swipe; `?os=mac\|win` cho mock/dev; `pnpm test:browser` | #189 |
 | Dialog Properties (xem/thêm/sửa/xóa, kiểm giá trị `svn:*` như `svn propset` 1.15, lệnh `props_get`); dialog Repository layout; banner `wc-busy` khi chương trình khác giữ lock, cleanup "gỡ lock của chương trình khác" chỉ chạy khi người dùng tick xác nhận và không còn tiến trình nào mở `wc.db` (Linux), không xóa file nào; banner out-of-date và tag | #190 |
+| Fixture WC format 31 từ svn 1.15.0 (42 trạng thái) và f32 (43 trạng thái); repo "độc" và evil server chạy không cần Docker; e2e `hostile.test.mjs`; `xtask compat fixtures` chạy các generator; log/author có UTF-8 hỏng hiển thị bằng U+FFFD | #167 |
+| Quy trình phát hành: environment có duyệt, ký số tùy chọn, tự đẩy sang `OpenSVN-releases`; `check-token-scope.sh`, release notes sinh từ conventional commit, checklist kiểm tay chữ ký và N-1→N; bundle id chốt `com.opensvn.desktop` | #169, #183, #198 |
+| Benchmark 100k file so với svn 1.15, bench log/commit, crash case cho switch, soak 2 giờ, suite chạy đồng thời với svn CLI (`tests/crash/tests/concurrency.rs`) | #170 |
+| URL server VisualSVN `https://host/svn/` hiện danh sách repo để chọn | #171 |
+| Diff văn bản cho Word/Excel, mở phiên bản bằng app mặc định, công cụ diff ngoài theo đuôi file | #177 |
+| Switch giữ con bị `exclude` như svn 1.15; switch với `--depth` hẹp để node ngoài depth (cả dòng `exclude`) ở vị trí cũ, chỉ node được bump mới dời sang vị trí mới | #179, #185 |
+| `svn cleanup` của client khác giữa lúc update/checkout: transaction NODES kiểm tra file pristine dùng lại (khôi phục từ bản giữ lại hoặc dừng), kiểm tra lock còn là của mình, release không xóa row của client khác | #180 |
+| Continue checkout nhận lại `.svn` rỗng hoặc chỉ có `.svn/tmp` của checkout bị kill trước khi kịp lấy lock tạo; nhận lại file svn đã đặt nhưng chưa có hàng BASE | #181, #188 |
+| Settings của #17: thay pin chứng chỉ (`replacePin`), nút đăng nhập Windows, danh sách chứng chỉ tin cậy, chọn merge tool/editor/terminal, mở WC gần nhất, log level, cỡ chữ, mật độ, tab, global-ignores, xóa cache | #187 |
+| Crash e2e qua app thật (SIGKILL cả process group, mở lại cùng profile), RSS với 100k file, soak 10 phút/2 giờ; sửa WC biến mất sau crash lúc commit và thiếu watcher sau khi mở lại app; soak engine giới hạn arena glibc, warm-up chờ đủ cửa sổ log | #192, #199 |
+| Kiểm tra filesystem bằng `statfs` chỉ biên dịch trên Linux và trong test (clippy macOS sạch) | #194 |
+| Engine update chạy cùng vòng `svn cleanup`: update xong, báo busy, hoặc dừng với lỗi có kiểu "cleaned up by another client" (`WcBusy`), không bao giờ fail vì file tạm biến mất (`WcDb::wc_lock_explain_failure`); `engine_update_vs_svn_cleanup` vào suite strict, 50/50 lần pass | #202 |
+| RAM app trên Linux: app tự `exec` lại một lần khi khởi động với `MALLOC_ARENA_MAX=2` (heap thật lúc checkout chỉ ~23 MB, phần còn lại là arena glibc giữ lại); setting `appearance.hardwareAcceleration` và biến `OPENSVN_HARDWARE_ACCELERATION` đặt `WEBKIT_DISABLE_DMABUF_RENDERER`/`WEBKIT_DISABLE_COMPOSITING_MODE` (mặc định vẫn bật); app không giữ danh sách mọi notification của update (`ClientCtx::keep_events`); `rss.test.mjs` tách RSS đỉnh của app thành heap/gpu/code. 100k file: app 594 → 349 MB, cả cây 1041 → 804 MB (tắt tăng tốc: 722 MB) (`benches/results/2026-10-16-app-rss-linux.md`) | #202 |
 | Màn cập nhật app (#22): Settings › Updates (phiên bản hiện tại, token chỉ ghi vào keychain, trạng thái Chưa cấu hình/Đã cấu hình/Không hợp lệ, Xóa token, `updates.autoCheck`), dialog Check for app updates… từ menu và Settings (bản mới nhất, có bản mới kèm ghi chú và Install có tiến độ rồi hỏi khởi động lại, chưa cấu hình không gửi request, lỗi kèm Retry), kiểm tra lúc mở app tối đa một lần mỗi ngày dạng toast. Backend: `update_check` trả `UpdateCheck`, `updater_token_status` trả `TokenStatus`, `app_version`, `update_restart`, sự kiện `app://update-progress`; `update_install` không tự khởi động lại | #201 |
 
 Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #144, #145, #146.
 
 ## 4. Đang làm (đừng nhận trùng)
 
-| PR / nhánh | Nội dung | Issue | Trạng thái |
-|---|---|---|---|
-| #187 `feat/remote-auth-settings` | Thay pin chứng chỉ đổi (`replacePin`), nút đăng nhập Windows, danh sách chứng chỉ tin cậy, chọn merge tool/editor/terminal, mở WC gần nhất, log level, cỡ chữ, mật độ, tab, global-ignores, xóa cache | #17 | Đang review |
-| #171 `feat/parent-path-repo-list` | URL server VisualSVN `https://host/svn/` hiện danh sách repo để chọn | #133 | Đang review |
-| #169 `ci/release-gating-publish` | Quy trình phát hành: environment có duyệt, ký số tùy chọn, tự đẩy sang `OpenSVN-releases` | #22 | Đang review |
-| #170 `perf/bench-100k-crash-soak` | Benchmark 100k file với svn 1.15, crash test cho switch, soak 2 giờ, test chạy đồng thời với svn CLI | #121, #21 | Đang code |
-| #192 `test/app-crash-rss-soak` | Crash e2e qua app thật (SIGKILL cả process group, relaunch cùng profile), RSS với 100k file, soak 10 phút/2 giờ; svn 1.15 cho nightly; svn 1.14.5 dùng WC do engine tạo. Kèm 2 bản sửa: WC biến mất sau crash lúc commit, không có watcher sau khi mở lại app | #20, #21 | Draft |
-| #180 `fix/cleanup-vacuum-race` | `svn cleanup` của client khác giữa lúc update/checkout: transaction NODES kiểm tra file pristine dùng lại (khôi phục từ bản giữ lại hoặc dừng), kiểm tra lock còn là của mình, release không xóa row của client khác | | Đang review |
-| `chore/release-prep` | Phần #22 làm được khi chưa có secret: `check-token-scope.sh` kiểm scope token đọc của updater, release notes sinh từ conventional commit, checklist kiểm tay chữ ký và N-1→N trên macOS/Windows, ghi chú cần quyết định bundle id | #22 | Draft |
-| #167 `test/fixtures-hostile-repo` | Fixture WC format 31 từ svn 1.15 (42 trạng thái) và f32 (43 trạng thái); repo "độc" + evil server chạy không cần Docker; e2e `hostile.test.mjs`; `xtask compat fixtures` chạy các generator; log/author có UTF-8 hỏng hiển thị bằng U+FFFD | #8, #18 | Đang review |
-| #185 `fix/switch-exclude-ancestry` | Switch với `--depth` hẹp khớp svn 1.15: node ngoài depth (cả dòng `exclude`) giữ vị trí cũ, chỉ node được bump mới dời sang vị trí mới (bỏ `relocate_subtree` cho cả cây); test oracle cho dòng `exclude` ở mọi depth, switch thư mục cha của thư mục đã switch, ancestry (nhánh/tag/file copy được, không chung lịch sử bị từ chối); DAV so với svn 1.15 | — | Đang review |
+Hiện không có PR nào đang mở.
 
-Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: xem/diff file Word/Excel, hiển thị %/ETA khi checkout, giữ nguyên byte đường dẫn (NFC/NFD), build Mac. Hỏi chủ repo trước khi làm những mảng này.
+Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: hiển thị %/ETA khi checkout, giữ nguyên byte đường dẫn (NFC/NFD), build Mac. Hỏi chủ repo trước khi làm những mảng này.
 
 ## 5. Việc còn trống (ai cũng nhận được)
 
@@ -126,7 +129,10 @@ Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo,
 3. **Watcher và menu native (#11).** Kiểm tay menu trên macOS và Windows.
 4. **Spike WebView (#12).** Chạy trên Linux (Intel/AMD/NVIDIA) và Windows 11 theo `plans/**/reports/from-dev-p09-webview-perf-spike-report.md`, rồi bỏ trạng thái "conditional" trong ADR-002.
 5. **Bật `real-engine` làm feature mặc định (#20, #21).** Crash test qua app thật đã có (`e2e/crash.test.mjs`, #192). Còn bật feature mặc định, cùng ma trận compat đầy đủ, bộ test bảo mật và một tuần dùng thật (dogfood).
-6. **RAM của app (#21).** Đo bằng `e2e/rss.test.mjs`, `e2e/soak.test.mjs` (#192). Dưới Xvfb, cả cây tiến trình đã 582 MB RSS khi app vừa mở, trong đó `WebKitWebProcess` chiếm 344 MB. `WEBKIT_DISABLE_DMABUF_RENDERER=1` hạ còn 389 MB. Cần đo trên máy có GPU và quyết định mặc định cho Linux, gắn với spike WebView (#12).
+6. **RAM của app (#21), phần còn lại.** Số đo ở `benches/results/2026-10-16-app-rss-linux.md` (Xvfb, 100k file). Cả cây vẫn trên 400 MB: lúc idle, riêng hai process WebKit đã chiếm khoảng 385 MB RSS khi tăng tốc phần cứng bật (llvmpipe). Tắt tăng tốc thì còn 383 MB. Còn mở:
+   - Đo trên máy có GPU (Intel/AMD/NVIDIA) rồi quyết định mặc định của `appearance.hardwareAcceleration` trên Linux (#182, gắn với spike WebView #12).
+   - App process vẫn lên 350 MB ở refresh/update vì nhiều lượt quét toàn cây nối nhau: `wc://status-changed` làm FE gọi lại `status_get` (thêm một lượt quét) thay vì áp diff. Áp diff chỉ đúng khi danh sách của FE trùng snapshot của publisher, nên cần cho `status_get` trả snapshot.
+   - `read_subtree` giải mã props của mọi hàng NODES cho status; remote check dựng `WcStatus` cho cả cây (`show_unmodified: true`) rồi mới lọc.
 7. **Đếm ngược "thử lại sau Ns" đọc lại mỗi giây (#172, follow-up).** `connection-wait.tsx` đặt `role="status"` lên đoạn chữ đổi mỗi giây, nên trình đọc màn hình đọc liên tục. Nên để vùng live chỉ báo "Mất kết nối" và ẩn phần đếm ngược khỏi vùng live.
 8. **"Update lên bản mới nhất" của checkout dở bỏ qua lựa chọn ignore-externals (#172, follow-up).** Nút này chạy update thường, nên tải cả externals dù checkout ban đầu chọn bỏ qua. Nên đọc journal checkout như `wc_continue`.
 9. **Commit qua proxy/middlebox reset kết nối sau N request (#193, follow-up).** Với `--reset-after 2`, request ghi thứ 3 trên một kết nối luôn bị reset, nên commit không bao giờ qua được (đúng thiết kế #166: không gửi lại). Hướng sửa: gửi MERGE/LOCK/UNLOCK trên kết nối mới, hoặc giới hạn số request ghi mỗi kết nối. Cần đo chi phí handshake với VisualSVN thật.
