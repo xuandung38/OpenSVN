@@ -51,15 +51,15 @@ pub(super) async fn drive_update(
     } = at;
     let mut reporter = CollectingReporter::default();
     report(&mut reporter)?;
-    // Like svn_repos: a switch reads a linked path from its link (an update would follow the
-    // link in the target as well; the fake does not model that and treats links as set_path).
-    if matches!(req.mode, UpdateMode::Switch(_)) {
-        for e in &mut reporter.entries {
-            if let Some(url) = &e.link_url {
-                e.link = Some(url_to_rel(repos_root, url)?);
-            }
+    // Like svn_repos: a linked path is read from its link. A switch only reads the working
+    // copy's side there; an update (or status) also takes the new tree from the link
+    // (`update_entry`: "For non-switch operations, follow link_path in the target").
+    for e in &mut reporter.entries {
+        if let Some(url) = &e.link_url {
+            e.link = Some(url_to_rel(repos_root, url)?);
         }
     }
+    let is_switch = matches!(req.mode, UpdateMode::Switch(_));
 
     let tree_target = match &req.mode {
         UpdateMode::Switch(url) => url_to_rel(repos_root, url)?,
@@ -93,6 +93,7 @@ pub(super) async fn drive_update(
         send_text: req.mode != UpdateMode::Status,
         max_open_files,
         requested_depth: req.depth,
+        is_switch,
     };
     let ops = plan(&input)?;
 
