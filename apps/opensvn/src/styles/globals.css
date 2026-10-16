@@ -46,7 +46,8 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-family: var(--f-ui);
-  font-size: 13px;
+  /* Settings > Appearance > Font size (lib/ui-prefs.tsx). */
+  font-size: var(--ui-font-size, 13px);
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
@@ -58,6 +59,13 @@ select,
 textarea {
   font: inherit;
   color: inherit;
+}
+
+/* Settings > Diff & Merge > Tab width: diff, blame and file views. */
+pre,
+code,
+.font-mono {
+  tab-size: var(--tab-width, 4);
 }
 
 /* Focus ring for every interactive element (design-guidelines 4). */

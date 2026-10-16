@@ -1,6 +1,7 @@
 //! Shared helpers for the golden tests: fixture loading and chunked feeding.
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::cell::Cell;
 use std::path::PathBuf;
 
 use svn_protocol::{Capabilities, Headers, ResponseHead, ResponseParser, UrlBuilder};
@@ -17,15 +18,40 @@ pub struct Fixture {
     pub resp_body: Vec<u8>,
 }
 
-fn data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data")
+/// Recording sets under `tests/`: `data` from mod_dav_svn 1.14.5, `data-1.15` from 1.15.0. Both
+/// come from the same `tools/capture/run.sh` scenario, so they hold the same exchanges.
+pub const DATA_SETS: [&str; 2] = ["data", "data-1.15"];
+
+thread_local! {
+    static DATA_SET: Cell<&'static str> = const { Cell::new("data") };
 }
 
-/// Loads `tests/data/<name>.{meta,req,resp}`.
+/// Makes `load`/`companion`/`caps`/`urls` on this thread read from `set` (one of `DATA_SETS`).
+pub fn use_set(set: &'static str) {
+    DATA_SET.with(|s| s.set(set));
+}
+
+/// Runs `check` once per recording set. A failure names the set on stderr.
+pub fn for_each_set(check: impl Fn()) {
+    for set in DATA_SETS {
+        eprintln!("recording set: tests/{set}");
+        use_set(set);
+        check();
+    }
+    use_set(DATA_SETS[0]);
+}
+
+fn data_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(DATA_SET.with(Cell::get))
+}
+
+/// Loads `tests/<set>/<name>.{meta,req,resp}` from the current recording set.
 pub fn load(name: &str) -> Fixture {
     let base = data_dir().join(name);
     let meta = std::fs::read_to_string(base.with_extension("meta"))
-        .unwrap_or_else(|e| panic!("fixture {name}: {e}"));
+        .unwrap_or_else(|e| panic!("fixture {}/{name}: {e}", DATA_SET.with(Cell::get)));
     let (mut method, mut path, mut status) = (String::new(), String::new(), 0);
     let (mut req_headers, mut resp_headers) = (Headers::new(), Headers::new());
     let mut in_response = false;

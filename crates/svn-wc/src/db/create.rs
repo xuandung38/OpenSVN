@@ -356,6 +356,7 @@ impl WcDb {
             owned_locks: Mutex::new(Default::default()),
             lock_owner: Mutex::new(None),
             lock_gate: Mutex::new(()),
+            lock_markers: Mutex::default(),
         })
     }
 

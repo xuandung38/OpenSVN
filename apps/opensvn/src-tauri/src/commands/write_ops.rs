@@ -242,10 +242,12 @@ pub async fn wc_continue(
                     "There is nothing to continue: the working copy is complete.",
                 ));
             };
-            if let Some(url) = switch_to {
+            if let Some((url, ignore_ancestry)) = switch_to {
                 // A switch that stopped half-way: an update would keep the folders it had
                 // not reached at their old URL. Finished at the revision it was reaching.
-                let new_rev = engine.switch(&wc, &url, Some(rev), &ctx).await?;
+                let new_rev = engine
+                    .switch(&wc, &url, Some(rev), ignore_ancestry, &ctx)
+                    .await?;
                 forget_switch(&db, &row.root_path);
                 return Ok(OpResult::NewRev { new_rev });
             }
@@ -295,6 +297,7 @@ pub async fn switch(
     wc_id: WcId,
     url: String,
     rev: Option<Rev>,
+    ignore_ancestry: bool,
 ) -> Result<OperationHandle, AppError> {
     guard(async {
         let row = state.wcs.resolve(&wc_id)?.row;
@@ -306,10 +309,10 @@ pub async fn switch(
             move |engine, wc, ctx| async move {
                 // Kept until the switch finishes: one that stops half-way (connection lost for
                 // good, cancelled, app closed) is continued as a switch to this URL.
-                if let Err(e) = db.switch_journal_put(&row.root_path, &url) {
+                if let Err(e) = db.switch_journal_put(&row.root_path, &url, ignore_ancestry) {
                     tracing::warn!(error = %e, "could not record the switch");
                 }
-                let new_rev = engine.switch(&wc, &url, rev, &ctx).await?;
+                let new_rev = engine.switch(&wc, &url, rev, ignore_ancestry, &ctx).await?;
                 forget_switch(&db, &row.root_path);
                 Ok(OpResult::NewRev { new_rev })
             },

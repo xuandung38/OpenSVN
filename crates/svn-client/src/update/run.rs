@@ -695,6 +695,7 @@ async fn record_unseen_children(
             let repos_relpath = super::editor::repos_child(&parent_repos, name.as_str());
             let repos_id = parent.repos_id.unwrap_or_default();
             db.with_txn(|t| {
+                t.verify_wc_lock()?;
                 if t.read_base(&child)?.is_some() {
                     return Ok(());
                 }

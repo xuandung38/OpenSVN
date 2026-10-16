@@ -702,3 +702,104 @@ fn a_new_base_node_below_a_deleted_directory_is_deleted_in_its_layer() {
     let c = db.read_node(&rp("d/c")).expect("read").expect("d/c");
     assert_eq!((c.op_depth, c.presence), (0, Presence::NotPresent));
 }
+
+/// A temp file in `.svn/tmp` holding `text`, as the update editor hands it to `place`.
+fn text_copy(db: &WcDb, text: &[u8]) -> tempfile::TempPath {
+    use std::io::Write as _;
+    let tmp = db.wcroot().join(".svn/tmp");
+    std::fs::create_dir_all(&tmp).expect("tmp");
+    let mut f = tempfile::NamedTempFile::new_in(&tmp).expect("temp");
+    f.write_all(text).expect("write");
+    f.into_temp_path()
+}
+
+/// `svn cleanup` of another client can vacuum an unreferenced row (and its file) that an update
+/// reuses, after `place` said "already stored" and before the transaction references it. The
+/// transaction restores the text from the copy it kept, or fails without writing anything; it
+/// never commits a NODES row whose pristine is gone.
+#[test]
+fn a_reused_pristine_vacuumed_before_its_transaction_is_restored_or_refused() {
+    use svn_wc::pristine::Placement;
+
+    let (_tmp, db) = new_wc();
+    let text = b"reused text\n";
+    let sha1 = install_text(&db, text);
+    let rec = db
+        .pristine_store()
+        .index()
+        .lookup(&sha1)
+        .expect("lookup")
+        .expect("row");
+    let stored = db.pristine_store().path_of(&sha1);
+    let mut placed = std::collections::HashSet::new();
+    let Placement::AlreadyStored(spare) = db
+        .pristine_store()
+        .place(text_copy(&db, text), &rec, true, &mut placed)
+        .expect("place")
+    else {
+        panic!("an existing row is reused");
+    };
+    assert!(placed.is_empty(), "nothing was placed");
+
+    // Another client vacuums: row and file go.
+    assert_eq!(db.pristine_store().remove_unreferenced().expect("gc"), 1);
+    assert!(!stored.exists());
+
+    // Restored from the kept copy inside the transaction that references it.
+    let node = base_file("a.txt", 1, Some(sha1.to_svn_string()));
+    db.with_txn(|t| {
+        t.record_pristine_or_restore(&rec, Some(&spare))?;
+        t.base_add(&rp("a.txt"), &node)
+    })
+    .expect("restored");
+    assert!(stored.is_file());
+    assert!(db.pristine_store().verify(&sha1).expect("verify"));
+    assert!(
+        std::fs::metadata(&stored)
+            .expect("stat")
+            .permissions()
+            .readonly()
+    );
+    drop(spare); // already renamed into the store: nothing to remove
+    assert!(stored.is_file());
+
+    // Without a copy the transaction fails as a whole: no row without its file, no node.
+    let other = b"another reused text\n";
+    let sha2 = install_text(&db, other);
+    let rec2 = db
+        .pristine_store()
+        .index()
+        .lookup(&sha2)
+        .expect("lookup")
+        .expect("row");
+    assert_eq!(db.pristine_store().remove_unreferenced().expect("gc"), 1);
+    let node = base_file("b.txt", 1, Some(sha2.to_svn_string()));
+    let err = db
+        .with_txn(|t| {
+            t.record_pristine(&rec2)?;
+            t.base_add(&rp("b.txt"), &node)
+        })
+        .expect_err("text gone");
+    assert_eq!(err.code, ErrorCode::WcBusy, "{err}");
+    assert!(
+        err.message
+            .contains("cleaned up by another client during the update"),
+        "{err}"
+    );
+    assert!(
+        db.pristine_store()
+            .index()
+            .lookup(&sha2)
+            .expect("lookup")
+            .is_none()
+    );
+    assert!(db.read_base(&rp("b.txt")).expect("read").is_none());
+
+    // A copy whose size does not match the record is never taken.
+    let bad = text_copy(&db, b"short\n");
+    let err = db
+        .with_txn(|t| t.record_pristine_or_restore(&rec2, Some(&bad)))
+        .expect_err("wrong copy");
+    assert_eq!(err.code, ErrorCode::Corrupt, "{err}");
+    assert!(!db.pristine_store().path_of(&sha2).exists());
+}

@@ -897,6 +897,8 @@ async fn a_commit_with_changes_below_a_switched_subtree_goes_through() {
         &root.join(&RelPath::new("branches/b").unwrap()).unwrap(),
         None,
         svn_types::Depth::Unknown,
+        // The branch was seeded on its own, without history.
+        true,
         &CancelToken::new(),
     )
     .await

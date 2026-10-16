@@ -791,9 +791,15 @@ async fn a_switch_cut_for_good_is_finished_by_continue_switch() {
         ],
         tmp.path().join("proxy-1.log"),
     );
-    let h = crate::commands::switch(app.state(), listed.id.clone(), format!("{base}/d001"), None)
-        .await
-        .unwrap();
+    let h = crate::commands::switch(
+        app.state(),
+        listed.id.clone(),
+        format!("{base}/d001"),
+        None,
+        false,
+    )
+    .await
+    .unwrap();
     let err = app
         .wait_op(&h, Duration::from_secs(300))
         .await
@@ -809,9 +815,8 @@ async fn a_switch_cut_for_good_is_finished_by_continue_switch() {
         app.state()
             .db
             .switch_journal_get(&listed.root_path)
-            .unwrap()
-            .as_deref(),
-        Some(format!("{base}/d001").as_str())
+            .unwrap(),
+        Some((format!("{base}/d001"), false))
     );
     assert_eq!(app.cleanup_banners(), 0);
 

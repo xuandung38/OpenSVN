@@ -83,7 +83,7 @@ export const commands = {
 	 *  to. Fails when nothing is incomplete.
 	 */
 	wcContinue: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("wc_continue", { wcId })),
-	switch: (wcId: WcId, url: string, rev: number | null) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("switch", { wcId, url, rev })),
+	switch: (wcId: WcId, url: string, rev: number | null, ignoreAncestry: boolean) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("switch", { wcId, url, rev, ignoreAncestry })),
 	commit: (request: CommitRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("commit", { request })),
 	revert: (request: RevertRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("revert", { request })),
 	addPaths: (wcId: WcId, paths: string[]) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("add_paths", { wcId, paths })),
@@ -192,6 +192,11 @@ export const commands = {
 	/**  Stops trusting a certificate; the next connection asks again. */
 	certsRemove: (key: TrustedCertKey) => typedError<null, AppError>(__TAURI_INVOKE("certs_remove", { key })),
 	/**
+	 *  Empties the disposable cache (`cache.sqlite`: status snapshots). Working copies, settings,
+	 *  accounts and trusted certificates are not touched; the next scan rebuilds what was removed.
+	 */
+	cacheClear: () => typedError<null, AppError>(__TAURI_INVOKE("cache_clear")),
+	/**
 	 *  Shows a working copy item in the file manager. `path` is relative to the working copy root;
 	 *  an empty path reveals the root folder itself. Items reached through a symbolic link are
 	 *  refused, so the file manager never opens a folder outside the working copy.
@@ -221,7 +226,7 @@ export const events = {
 };
 
 /* Constants */
-export const SETTING_RANGES = {"cache.maxSizeGb":{"max":4096,"min":1},"general.checkIntervalMin":{"max":1440,"min":1},"network.maxConnections":{"max":8,"min":1},"network.reconnectWaitMin":{"max":120,"min":1},"network.timeoutSec":{"max":3600,"min":5}} as const;
+export const SETTING_RANGES = {"appearance.fontSize":{"max":20,"min":11},"cache.maxSizeGb":{"max":4096,"min":1},"diff.tabWidth":{"max":16,"min":1},"general.checkIntervalMin":{"max":1440,"min":1},"network.maxConnections":{"max":8,"min":1},"network.reconnectWaitMin":{"max":120,"min":1},"network.timeoutSec":{"max":3600,"min":5}} as const;
 
 /* Types */
 /**  Credential metadata only; never contains a password. */
@@ -453,6 +458,9 @@ export type CopyLocationRequest = {
 	fromWc: WcId | null,
 };
 
+/**  Row spacing of lists and tables. */
+export type Density = "comfortable" | "compact";
+
 export type Depth = "empty" | "files" | "immediates" | "infinity";
 
 /**  One file of the bundle as the user sees it. */
@@ -549,7 +557,12 @@ export type ErrorCode = "network" | "timeout" | "auth-required" |
  *  offers no Basic, the URL is plain http (SSO is https only), its mutual-authentication
  *  token was invalid, or the user chose SSO again after it had failed.
  */
-"negotiate-failed" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "hook-failed" | "repository-moved" | "pristine-not-hydrated" | "wc-invalid-operation" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | 
+"negotiate-failed" | "forbidden" | "tls-untrusted" | "out-of-date" | "locked-by-other" | "lock-token-invalid" | "wc-busy" | "wc-needs-cleanup" | "wc-format-unsupported" | "not-a-working-copy" | "conflict-blocks-commit" | "hook-failed" | "repository-moved" | "pristine-not-hydrated" | "wc-invalid-operation" | 
+/**
+ *  A switch target shares no history with the working copy (svn E195012). Nothing changed;
+ *  the switch can be asked for again with `ignore_ancestry`.
+ */
+"unrelated-resources" | "path-not-found" | "disk-full" | "permission-denied" | "file-in-use" | "cancelled" | 
 /**
  *  The server sent a malformed response (bad XML or encoding, an impossible editor drive).
  *  Nothing local is damaged, so cleanup is not offered; the message names what was wrong.
@@ -735,6 +748,9 @@ export type LogGetRequest = {
 	withPaths: boolean,
 	filter: string | null,
 };
+
+/**  Most detailed level written to the log. There is no `trace`: it would log transport internals. */
+export type LogLevel = "error" | "warn" | "info" | "debug";
 
 /**  Result of `log_get`. */
 export type LogPage = {
@@ -1044,9 +1060,18 @@ export type SecretText = string;
 export type Settings = {
 	"general.checkIntervalMin": number,
 	"general.language": Language,
+	/**  Open the most recently used working copy when the app starts; off starts with none. */
+	"general.openLastWc": boolean,
+	/**  Log level of the app's own modules; other libraries stay at `info` at most. */
+	"general.logLevel": LogLevel,
 	"appearance.theme": Theme,
+	/**  Base UI font size in pixels. Range: `SETTING_RANGES`. */
+	"appearance.fontSize": number,
+	"appearance.density": Density,
 	"diff.mode": DiffMode,
 	"diff.ignoreWhitespace": boolean,
+	/**  Columns per tab in diff, blame and file views. Range: `SETTING_RANGES`. */
+	"diff.tabWidth": number,
 	/**  Range: `SETTING_RANGES` (validator in the app crate). */
 	"network.maxConnections": number,
 	"network.timeoutSec": number,
@@ -1064,6 +1089,11 @@ export type Settings = {
 	"network.negotiate": boolean,
 	"wc.defaultFormat": WcFormat,
 	"wc.readSubversionConfig": boolean,
+	/**
+	 *  Whitespace-separated `global-ignores` patterns used instead of svn's configuration
+	 *  (`~/.subversion/config` or the built-in list). Empty: use svn's configuration.
+	 */
+	"wc.globalIgnores": string,
 	"cache.maxSizeGb": number,
 	"integrations.webRevisionUrl": string,
 	"integrations.webFileUrl": string,
@@ -1101,9 +1131,18 @@ export type SettingsPatch = SettingsPatch_Serialize | SettingsPatch_Deserialize;
 export type SettingsPatch_Deserialize = {
 	"general.checkIntervalMin"?: number | null,
 	"general.language"?: Language | null,
+	/**  Open the most recently used working copy when the app starts; off starts with none. */
+	"general.openLastWc"?: boolean | null,
+	/**  Log level of the app's own modules; other libraries stay at `info` at most. */
+	"general.logLevel"?: LogLevel | null,
 	"appearance.theme"?: Theme | null,
+	/**  Base UI font size in pixels. Range: `SETTING_RANGES`. */
+	"appearance.fontSize"?: number | null,
+	"appearance.density"?: Density | null,
 	"diff.mode"?: DiffMode | null,
 	"diff.ignoreWhitespace"?: boolean | null,
+	/**  Columns per tab in diff, blame and file views. Range: `SETTING_RANGES`. */
+	"diff.tabWidth"?: number | null,
 	/**  Range: `SETTING_RANGES` (validator in the app crate). */
 	"network.maxConnections"?: number | null,
 	"network.timeoutSec"?: number | null,
@@ -1121,6 +1160,11 @@ export type SettingsPatch_Deserialize = {
 	"network.negotiate"?: boolean | null,
 	"wc.defaultFormat"?: WcFormat | null,
 	"wc.readSubversionConfig"?: boolean | null,
+	/**
+	 *  Whitespace-separated `global-ignores` patterns used instead of svn's configuration
+	 *  (`~/.subversion/config` or the built-in list). Empty: use svn's configuration.
+	 */
+	"wc.globalIgnores"?: string | null,
 	"cache.maxSizeGb"?: number | null,
 	"integrations.webRevisionUrl"?: string | null,
 	"integrations.webFileUrl"?: string | null,
@@ -1135,9 +1179,18 @@ export type SettingsPatch_Deserialize = {
 export type SettingsPatch_Serialize = {
 	"general.checkIntervalMin"?: number | null,
 	"general.language"?: Language | null,
+	/**  Open the most recently used working copy when the app starts; off starts with none. */
+	"general.openLastWc"?: boolean | null,
+	/**  Log level of the app's own modules; other libraries stay at `info` at most. */
+	"general.logLevel"?: LogLevel | null,
 	"appearance.theme"?: Theme | null,
+	/**  Base UI font size in pixels. Range: `SETTING_RANGES`. */
+	"appearance.fontSize"?: number | null,
+	"appearance.density"?: Density | null,
 	"diff.mode"?: DiffMode | null,
 	"diff.ignoreWhitespace"?: boolean | null,
+	/**  Columns per tab in diff, blame and file views. Range: `SETTING_RANGES`. */
+	"diff.tabWidth"?: number | null,
 	/**  Range: `SETTING_RANGES` (validator in the app crate). */
 	"network.maxConnections"?: number | null,
 	"network.timeoutSec"?: number | null,
@@ -1155,6 +1208,11 @@ export type SettingsPatch_Serialize = {
 	"network.negotiate"?: boolean | null,
 	"wc.defaultFormat"?: WcFormat | null,
 	"wc.readSubversionConfig"?: boolean | null,
+	/**
+	 *  Whitespace-separated `global-ignores` patterns used instead of svn's configuration
+	 *  (`~/.subversion/config` or the built-in list). Empty: use svn's configuration.
+	 */
+	"wc.globalIgnores"?: string | null,
 	"cache.maxSizeGb"?: number | null,
 	"integrations.webRevisionUrl"?: string | null,
 	"integrations.webFileUrl"?: string | null,

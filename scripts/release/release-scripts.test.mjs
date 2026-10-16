@@ -1,13 +1,22 @@
 // Run with: node --test scripts/release/release-scripts.test.mjs
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildManifest } from "./make-latest-json.mjs";
-import { compareVersions, parseArgs, publish, updateEntries } from "./publish-release.mjs";
+import {
+  compareVersions,
+  formatNotes,
+  notesFromGit,
+  parseArgs,
+  previousTag,
+  publish,
+  updateEntries,
+} from "./publish-release.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -280,6 +289,232 @@ test("publish: argument and helper validation", () => {
     assert.throws(() => publish(opts(dist(SIGNED))), /GH_TOKEN/);
   });
   assert.equal(gh.state().releases.length, 0);
+});
+
+// ---- release notes from git -------------------------------------------------------------------
+
+/** A throw-away repository; `run(...args)` runs git in it with a fixed identity. */
+function repo() {
+  const dir = mkdtempSync(join(tmpdir(), "notes-"));
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_AUTHOR_NAME: "t",
+    GIT_AUTHOR_EMAIL: "t@example.com",
+    GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@example.com",
+  };
+  const run = (...args) => execFileSync("git", args, { cwd: dir, env, encoding: "utf8" }).trim();
+  run("init", "-q", "-b", "main");
+  const commit = (subject) => run("commit", "-q", "--allow-empty", "-m", subject);
+  return { dir, run, commit };
+}
+
+test("release notes: grouped by type, merges dropped, previous stable tag as the base", () => {
+  const r = repo();
+  r.commit("feat: before the previous release");
+  r.run("tag", "-a", "v0.1.0", "-m", "0.1.0");
+  r.commit("fix(svn-ra): retry a dropped REPORT");
+  r.run("tag", "v0.2.0-1");
+  r.run("checkout", "-q", "-b", "topic");
+  r.commit("feat(ui)!: new settings page");
+  r.commit("perf: batch fsync");
+  r.run("checkout", "-q", "main");
+  r.commit("docs: release checklist");
+  r.run("merge", "-q", "--no-ff", "-m", "Merge pull request #1 from acme/topic", "topic");
+  r.commit("Keep AppError within the error-size limit");
+  r.run("tag", "-a", "v0.2.0", "-m", "0.2.0");
+  r.commit("feat: after the release");
+
+  assert.equal(previousTag("0.2.0", "refs/tags/v0.2.0", r.dir), "v0.1.0");
+  // A pre-release counts pre-release tags too.
+  assert.equal(previousTag("0.2.0-2", "HEAD", r.dir), "v0.2.0-1");
+  assert.equal(previousTag("0.1.0", "refs/tags/v0.1.0", r.dir), null);
+
+  const notes = notesFromGit({ tag: "v0.2.0", version: "0.2.0" }, r.dir);
+  assert.match(notes, /^OpenSVN 0\.2\.0\. Verify downloads with the SHA256SUMS-\*\.txt files\.\n/);
+  assert.doesNotMatch(notes, /Merge pull request|before the previous|after the release/);
+  const sections = notes
+    .split(/^## /m)
+    .slice(1)
+    .map((sec) => sec.split("\n")[0]);
+  assert.deepEqual(sections, ["Features", "Bug fixes", "Performance", "Other changes"]);
+  assert.match(
+    notes,
+    /## Features\n\n- \*\*BREAKING\*\* \*\*ui:\*\* new settings page \([0-9a-f]{7}\)\n/,
+  );
+  assert.match(notes, /## Bug fixes\n\n- \*\*svn-ra:\*\* retry a dropped REPORT \(/);
+  assert.match(notes, /## Performance\n\n- batch fsync \(/);
+  assert.match(notes, /## Other changes\n\n(- .+\n){2}$/);
+  assert.match(notes, /- docs: release checklist \(/);
+  assert.match(notes, /- Keep AppError within the error-size limit \(/);
+
+  // An untagged version (manual run before tagging) takes HEAD; the first release takes all.
+  assert.match(notesFromGit({ tag: "v0.3.0", version: "0.3.0" }, r.dir), /after the release/);
+  const first = notesFromGit({ tag: "v0.1.0", version: "0.1.0" }, r.dir);
+  assert.match(first, /## Features\n\n- before the previous release/);
+});
+
+test("release notes: empty range, unknown types and the size cap", () => {
+  assert.match(formatNotes("1.0.0", []), /No changes since the previous release/);
+  const odd = formatNotes("1.0.0", [{ hash: "a".repeat(40), subject: "chore(deps): bump" }]);
+  assert.match(odd, /## Other changes\n\n- chore\(deps\): bump \(aaaaaaa\)/);
+  const many = Array.from({ length: 3000 }, (_, i) => ({
+    hash: "b".repeat(40),
+    subject: `fix: ${"x".repeat(60)} ${i}`,
+  }));
+  const big = formatNotes("1.0.0", many);
+  assert.ok(big.length < 125_000);
+  assert.match(big, /\(list truncated\)\n$/);
+  assert.throws(
+    () =>
+      parseArgs([
+        "--tag",
+        "v1.0.0",
+        "--version",
+        "1.0.0",
+        "--dist",
+        "d",
+        "--notes",
+        "x",
+        "--notes-from-git",
+      ]),
+    /exclude/,
+  );
+});
+
+test("release.yml: publish generates the notes from git with full history", () => {
+  const release = readFileSync(
+    join(here, "..", "..", ".github", "workflows", "release.yml"),
+    "utf8",
+  );
+  const publishJob = jobs(release).publish;
+  assert.match(publishJob, /publish-release\.mjs[^\n]*\\\n[^\n]*--notes-from-git/);
+  assert.doesNotMatch(publishJob, /publish-release\.mjs[^\n]*\\\n[^\n]*--notes "/);
+  assert.match(publishJob, /fetch-depth: 0/);
+});
+
+// ---- check-token-scope.sh ---------------------------------------------------------------------
+
+const TOKEN = "github_pat_TESTsecret0123456789";
+
+/** pkt-line framing of the git smart-HTTP protocol. */
+const pkt = (line) => `${(line.length + 4).toString(16).padStart(4, "0")}${line}`;
+
+/**
+ * A fake api.github.com + github.com that answers per `scope`: which repositories the token can
+ * read (API and git) and whether it can write. Requests without the token get 401.
+ */
+function fakeGitHub(scope) {
+  const seen = [];
+  const server = createServer((req, res) => {
+    const auth = req.headers.authorization ?? "";
+    const basic = `Basic ${Buffer.from(`x-access-token:${TOKEN}`).toString("base64")}`;
+    seen.push({
+      method: req.method,
+      url: req.url,
+      authed: auth === `Bearer ${TOKEN}` || auth === basic,
+    });
+    if (!seen.at(-1).authed) return res.writeHead(401).end();
+    const reads = (repo) => scope.read.includes(repo);
+    let m = /^\/git\/(.+)\.git\/info\/refs\?service=git-upload-pack$/.exec(req.url);
+    if (m) {
+      if (!reads(m[1])) return res.writeHead(404).end("Repository not found.");
+      const sha = "1".repeat(40);
+      res.writeHead(200, { "content-type": "application/x-git-upload-pack-advertisement" });
+      return res.end(
+        `${pkt("# service=git-upload-pack\n")}0000${pkt(`${sha} HEAD\0agent=fake\n`)}${pkt(`${sha} refs/heads/main\n`)}0000`,
+      );
+    }
+    m = /^\/api\/repos\/([^/]+\/[^/]+)(\/contents\/(.+))?$/.exec(req.url);
+    if (!m || !reads(m[1])) return res.writeHead(404).end();
+    if (req.method === "PUT") return res.writeHead(scope.write ? 404 : 403).end();
+    if (m[3] === "latest.json" && !scope.latest) return res.writeHead(404).end();
+    return res.writeHead(200).end("{}");
+  });
+  return new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () => resolve({ server, seen, port: server.address().port })),
+  );
+}
+
+async function checkScope(scope, env = {}) {
+  const gh = await fakeGitHub(scope);
+  const base = `http://127.0.0.1:${gh.port}`;
+  try {
+    return await new Promise((resolve) => {
+      execFile(
+        join(here, "check-token-scope.sh"),
+        [],
+        {
+          env: {
+            ...process.env,
+            OPENSVN_UPDATER_TOKEN: TOKEN,
+            GITHUB_API: `${base}/api`,
+            GITHUB_GIT: `${base}/git`,
+            MAIN_REPO: "acme/OpenSVN",
+            RELEASES_REPO: "acme/OpenSVN-releases",
+            NO_PROXY: "127.0.0.1",
+            no_proxy: "127.0.0.1",
+            ...env,
+          },
+          encoding: "utf8",
+        },
+        (err, stdout, stderr) =>
+          resolve({ code: err ? err.code : 0, out: stdout + stderr, seen: gh.seen }),
+      );
+    });
+  } finally {
+    gh.server.close();
+  }
+}
+
+const RELEASES_ONLY = { read: ["acme/OpenSVN-releases"], write: false, latest: true };
+
+test("check-token-scope: a read-only releases token passes, and the token is never printed", async () => {
+  const r = await checkScope(RELEASES_ONLY);
+  assert.equal(r.code, 0, r.out);
+  assert.equal((r.out.match(/^PASS /gm) ?? []).length, 5, r.out);
+  assert.match(r.out, /RESULT: PASS/);
+  assert.ok(!r.out.includes(TOKEN) && !r.out.includes("TESTsecret"), "token leaked");
+  assert.ok(r.seen.every((s) => s.authed));
+  assert.ok(r.seen.some((s) => s.method === "PUT"));
+  assert.ok(r.seen.some((s) => s.url.startsWith("/git/acme/OpenSVN.git/")));
+});
+
+test("check-token-scope: latest.json not published yet is a clear note, not a failure", async () => {
+  const r = await checkScope({ ...RELEASES_ONLY, latest: false });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /latest\.json -> 404\n\s+note: latest\.json does not exist yet/);
+});
+
+test("check-token-scope: a token that reaches the source or can write fails each check", async () => {
+  const r = await checkScope({
+    read: ["acme/OpenSVN-releases", "acme/OpenSVN"],
+    write: true,
+    latest: true,
+  });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /FAIL {2}GET repos\/acme\/OpenSVN -> 200 \(want 404\)/);
+  assert.match(r.out, /FAIL {2}git ls-remote acme\/OpenSVN succeeded/);
+  assert.match(r.out, /FAIL {2}PUT .* -> 404 \(want 403\)\n.*can write/);
+  assert.match(r.out, /RESULT: FAIL/);
+  assert.ok(!r.out.includes(TOKEN), "token leaked");
+});
+
+test("check-token-scope: a token without the releases repo, a bad token, no token", async () => {
+  const none = await checkScope({ read: [], write: false, latest: true });
+  assert.equal(none.code, 1, none.out);
+  assert.match(none.out, /FAIL {2}GET repos\/acme\/OpenSVN-releases -> 404/);
+  assert.match(none.out, /inconclusive: git could not use the token/);
+
+  const bad = await checkScope(RELEASES_ONLY, { OPENSVN_UPDATER_TOKEN: "wrong" });
+  assert.equal(bad.code, 1, bad.out);
+  assert.match(bad.out, /-> 401\n\s+the token is invalid or expired/);
+
+  const missing = await checkScope(RELEASES_ONLY, { OPENSVN_UPDATER_TOKEN: "" });
+  assert.equal(missing.code, 2);
+  assert.equal(missing.seen.length, 0);
 });
 
 // ---- release.yml secret isolation -------------------------------------------------------------

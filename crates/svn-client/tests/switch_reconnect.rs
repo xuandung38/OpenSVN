@@ -115,6 +115,7 @@ async fn a_switch_broken_mid_drive_resumes_at_the_switched_target() {
         &url("branches/b"),
         Some(Revnum(1)),
         Depth::Unknown,
+        true,
         &CancelToken::new(),
     )
     .await
@@ -160,6 +161,7 @@ async fn a_switch_that_cannot_be_resumed_is_finished_by_the_same_switch() {
         &url("branches/b"),
         Some(Revnum(1)),
         Depth::Unknown,
+        true,
         &CancelToken::new(),
     )
     .await
@@ -194,6 +196,7 @@ async fn a_switch_that_cannot_be_resumed_is_finished_by_the_same_switch() {
         &url("branches/b"),
         Some(Revnum(1)),
         Depth::Unknown,
+        true,
         &CancelToken::new(),
     )
     .await
@@ -255,6 +258,7 @@ async fn a_switch_moves_a_folder_switched_below_it_like_svn() {
         &url("branches/x"),
         None,
         Depth::Unknown,
+        true,
         &CancelToken::new(),
     )
     .await
@@ -275,6 +279,7 @@ async fn a_switch_moves_a_folder_switched_below_it_like_svn() {
         &url("branches/b"),
         None,
         Depth::Unknown,
+        true,
         &CancelToken::new(),
     )
     .await

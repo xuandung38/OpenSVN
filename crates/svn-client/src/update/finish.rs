@@ -310,6 +310,7 @@ impl UpdateEditor {
         let depth = self.s.depth;
         let sticky = self.s.sticky_depth;
         db.with_txn(|t| {
+            t.verify_wc_lock()?;
             if let Some((old, new)) = &relocation {
                 t.relocate_subtree(&target, old, new)?;
             }

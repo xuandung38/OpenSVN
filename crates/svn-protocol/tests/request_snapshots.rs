@@ -5,13 +5,14 @@ mod common;
 
 use common::{session_url, urls};
 use svn_protocol::get::get_request;
+use svn_protocol::list_report::{ListDepth, list_report_request};
 use svn_protocol::locks::{
     LockOptions, get_lock_request, get_locks_request, lock_request, unlock_request,
 };
 use svn_protocol::log::{LogRequest, LogRevprops, log_request};
 use svn_protocol::propfind::{allprop_request, list_request, stat_request};
-use svn_protocol::{HttpRequest, options_request};
-use svn_types::{Depth, RelPath, Revnum};
+use svn_protocol::{HttpRequest, options_request, parent_listing_request};
+use svn_types::{Depth, RelPath, RepoUrl, Revnum};
 
 fn render(req: &HttpRequest) -> String {
     let mut out = format!("{} {}\n", req.method.as_str(), req.url);
@@ -130,6 +131,36 @@ fn lock_family() {
 }
 
 #[test]
+fn list_report_family() {
+    let u = urls();
+    for (name, depth) in [
+        ("immediates", ListDepth::Immediates),
+        ("infinity", ListDepth::Infinity),
+    ] {
+        insta::assert_snapshot!(
+            format!("list_report_{name}"),
+            render(
+                &list_report_request(&u, Revnum(5), &rel("trunk/dir with space"), depth).unwrap()
+            )
+        );
+    }
+}
+
+#[test]
+fn parent_listing() {
+    // Without and with the trailing slash: both ask for the same listing page.
+    for (name, url) in [
+        ("no_slash", "https://svn.test.local/svn"),
+        ("slash", "https://svn.test.local/svn/"),
+    ] {
+        insta::assert_snapshot!(
+            format!("parent_listing_{name}"),
+            render(&parent_listing_request(&RepoUrl::parse(url).unwrap()).unwrap())
+        );
+    }
+}
+
+#[test]
 fn builders_reject_unusable_input() {
     let u = urls();
     let p = rel("a");
@@ -142,4 +173,18 @@ fn builders_reject_unusable_input() {
         ..LockOptions::default()
     };
     assert!(lock_request(&u, &p, &bad_comment).is_err());
+}
+
+#[test]
+fn location_segments() {
+    insta::assert_snapshot!(render(
+        &svn_protocol::location_segments::location_segments_request(
+            &urls(),
+            &rel("branches/b c"),
+            Revnum(9),
+            Revnum(9),
+            Revnum(0),
+        )
+        .unwrap()
+    ));
 }

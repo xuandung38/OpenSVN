@@ -22,7 +22,17 @@ export function rangeOf(key: RangedKey): { min: number; max: number } {
  * Why a field is invalid: checked here before Save, or `rejected` when the backend refused the
  * value on Save (its message is never shown as is; the field shows a localized text).
  */
-export type FieldError = "https" | "range" | "proxy" | "rejected";
+export type FieldError = "https" | "range" | "proxy" | "ignores" | "rejected";
+
+/** Longest `wc.globalIgnores` value, as the backend validator allows it (bytes, here UTF-8). */
+export const MAX_GLOBAL_IGNORES = 4096;
+
+/** svn `global-ignores`: whitespace-separated patterns, no other control characters, bounded size. */
+export function isGlobalIgnores(v: string): boolean {
+  if (new TextEncoder().encode(v).length > MAX_GLOBAL_IGNORES) return false;
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what this rejects
+  return !/[\u0000-\u0008\u000e-\u001f\u007f-\u0084\u0086-\u009f]/.test(v);
+}
 
 /** Effective value of a setting: the unsaved draft wins over the stored value. */
 export function settingValue<K extends keyof Settings>(s: Settings, d: Draft, key: K): Settings[K] {
@@ -78,6 +88,7 @@ export function validateDraft(s: Settings, d: Draft): Record<string, FieldError>
     const { min, max } = rangeOf(key);
     if (!inRange(v(key), min, max)) errors[key] = "range";
   }
+  if (!isGlobalIgnores(v("wc.globalIgnores"))) errors["wc.globalIgnores"] = "ignores";
   const proxy: ProxySetting = v("network.proxy");
   if (proxy.mode === "custom" && !isProxyUrl(proxy.url)) errors["network.proxy"] = "proxy";
   return errors;
