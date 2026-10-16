@@ -441,6 +441,17 @@ async fn install_requires_a_prior_check_reports_progress_and_gates_the_restart()
         version: "2.0.0".into(),
         notes: None,
     });
+    // The token was cleared after the check: refused, nothing downloaded.
+    assert!(commands::update_install(f.state()).await.is_err());
+    assert!(
+        !f.events
+            .all()
+            .iter()
+            .any(|r| matches!(r, Recorded::UpdateProgress(_)))
+    );
+    commands::updater_token_set(f.state(), "ghp_x".to_owned().into())
+        .await
+        .unwrap();
     commands::update_install(f.state()).await.unwrap();
     let progress: Vec<u64> = f
         .events

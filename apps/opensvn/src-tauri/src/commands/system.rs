@@ -474,7 +474,12 @@ pub async fn update_check(
 #[specta::specta]
 pub async fn update_install(state: State<'_, AppState>) -> Result<(), AppError> {
     guard(async {
-        let token = state.secrets.get(crate::updater::TOKEN_KEY)?;
+        // Cleared since the check: nothing is downloaded without a token.
+        let Some(token) = state.secrets.get(crate::updater::TOKEN_KEY)? else {
+            return Err(crate::errors::invalid_argument(
+                "Save a release access token in Settings › Updates first.",
+            ));
+        };
         let events = Arc::clone(&state.events);
         let last = std::sync::Mutex::new(None::<std::time::Instant>);
         let progress = move |p: crate::updater::UpdateProgress| {
@@ -488,7 +493,7 @@ pub async fn update_install(state: State<'_, AppState>) -> Result<(), AppError> 
                 events.update_progress(&p);
             }
         };
-        state.updates.install(token, &progress).await?;
+        state.updates.install(Some(token), &progress).await?;
         state.update_installed.store(true, Ordering::Relaxed);
         Ok(())
     })

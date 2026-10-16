@@ -18,8 +18,9 @@
 //! * Redirects are followed only over `https` to GitHub's API and release asset hosts, and the
 //!   `Authorization` header is marked sensitive. Any updater `dangerous*` TLS option in the config
 //!   fails the build (`build.rs`) and is refused at runtime too.
-//! * `install` re-reads the token: if it was cleared after the check, none is sent. It reports
-//!   download progress and does not restart; the UI asks, then calls `update_restart`.
+//! * `install` re-reads the token: if it was cleared after the check, `update_install` is refused
+//!   and nothing is downloaded. It reports download progress and does not restart; the UI asks,
+//!   then calls `update_restart`.
 
 use std::sync::Arc;
 #[cfg(test)]
