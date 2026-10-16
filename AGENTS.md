@@ -108,8 +108,8 @@ Build bộ cài:
 | Settings của #17: thay pin chứng chỉ (`replacePin`), nút đăng nhập Windows, danh sách chứng chỉ tin cậy, chọn merge tool/editor/terminal, mở WC gần nhất, log level, cỡ chữ, mật độ, tab, global-ignores, xóa cache | #187 |
 | Crash e2e qua app thật (SIGKILL cả process group, mở lại cùng profile), RSS với 100k file, soak 10 phút/2 giờ; sửa WC biến mất sau crash lúc commit và thiếu watcher sau khi mở lại app; soak engine giới hạn arena glibc, warm-up chờ đủ cửa sổ log | #192, #199 |
 | Kiểm tra filesystem bằng `statfs` chỉ biên dịch trên Linux và trong test (clippy macOS sạch) | #194 |
-| Engine update chạy cùng vòng `svn cleanup`: update xong, báo busy, hoặc dừng với lỗi có kiểu "cleaned up by another client" (`WcBusy`), không bao giờ fail vì file tạm biến mất (`WcDb::wc_lock_explain_failure`); `engine_update_vs_svn_cleanup` vào suite strict, 50/50 lần pass | test/finish-21 |
-| RAM app trên Linux: app tự `exec` lại một lần khi khởi động với `MALLOC_ARENA_MAX=2` (heap thật lúc checkout chỉ ~23 MB, phần còn lại là arena glibc giữ lại); setting `appearance.hardwareAcceleration` và biến `OPENSVN_HARDWARE_ACCELERATION` đặt `WEBKIT_DISABLE_DMABUF_RENDERER`/`WEBKIT_DISABLE_COMPOSITING_MODE` (mặc định vẫn bật); app không giữ danh sách mọi notification của update (`ClientCtx::keep_events`); `rss.test.mjs` tách RSS đỉnh của app thành heap/gpu/code. 100k file: app 594 → 349 MB, cả cây 1041 → 804 MB (tắt tăng tốc: 722 MB) (`benches/results/2026-10-16-app-rss-linux.md`) | test/finish-21 |
+| Engine update chạy cùng vòng `svn cleanup`: update xong, báo busy, hoặc dừng với lỗi có kiểu "cleaned up by another client" (`WcBusy`), không bao giờ fail vì file tạm biến mất (`WcDb::wc_lock_explain_failure`); `engine_update_vs_svn_cleanup` vào suite strict, 50/50 lần pass | #202 |
+| RAM app trên Linux: app tự `exec` lại một lần khi khởi động với `MALLOC_ARENA_MAX=2` (heap thật lúc checkout chỉ ~23 MB, phần còn lại là arena glibc giữ lại); setting `appearance.hardwareAcceleration` và biến `OPENSVN_HARDWARE_ACCELERATION` đặt `WEBKIT_DISABLE_DMABUF_RENDERER`/`WEBKIT_DISABLE_COMPOSITING_MODE` (mặc định vẫn bật); app không giữ danh sách mọi notification của update (`ClientCtx::keep_events`); `rss.test.mjs` tách RSS đỉnh của app thành heap/gpu/code. 100k file: app 594 → 349 MB, cả cây 1041 → 804 MB (tắt tăng tốc: 722 MB) (`benches/results/2026-10-16-app-rss-linux.md`) | #202 |
 
 Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #144, #145, #146.
 
@@ -117,7 +117,7 @@ Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #
 
 | PR / nhánh | Nội dung | Issue | Trạng thái |
 |---|---|---|---|
-| `test/finish-21` | Phần code còn lại của #21: test cleanup race vào suite strict, RAM app trên Linux, cập nhật mục 3–5 | #21 | Draft |
+| #202 `test/finish-21` | Phần code còn lại của #21: test cleanup race vào suite strict, RAM app trên Linux, cập nhật mục 3–5 | #21 | Draft |
 
 Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: hiển thị %/ETA khi checkout, giữ nguyên byte đường dẫn (NFC/NFD), build Mac. Hỏi chủ repo trước khi làm những mảng này.
 
