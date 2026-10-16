@@ -96,11 +96,6 @@ dunce = "=1.0.5"
 # Native file picker and confirmation dialogs for program settings (no JS plugin is registered).
 rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-# WebKitGTK settings of the window's web view (hardware acceleration policy, `renderer.rs`); the
-# version wry already links.
-webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
-
 [target.'cfg(unix)'.dependencies]
 # `O_NOFOLLOW` / `ELOOP` for opening working files without following a swapped-in symlink.
 libc = "=0.2.190"

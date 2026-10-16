@@ -116,6 +116,9 @@ test(`app RSS on a ${FILES}-file working copy stays under ${LIMIT_MB} MB`, async
       }),
     };
     writeArtifact("rss-report.json", `${JSON.stringify(report, null, 2)}\n`);
+    const kinds = Object.entries(report.peak.appByKindMb)
+      .map(([k, v]) => `${k} ${v} MB`)
+      .join(", ");
     writeArtifact(
       "rss-report.md",
       [
@@ -125,11 +128,7 @@ test(`app RSS on a ${FILES}-file working copy stays under ${LIMIT_MB} MB`, async
         "",
         `Peak of the app process tree: RSS ${peakMb} MB (PSS ${report.peak.treePssMb} MB), app process alone ${report.peak.appRssMb} MB; limit ${LIMIT_MB} MB.`,
         "",
-        `App process at its peak (${report.peak.appPeakPhase}): ${Object.entries(
-          report.peak.appByKindMb,
-        )
-          .map(([k, v]) => `${k} ${v} MB`)
-          .join(", ")} (heap: malloc arenas and stacks; gpu: renderer buffers; code: binary and libraries).`,
+        `App process at its peak (${report.peak.appPeakPhase}): ${kinds} (heap: malloc arenas and stacks; gpu: renderer buffers; code: binary and libraries).`,
         "",
         `The refresh found the working copy busy for ${(busyMs / 1000).toFixed(1)} s after the restart (${busyRetries} refused attempts).`,
         "",

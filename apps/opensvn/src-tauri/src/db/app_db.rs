@@ -11,6 +11,29 @@ use super::{Db, DbError, now_iso};
 /// How many recent repository URLs `app.sqlite` keeps.
 pub const RECENT_URL_CAP: u32 = 20;
 
+/// One stored setting of the `app.sqlite` in `dir`, read without creating or migrating anything
+/// (the app reads it before it starts, see `startup_env`). `None` when the file, the table or the
+/// key is missing, or the value is not JSON.
+pub fn stored_setting(dir: &Path, key: &str) -> Option<serde_json::Value> {
+    use rusqlite::OpenFlags;
+    let path = dir.join("app.sqlite");
+    if !path.is_file() {
+        return None;
+    }
+    let c = rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let raw: String = c
+        .query_row("SELECT value FROM setting WHERE key = ?1", [key], |r| {
+            r.get(0)
+        })
+        .optional()
+        .ok()??;
+    serde_json::from_str(&raw).ok()
+}
+
 /// Handle to `app.sqlite`. Cheap to clone; clones share one connection.
 #[derive(Clone)]
 pub struct AppDb {
@@ -475,6 +498,22 @@ mod tests {
         db.settings_apply(&[("a".into(), Some("2".into())), ("b".into(), None)])
             .unwrap();
         assert_eq!(db.settings_all().unwrap(), vec![("a".into(), "2".into())]);
+    }
+
+    #[test]
+    fn a_stored_setting_is_read_before_start_without_creating_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "appearance.hardwareAcceleration";
+        assert_eq!(stored_setting(dir.path(), key), None);
+        assert!(!dir.path().join("app.sqlite").exists(), "nothing created");
+        let db = AppDb::open(dir.path()).unwrap();
+        assert_eq!(stored_setting(dir.path(), key), None);
+        db.settings_apply(&[(key.into(), Some("false".into()))])
+            .unwrap();
+        assert_eq!(
+            stored_setting(dir.path(), key),
+            Some(serde_json::Value::Bool(false))
+        );
     }
 
     #[test]

@@ -3607,7 +3607,6 @@ dependencies = [
  "unicode-normalization",
  "url",
  "uuid",
- "webkit2gtk",
 ]
 
 [[package]]
