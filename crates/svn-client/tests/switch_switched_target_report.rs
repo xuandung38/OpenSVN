@@ -9,6 +9,8 @@
 //! - A target below a switched directory is anchored at that directory, the same way.
 //! - A switched **file** is reported as svn's crawler does: a place-holder `set_path` carrying
 //!   the parent's revision, then its `link_path` (nothing follows a file).
+//!
+//! The branches are seeded without history, so every switch here ignores ancestry.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod common;
@@ -56,6 +58,7 @@ async fn a_switched_directory_is_its_own_anchor() {
         &url("branch"),
         None,
         Depth::Unknown,
+        true,
         &cancel,
     )
     .await
@@ -82,6 +85,7 @@ async fn a_switched_directory_is_its_own_anchor() {
         &url("branch"),
         None,
         Depth::Unknown,
+        true,
         &cancel,
     )
     .await
@@ -168,6 +172,7 @@ async fn a_switched_file_gets_a_place_holder_then_its_link() {
         &url("other/f.txt"),
         None,
         Depth::Unknown,
+        true,
         &cancel,
     )
     .await
@@ -184,6 +189,7 @@ async fn a_switched_file_gets_a_place_holder_then_its_link() {
         &url("other/f.txt"),
         None,
         Depth::Unknown,
+        true,
         &cancel,
     )
     .await

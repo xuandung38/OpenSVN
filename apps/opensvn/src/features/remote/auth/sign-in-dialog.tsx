@@ -18,17 +18,19 @@ export interface CredentialsAnswer {
  * Sign-in dialog (doc 01, 4.3). Shows the full origin (host:port), the realm and a reason-specific
  * message. Esc/Close cancels the operation.
  *
- * Windows SSO ("Sign in with Windows account") is intentionally not offered yet: `AuthResponse` has
- * no `negotiate` variant, and an unknown variant is rejected while the engine keeps waiting. Add the
- * button when the contract gains that variant (`offered` already carries the methods).
+ * When the server offers `negotiate`, "Sign in with Windows account" answers `{kind:"negotiate"}`
+ * (single sign-on, no secret). It is not offered again after Windows sign-in failed for this server.
  */
 export function SignInDialog({
   prompt,
   onSubmit,
+  onNegotiate,
   onCancel,
 }: {
   prompt: CredentialsPromptInfo;
   onSubmit: (a: CredentialsAnswer) => void;
+  /** Single sign-on with the Windows account; shown only when the server offered `negotiate`. */
+  onNegotiate?: () => void;
   onCancel: () => void;
 }) {
   const t = useT(authStrings);
@@ -38,6 +40,10 @@ export function SignInDialog({
   const [password, setPassword] = useState("");
   const [save, setSave] = useState(true);
   const exhausted = prompt.reason === "rejected" && prompt.attempt >= MAX_AUTH_ATTEMPTS;
+  const sso =
+    onNegotiate !== undefined &&
+    prompt.offered.includes("negotiate") &&
+    prompt.reason !== "negotiate-failed";
 
   // `rejected` at attempt 0: the password typed last time was rejected (and so not saved), but
   // this is a new sign-in round, so there is no attempt counter to show.
@@ -91,6 +97,12 @@ export function SignInDialog({
         {reason}
       </p>
       {exhausted && <p className="m-0 text-bad-text">{t("lastAttempt")}</p>}
+      {sso && (
+        <div className="flex flex-col gap-2">
+          <Button onClick={onNegotiate}>{t("signInWindows")}</Button>
+          <p className="m-0 text-[12px] text-muted-text">{t("orPassword")}</p>
+        </div>
+      )}
       <form
         id={formId}
         className="flex flex-col gap-2"

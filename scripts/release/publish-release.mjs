@@ -2,7 +2,12 @@
 // Publishes a built release to the separate releases repository (installers + latest.json).
 //
 //   publish-release.mjs --tag v0.1.0 --version 0.1.0 --dist dist [--repo owner/OpenSVN-releases]
-//       [--notes TEXT] [--latest auto|always|never]
+//       [--notes TEXT | --notes-from-git] [--latest auto|always|never]
+//
+// --notes-from-git builds the notes from the conventional commits between the previous release
+// tag and --tag (or HEAD when the tag does not exist in this checkout), grouped into features,
+// fixes, performance and everything else; merge commits are dropped. Needs a full clone with
+// tags (actions/checkout with fetch-depth: 0).
 //
 // Needs GH_TOKEN: a fine-grained token whose only permission is Contents: Read and write on the
 // releases repository. Steps, in an order that never lets a client see a manifest pointing at
@@ -35,7 +40,7 @@ const UPDATE_ARTIFACTS = [
 ];
 
 export function parseArgs(argv) {
-  const o = { latest: "auto", notes: "" };
+  const o = { latest: "auto", notes: "", notesFromGit: false };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     const value = () => {
@@ -47,6 +52,7 @@ export function parseArgs(argv) {
     else if (flag === "--dist") o.dist = value();
     else if (flag === "--repo") o.repo = value();
     else if (flag === "--notes") o.notes = value();
+    else if (flag === "--notes-from-git") o.notesFromGit = true;
     else if (flag === "--latest") o.latest = value();
     else throw new Error(`unknown argument ${flag}`);
   }
@@ -55,6 +61,7 @@ export function parseArgs(argv) {
   if (o.tag !== `v${o.version}`) throw new Error(`--tag must be v${o.version}, got "${o.tag}"`);
   if (!REPO.test(o.repo)) throw new Error(`--repo must be <owner>/OpenSVN-releases: ${o.repo}`);
   if (!o.dist) throw new Error("--dist is required");
+  if (o.notes && o.notesFromGit) throw new Error("--notes and --notes-from-git exclude each other");
   if (!["auto", "always", "never"].includes(o.latest))
     throw new Error("--latest: auto|always|never");
   return o;
@@ -88,6 +95,82 @@ export function updateEntries(dist, files, assetUrls) {
     for (const p of kind.platforms) entries.push(`${p},${join(dist, name)},${url}`);
   }
   return entries;
+}
+
+const NOTE_GROUPS = [
+  { type: "feat", title: "Features" },
+  { type: "fix", title: "Bug fixes" },
+  { type: "perf", title: "Performance" },
+  { type: null, title: "Other changes" },
+];
+const CONVENTIONAL = /^([a-z]+)(?:\(([^)]*)\))?(!)?:\s*(.+)$/;
+/** GitHub rejects release bodies over 125000 characters; keep well below. */
+const NOTES_LIMIT = 100_000;
+
+function git(args, cwd) {
+  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+/**
+ * The release tag `version` follows: the highest v<semver> tag reachable from `ref` that sorts
+ * below `version`. A stable release skips pre-release tags, so the notes of 0.2.0 cover
+ * everything since 0.1.0 rather than since 0.2.0-1. Null when there is none (first release).
+ */
+export function previousTag(version, ref, cwd) {
+  const stable = SEMVER.exec(version)[4] === undefined;
+  const tags = git(["tag", "--merged", ref, "--list", "v*"], cwd).split("\n").filter(Boolean);
+  let best = null;
+  for (const t of tags) {
+    const v = t.slice(1);
+    const m = SEMVER.exec(v);
+    if (!m || (stable && m[4] !== undefined)) continue;
+    if (compareVersions(v, version) >= 0) continue;
+    if (!best || compareVersions(v, best.slice(1)) > 0) best = t;
+  }
+  return best;
+}
+
+/** Markdown notes from the subjects of `[{hash, subject}]`, grouped by conventional type. */
+export function formatNotes(version, commits) {
+  const groups = new Map(NOTE_GROUPS.map((g) => [g.type, []]));
+  for (const { hash, subject } of commits) {
+    const m = CONVENTIONAL.exec(subject);
+    const type = m && groups.has(m[1]) ? m[1] : null;
+    const scope = m?.[2] ? `**${m[2]}:** ` : "";
+    const breaking = m?.[3] ? "**BREAKING** " : "";
+    const text = m && type ? `${breaking}${scope}${m[4]}` : subject;
+    groups.get(type).push(`- ${text} (${hash.slice(0, 7)})`);
+  }
+  let out = `OpenSVN ${version}. Verify downloads with the SHA256SUMS-*.txt files.\n`;
+  for (const g of NOTE_GROUPS) {
+    const lines = groups.get(g.type);
+    if (lines.length) out += `\n## ${g.title}\n\n${lines.join("\n")}\n`;
+  }
+  if (commits.length === 0) out += "\nNo changes since the previous release.\n";
+  if (out.length > NOTES_LIMIT) {
+    out = `${out.slice(0, out.lastIndexOf("\n", NOTES_LIMIT))}\n\n(list truncated)\n`;
+  }
+  return out;
+}
+
+/** Release notes for `o.tag` from the git history in `cwd` (see --notes-from-git). */
+export function notesFromGit(o, cwd = process.cwd()) {
+  let ref = "HEAD";
+  try {
+    git(["rev-parse", "--verify", "--quiet", `refs/tags/${o.tag}^{commit}`], cwd);
+    ref = `refs/tags/${o.tag}`;
+  } catch {}
+  const prev = previousTag(o.version, ref, cwd);
+  const range = prev ? `refs/tags/${prev}..${ref}` : ref;
+  const commits = git(["log", "--no-merges", "--format=%H%x1f%s", range], cwd)
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => {
+      const [hash, subject] = l.split("\x1f");
+      return { hash, subject };
+    });
+  console.log(`release notes: ${commits.length} commits since ${prev ?? "the first commit"}`);
+  return formatNotes(o.version, commits);
 }
 
 function gh(args, opts = {}) {
@@ -184,6 +267,7 @@ function writeLatest(o, manifest) {
 if (import.meta.url === `file://${process.argv[1]}`) {
   try {
     const o = parseArgs(process.argv.slice(2));
+    if (o.notesFromGit) o.notes = notesFromGit(o);
     publish(o);
   } catch (e) {
     console.error(`::error::${e.stderr ? `${e.message}: ${e.stderr}` : e.message}`);

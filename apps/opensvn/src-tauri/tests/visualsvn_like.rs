@@ -656,7 +656,7 @@ async fn repository_name_case_variants() {
     // `svn switch` refuses it (relocate instead).
     let err = e
         .engine
-        .switch(&wc_l, &upper, None, &ctx())
+        .switch(&wc_l, &upper, None, false, &ctx())
         .await
         .expect_err("switch across spellings");
     assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{err:?}");

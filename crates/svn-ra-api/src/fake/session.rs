@@ -22,7 +22,8 @@ use crate::auth::{
 };
 use crate::commit::{CommitEditor, CommitObserver};
 use crate::session::{
-    FileMeta, FileRev, FileRevHandler, LogRequest, RaSession, ReportFn, TxnAbort, UpdateRequest,
+    FileMeta, FileRev, FileRevHandler, LocationSegment, LogRequest, RaSession, ReportFn, TxnAbort,
+    UpdateRequest,
 };
 
 /// Credentials the fake server accepts.
@@ -636,6 +637,18 @@ impl RaSession for FakeRaSession {
             }
         }
         Ok(())
+    }
+
+    async fn get_location_segments(
+        &self,
+        path: &RelPath,
+        peg: Option<Revnum>,
+        start: Option<Revnum>,
+        end: Option<Revnum>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<LocationSegment>> {
+        cancel.check()?;
+        self.guard().location_segments(path, peg, start, end)
     }
 
     async fn do_update(
