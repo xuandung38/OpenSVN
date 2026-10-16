@@ -1,6 +1,6 @@
 # AGENTS.md: hướng dẫn và tiến độ cho người và agent cùng làm OpenSVN
 
-Cập nhật lần cuối: 2026-10-15, main tại `c5eba85`.
+Cập nhật lần cuối: 2026-10-16.
 Đọc file này trước khi nhận việc. Lệnh build/test, quy tắc đặt tên nhánh và cấu trúc repo nằm ở `docs/contributing.md`. Kiến trúc nằm ở `docs/system-architecture.md`.
 
 
