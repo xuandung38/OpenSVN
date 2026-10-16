@@ -71,7 +71,7 @@ fn the_root_and_gaps_and_absolute_paths() {
 }
 
 #[test]
-fn malformed_answers_are_corrupt() {
+fn malformed_answers_are_protocol_violations() {
     for body in [
         &b"<S:log-report xmlns:S=\"svn:\"/>"[..],
         b"<S:get-location-segments-report xmlns:S=\"svn:\">\
@@ -87,7 +87,7 @@ fn malformed_answers_are_corrupt() {
         let err = parse_location_segments(body).unwrap_err();
         assert_eq!(
             err.code,
-            ErrorCode::Corrupt,
+            ErrorCode::ProtocolViolation,
             "{}",
             String::from_utf8_lossy(body)
         );
