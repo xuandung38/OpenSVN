@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wc-sparse-apply"
+description = "Enables the wc_sparse_apply command without any pre-configured scope."
+commands.allow = ["wc_sparse_apply"]
+
+[[permission]]
+identifier = "deny-wc-sparse-apply"
+description = "Denies the wc_sparse_apply command without any pre-configured scope."
+commands.deny = ["wc_sparse_apply"]

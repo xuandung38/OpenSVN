@@ -113,6 +113,9 @@ pub struct FakeWc {
     pub dead_owner_locks: Vec<String>,
     /// Simulated locks of foreign owners (reported, never stolen).
     pub foreign_locks: Vec<String>,
+    /// Recorded depth of folders that are not at depth infinity, excluded folders included
+    /// (`Exclude`). The root is listed under `""`.
+    pub depths: BTreeMap<RelPath, opensvn_ipc::SparseDepth>,
 }
 
 fn not_found(path: &RelPath) -> SvnError {

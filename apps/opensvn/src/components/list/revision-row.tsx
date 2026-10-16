@@ -11,6 +11,8 @@ export interface RevisionRowProps {
   /** Revision exists on the server but is not yet in the working copy. */
   incoming?: boolean;
   selected?: boolean;
+  /** Short tag before the message (e.g. the revision marked for a comparison). */
+  badge?: string;
   /** Keyboard-active row of the owning listbox and its DOM id (see VirtualList). */
   active?: boolean;
   id?: string;
@@ -26,6 +28,7 @@ export const RevisionRow = memo(function RevisionRow({
   when,
   incoming = false,
   selected = false,
+  badge,
   active = false,
   id,
   onSelect,
@@ -52,6 +55,11 @@ export const RevisionRow = memo(function RevisionRow({
     >
       <span className="truncate">
         {incoming && <span className="mr-1 text-accent-text">↓ not updated</span>}
+        {badge && (
+          <span className="mr-1 rounded-sm bg-surface-2 px-1 text-[11px] text-info-text">
+            {badge}
+          </span>
+        )}
         <SafeText>{firstLine}</SafeText>
       </span>
       <span className="tnum truncate text-[11px] text-muted-text">

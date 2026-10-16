@@ -65,6 +65,13 @@ async fn checkout_creates_the_child_folder_registers_it_and_remembers_the_url() 
         commands::recent_urls(f.state()).await.unwrap(),
         [format!("{DEMO_REPO_URL}/trunk")]
     );
+    assert!(
+        commands::recent_url_remove(f.state(), format!("{DEMO_REPO_URL}/trunk"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(commands::recent_urls(f.state()).await.unwrap().is_empty());
 }
 
 #[tokio::test]
