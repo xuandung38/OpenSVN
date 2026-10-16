@@ -481,7 +481,9 @@ async fn cancel_stops_a_slow_download() {
         .await
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::Cancelled);
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // Cancelled after 200 ms: the download stops at once, not after a retry delay or timeout.
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(1), "took {took:?}");
     assert!(out.is_empty());
 }
 

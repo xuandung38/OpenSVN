@@ -19,10 +19,26 @@ const SECRET_NAMES: &[&str] = &[
     "opaquelocktoken",
 ];
 
+/// Headers whose unquoted value is secret to the end of the line, delimiters included: every
+/// cookie of a `Cookie` header, every credential of an `Authorization` header.
+const WHOLE_VALUE_NAMES: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+];
+
 const MASK: &str = "[redacted]";
 
 fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
+/// Whether a name may start right after `before`: not inside a longer word (`tokenizer`,
+/// `my-cookie-jar`), but after a command-line flag's dashes (`--password=x`, `-token=x`).
+fn starts_a_name(before: &str) -> bool {
+    let word = before.trim_end_matches('-');
+    before.len() - word.len() <= 2 && !word.chars().next_back().is_some_and(is_name_char)
 }
 
 /// Replaces `userinfo` in `scheme://userinfo@host` with the mask.
@@ -64,9 +80,7 @@ fn mask_named_values(line: &str) -> String {
             continue;
         }
         for name in SECRET_NAMES {
-            if lower[i..].starts_with(name)
-                && (i == 0 || !line[..i].chars().next_back().is_some_and(is_name_char))
-            {
+            if lower[i..].starts_with(name) && starts_a_name(&line[..i]) {
                 let after = i + name.len();
                 // optional closing quote, spaces, then a separator
                 let mut j = after;
@@ -86,6 +100,9 @@ fn mask_named_values(line: &str) -> String {
                     let end = if quoted {
                         let q = bytes[j] as char;
                         line[start..].find(q).map_or(line.len(), |k| start + k)
+                    } else if WHOLE_VALUE_NAMES.contains(name) {
+                        // `Cookie: a=1; sid=x` holds several secrets separated by `;`.
+                        line.len()
                     } else {
                         // unquoted values run to the end of the line (headers) or next delimiter
                         line[start..]
@@ -180,6 +197,7 @@ mod tests {
             "abc123",
             "p@ss w0rd",
             "abcdef",
+            "dark",
         ] {
             assert!(!out.contains(secret), "{secret} leaked: {out}");
         }
@@ -192,6 +210,14 @@ mod tests {
     fn names_inside_longer_words_are_left_alone() {
         let out = redact_secrets("tokenizer: fast\nmy-cookie-jar=1\n");
         assert!(out.contains("tokenizer: fast"));
+        assert!(out.contains("my-cookie-jar=1"));
+    }
+
+    #[test]
+    fn command_line_flags_are_masked() {
+        let out = redact_secrets("args: [\"--password=hunter2\", \"-token=abc123\", \"--x\"]\n");
+        assert!(!out.contains("hunter2") && !out.contains("abc123"), "{out}");
+        assert!(out.contains("\"--x\""), "{out}");
     }
 
     #[test]
