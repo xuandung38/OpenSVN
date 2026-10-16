@@ -279,11 +279,13 @@ impl RealEngine {
                 Err(e) => Err(e),
             },
             Err(e) => {
-                // `abort_edit` works after cancellation too; the original error is what matters.
-                if let Err(abort) = editor.abort_edit().await {
+                // `abort_edit` works after cancellation too; the original error is what matters,
+                // unless a broken connection left nothing behind ("nothing committed").
+                let abort = editor.abort_edit().await;
+                if let Err(abort) = &abort {
                     tracing::warn!(error = %abort, "could not abort the commit transaction");
                 }
-                Err(e)
+                Err(svn_ra_api::unsent_commit_error(e, &abort))
             }
         }
     }

@@ -354,6 +354,66 @@ async fn lock_held_by_someone_else_blocks_the_commit() {
 }
 
 #[tokio::test]
+async fn a_cut_upload_commits_nothing_and_the_same_commit_then_goes_through() {
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "mine\n");
+    write(&e.wc, "d/f2", "mine2\n");
+    // The second upload's connection breaks.
+    e.ra.inner.cut_upload(1);
+    let before = dump_rows(&e.wc);
+    let err = e.commit_all("m").await.expect_err("cut");
+    assert_eq!(err.code, ErrorCode::CommitNotApplied, "{err}");
+    assert_eq!(err.message, svn_ra_api::NOTHING_COMMITTED);
+    assert_eq!(
+        err.connection_failure(),
+        Some(svn_types::ConnectionFailure::ConnectionReset),
+        "the broken connection stays the cause"
+    );
+    // Nothing on the server, nothing changed locally, nothing left to recover.
+    assert!(e.ra.inner.open_txns().is_empty());
+    assert_eq!(
+        e.ra.inner
+            .youngest_rev(&CancelToken::new())
+            .await
+            .expect("rev")
+            .0,
+        1
+    );
+    assert_eq!(dump_rows(&e.wc), before, "WC rows unchanged");
+    assert!(e.journal_files().is_empty());
+    assert_eq!(e.db.wc_lock_held(&rp("")).expect("held"), LockState::Free);
+    // As the message says: the same commit is safe to send again.
+    let done = e.commit_all("m").await.expect("retry").expect("committed");
+    assert_eq!(done.revision.0, 2);
+    assert_eq!(e.server_file("d/f1").await, "mine\n");
+    assert_eq!(e.server_file("d/f2").await, "mine2\n");
+    e.assert_clean_for_svn();
+}
+
+#[tokio::test]
+async fn a_cut_upload_whose_transaction_may_remain_keeps_the_network_error() {
+    let Some(e) = env() else { return };
+    write(&e.wc, "d/f1", "mine\n");
+    e.ra.inner.cut_upload(0);
+    e.ra.inner.fail_aborts(Some("Transaction cleanup failed"));
+    let err = e.commit_all("m").await.expect_err("cut");
+    // The transaction may still be on the server: not "nothing committed".
+    assert_eq!(err.code, ErrorCode::Network, "{err}");
+    assert_eq!(
+        err.connection_failure(),
+        Some(svn_types::ConnectionFailure::ConnectionReset)
+    );
+    assert_eq!(e.ra.inner.open_txns().len(), 1);
+    // Its journal stays for recovery to delete the transaction.
+    let journals = e.journal_files();
+    assert_eq!(
+        journals.iter().filter(|f| f.ends_with(".json")).count(),
+        1,
+        "{journals:?}"
+    );
+}
+
+#[tokio::test]
 async fn cancel_before_merge_leaves_wc_and_server_untouched() {
     let Some(mut e) = env() else { return };
     write(&e.wc, "d/f1", "mine\n");

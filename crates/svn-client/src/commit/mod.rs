@@ -424,10 +424,11 @@ async fn commit_locked(
     .await;
     if let Err(e) = driven {
         // Nothing was merged: delete the server transaction and keep the working copy as is.
-        if editor.abort_edit().await.is_ok() {
+        let abort = editor.abort_edit().await;
+        if abort.is_ok() {
             let _ = store.remove(&id);
         }
-        return Err(map_commit_error(e));
+        return Err(svn_ra_api::unsent_commit_error(map_commit_error(e), &abort));
     }
 
     let info = match editor.close_edit().await {

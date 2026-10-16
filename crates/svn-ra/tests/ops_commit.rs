@@ -15,9 +15,15 @@ use ra_write_support::{
 use svn_delta::{SvndiffDecoder, WindowApplier};
 use svn_ra::ops::commit::{abort_txn, start_commit};
 use svn_ra::ops::update::RaWire;
-use svn_ra_api::{CommitEditor, CommitInfo, CommitObserver, ReplayableSource};
+use svn_ra::transport::{
+    HttpTransport, MemoryTrustStore, ProxyConfig, RetryPolicy, TransportConfig,
+};
+use svn_ra_api::{
+    CommitEditor, CommitInfo, CommitObserver, NOTHING_COMMITTED, ReplayableSource, TxnAbort,
+};
 use svn_types::{
-    CancelToken, Checksum, ErrorCode, PropChange, RelPath, Result, Revnum, SvnError, TxDeltaOp,
+    CancelToken, Checksum, ConnectionFailure, ErrorCode, PropChange, RelPath, Result, Revnum,
+    SvnError, TxDeltaOp,
 };
 use tempfile::NamedTempFile;
 use wiremock::matchers::{method, path};
@@ -934,6 +940,129 @@ async fn observer_failure_after_merge_names_the_revision() {
     let err = ed.close_edit().await.unwrap_err();
     assert!(err.message.contains("revision r10"), "{}", err.message);
     assert!(requests(&srv).await.iter().all(|(m, _)| m != "DELETE"));
+}
+
+/// A wire whose reads give up after 300 ms: a request the server does not answer in time
+/// breaks off like a dead connection (`ConnectionFailure::Timeout`).
+async fn impatient_wire(srv: &MockServer) -> RaWire {
+    let config = TransportConfig {
+        proxy: ProxyConfig::Disabled,
+        retry: RetryPolicy::none(),
+        read_timeout: Duration::from_millis(300),
+        ..TransportConfig::default()
+    };
+    let t = Arc::new(HttpTransport::new(
+        config,
+        Arc::new(FixedPrompter::default()),
+        Arc::new(MemoryTrustStore::new()),
+    ));
+    RaWire::open(t, session_url(srv), &CancelToken::new())
+        .await
+        .expect("open wire")
+}
+
+/// Adds `a` and closes the edit; the `PUT` never gets its answer in time.
+async fn commit_with_a_stalled_put(srv: &MockServer) -> SvnError {
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(201).set_delay(Duration::from_secs(3)))
+        .mount(srv)
+        .await;
+    let w = impatient_wire(srv).await;
+    let rec = Arc::new(Recorder::default());
+    let mut ed = start_commit(&w, "m", &[], &[], false, rec, &CancelToken::new())
+        .await
+        .unwrap();
+    let (_keep, src, md5) = source("hello");
+    let root = ed.open_root(None).await.unwrap();
+    let f = ed.add_file(&p("a"), root, None).await.unwrap();
+    ed.apply_text(f, None, src, None, md5).await.unwrap();
+    ed.close_file(f).await.unwrap();
+    ed.close_directory(root).await.unwrap();
+    ed.close_edit().await.unwrap_err()
+}
+
+#[tokio::test]
+async fn a_broken_upload_whose_transaction_was_deleted_committed_nothing() {
+    let srv = server(Bulk::Prefer).await;
+    mount_txn(&srv).await;
+    let err = commit_with_a_stalled_put(&srv).await;
+    assert_eq!(err.code, ErrorCode::CommitNotApplied, "{err:?}");
+    assert_eq!(err.message, NOTHING_COMMITTED);
+    // The broken connection is the cause, for the details.
+    assert_eq!(err.connection_failure(), Some(ConnectionFailure::Timeout));
+    let reqs = requests(&srv).await;
+    assert!(reqs.iter().all(|(m, _)| m != "MERGE"), "{reqs:?}");
+    assert_eq!(
+        reqs.last().unwrap(),
+        &("DELETE".to_owned(), format!("{ROOT}/!svn/txn/{TXN}"))
+    );
+    // The PUT was sent once.
+    assert_eq!(reqs.iter().filter(|(m, _)| m == "PUT").count(), 1);
+}
+
+#[tokio::test]
+async fn a_broken_upload_keeps_its_own_error_when_the_transaction_may_still_exist() {
+    for delete in [500, 404] {
+        let srv = server(Bulk::Prefer).await;
+        Mock::given(method("POST"))
+            .and(path("/svn/repo/!svn/me"))
+            .respond_with(ResponseTemplate::new(201).append_header("SVN-Txn-Name", TXN))
+            .mount(&srv)
+            .await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(delete))
+            .mount(&srv)
+            .await;
+        let err = commit_with_a_stalled_put(&srv).await;
+        // A failed DELETE leaves the transaction unknown; a missing one is not the server
+        // confirming it deleted the commit's work. Either way the user sees what broke.
+        assert_eq!(err.code, ErrorCode::Timeout, "DELETE {delete}: {err:?}");
+        assert_eq!(err.connection_failure(), Some(ConnectionFailure::Timeout));
+    }
+}
+
+#[tokio::test]
+async fn a_refused_upload_is_not_turned_into_nothing_committed() {
+    let srv = server(Bulk::Prefer).await;
+    mount_txn(&srv).await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(409).set_body_string(
+            "<?xml version=\"1.0\"?><D:error xmlns:D=\"DAV:\" xmlns:m=\"http://apache.org/dav/xmlns\" \
+             xmlns:C=\"svn:\"><C:error/><m:human-readable errcode=\"160024\">out of date\
+             </m:human-readable></D:error>",
+        ))
+        .mount(&srv)
+        .await;
+    let rec = Arc::new(Recorder::default());
+    let mut ed = begin(&srv, &rec, &[], &CancelToken::new()).await.unwrap();
+    let (_keep, src, md5) = source("hello");
+    let root = ed.open_root(None).await.unwrap();
+    let f = ed.add_file(&p("a"), root, None).await.unwrap();
+    ed.apply_text(f, None, src, None, md5).await.unwrap();
+    ed.close_file(f).await.unwrap();
+    ed.close_directory(root).await.unwrap();
+    let err = ed.close_edit().await.unwrap_err();
+    assert_ne!(err.code, ErrorCode::CommitNotApplied, "{err:?}");
+    assert_eq!(err.svn_code, Some(160_024), "{err:?}");
+}
+
+#[tokio::test]
+async fn abort_edit_says_whether_the_transaction_was_deleted() {
+    for (status, outcome) in [(204, TxnAbort::Deleted), (404, TxnAbort::Gone)] {
+        let srv = server(Bulk::Prefer).await;
+        Mock::given(method("POST"))
+            .and(path("/svn/repo/!svn/me"))
+            .respond_with(ResponseTemplate::new(201).append_header("SVN-Txn-Name", TXN))
+            .mount(&srv)
+            .await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&srv)
+            .await;
+        let rec = Arc::new(Recorder::default());
+        let ed = begin(&srv, &rec, &[], &CancelToken::new()).await.unwrap();
+        assert_eq!(ed.abort_edit().await.unwrap(), outcome, "DELETE {status}");
+    }
 }
 
 #[tokio::test]
