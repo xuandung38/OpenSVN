@@ -301,19 +301,15 @@ impl UpdateEditor {
         let rev = self.rev()?;
         let db = self.s.db.clone();
         let target = self.target_wc.clone();
-        let relocation = match (&self.s.switch_relpath, self.old_target()) {
-            (Some(new), Some(old)) if !old.is_empty() => Some((old.to_owned(), new.clone())),
-            _ => None,
-        };
         let switch_to = self.s.switch_relpath.clone();
         let skipped = self.skipped.clone();
         let depth = self.s.depth;
         let sticky = self.s.sticky_depth;
         db.with_txn(|t| {
             t.verify_wc_lock()?;
-            if let Some((old, new)) = &relocation {
-                t.relocate_subtree(&target, old, new)?;
-            }
+            // A switch moves only the nodes it bumps (within the depth, outside the skipped
+            // subtrees, excluded ones included), like svn's `bump_node_revision`: nodes outside
+            // the depth keep their old location.
             match &switch_to {
                 Some(new) => {
                     t.bump_revisions_post_switch(&target, rev, depth, &skipped, new)?;

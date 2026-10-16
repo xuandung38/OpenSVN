@@ -5,8 +5,16 @@
 //! (another user), the engine updates its working copy (merging into its local edits), edits
 //! `SOAK_FILES / 50` other files and commits them, runs status, and reads the newest 100 log
 //! entries with changed paths. The RSS of this process is sampled after every cycle. The
-//! baseline is the RSS once the warm-up (the first 10% of the run, at least one cycle) is over;
-//! the RSS at the end must be less than 10% above it.
+//! baseline is the RSS once the warm-up is over: the first 10% of the run, and at least until the
+//! log returns its full 100 entries (until then each cycle legitimately reads more history). The
+//! RSS at the end must be less than 10% above it.
+//!
+//! The test runs under `MALLOC_ARENA_MAX=2` (it starts itself again with it when unset). With
+//! glibc's default (up to 8 arenas per core, each thread sticking to its own), the freed pages
+//! that tokio's worker and blocking threads leave in their arenas add several MiB of RSS over minutes while the live heap stays
+//! flat (heaptrack: about 1.2 MiB between cycles over 5 minutes). That is the allocator, not memory
+//! the engine keeps: jemalloc, which reuses freed pages across threads, stays within the limit
+//! in the same run. Set `MALLOC_ARENA_MAX` yourself to measure another arena count.
 //!
 //! `cargo test --release -p opensvn-crash --test soak -- --ignored --nocapture soak_2h`
 //! (`soak_short` runs 2 minutes). Knobs: `SOAK_SECS` (overrides the duration of either test),
@@ -16,6 +24,7 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use opensvn_crash::engine::Engine;
@@ -50,6 +59,32 @@ fn write(path: &Path, text: &str) {
 /// stay the same size from cycle to cycle (only memory the engine keeps may grow).
 fn touch(path: &Path, i: usize, who: &str, cycle: usize) {
     std::fs::write(path, format!("file {i}\n{who} {cycle:010}\n")).expect("write");
+}
+
+/// Bounds glibc's arenas (see the module docs).
+const ARENA_ENV: &str = "MALLOC_ARENA_MAX";
+
+/// True when this process should run the soak itself: `MALLOC_ARENA_MAX` is set. Otherwise runs
+/// test `test` again in a child process with `MALLOC_ARENA_MAX=2` (glibc reads it only at start)
+/// and fails when the child fails.
+fn with_bounded_arenas(test: &str) -> bool {
+    if std::env::var_os(ARENA_ENV).is_some() {
+        return true;
+    }
+    let exe = std::env::current_exe().expect("test binary");
+    let status = Command::new(exe)
+        .args([
+            test,
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(ARENA_ENV, "2")
+        .status()
+        .expect("run the soak again");
+    assert!(status.success(), "{test} failed under {ARENA_ENV}=2");
+    false
 }
 
 struct Sample {
@@ -118,7 +153,7 @@ fn soak(default_secs: u64, name: &str) {
         }
         svn.run_in(&theirs, &["commit", "-q", "-m", &format!("theirs {cycle}")])
             .expect("svn commit");
-        rt.block_on(async {
+        let log_full = rt.block_on(async {
             engine.update(&url, &ours, None).await.expect("update");
             // Our edits: the second half.
             for k in 0..per_cycle {
@@ -140,6 +175,7 @@ fn soak(default_secs: u64, name: &str) {
                 changed >= entries,
                 "{changed} changed paths in {entries} entries"
             );
+            entries == 100
         });
         svn.run_in(&theirs, &["update", "-q"]).expect("svn update");
         let rss = rss_kib();
@@ -148,7 +184,7 @@ fn soak(default_secs: u64, name: &str) {
             cycle,
             rss,
         });
-        if baseline.is_none() && start.elapsed() >= warmup {
+        if baseline.is_none() && start.elapsed() >= warmup && log_full {
             baseline = Some((cycle, rss));
         }
         if last_report.elapsed() >= Duration::from_secs(60) {
@@ -170,7 +206,8 @@ fn soak(default_secs: u64, name: &str) {
     assert!(st.is_empty(), "svn status after the soak: {st:?}");
 
     let mut md = format!(
-        "# Engine soak ({name})\n\n- duration: {:.0} s, {} cycles of update + status + commit + status + log -l 100 -v (and one svn commit by another user)\n- files: {files}, {per_cycle} changed per cycle by each side\n- machine: {} CPUs, build: {}\n- RSS at the end of warm-up (cycle {base_cycle}): {base_rss} KiB\n- RSS at the end (cycle {}): {} KiB, growth {:+.1}% (limit +10%)\n- max RSS: {max} KiB\n\n| time | cycle | RSS (KiB) |\n|---:|---:|---:|\n",
+        "# Engine soak ({name})\n\n- allocator: glibc, {ARENA_ENV}={}\n- duration: {:.0} s, {} cycles of update + status + commit + status + log -l 100 -v (and one svn commit by another user)\n- files: {files}, {per_cycle} changed per cycle by each side\n- machine: {} CPUs, build: {}\n- RSS at the end of warm-up (cycle {base_cycle}): {base_rss} KiB\n- RSS at the end (cycle {}): {} KiB, growth {:+.1}% (limit +10%)\n- max RSS: {max} KiB\n\n| time | cycle | RSS (KiB) |\n|---:|---:|---:|\n",
+        std::env::var(ARENA_ENV).unwrap_or_default(),
         elapsed.as_secs_f64(),
         end.cycle,
         std::thread::available_parallelism()
@@ -217,11 +254,15 @@ fn soak(default_secs: u64, name: &str) {
 #[test]
 #[ignore = "two hours; needs apache2 + mod_dav_svn and svn"]
 fn soak_2h() {
-    soak(2 * 3600, "soak-2h");
+    if with_bounded_arenas("soak_2h") {
+        soak(2 * 3600, "soak-2h");
+    }
 }
 
 #[test]
 #[ignore = "needs apache2 + mod_dav_svn and svn"]
 fn soak_short() {
-    soak(120, "soak-short");
+    if with_bounded_arenas("soak_short") {
+        soak(120, "soak-short");
+    }
 }
