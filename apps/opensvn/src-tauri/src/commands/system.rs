@@ -5,6 +5,9 @@ use opensvn_ipc::{
     PathGrantInfo, PickRequest, ProgramKind, Settings, SettingsPatch, TrustedCert, TrustedCertKey,
     WcId,
 };
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
 use tauri::State;
 
 use crate::app_state::AppState;
@@ -376,7 +379,9 @@ pub async fn updater_token_set(
         state.secrets.set(
             crate::updater::TOKEN_KEY,
             &secrecy::SecretString::from(value.to_owned()),
-        )
+        )?;
+        state.update_token_rejected.store(false, Ordering::Relaxed);
+        Ok(())
     })
     .await
 }
@@ -385,36 +390,128 @@ pub async fn updater_token_set(
 #[tauri::command]
 #[specta::specta]
 pub async fn updater_token_clear(state: State<'_, AppState>) -> Result<(), AppError> {
-    guard(async { state.secrets.delete(crate::updater::TOKEN_KEY) }).await
-}
-
-/// Whether an update token is stored (the value itself is never readable).
-#[tauri::command]
-#[specta::specta]
-pub async fn updater_token_status(state: State<'_, AppState>) -> Result<bool, AppError> {
-    guard(async { Ok(state.secrets.get(crate::updater::TOKEN_KEY)?.is_some()) }).await
-}
-
-/// Looks for a newer app version. User initiated; there is no background check.
-#[tauri::command]
-#[specta::specta]
-pub async fn update_check(
-    state: State<'_, AppState>,
-) -> Result<Option<crate::updater::UpdateInfo>, AppError> {
     guard(async {
-        let token = state.secrets.get(crate::updater::TOKEN_KEY)?;
-        state.updates.check(token).await
+        state.secrets.delete(crate::updater::TOKEN_KEY)?;
+        state.update_token_rejected.store(false, Ordering::Relaxed);
+        Ok(())
     })
     .await
 }
 
-/// Installs the update found by `update_check` and restarts the app.
+/// Whether an update token is stored, and whether the release API refused it at the last check.
+/// The value itself is never readable.
+#[tauri::command]
+#[specta::specta]
+pub async fn updater_token_status(
+    state: State<'_, AppState>,
+) -> Result<crate::updater::TokenStatus, AppError> {
+    use crate::updater::TokenStatus;
+    guard(async {
+        Ok(if state.secrets.get(crate::updater::TOKEN_KEY)?.is_none() {
+            TokenStatus::Missing
+        } else if state.update_token_rejected.load(Ordering::Relaxed) {
+            TokenStatus::Rejected
+        } else {
+            TokenStatus::Stored
+        })
+    })
+    .await
+}
+
+/// Version of the running app.
+#[tauri::command]
+#[specta::specta]
+pub async fn app_version(state: State<'_, AppState>) -> Result<String, AppError> {
+    guard(async { Ok(state.updates.current_version()) }).await
+}
+
+/// Looks for a newer app version. Started by the UI (Settings, the menu, or the daily check after
+/// start). Without an updater configuration in this build or without a stored token, it returns
+/// `notConfigured` and sends no request.
+#[tauri::command]
+#[specta::specta]
+pub async fn update_check(
+    state: State<'_, AppState>,
+) -> Result<crate::updater::UpdateCheck, AppError> {
+    use crate::updater::{NotConfiguredReason, UpdateCheck};
+    guard(async {
+        if !state.updates.configured() {
+            return Ok(UpdateCheck::NotConfigured {
+                reason: NotConfiguredReason::Build,
+            });
+        }
+        let Some(token) = state.secrets.get(crate::updater::TOKEN_KEY)? else {
+            return Ok(UpdateCheck::NotConfigured {
+                reason: NotConfiguredReason::Token,
+            });
+        };
+        match state.updates.check(Some(token)).await {
+            Ok(found) => {
+                state.update_token_rejected.store(false, Ordering::Relaxed);
+                Ok(match found {
+                    Some(u) => UpdateCheck::Available {
+                        version: u.version,
+                        notes: u.notes,
+                    },
+                    None => UpdateCheck::UpToDate,
+                })
+            }
+            Err(e) => {
+                if e.code == opensvn_ipc::ErrorCode::Forbidden {
+                    state.update_token_rejected.store(true, Ordering::Relaxed);
+                }
+                Err(e)
+            }
+        }
+    })
+    .await
+}
+
+/// Downloads and installs the update found by `update_check`, announcing progress as
+/// `app://update-progress`. It does not restart: the UI asks, then calls `update_restart` (on
+/// Windows the installer may close the app itself).
 #[tauri::command]
 #[specta::specta]
 pub async fn update_install(state: State<'_, AppState>) -> Result<(), AppError> {
     guard(async {
-        let token = state.secrets.get(crate::updater::TOKEN_KEY)?;
-        state.updates.install(token).await
+        // Cleared since the check: nothing is downloaded without a token.
+        let Some(token) = state.secrets.get(crate::updater::TOKEN_KEY)? else {
+            return Err(crate::errors::invalid_argument(
+                "Save a release access token in Settings › Updates first.",
+            ));
+        };
+        let events = Arc::clone(&state.events);
+        let last = std::sync::Mutex::new(None::<std::time::Instant>);
+        let progress = move |p: crate::updater::UpdateProgress| {
+            // At most one event per 100 ms, plus the last chunk.
+            let done = p.total.is_some_and(|t| p.downloaded.0 >= t.0);
+            let mut last = last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if done || last.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(100)) {
+                *last = Some(std::time::Instant::now());
+                events.update_progress(&p);
+            }
+        };
+        state.updates.install(Some(token), &progress).await?;
+        state.update_installed.store(true, Ordering::Relaxed);
+        Ok(())
+    })
+    .await
+}
+
+/// Restarts the app so an installed update takes effect. Refused unless `update_install`
+/// succeeded in this session.
+#[tauri::command]
+#[specta::specta]
+pub async fn update_restart(state: State<'_, AppState>) -> Result<(), AppError> {
+    guard(async {
+        if !state.update_installed.load(Ordering::Relaxed) {
+            return Err(crate::errors::invalid_argument(
+                "No update has been installed yet.",
+            ));
+        }
+        state.updates.restart()
     })
     .await
 }

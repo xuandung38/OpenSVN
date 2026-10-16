@@ -34,6 +34,8 @@ pub const COMMAND_NAMES: &[&str] = &[
     "updater_token_status",
     "update_check",
     "update_install",
+    "update_restart",
+    "app_version",
     "diagnostics_preview",
     "menu_set_layout",
     "certs_list",

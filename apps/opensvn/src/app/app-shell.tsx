@@ -17,7 +17,9 @@ import {
   type RemoteView,
   useRemoteLinks,
 } from "../features/remote/remote-pane";
-import { SettingsSheet } from "../features/remote/settings/settings-sheet";
+import { type PageId, SettingsSheet } from "../features/remote/settings/settings-sheet";
+import { useAutoUpdateCheck } from "../features/updates/auto-check";
+import { UpdateDialog } from "../features/updates/update-dialog";
 import { WcSidebar } from "../features/wc/changes/wc-sidebar";
 import { WcDialogHost } from "../features/wc/dialogs/wc-dialog-host";
 import { DiffView } from "../features/wc/diff/diff-view";
@@ -168,6 +170,13 @@ function ShellBody({
   const sh = useT(shellStrings);
   const t = useT(wcStrings);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsPage, setSettingsPage] = useState<PageId>("general");
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const openSettings = (page: PageId = "general") => {
+    setSettingsPage(page);
+    setSettingsOpen(true);
+  };
+  useAutoUpdateCheck();
   const [createKind, setCreateKind] = useState<"branch" | "tag" | "location" | null>(null);
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -193,7 +202,8 @@ function ShellBody({
     onToggleActivity: () => setShowActivity((v) => !v),
     onAddExisting: () => void addExisting(),
     onSwitchRepo: () => setPickerOpen(true),
-    onOpenSettings: () => setSettingsOpen(true),
+    onOpenSettings: () => openSettings(),
+    onCheckAppUpdates: () => setUpdateOpen(true),
     onToggleSidebar: () => setShowSidebar((v) => !v),
     onCloseWc: () => {
       if (!current) return;
@@ -227,7 +237,16 @@ function ShellBody({
       <DropToAddWorkingCopy />
       {/* Outside `main`: the Welcome screen (no working copy yet, as on a fresh install) has the
           same gear button and menu item, so Settings must open from there too. */}
-      <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsSheet
+        open={settingsOpen}
+        initialPage={settingsPage}
+        onClose={() => setSettingsOpen(false)}
+      />
+      <UpdateDialog
+        open={updateOpen}
+        onClose={() => setUpdateOpen(false)}
+        onOpenSettings={() => openSettings("updates")}
+      />
       <MainWindow
         toolbar={
           <AppToolbar
@@ -242,7 +261,7 @@ function ShellBody({
             onUpdate={() => void actions.update(null)}
             onToggleActivity={() => setShowActivity((v) => !v)}
             wrapWorkingCopy={wcPicker}
-            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenSettings={() => openSettings()}
             wrapLocation={
               current
                 ? (item) => (

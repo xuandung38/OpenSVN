@@ -202,6 +202,7 @@ fn sample_settings() -> Settings {
         general_language: Language::En,
         general_open_last_wc: true,
         general_log_level: LogLevel::Info,
+        updates_auto_check: true,
         appearance_theme: Theme::System,
         appearance_font_size: 13,
         appearance_density: Density::Comfortable,

@@ -49,6 +49,8 @@
     "allow-updater-token-status",
     "allow-update-check",
     "allow-update-install",
+    "allow-update-restart",
+    "allow-app-version",
     "allow-diagnostics-preview",
     "allow-menu-set-layout",
     "allow-certs-list",

@@ -220,30 +220,37 @@ them itself; §8 is the end-to-end proof.
 ## 8. Verify the N-1 → N auto-update (manual, macOS and Windows)
 
 Needs two published stable versions (N-1 and N, signed with the same updater key) and the read
-token from §2. Run it on one macOS and one Windows machine that you can reset. The app has the
-updater commands (`updater_token_set`, `update_check`, `update_install`); if the Settings screen
-for them is not in N-1 yet, provision the token with the keychain commands in
-`docs/deployment-guide.md` ("Provisioning the update token") and test from the first version that
-ships the screen.
+token from §2. Run it on one macOS and one Windows machine that you can reset. Everything below
+goes through the app's own screens: **Settings › Updates** (current version, the token, the daily
+check, **Check for updates**) and the menu item **Check for app updates…** (macOS: the OpenSVN app
+menu; Windows/Linux: Help), which opens the same update dialog. If N-1 predates that screen,
+provision the token with the keychain commands in `docs/deployment-guide.md` ("Provisioning the
+update token") and test from the first version that ships it.
 
 Prepare, once per machine:
 
 - [ ] Uninstall any OpenSVN, then install **N-1** from its release (macOS: DMG → `/Applications`;
       Windows: run the **NSIS setup** for one pass and the **MSI** for a second pass, since each
       updates through its own artifact).
-- [ ] Launch N-1, open About and note the version. Add a working copy, make one local change and
+- [ ] Launch N-1, open **Settings › Updates** and note the current version. Add a working copy, make one local change and
       save one server password, so you can check that data and keychain entries survive.
-- [ ] Store the read token through Settings (or the keychain command). The token status reads
-      "set"; the token itself is never shown again.
+- [ ] Paste the read token in **Settings › Updates** and press **Save token** (or use the keychain
+      command). The status reads "Configured"; the field empties and the token is never shown
+      again.
 
 Update:
 
-- [ ] Check for updates. Wanted: "version N available" with the notes of release N (the grouped
-      list from `--notes-from-git`).
-- [ ] Install. macOS: the app downloads the `.app.tar.gz`, replaces `/Applications/OpenSVN.app`
-      and restarts. Windows: the app downloads the MSI or setup matching how it was installed, runs
-      it (UAC prompt for the MSI) and restarts.
-- [ ] About shows **N**. Check for updates again: "up to date".
+- [ ] **Check for app updates…**. Wanted: "OpenSVN N is available" with the notes of release N
+      (the grouped list from `--notes-from-git`) under "What's new".
+- [ ] **Install**. The dialog shows the download progress. macOS: the app downloads the
+      `.app.tar.gz` and replaces `/Applications/OpenSVN.app`, then asks to restart; **Restart now**
+      relaunches it. Windows: the app downloads the MSI or setup matching how it was installed and
+      runs it (UAC prompt for the MSI); the installer closes and relaunches the app itself.
+- [ ] **Settings › Updates** shows **N**. Check for updates again: "OpenSVN N is the newest
+      version".
+- [ ] Optional, the start-up check: with "Check for updates once a day" on, install N-1 again,
+      launch it: a notice "OpenSVN N is available" appears without a dialog. It does not appear
+      again on a second launch the same day.
 - [ ] The working copy is still listed with its local change, the saved password still works
       (no new login prompt), settings are unchanged.
 - [ ] macOS: run the §7 `codesign`/`spctl` commands on the updated `/Applications/OpenSVN.app`;
@@ -252,10 +259,11 @@ Update:
 
 Negative checks (one machine is enough):
 
-- [ ] Clear the token: the check reports updates as not configured and makes no network request.
-- [ ] Store a token without access (or an expired one): the check fails with a clear error, the
-      app keeps running N-1.
-- [ ] Offline: the check fails cleanly and can be retried.
+- [ ] **Clear token** in Settings › Updates: the status reads "Not configured", and the dialog says
+      updates are not configured (with **Open Settings**) and makes no network request.
+- [ ] Store a token without access (or an expired one): the dialog says the release server refused
+      the token, the status in Settings › Updates reads "Invalid", the app keeps running N-1.
+- [ ] Offline: the dialog says the release server could not be reached and offers **Retry**.
 
 Record the OS versions, N-1, N and the results in the release issue.
 

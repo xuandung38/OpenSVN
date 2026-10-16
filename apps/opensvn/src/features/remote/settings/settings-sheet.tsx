@@ -10,6 +10,7 @@ import { cn } from "../../../lib/cn";
 import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
 import { applyTheme } from "../../../lib/theme";
+import { UpdatesPage } from "../../updates/updates-page";
 import {
   type Draft,
   type FieldError,
@@ -29,13 +30,14 @@ import {
 } from "./settings-pages";
 import { settingsStrings } from "./settings-strings";
 
-type PageId =
+export type PageId =
   | "general"
   | "accounts"
   | "appearance"
   | "diffMerge"
   | "integrations"
   | "network"
+  | "updates"
   | "advanced";
 /**
  * Footer text for a failed Save. A refused value is explained on its field; the backend's own
@@ -66,17 +68,34 @@ const PAGES: PageId[] = [
   "diffMerge",
   "integrations",
   "network",
+  "updates",
   "advanced",
 ];
 
 /** Settings sheet (doc 01, section 9): nav on the left, page on the right, Save applies the draft once. */
-export function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function SettingsSheet({
+  open,
+  onClose,
+  initialPage = "general",
+}: {
+  open: boolean;
+  onClose: () => void;
+  /** Page shown when the sheet opens ("updates" from the update dialog). */
+  initialPage?: PageId;
+}) {
   const t = useT(settingsStrings);
   const c = useT(commonStrings);
   const toast = useToast();
   const qc = useQueryClient();
   const settings = useSettings();
-  const [page, setPage] = useState<PageId>("general");
+  const [page, setPage] = useState<PageId>(initialPage);
+  // Each opening starts on the requested page.
+  const [openedFor, setOpenedFor] = useState<string | null>(null);
+  const opening = open ? initialPage : null;
+  if (opening !== openedFor) {
+    setOpenedFor(opening);
+    if (opening) setPage(opening);
+  }
   const [draft, setDraft] = useState<Draft>({});
 
   const save = useMutation({
@@ -174,6 +193,8 @@ export function SettingsSheet({ open, onClose }: { open: boolean; onClose: () =>
             <IntegrationsPage {...props} />
           ) : page === "network" ? (
             <NetworkPage {...props} />
+          ) : page === "updates" ? (
+            <UpdatesPage {...props} />
           ) : (
             <AdvancedPage {...props} />
           )}

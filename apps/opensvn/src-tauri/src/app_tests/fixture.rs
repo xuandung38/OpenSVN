@@ -75,28 +75,69 @@ impl Notifier for RecordingNotifier {
     }
 }
 
-/// Update double: records the token it was given.
-#[derive(Default)]
+/// Update double: records the token it was given (one entry per request it would send).
 pub struct RecordingUpdates {
     pub tokens: Mutex<Vec<Option<String>>>,
     pub available: Mutex<Option<UpdateInfo>>,
+    /// Whether the build has an updater configuration.
+    pub configured: std::sync::atomic::AtomicBool,
+    /// Error the next check fails with.
+    pub fail_next: Mutex<Option<AppError>>,
+    /// Restarts asked for.
+    pub restarts: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for RecordingUpdates {
+    fn default() -> Self {
+        Self {
+            tokens: Mutex::default(),
+            available: Mutex::default(),
+            configured: std::sync::atomic::AtomicBool::new(true),
+            fail_next: Mutex::default(),
+            restarts: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
 }
 
 #[async_trait]
 impl UpdateControl for RecordingUpdates {
+    fn current_version(&self) -> String {
+        "0.1.0".to_owned()
+    }
+    fn configured(&self) -> bool {
+        self.configured.load(std::sync::atomic::Ordering::Relaxed)
+    }
     async fn check(&self, token: Option<SecretString>) -> Result<Option<UpdateInfo>, AppError> {
         self.tokens
             .lock()
             .unwrap()
             .push(token.map(|t| t.expose_secret().to_owned()));
+        if let Some(e) = self.fail_next.lock().unwrap().take() {
+            return Err(e);
+        }
         Ok(self.available.lock().unwrap().clone())
     }
-    async fn install(&self, _token: Option<SecretString>) -> Result<(), AppError> {
-        if self.available.lock().unwrap().is_some() {
-            Ok(())
-        } else {
-            Err(crate::errors::invalid_argument("Check for updates first."))
+    async fn install(
+        &self,
+        _token: Option<SecretString>,
+        progress: crate::updater::ProgressSink<'_>,
+    ) -> Result<(), AppError> {
+        if self.available.lock().unwrap().is_none() {
+            return Err(crate::errors::invalid_argument("Check for updates first."));
         }
+        // Three chunks of a 300-byte download, the last one reported as complete.
+        for done in [100, 200, 300] {
+            progress(crate::updater::UpdateProgress {
+                downloaded: opensvn_ipc::Size(done),
+                total: Some(opensvn_ipc::Size(300)),
+            });
+        }
+        Ok(())
+    }
+    fn restart(&self) -> Result<(), AppError> {
+        self.restarts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 }
 

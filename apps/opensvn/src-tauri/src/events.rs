@@ -28,3 +28,8 @@ event!(WcIncoming, Incoming, "wc://incoming");
 event!(WcBanner, Banner, "wc://banner");
 event!(AuthPromptEvent, AuthPrompt, "auth://prompt");
 event!(FsDropped, DroppedPaths, "fs://dropped");
+event!(
+    AppUpdateProgress,
+    crate::updater::UpdateProgress,
+    "app://update-progress"
+);

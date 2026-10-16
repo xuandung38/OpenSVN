@@ -18,6 +18,8 @@ import { CompareDialog } from "../features/remote/history/compare-dialog";
 import { RevisionDiffDialog } from "../features/remote/history/revision-diff-dialog";
 import { LockDialog } from "../features/remote/lock/lock-dialog";
 import { SettingsSheet } from "../features/remote/settings/settings-sheet";
+import { UpdateDialog } from "../features/updates/update-dialog";
+import { updateStrings } from "../features/updates/update-strings";
 import { CheckoutDialog } from "../features/wc/dialogs/checkout-dialog";
 import { ShortcutsDialog } from "../features/wc/shortcuts-dialog";
 import { sparseStrings } from "../features/wc/sparse/sparse-strings";
@@ -25,6 +27,7 @@ import { WcSessionProvider } from "../features/wc/wc-session";
 import { WelcomeScreen } from "../features/wc/welcome/welcome-screen";
 import type { AppError, OperationHandle } from "../ipc/bindings";
 import { applyProgress, newOpState, type OpState } from "../ipc/events";
+import { resetMockUpdater, setMockUpdateChunkMs } from "../ipc/mock/adapter";
 import { mockWorkingCopies } from "../ipc/mock/data";
 import { MOCK_REPO_ROOT, mockLogWithPaths } from "../ipc/mock/remote-data";
 import type { Lang } from "../lib/i18n/i18n";
@@ -431,6 +434,40 @@ for (const lang of ["en", "vi"] as Lang[]) {
       await settle();
       expect(within(sheet).getByRole("group", { hidden: true })).toBeTruthy();
       await expectNoSeriousA11yViolations(`settings: clear cache confirm (${lang})`);
+    });
+
+    test("app update dialog: every step", async () => {
+      const user = userEvent.setup();
+      const u = updateStrings[lang];
+      const scan = async (step: string, ui: () => ReactElement, until: string | RegExp) => {
+        const view = renderApp(ui());
+        const dlg = await screen.findByRole("dialog", { hidden: true });
+        await within(dlg).findByText(until);
+        await settle();
+        await expectNoSeriousA11yViolations(`update dialog: ${step} (${lang})`);
+        return { view, dlg };
+      };
+      const dialog = () => <UpdateDialog open onClose={noop} onOpenSettings={noop} />;
+      resetMockUpdater();
+      (await scan("not configured", dialog, u.notConfiguredToken)).view.unmount();
+      resetMockUpdater({ token: true, next: "forbidden" });
+      (await scan("refused token", dialog, u.errForbidden)).view.unmount();
+      resetMockUpdater({ token: true });
+      (await scan("up to date", dialog, /0\.1\.0/)).view.unmount();
+      resetMockUpdater({
+        token: true,
+        next: { version: "0.2.0", notes: "## Features\n- faster status\n".repeat(30) },
+      });
+      const { view, dlg } = await scan("available with notes", dialog, /0\.2\.0/);
+      setMockUpdateChunkMs(400);
+      await user.click(within(dlg).getByRole("button", { name: u.install, hidden: true }));
+      await within(dlg).findByRole("progressbar", { hidden: true });
+      await expectNoSeriousA11yViolations(`update dialog: installing (${lang})`);
+      await within(dlg).findByText(u.installed, undefined, { timeout: 10_000 });
+      await expectNoSeriousA11yViolations(`update dialog: restart prompt (${lang})`);
+      view.unmount();
+      setMockUpdateChunkMs(150);
+      resetMockUpdater();
     });
 
     test("activity panel with running, failed and finished operations", async () => {
