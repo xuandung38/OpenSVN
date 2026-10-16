@@ -35,8 +35,8 @@ use opensvn_compat::local::LocalBackend;
 use opensvn_compat::runner::{EngineDriver, Runner, TEST_PASSWORD, TEST_USER};
 use opensvn_compat::scenario::{Scenario, Step, SvnVersion};
 use opensvn_ipc::{
-    CleanupRequest, CommitRequest, Depth, ResolveChoice, ResolveRequest, Rev, RevertRequest,
-    UpdateRequest, WcFormat, WcId,
+    AppError, CleanupRequest, CommitRequest, Depth, ResolveChoice, ResolveRequest, Rev,
+    RevertRequest, UpdateRequest, WcFormat, WcId,
 };
 use opensvn_lib::engine::real::{ClientRecovery, HttpConnector, RealEngine, RealEngineConfig};
 use opensvn_lib::engine::{CheckoutPlan, EngineFacade, LockScope, OpContext, StatusQuery, WcRef};
@@ -46,7 +46,7 @@ use svn_ra::transport::{MemoryTrustStore, ProxyConfig};
 use svn_ra_api::{
     AuthMethod, AuthPrompter, CertDecision, CertInfo, CredentialRequest, Credentials,
 };
-use svn_types::{LockOwnershipStore, MemoryLockOwnership};
+use svn_types::{LockOwnershipStore, MemoryLockOwnership, SvnError};
 use tokio::sync::watch;
 
 /// Answers every credential request with the test account; rejects unknown certificates (the
@@ -368,7 +368,16 @@ impl EngineCli {
 
 impl EngineDriver for EngineCli {
     fn run(&self, _step: &Step, wc_dir: &Path, svn_args: &[String]) -> Result<()> {
-        self.rt.block_on(self.exec(wc_dir, svn_args))
+        self.rt
+            .block_on(self.exec(wc_dir, svn_args))
+            .map_err(|err| {
+                // Shown as the app shows it (`E195012: ...` in the detail), so `fails_with` names
+                // the same svn error code for the engine as for svn.
+                match err.downcast_ref::<SvnError>().map(AppError::from) {
+                    Some(app) => anyhow!("{}: {}", app.message, app.detail.unwrap_or_default()),
+                    None => err,
+                }
+            })
     }
 }
 

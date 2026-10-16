@@ -160,9 +160,10 @@ One case needs 1.15 (`update_empty_target_vs_svn`, working rows below an empty t
 test supplies via `Runner::with_engine`; `compat-run` has no engine attached and fails such
 scenarios with a clear error. The driver of the real engine is
 `apps/opensvn/src-tauri/tests/compat_two_way.rs`: it maps `svn`-style command lines (`checkout`,
-`update [--set-depth]`, `switch`, `commit`, `revert`, `add`, `delete`, `move`, `lock`, `unlock`,
+`update [--set-depth]`, `switch [--ignore-ancestry]`, `commit`, `revert`, `add`, `delete`, `move`, `lock`, `unlock`,
 `cleanup`, `resolve`, `propset`, `propdel`, `status`) onto `RealEngine` over HTTPS. An engine step
-takes `fails_with` too (matched against the engine's error text).
+takes `fails_with` too, matched against the error as the app shows it: message and detail
+with the svn code, so `fails_with: E195012` checks the engine and svn alike.
 
 Engine steps need the **local backend** (below): the engine runs on the host, so it must see the
 same working copies, URLs and CA as the svn clients.
