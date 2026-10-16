@@ -12,8 +12,8 @@ use svn_ra_api::{DirListing, LogRequest, RaSession};
 use svn_types::{CancelToken, ErrorCode, NodeKind, RelPath, Revnum, SvnError, rename_replacing};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
+use super::RealEngine;
 use super::text::CappedBuf;
-use super::{RealEngine, wc_read};
 use crate::engine::context::{OpContext, ProgressUpdate};
 use crate::engine::facade::{DiffOptions, EngineResult, LogScope};
 use crate::engine::mapping::{self, entry_kind, revnum};
@@ -335,9 +335,8 @@ impl RealEngine {
     ) -> EngineResult<LogPage> {
         let (session, path) = match scope {
             LogScope::Url(url) => self.locate(url, ctx).await?,
-            LogScope::Wc { wc, path } => {
-                let loc = wc_read::node_location(&wc.root, path).await?;
-                self.locate_repo_path(&loc.repo_root, &loc.repos_path, ctx)
+            LogScope::Repo(loc) => {
+                self.locate_repo_path(&loc.repo_root, &RelPath::new(&loc.repos_path)?, ctx)
                     .await?
             }
         };

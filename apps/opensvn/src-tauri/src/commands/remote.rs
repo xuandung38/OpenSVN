@@ -161,16 +161,24 @@ pub async fn log_get(
                 .await
                 .map_err(engine_err),
             LogTarget::Wc { wc_id, path } => {
-                state
+                // Only the location lookup reads the working copy. The log itself can take
+                // minutes (a revision with 100k changed paths behind authz), and holding the
+                // read path that long would queue every write and, behind it, every later read.
+                let loc = state
                     .wc_read(&wc_id, move |engine, wc| {
-                        let (request, path) = (request.clone(), path.clone());
+                        let path = path.clone();
                         async move {
                             engine
-                                .log(&LogScope::Wc { wc, path }, &request, &OpContext::detached())
+                                .node_location(&wc, &path, &OpContext::detached())
                                 .await
                         }
                     })
+                    .await?;
+                state
+                    .engine
+                    .log(&LogScope::Repo(loc), &request, &OpContext::detached())
                     .await
+                    .map_err(engine_err)
             }
         }
     })

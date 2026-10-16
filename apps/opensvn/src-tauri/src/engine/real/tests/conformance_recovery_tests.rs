@@ -19,7 +19,8 @@ use super::support::{Fixture, fixture, plant_dead_app_lock, plant_lock_row};
 use crate::engine::conformance::{self, Harness, PlantedOwner};
 use crate::engine::{
     CheckoutPlan, DiffOptions, EngineFacade, EngineResult, ExportedSides, LockScope, LogScope,
-    OpContext, RemoteEditPlan, RemoteScan, SideFiles, StatusQuery, WcInfo, WcOpened, WcRef,
+    OpContext, RemoteEditPlan, RemoteScan, RepoLocation, SideFiles, StatusQuery, WcInfo, WcOpened,
+    WcRef,
 };
 
 /// The real engine with checkout done by `svn-client` directly.
@@ -254,6 +255,14 @@ impl EngineFacade for ClientCheckout {
             .engine
             .export_rev_sides(url, from, to_rev, to, ctx)
             .await
+    }
+    async fn node_location(
+        &self,
+        wc: &WcRef,
+        path: &str,
+        ctx: &OpContext,
+    ) -> EngineResult<RepoLocation> {
+        self.0.engine.node_location(wc, path, ctx).await
     }
     async fn log(
         &self,

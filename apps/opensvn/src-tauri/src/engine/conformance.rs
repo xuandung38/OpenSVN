@@ -343,12 +343,26 @@ pub async fn commit_and_update_cycle(h: &dyn Harness) {
         diff.right.expect("r").content
     );
 
+    // A working copy log resolves the node locally, then reads the log without the working copy.
+    let loc = e
+        .node_location(&wc2, "", &ctx())
+        .await
+        .expect("wc location");
+    assert_eq!(
+        loc.repos_path,
+        e.node_location(&wc1, "", &ctx())
+            .await
+            .expect("first wc location")
+            .repos_path
+    );
+    let err = e
+        .node_location(&wc2, "never-added.txt", &ctx())
+        .await
+        .expect_err("unversioned path has no location");
+    assert_eq!(err.code, ErrorCode::PathNotFound);
     let log = e
         .log(
-            &LogScope::Wc {
-                wc: wc2.clone(),
-                path: String::new(),
-            },
+            &LogScope::Repo(loc),
             &LogGetRequest {
                 target: LogTarget::Wc {
                     wc_id: wc2.id.clone(),

@@ -12,7 +12,9 @@ use super::support::{
 };
 use crate::engine::conformance::{self, Harness, PlantedOwner};
 use crate::engine::real::RealEngine;
-use crate::engine::{DiffOptions, EngineFacade, LockScope, LogScope, OpContext, WcRef};
+use crate::engine::{
+    DiffOptions, EngineFacade, LockScope, LogScope, OpContext, RepoLocation, WcRef,
+};
 
 /// Harness for the repository-only groups of the shared suite on the real engine (no working
 /// copy writes). The whole suite, working copy groups included, runs in `conformance_tests`.
@@ -608,19 +610,64 @@ async fn working_copy_log_follows_the_repository_path_of_the_node() {
     seed_history(&f);
     let (_tmp, root) = make_wc(4);
     add_base_file(&root, "README.md", "trunk/README.md", 4);
+    let loc = f
+        .engine
+        .node_location(&wc_ref(&root), "README.md", &ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        loc,
+        RepoLocation {
+            repo_root: URL.to_owned(),
+            repos_path: "trunk/README.md".into(),
+        }
+    );
     let page = f
         .engine
-        .log(
-            &LogScope::Wc {
-                wc: wc_ref(&root),
-                path: "README.md".into(),
-            },
-            &log_request(10, None),
-            &ctx(),
-        )
+        .log(&LogScope::Repo(loc), &log_request(10, None), &ctx())
         .await
         .unwrap();
     assert_eq!(page.entries.len(), 4);
+}
+
+/// A switched node logs its own repository path, not the working copy URL plus the path.
+#[tokio::test]
+async fn working_copy_log_of_a_switched_node_reads_the_branch() {
+    let f = fixture();
+    seed_history(&f);
+    f.repo
+        .seed(
+            "dave",
+            "Branch work",
+            &[
+                dir("branches"),
+                dir("branches/x"),
+                put("branches/x/README.md", "branch\n"),
+            ],
+        )
+        .unwrap();
+    let (_tmp, root) = make_wc(5);
+    add_base_file(&root, "README.md", "branches/x/README.md", 5);
+    let loc = f
+        .engine
+        .node_location(&wc_ref(&root), "README.md", &ctx())
+        .await
+        .unwrap();
+    assert_eq!(loc.repos_path, "branches/x/README.md");
+    let page = f
+        .engine
+        .log(&LogScope::Repo(loc), &log_request(10, None), &ctx())
+        .await
+        .unwrap();
+    let messages: Vec<&str> = page.entries.iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(messages, ["Branch work"]);
+
+    let err = f
+        .engine
+        .node_location(&wc_ref(&root), "missing.txt", &ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PathNotFound);
 }
 
 #[allow(dead_code)]

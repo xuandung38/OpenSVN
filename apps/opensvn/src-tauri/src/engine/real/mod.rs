@@ -35,7 +35,7 @@ use svn_types::{CancelToken, ErrorCode, LockOwnershipStore, RelPath, RepoUrl, Sv
 use super::context::OpContext;
 use super::facade::{
     CheckoutPlan, DiffOptions, EngineFacade, EngineResult, ExportedSides, LockScope, LogScope,
-    RemoteEditPlan, RemoteScan, SideFiles, StatusQuery, WcInfo, WcOpened, WcRef,
+    RemoteEditPlan, RemoteScan, RepoLocation, SideFiles, StatusQuery, WcInfo, WcOpened, WcRef,
 };
 
 mod blame;
@@ -322,6 +322,20 @@ impl EngineFacade for RealEngine {
 
     async fn wc_info(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcInfo> {
         wc_read::wc_info(root, ctx).await
+    }
+
+    async fn node_location(
+        &self,
+        wc: &WcRef,
+        path: &str,
+        ctx: &OpContext,
+    ) -> EngineResult<RepoLocation> {
+        ctx.check()?;
+        let loc = wc_read::node_location(&wc.root, path).await?;
+        Ok(RepoLocation {
+            repo_root: loc.repo_root,
+            repos_path: loc.repos_path.to_string(),
+        })
     }
 
     async fn ensure_authenticated(&self, wc: &WcRef, ctx: &OpContext) -> EngineResult<()> {
