@@ -928,19 +928,21 @@ async fn switch_checks_ancestry_with_location_segments() {
             ],
         ));
         // r3: a branch of trunk as it was in r1.
-        e.copy_location(
-            &CopyLocationRequest {
-                from_url: format!("{url}/trunk"),
-                from_rev: Some(opensvn_ipc::Rev(1)),
-                to_url: format!("{url}/branches/rel"),
-                message: "Branch".into(),
-                switch_wc_id: None,
-                from_wc: None,
-            },
-            None,
-            &ctx(),
+        opensvn_lib::write_op!(
+            &h,
+            e.copy_location(
+                &CopyLocationRequest {
+                    from_url: format!("{url}/trunk"),
+                    from_rev: Some(opensvn_ipc::Rev(1)),
+                    to_url: format!("{url}/branches/rel"),
+                    message: "Branch".into(),
+                    switch_wc_id: None,
+                    from_wc: None,
+                },
+                None,
+                &ctx(),
+            )
         )
-        .await
         .expect("branch");
 
         let cancel = svn_types::CancelToken::new();

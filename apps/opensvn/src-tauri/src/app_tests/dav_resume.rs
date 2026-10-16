@@ -796,7 +796,8 @@ async fn a_switch_cut_for_good_is_finished_by_continue_switch() {
         listed.id.clone(),
         format!("{base}/d001"),
         None,
-        false,
+        // d000 and d001 share no history (two folders of one revision).
+        true,
     )
     .await
     .unwrap();
@@ -816,7 +817,7 @@ async fn a_switch_cut_for_good_is_finished_by_continue_switch() {
             .db
             .switch_journal_get(&listed.root_path)
             .unwrap(),
-        Some((format!("{base}/d001"), false))
+        Some((format!("{base}/d001"), true))
     );
     assert_eq!(app.cleanup_banners(), 0);
 
