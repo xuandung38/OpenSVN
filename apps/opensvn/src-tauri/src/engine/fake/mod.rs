@@ -19,7 +19,7 @@ mod tick_tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -32,11 +32,12 @@ use svn_ra_api::RaSession;
 use svn_ra_api::fake::FakeRaSession;
 use svn_types::{ErrorCode, RelPath, SvnError};
 
-use self::state::FakeWc;
+use self::state::{FakeWc, Sched, rel};
 use super::context::OpContext;
 use super::facade::{
     CheckoutPlan, DiffOptions, EngineFacade, EngineResult, ExportedSides, LockScope, LogScope,
-    RecoveryReport, RemoteEditPlan, RemoteScan, SideFiles, StatusQuery, WcInfo, WcOpened, WcRef,
+    RecoveryReport, RemoteEditPlan, RemoteScan, RepoLocation, SideFiles, StatusQuery, WcInfo,
+    WcOpened, WcRef,
 };
 
 pub use seed::{DEMO_REPO_URL, demo_repo, demo_wc_root};
@@ -47,6 +48,16 @@ pub struct FakeEngine {
     repos: Vec<FakeRaSession>,
     /// Pause per simulated item, so progress and cancellation are observable in the UI.
     step_delay: Duration,
+    /// Holds every log at the network step until released (tests of a slow server).
+    log_gate: Mutex<Option<Arc<LogGate>>>,
+}
+
+/// A slow log server for tests: each log signals `started` and waits for a `release` permit.
+pub struct LogGate {
+    /// Notified when a log reaches the network step.
+    pub started: tokio::sync::Notify,
+    /// One permit lets one held log continue.
+    pub release: tokio::sync::Semaphore,
 }
 
 impl FakeEngine {
@@ -56,6 +67,7 @@ impl FakeEngine {
             wcs: Mutex::new(HashMap::new()),
             repos: Vec::new(),
             step_delay: Duration::ZERO,
+            log_gate: Mutex::new(None),
         }
     }
 
@@ -71,6 +83,31 @@ impl FakeEngine {
     pub fn with_step_delay(mut self, delay: Duration) -> Self {
         self.step_delay = delay;
         self
+    }
+
+    /// Holds every later log at its network step until the returned gate releases it.
+    pub fn hold_logs(&self) -> Arc<LogGate> {
+        let gate = Arc::new(LogGate {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        *self.log_gate.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&gate));
+        gate
+    }
+
+    /// Simulated wait for a slow log server, when a test holds logs.
+    async fn log_wait(&self) {
+        let gate = self
+            .log_gate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            gate.started.notify_one();
+            if let Ok(permit) = gate.release.acquire().await {
+                permit.forget();
+            }
+        }
     }
 
     /// Runs `f` on the working copy rooted at `root`.
@@ -183,6 +220,33 @@ impl EngineFacade for FakeEngine {
 
     async fn wc_info(&self, root: &Path, _ctx: &OpContext) -> EngineResult<WcInfo> {
         self.with_wc(root, |wc| Ok(wc.info()))
+    }
+
+    async fn node_location(
+        &self,
+        wc: &WcRef,
+        path: &str,
+        ctx: &OpContext,
+    ) -> EngineResult<RepoLocation> {
+        ctx.check()?;
+        let rp = rel(path)?;
+        self.with_wc(&wc.root, |w| {
+            // Like wc.db: only nodes with a BASE row have a repository location.
+            let in_base = rp.is_root()
+                || w.nodes
+                    .get(&rp)
+                    .is_some_and(|n| !matches!(n.sched, Sched::Added | Sched::Unversioned));
+            if !in_base {
+                return Err(SvnError::new(
+                    ErrorCode::PathNotFound,
+                    format!("'{rp}' is not in the repository (not versioned or only scheduled)"),
+                ));
+            }
+            Ok(RepoLocation {
+                repo_root: w.repo_root_url.clone(),
+                repos_path: w.repo_path(&rp).trim_matches('/').to_owned(),
+            })
+        })
     }
 
     async fn ensure_authenticated(&self, wc: &WcRef, ctx: &OpContext) -> EngineResult<()> {

@@ -6,9 +6,11 @@ use opensvn_ipc::{
     BranchKind, CopyLocationRequest, EntryKind, Layout, LockRequest, LockTargets, LogGetRequest,
     LogTarget, OpResult, PathGrantId, RemoteEditRequest, RemoteOp, Rev, UnlockRequest,
 };
+use svn_types::SvnError;
 
 use super::fixture::Fixture;
 use crate::commands;
+use crate::engine::OpContext;
 use crate::engine::fake::DEMO_REPO_URL;
 
 fn url(p: &str) -> String {
@@ -658,4 +660,85 @@ async fn resolve_url_passes_plain_urls_and_reports_unconverted_web_links() {
         assert_eq!(e.detail.as_deref(), Some(commands::VISUALSVN_WEB_LINK));
         assert!(e.message.contains("Copy URL to clipboard"), "{}", e.message);
     }
+}
+
+/// A working copy log reads the working copy only to locate the node. A write queued while the
+/// server is slow to answer runs at once, and a read queued behind that write is not held by the
+/// log either (a fair read/write gate would otherwise park both until the log returns).
+#[tokio::test]
+async fn a_slow_working_copy_log_does_not_hold_the_working_copy() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    let gate = f.engine.hold_logs();
+    let log = commands::log_get(
+        f.state(),
+        LogGetRequest {
+            target: LogTarget::Wc {
+                wc_id: wc.id.clone(),
+                path: "README.md".into(),
+            },
+            from_rev: None,
+            to_rev: None,
+            limit: 5,
+            stop_on_copy: None,
+            with_paths: true,
+            filter: None,
+        },
+    );
+    tokio::pin!(log);
+    tokio::select! {
+        biased;
+        _ = &mut log => panic!("the held log returned"),
+        () = gate.started.notified() => {}
+    }
+
+    // The log is now waiting on the server.
+    let wrote = tokio::time::timeout(
+        Duration::from_secs(5),
+        f.state()
+            .wc_write(&wc.id, |_, _| async { Ok::<_, SvnError>("written") }),
+    )
+    .await
+    .expect("a write is not queued behind a slow log");
+    assert_eq!(wrote.unwrap(), "written");
+    let info = tokio::time::timeout(
+        Duration::from_secs(5),
+        f.state().wc_read(&wc.id, |engine, wc| async move {
+            engine.wc_info(&wc.root, &OpContext::detached()).await
+        }),
+    )
+    .await
+    .expect("a read is not queued behind a slow log");
+    assert_eq!(info.unwrap().repo_root_url, DEMO_REPO_URL);
+
+    gate.release.add_permits(1);
+    let page = tokio::time::timeout(Duration::from_secs(5), log)
+        .await
+        .expect("the released log returns")
+        .unwrap();
+    assert!(!page.entries.is_empty());
+}
+
+#[tokio::test]
+async fn a_working_copy_log_of_an_unversioned_path_reports_it() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    let err = commands::log_get(
+        f.state(),
+        LogGetRequest {
+            target: LogTarget::Wc {
+                wc_id: wc.id.clone(),
+                path: "no-such-file.txt".into(),
+            },
+            from_rev: None,
+            to_rev: None,
+            limit: 5,
+            stop_on_copy: None,
+            with_paths: false,
+            filter: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, opensvn_ipc::ErrorCode::PathNotFound);
 }

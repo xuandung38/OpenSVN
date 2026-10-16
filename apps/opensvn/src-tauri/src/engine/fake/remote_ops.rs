@@ -326,18 +326,13 @@ impl FakeEngine {
     ) -> Result<LogPage, SvnError> {
         let (session, path) = match scope {
             LogScope::Url(url) => self.locate(url)?,
-            LogScope::Wc { wc, path } => {
-                let rp = rel(path)?;
-                let (root, repo_path) = self.with_wc(&wc.root, |w| {
-                    Ok((w.repo_root_url.clone(), w.repo_path(&rp)))
-                })?;
-                (
-                    self.repo_by_root(&root)?,
-                    RelPath::new(repo_path.trim_matches('/'))?,
-                )
-            }
+            LogScope::Repo(loc) => (
+                self.repo_by_root(&loc.repo_root)?,
+                RelPath::new(loc.repos_path.trim_matches('/'))?,
+            ),
         };
         session.ensure_authenticated(&ctx.cancel).await?;
+        self.log_wait().await;
         let filter = req
             .filter
             .as_ref()
