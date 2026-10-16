@@ -98,11 +98,10 @@ mod tests {
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
-        // The shell opens the file before it execs `sleep`: wait for the exec, so the name read
-        // from `comm` is the final one.
+        // The shell holds the file before it execs `sleep`: wait for the exec, not the first sight.
         let seen = loop {
             let seen = other_processes_with_open(&file).unwrap();
-            if seen.iter().any(|o| o.name == "sleep") || Instant::now() > deadline {
+            if seen.iter().any(|p| p.name == "sleep") || Instant::now() > deadline {
                 break seen;
             }
             std::thread::sleep(Duration::from_millis(20));
