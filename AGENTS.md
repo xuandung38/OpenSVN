@@ -82,6 +82,7 @@ Build bộ cài:
 | Thanh bên History hiện trạng thái đang tải, lỗi kèm nút Thử lại và danh sách trống, giống màn History chính | #174 |
 | Phản hồi hỏng từ server (XML/UTF-8/base64/svndiff lỗi, editor drive sai) báo mã `server-protocol-error` (engine: `ErrorCode::ProtocolViolation`), không còn gợi ý Cleanup; `Corrupt` chỉ dành cho dữ liệu local | #175 |
 | Browse báo số mục bị ẩn vì tên không an toàn, không còn hiện "thư mục trống" (chỉ gửi số đếm qua IPC) | #176 |
+| Sparse checkout: cây thư mục chọn depth cho từng thư mục, dùng chung cho hộp thoại Checkout và `menu://wc/sparse`; `set_depth` tự đưa vào target thiếu hoặc bị exclude (như `--parents`). Browse upload/download, History so sánh hai revision (`diff_rev`), màn Welcome nhớ URL gần đây (giới hạn trong `app.sqlite`, xóa được) | `feat/remote-browse-sparse` |
 
 Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #144, #145, #146.
 

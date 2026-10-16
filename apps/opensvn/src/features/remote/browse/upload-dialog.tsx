@@ -46,7 +46,7 @@ export function UploadDialog({
   // The folder at HEAD, where the upload lands: warns before replacing a file.
   const head = useRepoList(folderUrl, null);
   const nameError = validateEntryName(name);
-  const existing = (head.data ?? []).find((e) => e.name === name.trim()) ?? null;
+  const existing = (head.data?.entries ?? []).find((e) => e.name === name.trim()) ?? null;
   const valid =
     grant !== null && nameError === null && message.trim().length > 0 && existing?.kind !== "dir";
 

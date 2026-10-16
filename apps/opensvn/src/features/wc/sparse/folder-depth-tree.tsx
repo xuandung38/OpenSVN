@@ -76,7 +76,7 @@ function FolderChildren({
       </SafeText>
     );
   }
-  const dirs = list.data.filter((e) => e.kind === "dir");
+  const dirs = list.data.entries.filter((e) => e.kind === "dir");
   if (dirs.length === 0) {
     return <p className="m-0 px-1 py-0.5 text-[12px] text-muted-text">{t("noFolders")}</p>;
   }

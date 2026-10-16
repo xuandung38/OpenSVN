@@ -235,7 +235,7 @@ pub async fn drive_update(
             format!("'{target_wc}' is not under version control"),
         ));
     }
-    let lock_dir = if !absent && node.is_some_and(|n| n.kind == NodeKind::Dir) {
+    let lock_dir = if !absent && node.as_ref().is_some_and(|n| n.kind == NodeKind::Dir) {
         target_wc.clone()
     } else {
         target_wc.parent().unwrap_or_else(RelPath::root)
@@ -245,7 +245,12 @@ pub async fn drive_update(
     // `set_path("")`. A `link_path` for it with entries below would make svn_repos read freed
     // memory (`reporter.c`, `delta_dirs`), and mod_dav_svn's child dies on an assertion.
     let reparented: Box<dyn RaSession>;
-    let (session, anchor) = match switched_dir_url(&db, &target_wc, &node, session)? {
+    // A node being brought in is never switched: it is added below its parent.
+    let switched = match node.as_ref().filter(|_| !absent) {
+        Some(n) => switched_dir_url(&db, &target_wc, n, session)?,
+        None => None,
+    };
+    let (session, anchor) = match switched {
         Some(url) => {
             check_identity(&db, session)?;
             let session: &dyn RaSession = if session.session_url() == &url {

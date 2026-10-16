@@ -80,7 +80,8 @@ test("checkout: choosing what the folder gets anyway, or another URL, leaves no 
   await waitFor(() => expect(within(dlg).queryByText(/folder choices/)).toBeNull());
   await user().click(within(dlg).getByRole("button", { name: "Checkout" }));
   await waitFor(() => expect(lastCall("checkout")).toBeTruthy());
-  expect((lastCall("checkout")?.args[0] as Record<string, unknown>).sparse).toBeNull();
+  const req = lastCall("checkout")?.args[0] as Record<string, unknown>;
+  expect(req.sparse).toBeNull();
 });
 
 test("Choose folders on a working copy starts from its depths and sends only the changes", async () => {
