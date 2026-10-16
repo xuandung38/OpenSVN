@@ -74,6 +74,7 @@ const CASES: [string, WcDialog][] = [
   ["update to revision", { kind: "update-rev" }],
   ["switch", { kind: "switch" }],
   ["cleanup", { kind: "cleanup" }],
+  ["choose folders", { kind: "sparse" }],
   ["cleanup (another program's lock)", { kind: "cleanup", foreignLock: true }],
   ["properties (root)", { kind: "properties", paths: [""] }],
   [

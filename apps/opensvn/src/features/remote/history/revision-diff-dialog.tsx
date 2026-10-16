@@ -3,7 +3,7 @@ import { lazy, Suspense, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { SafeText } from "../../../components/ui/safe-text";
 import { Sheet } from "../../../components/ui/sheet";
-import type { FileDiff } from "../../../ipc/bindings";
+import type { DiffTarget, FileDiff } from "../../../ipc/bindings";
 import { ipc, toAppError, unwrap } from "../../../ipc/client";
 import { cn } from "../../../lib/cn";
 import { commonStrings } from "../../../lib/i18n/common-strings";
@@ -23,30 +23,38 @@ function lineClass(line: string): string {
   return "";
 }
 
+type RevTarget = Extract<DiffTarget, { kind: "rev" } | { kind: "range" }>;
+
 /**
- * Minimal read-only diff of one path in one revision (hunks when the backend sends them, otherwise
- * the two sides as plain text). Content is always rendered as text; the full side-by-side diff view
- * belongs to the DiffView component.
+ * Minimal read-only diff of one path in one revision, or between two revisions when `from` is
+ * given (`diff_rev(from, rev)`): hunks when the backend sends them, otherwise the two sides as
+ * plain text. Content is always rendered as text; the full side-by-side diff view belongs to the
+ * DiffView component.
  */
 export function RevisionDiffDialog({
   url,
   rev,
+  from,
   path,
   onClose,
 }: {
   url: string;
   rev: number;
+  /** Older side of a comparison of two revisions; without it, the changes made in `rev`. */
+  from?: number;
   path: string;
   onClose: () => void;
 }) {
   const t = useT(historyStrings);
   const c = useT(commonStrings);
+  const target: RevTarget =
+    from === undefined ? { kind: "rev", url, rev } : { kind: "range", url, from, to: rev };
   const q = useQuery({
-    queryKey: ["rev-diff", url, rev],
+    queryKey: ["rev-diff", url, from ?? null, rev],
     queryFn: () =>
       unwrap(
         ipc().commands.diffGet({
-          target: { kind: "rev", url, rev },
+          target,
           ignoreWhitespace: null,
           forceLarge: null,
         }),
@@ -56,7 +64,7 @@ export function RevisionDiffDialog({
     <Sheet
       open
       onClose={onClose}
-      title={t("diffTitle", { rev })}
+      title={from === undefined ? t("diffTitle", { rev }) : t("compareTitle", { from, to: rev })}
       footer={<Button onClick={onClose}>{c("close")}</Button>}
     >
       <div className="p-3">
@@ -69,18 +77,18 @@ export function RevisionDiffDialog({
             {q.error.message}
           </p>
         )}
-        {q.data && <DiffBody diff={q.data} url={url} rev={rev} />}
+        {q.data && <DiffBody diff={q.data} target={target} />}
       </div>
     </Sheet>
   );
 }
 
-function DiffBody({ diff, url, rev }: { diff: FileDiff; url: string; rev: number }) {
+function DiffBody({ diff, target }: { diff: FileDiff; target: RevTarget }) {
   const t = useT(historyStrings);
-  if (!diff.office) return <PlainDiffBody diff={diff} url={url} rev={rev} />;
+  if (!diff.office) return <PlainDiffBody diff={diff} target={target} />;
   return (
     <div className="flex flex-col gap-2">
-      <OfficeNote office={diff.office} diff={diff} target={{ kind: "rev", url, rev }} />
+      <OfficeNote office={diff.office} diff={diff} target={target} />
       {diff.office.extracted && (diff.left || diff.right) ? (
         <div className="h-[60vh] min-h-[200px] rounded-md border border-line">
           <Suspense fallback={<p className="m-0 p-2">{t("diffLoading")}</p>}>
@@ -93,21 +101,20 @@ function DiffBody({ diff, url, rev }: { diff: FileDiff; url: string; rev: number
           </Suspense>
         </div>
       ) : (
-        <PlainDiffBody diff={diff} url={url} rev={rev} />
+        <PlainDiffBody diff={diff} target={target} />
       )}
     </div>
   );
 }
 
-function PlainDiffBody({ diff, url, rev }: { diff: FileDiff; url: string; rev: number }) {
+function PlainDiffBody({ diff, target }: { diff: FileDiff; target: RevTarget }) {
   const t = useT(historyStrings);
   if (diff.binary) return <p className="m-0">{t("diffBinary")}</p>;
   if (diff.tooComplex || diff.tooLarge) {
     return (
       <ExternalHandOff
         message={t(diff.tooComplex ? "diffTooComplex" : "diffTooLarge")}
-        url={url}
-        rev={rev}
+        target={target}
       />
     );
   }
@@ -155,13 +162,13 @@ function PlainDiffBody({ diff, url, rev }: { diff: FileDiff; url: string; rev: n
 }
 
 /** A diff the backend will not show: explain why and offer the external diff tool. */
-function ExternalHandOff({ message, url, rev }: { message: string; url: string; rev: number }) {
+function ExternalHandOff({ message, target }: { message: string; target: RevTarget }) {
   const t = useT(historyStrings);
   const [error, setError] = useState<string | null>(null);
   const open = async () => {
     setError(null);
     try {
-      await unwrap(ipc().commands.diffExternal({ kind: "rev", url, rev }));
+      await unwrap(ipc().commands.diffExternal(target));
     } catch (e) {
       setError(toAppError(e).message);
     }

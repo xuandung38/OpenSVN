@@ -24,6 +24,8 @@ export const commands = {
 	wcLocate: (wcId: WcId, grant: PathGrantId) => typedError<WorkingCopy, AppError>(__TAURI_INVOKE("wc_locate", { wcId, grant })),
 	/**  Repository URLs used recently, newest first. */
 	recentUrls: () => typedError<string[], AppError>(__TAURI_INVOKE("recent_urls")),
+	/**  Forgets a recent repository URL (the welcome screen's "Remove"); returns the list left. */
+	recentUrlRemove: (url: string) => typedError<string[], AppError>(__TAURI_INVOKE("recent_url_remove", { url })),
 	/**
 	 *  A folder grant for the default checkout folder (`general.checkoutRoot`), created when missing.
 	 *  The setting only changes through `checkout_root_choose`, so the grant always names a folder
@@ -91,6 +93,19 @@ export const commands = {
 	movePath: (wcId: WcId, from: string, to: string) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("move_path", { wcId, from, to })),
 	cleanup: (request: CleanupRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("cleanup", { request })),
 	setDepth: (wcId: WcId, path: string, depth: Depth) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("set_depth", { wcId, path, depth })),
+	/**
+	 *  "Choose folders" on an existing working copy: sets the depth of each folder, parents first
+	 *  (`svn update --parents --set-depth` per folder; `""` is the root, which cannot be excluded),
+	 *  bringing in folders the working copy does not have. One operation; local changes are never
+	 *  removed.
+	 */
+	wcSparseApply: (wcId: WcId, entries: SparseEntry[]) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("wc_sparse_apply", { wcId, entries })),
+	/**
+	 *  The recorded depth of every folder of the working copy, the root (`""`) first, then parents
+	 *  before children (excluded folders as `exclude`): what the "Choose folders" dialog starts from. Folders it does not list are not
+	 *  in the working copy.
+	 */
+	wcDepths: (wcId: WcId) => typedError<SparseEntry[], AppError>(__TAURI_INVOKE("wc_depths", { wcId })),
 	upgradeFormat: (wcId: WcId, to: number) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("upgrade_format", { wcId, to })),
 	resolve: (request: ResolveRequest) => typedError<null, AppError>(__TAURI_INVOKE("resolve", { request })),
 	/**

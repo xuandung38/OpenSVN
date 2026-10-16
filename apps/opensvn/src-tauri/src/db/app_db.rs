@@ -8,6 +8,9 @@ use rusqlite::{OptionalExtension, params};
 use super::migrations::APP_MIGRATIONS;
 use super::{Db, DbError, now_iso};
 
+/// How many recent repository URLs `app.sqlite` keeps.
+pub const RECENT_URL_CAP: u32 = 20;
+
 /// Handle to `app.sqlite`. Cheap to clone; clones share one connection.
 #[derive(Clone)]
 pub struct AppDb {
@@ -130,14 +133,30 @@ impl AppDb {
         })
     }
 
-    /// Remembers a repository URL typed or opened by the user.
+    /// Remembers a repository URL typed or opened by the user; the table keeps the newest
+    /// [`RECENT_URL_CAP`] rows.
     pub fn recent_url_touch(&self, url: &str) -> Result<(), DbError> {
         self.db.with(|c| {
-            c.execute(
+            let tx = c.transaction()?;
+            tx.execute(
                 "INSERT INTO recent_url (url, last_used_at) VALUES (?1, ?2)
                  ON CONFLICT(url) DO UPDATE SET last_used_at = excluded.last_used_at",
                 params![url, now_iso()],
             )?;
+            tx.execute(
+                "DELETE FROM recent_url WHERE url NOT IN
+                 (SELECT url FROM recent_url ORDER BY last_used_at DESC, url LIMIT ?1)",
+                params![RECENT_URL_CAP],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Forgets a recent repository URL (nothing happens when it is not listed).
+    pub fn recent_url_remove(&self, url: &str) -> Result<(), DbError> {
+        self.db.with(|c| {
+            c.execute("DELETE FROM recent_url WHERE url = ?1", params![url])?;
             Ok(())
         })
     }
@@ -494,6 +513,33 @@ mod tests {
             })
             .unwrap();
         assert_eq!(n, 200);
+    }
+
+    #[test]
+    fn recent_urls_are_capped_and_removable() {
+        let db = AppDb::open_in_memory().unwrap();
+        for i in 0..RECENT_URL_CAP + 5 {
+            db.recent_url_touch(&format!("https://svn.test.local/r{i:02}"))
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let n: u32 = db
+            .db
+            .with(|c| Ok(c.query_row("SELECT count(*) FROM recent_url", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(n, RECENT_URL_CAP);
+        let list = db.recent_url_list(100).unwrap();
+        assert_eq!(
+            list[0],
+            format!("https://svn.test.local/r{:02}", RECENT_URL_CAP + 4)
+        );
+        assert!(!list.contains(&"https://svn.test.local/r00".to_owned()));
+        db.recent_url_remove(&list[0]).unwrap();
+        db.recent_url_remove("https://svn.test.local/never")
+            .unwrap();
+        let after = db.recent_url_list(100).unwrap();
+        assert_eq!(after.len(), list.len() - 1);
+        assert!(!after.contains(&list[0]));
     }
 
     #[test]
