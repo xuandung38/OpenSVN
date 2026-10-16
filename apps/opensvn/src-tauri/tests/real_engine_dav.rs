@@ -731,6 +731,8 @@ async fn authz_denied_at_root_allowed_on_trunk() {
                 stop_on_copy: None,
                 with_paths: true,
                 filter: None,
+                include_merged: None,
+                revprops: None,
             },
             &ctx(),
         )

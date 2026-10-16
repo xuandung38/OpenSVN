@@ -368,6 +368,9 @@ mod tests {
         assert!(lazy.may_have("svn:mime-type") && !lazy.may_have("svn:special"));
         assert_eq!(lazy.get().unwrap(), Some(&decode_props(&blob).unwrap()));
         // Decoded once, then served from the cell.
-        assert!(std::ptr::eq(lazy.get().unwrap().unwrap(), lazy.get().unwrap().unwrap()));
+        assert!(std::ptr::eq(
+            lazy.get().unwrap().unwrap(),
+            lazy.get().unwrap().unwrap()
+        ));
     }
 }

@@ -201,6 +201,8 @@ fn log_request(limit: u32, filter: Option<&str>) -> LogGetRequest {
         stop_on_copy: None,
         with_paths: false,
         filter: filter.map(str::to_owned),
+        include_merged: None,
+        revprops: None,
     }
 }
 

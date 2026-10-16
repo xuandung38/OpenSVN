@@ -115,6 +115,18 @@ pub struct LogGetRequest {
     pub stop_on_copy: Option<bool>,
     pub with_paths: bool,
     pub filter: Option<String>,
+    /// Also list the revisions each entry merged in (`svn log -g`), under [`LogEntry::merged`].
+    /// `limit` counts the entries of the node's own history only.
+    ///
+    /// [`LogEntry::merged`]: crate::models::LogEntry::merged
+    #[serde(default)]
+    #[specta(optional)]
+    pub include_merged: Option<bool>,
+    /// Revision properties to read besides author, date and message (`svn log --with-revprop`);
+    /// they come back in `LogEntry::revprops`. `None` reads only the usual three.
+    #[serde(default)]
+    #[specta(optional)]
+    pub revprops: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]

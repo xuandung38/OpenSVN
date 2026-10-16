@@ -340,46 +340,31 @@ impl RealEngine {
                     .await?
             }
         };
-        let filter = req
-            .filter
-            .as_ref()
-            .map(|f| f.to_lowercase())
-            .filter(|f| !f.is_empty());
-        let limit = req.limit.clamp(1, 1000) as usize;
+        let mut pager = mapping::LogPager::new(req);
         let ra = LogRequest {
             paths: vec![path],
             start: revnum(req.from_rev),
             end: revnum(req.to_rev),
-            // Without a text filter the server can stop after one page plus the look-ahead entry.
-            limit: filter
-                .is_none()
-                .then(|| u32::try_from(limit + 1).unwrap_or(u32::MAX)),
+            // Without a text filter the server can stop after one page plus the look-ahead
+            // entry (with merged revisions the server counts the node's own entries only).
+            limit: (!pager.filtered())
+                .then(|| u32::try_from(pager.limit() + 1).unwrap_or(u32::MAX)),
             discover_changed_paths: req.with_paths,
             strict_node_history: req.stop_on_copy.unwrap_or(false),
+            include_merged_revisions: req.include_merged.unwrap_or(false),
+            revprops: mapping::log_revprops(req),
         };
-        let mut matched = Vec::new();
         let mut page_full = false;
         let outcome = session
             .log(
                 &ra,
                 &mut |e| {
-                    let hit = filter.as_ref().is_none_or(|f| {
-                        e.message
-                            .as_deref()
-                            .unwrap_or("")
-                            .to_lowercase()
-                            .contains(f)
-                            || e.author.as_deref().unwrap_or("").to_lowercase().contains(f)
-                    });
-                    if hit {
-                        matched.push(e);
+                    if pager.accept(e) {
+                        return Ok(());
                     }
-                    if matched.len() > limit {
-                        // One entry beyond the page proves there is a next page; stop reading.
-                        page_full = true;
-                        return Err(internal("log page complete"));
-                    }
-                    Ok(())
+                    // One entry beyond the page proves there is a next page; stop reading.
+                    page_full = true;
+                    Err(internal("log page complete"))
                 },
                 &ctx.cancel,
             )
@@ -389,11 +374,6 @@ impl RealEngine {
             Err(_) if page_full => {}
             Err(e) => return Err(e),
         }
-        let next_rev = (matched.len() > limit).then(|| mapping::rev(matched[limit].rev));
-        matched.truncate(limit);
-        Ok(LogPage {
-            entries: matched.into_iter().map(mapping::log_entry).collect(),
-            next_rev,
-        })
+        Ok(pager.page())
     }
 }

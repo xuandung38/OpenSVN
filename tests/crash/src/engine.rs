@@ -226,6 +226,7 @@ impl Engine {
             limit,
             discover_changed_paths: verbose,
             strict_node_history: false,
+            ..Default::default()
         };
         let (mut entries, mut changed) = (0, 0);
         s.log(

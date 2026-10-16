@@ -20,6 +20,7 @@ mod errors;
 mod events;
 mod layout;
 pub mod lock_ownership;
+mod log_cache;
 mod logging;
 mod menu;
 mod notify;

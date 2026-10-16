@@ -154,12 +154,8 @@ pub async fn log_get(
     request: LogGetRequest,
 ) -> Result<LogPage, AppError> {
     guard(async {
-        match request.target.clone() {
-            LogTarget::Url { url } => state
-                .engine
-                .log(&LogScope::Url(url), &request, &OpContext::detached())
-                .await
-                .map_err(engine_err),
+        let scope = match request.target.clone() {
+            LogTarget::Url { url } => LogScope::Url(url),
             LogTarget::Wc { wc_id, path } => {
                 // Only the location lookup reads the working copy. The log itself can take
                 // minutes (a revision with 100k changed paths behind authz), and holding the
@@ -174,13 +170,24 @@ pub async fn log_get(
                         }
                     })
                     .await?;
-                state
-                    .engine
-                    .log(&LogScope::Repo(loc), &request, &OpContext::detached())
+                LogScope::Repo(loc)
+            }
+        };
+        // Identical requests (the History bar, the History screen and the Incoming list all
+        // reload after an update) share one read of the server, and finished pages are kept
+        // until a revision moves.
+        let key = crate::log_cache::LogKey::new(&scope, &request);
+        let engine = std::sync::Arc::clone(&state.engine);
+        state
+            .status
+            .logs()
+            .get(key, || async move {
+                engine
+                    .log(&scope, &request, &OpContext::detached())
                     .await
                     .map_err(engine_err)
-            }
-        }
+            })
+            .await
     })
     .await
 }

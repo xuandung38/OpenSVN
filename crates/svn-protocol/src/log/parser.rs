@@ -133,6 +133,9 @@ impl LogParser {
                         message: None,
                         changed_paths: Vec::new(),
                         has_children: false,
+                        merge_depth: 0,
+                        subtractive_merge: false,
+                        revprops: Vec::new(),
                     },
                 });
             }
@@ -256,6 +259,13 @@ impl LogParser {
                 if item.entry.has_children {
                     self.merge_depth += 1;
                 }
+                item.entry.merge_depth = merge_depth;
+                item.entry.subtractive_merge = item.subtractive;
+                item.entry.revprops = item
+                    .revprops
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.to_vec()))
+                    .collect();
                 out.push(LogItem {
                     entry: item.entry,
                     revprops: item.revprops,

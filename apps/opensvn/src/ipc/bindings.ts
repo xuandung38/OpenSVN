@@ -137,7 +137,7 @@ export const commands = {
 	repoList: (url: string, rev: number | null) => typedError<RepoListing, AppError>(__TAURI_INVOKE("repo_list", { url, rev })),
 	repoCat: (url: string, rev: number | null) => typedError<TextSide, AppError>(__TAURI_INVOKE("repo_cat", { url, rev })),
 	repoSave: (url: string, rev: number | null, grant: PathGrantId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("repo_save", { url, rev, grant })),
-	logGet: (request: LogGetRequest) => typedError<LogPage, AppError>(__TAURI_INVOKE("log_get", { request })),
+	logGet: (request: LogGetRequest) => typedError<LogPage_Serialize, AppError>(__TAURI_INVOKE("log_get", { request })),
 	/**  Result arrives as `op://finished` with a blame payload. */
 	blameGet: (url: string, rev: number | null) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("blame_get", { url, rev })),
 	lock: (request: LockRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("lock", { request })),
@@ -798,7 +798,9 @@ export type LockRequest = {
 /**  Which items a lock/unlock applies to. */
 export type LockTargets = { kind: "wc"; wcId: WcId; paths: string[] } | { kind: "url"; urls: string[] };
 
-export type LogEntry = {
+export type LogEntry = LogEntry_Serialize | LogEntry_Deserialize;
+
+export type LogEntry_Deserialize = {
 	rev: Rev,
 	author: string | null,
 	date: string,
@@ -806,6 +808,40 @@ export type LogEntry = {
 	changedPaths: ChangedPath[] | null,
 	/**  Has merged child revisions. */
 	hasChildren: boolean | null,
+	/**
+	 *  Revisions this one merged in (`includeMerged`), newest first, each with its own merged
+	 *  revisions.
+	 */
+	merged?: LogEntry_Deserialize[] | null,
+	/**  This revision came in through a reverse merge (only inside `merged`). */
+	subtractiveMerge?: boolean | null,
+	/**
+	 *  Revision properties asked for with `revprops`, other than author, date and message
+	 *  (values decoded as UTF-8, invalid bytes replaced).
+	 */
+	revprops?: { [key in string]: string } | null,
+};
+
+export type LogEntry_Serialize = {
+	rev: Rev,
+	author: string | null,
+	date: string,
+	message: string,
+	changedPaths: ChangedPath[] | null,
+	/**  Has merged child revisions. */
+	hasChildren: boolean | null,
+	/**
+	 *  Revisions this one merged in (`includeMerged`), newest first, each with its own merged
+	 *  revisions.
+	 */
+	merged?: LogEntry_Serialize[] | null,
+	/**  This revision came in through a reverse merge (only inside `merged`). */
+	subtractiveMerge?: boolean | null,
+	/**
+	 *  Revision properties asked for with `revprops`, other than author, date and message
+	 *  (values decoded as UTF-8, invalid bytes replaced).
+	 */
+	revprops?: { [key in string]: string } | null,
 };
 
 export type LogGetRequest = {
@@ -816,13 +852,32 @@ export type LogGetRequest = {
 	stopOnCopy: boolean | null,
 	withPaths: boolean,
 	filter: string | null,
+	/**
+	 *  Also list the revisions each entry merged in (`svn log -g`), under [`LogEntry::merged`].
+	 *  `limit` counts the entries of the node's own history only.
+	 * 
+	 *  [`LogEntry::merged`]: crate::models::LogEntry::merged
+	 */
+	includeMerged?: boolean | null,
+	/**
+	 *  Revision properties to read besides author, date and message (`svn log --with-revprop`);
+	 *  they come back in `LogEntry::revprops`. `None` reads only the usual three.
+	 */
+	revprops?: string[] | null,
 };
 
 /**  Most detailed level written to the log. There is no `trace`: it would log transport internals. */
 export type LogLevel = "error" | "warn" | "info" | "debug";
 
-export type LogPage = {
-	entries: LogEntry[],
+export type LogPage = LogPage_Serialize | LogPage_Deserialize;
+
+export type LogPage_Deserialize = {
+	entries: LogEntry_Deserialize[],
+	nextRev: Rev | null,
+};
+
+export type LogPage_Serialize = {
+	entries: LogEntry_Serialize[],
 	nextRev: Rev | null,
 };
 

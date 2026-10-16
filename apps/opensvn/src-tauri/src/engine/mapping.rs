@@ -68,7 +68,137 @@ pub(crate) fn log_entry(e: svn_types::LogEntry) -> LogEntry {
         message: e.message.unwrap_or_default(),
         changed_paths: (!paths.is_empty()).then_some(paths),
         has_children: Some(e.has_children),
+        merged: None,
+        subtractive_merge: e.subtractive_merge.then_some(true),
+        revprops: (!e.revprops.is_empty()).then(|| {
+            e.revprops
+                .into_iter()
+                .map(|(k, v)| (k, String::from_utf8_lossy(&v).into_owned()))
+                .collect()
+        }),
     }
+}
+
+/// One page of a log as the engines read it: the text filter (message and author, case
+/// insensitive) and the limit apply to the node's own entries; the revisions a matching entry
+/// merged in come along with it.
+pub(crate) struct LogPager {
+    filter: Option<String>,
+    limit: usize,
+    /// The current own entry matched, so its merged revisions are kept.
+    keep: bool,
+    tops: usize,
+    entries: Vec<svn_types::LogEntry>,
+    next: Option<svn_types::Revnum>,
+}
+
+impl LogPager {
+    pub(crate) fn new(req: &opensvn_ipc::LogGetRequest) -> Self {
+        Self {
+            filter: req
+                .filter
+                .as_ref()
+                .map(|f| f.to_lowercase())
+                .filter(|f| !f.is_empty()),
+            limit: req.limit.clamp(1, 1000) as usize,
+            keep: false,
+            tops: 0,
+            entries: Vec::new(),
+            next: None,
+        }
+    }
+
+    /// The page size.
+    pub(crate) fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// True when a text filter decides which entries match (the server cannot stop early).
+    pub(crate) fn filtered(&self) -> bool {
+        self.filter.is_some()
+    }
+
+    /// Takes the next entry of the report; false once the page is complete (one own entry
+    /// beyond it proves a next page, and reading can stop).
+    pub(crate) fn accept(&mut self, e: svn_types::LogEntry) -> bool {
+        if e.merge_depth > 0 {
+            if self.keep {
+                self.entries.push(e);
+            }
+            return true;
+        }
+        self.keep = self.filter.as_ref().is_none_or(|f| {
+            e.message
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains(f)
+                || e.author.as_deref().unwrap_or("").to_lowercase().contains(f)
+        });
+        if !self.keep {
+            return true;
+        }
+        if self.tops == self.limit {
+            self.keep = false;
+            self.next = Some(e.rev);
+            return false;
+        }
+        self.tops += 1;
+        self.entries.push(e);
+        true
+    }
+
+    pub(crate) fn page(self) -> opensvn_ipc::LogPage {
+        opensvn_ipc::LogPage {
+            entries: log_entries(self.entries),
+            next_rev: self.next.map(rev),
+        }
+    }
+}
+
+/// Revision properties a log request reads: the usual three, plus those asked for.
+pub(crate) fn log_revprops(req: &opensvn_ipc::LogGetRequest) -> svn_ra_api::LogRevprops {
+    match &req.revprops {
+        None => svn_ra_api::LogRevprops::Default,
+        Some(extra) => {
+            let mut names: Vec<String> = ["svn:author", "svn:date", "svn:log"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            for n in extra {
+                if !names.contains(n) {
+                    names.push(n.clone());
+                }
+            }
+            svn_ra_api::LogRevprops::Only(names)
+        }
+    }
+}
+
+/// [`log_entry`] of entries in report order, with the revisions a merge brought in (`log -g`,
+/// `merge_depth > 0`, right after their merging entry) nested under it in `merged`.
+pub(crate) fn log_entries(entries: Vec<svn_types::LogEntry>) -> Vec<LogEntry> {
+    /// Entries still open for children, deepest last, with their depth.
+    fn close(stack: &mut Vec<(u32, LogEntry)>, out: &mut Vec<LogEntry>, depth: u32) {
+        while stack.last().is_some_and(|(d, _)| *d >= depth) {
+            let Some((_, done)) = stack.pop() else { break };
+            match stack.last_mut() {
+                Some((_, parent)) => parent.merged.get_or_insert_with(Vec::new).push(done),
+                None => out.push(done),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut stack: Vec<(u32, LogEntry)> = Vec::new();
+    for e in entries {
+        // A child deeper than its parent's level + 1 (a malformed report) hangs under the
+        // deepest open entry.
+        let depth = e.merge_depth.min(stack.last().map_or(0, |(d, _)| d + 1));
+        close(&mut stack, &mut out, depth);
+        stack.push((depth, log_entry(e)));
+    }
+    close(&mut stack, &mut out, 0);
+    out
 }
 
 /// The folder depths of a sparse checkout or "Choose folders", parents first; a folder given
@@ -130,6 +260,9 @@ mod tests {
                 prop_mods: false,
             }],
             has_children: false,
+            merge_depth: 0,
+            subtractive_merge: false,
+            revprops: Vec::new(),
         };
         let mapped = log_entry(entry);
         assert_eq!(mapped.rev, Rev(7));

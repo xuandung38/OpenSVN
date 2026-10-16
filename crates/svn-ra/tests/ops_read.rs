@@ -508,6 +508,7 @@ async fn log_streams_entries_newest_first() {
         limit: None,
         discover_changed_paths: true,
         strict_node_history: false,
+        ..Default::default()
     };
     let mut seen: Vec<LogEntry> = Vec::new();
     s.log(

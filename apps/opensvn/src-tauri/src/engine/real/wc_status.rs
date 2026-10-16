@@ -425,6 +425,7 @@ async fn count_incoming(
         limit: Some(INCOMING_CAP),
         discover_changed_paths: false,
         strict_node_history: false,
+        ..Default::default()
     };
     let mut count: u32 = 0;
     let outcome = session

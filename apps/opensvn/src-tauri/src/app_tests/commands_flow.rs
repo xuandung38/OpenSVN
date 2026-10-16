@@ -264,6 +264,8 @@ async fn commit_operation_emits_lifecycle_and_updates_status_and_history() {
             stop_on_copy: None,
             with_paths: true,
             filter: None,
+            include_merged: None,
+            revprops: None,
         },
     )
     .await

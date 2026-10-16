@@ -60,9 +60,14 @@ export function HistoryFilterBar({
             </option>
           ))}
         </Select>
-        <Chip on={filters.stopOnCopy} onClick={() => set({ stopOnCopy: !filters.stopOnCopy })}>
-          {t("stopOnCopy")}
-        </Chip>
+        <div className="flex flex-wrap gap-1.5">
+          <Chip on={filters.stopOnCopy} onClick={() => set({ stopOnCopy: !filters.stopOnCopy })}>
+            {t("stopOnCopy")}
+          </Chip>
+          <Chip on={filters.showMerged} onClick={() => set({ showMerged: !filters.showMerged })}>
+            {t("showMerged")}
+          </Chip>
+        </div>
         <label className="flex items-center gap-1.5 text-[11px] text-muted-text">
           {t("from")}
           <Input type="date" value={filters.from} onChange={(e) => set({ from: e.target.value })} />

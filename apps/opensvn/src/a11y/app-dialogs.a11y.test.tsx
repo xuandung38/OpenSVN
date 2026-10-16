@@ -294,7 +294,7 @@ const DIALOGS: [string, () => ReactElement][] = [
     "compare two revisions (file list)",
     () => (
       <CompareDialog
-        entries={mockLogWithPaths}
+        target={{ kind: "url", url: `${MOCK_REPO_ROOT}/trunk` }}
         from={mockLogWithPaths[3]?.rev ?? 0}
         to={mockLogWithPaths[0]?.rev ?? 0}
         repoRootUrl={MOCK_REPO_ROOT}

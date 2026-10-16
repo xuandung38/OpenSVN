@@ -10,6 +10,7 @@ use opensvn_ipc::{
 
 use crate::db::CacheDb;
 use crate::engine::{EngineFacade, OpContext, RemoteScan, StatusQuery, WcInfo};
+use crate::log_cache::LogCache;
 use crate::ops::AppEvents;
 use crate::wc::ResolvedWc;
 
@@ -35,6 +36,10 @@ pub struct StatusPublisher {
     snaps: Mutex<HashMap<String, SnapState>>,
     /// Last snapshot id handed out (ids are unique across working copies).
     last_id: AtomicU32,
+    /// Logs read so far; a moved revision or new revisions on the server make them stale.
+    logs: Arc<LogCache>,
+    /// Newest repository revision each working copy's last remote check saw.
+    latest: Mutex<HashMap<String, Rev>>,
 }
 
 /// What the stored snapshot of a working copy is to the UI.
@@ -90,7 +95,14 @@ impl StatusPublisher {
             gens: Mutex::new(HashMap::new()),
             snaps: Mutex::new(HashMap::new()),
             last_id: AtomicU32::new(0),
+            logs: Arc::new(LogCache::default()),
+            latest: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The shared log reads (`log_get`), dropped whenever this publisher sees a revision move.
+    pub fn logs(&self) -> &Arc<LogCache> {
+        &self.logs
     }
 
     fn snaps(&self) -> std::sync::MutexGuard<'_, HashMap<String, SnapState>> {
@@ -285,6 +297,8 @@ impl StatusPublisher {
             }
         };
         if moved {
+            // An update, commit or switch: logs read so far may miss revisions now relevant.
+            self.logs.invalidate();
             self.events.revision_changed(&RevisionChanged {
                 wc_id: wc_id.clone(),
                 base_rev: info.base_rev,
@@ -328,6 +342,16 @@ impl StatusPublisher {
                 base,
                 snapshot,
             });
+        }
+        let newer = self
+            .latest
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(wc_id.0.clone(), scan.latest_rev)
+            .is_some_and(|before| before != scan.latest_rev);
+        if newer {
+            // Someone committed: logs that start at HEAD are stale.
+            self.logs.invalidate();
         }
         self.events.incoming(&Incoming {
             wc_id: wc_id.clone(),

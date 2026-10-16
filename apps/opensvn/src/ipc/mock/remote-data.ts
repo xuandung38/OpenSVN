@@ -205,6 +205,63 @@ export const mockLogWithPaths: LogEntry[] = mockLog.map((e, i) => ({
   changedPaths: PATHS[i % PATHS.length] ?? null,
 }));
 
+/** Revisions the first entry merged in from feature-x (`includeMerged`), one nested deeper. */
+export const mockMerged: LogEntry[] = [
+  {
+    rev: 48150,
+    author: "chi",
+    date: new Date(Date.UTC(2026, 9, 2)).toISOString(),
+    message: "feature-x: parser rewrite",
+    changedPaths: [
+      {
+        path: "/branches/feature-x/src/parser.ts",
+        action: "M",
+        kind: "file",
+        copyFrom: null,
+        textMods: null,
+        propMods: null,
+      },
+    ],
+    hasChildren: true,
+    merged: [
+      {
+        rev: 48100,
+        author: "an",
+        date: new Date(Date.UTC(2026, 8, 28)).toISOString(),
+        message: "release-1.0: hotfix merged into feature-x",
+        changedPaths: [
+          {
+            path: "/branches/release-1.0/src/fix.ts",
+            action: "M",
+            kind: "file",
+            copyFrom: null,
+            textMods: null,
+            propMods: null,
+          },
+        ],
+        hasChildren: false,
+      },
+    ],
+  },
+  {
+    rev: 48140,
+    author: "binh",
+    date: new Date(Date.UTC(2026, 9, 1)).toISOString(),
+    message: "feature-x: tests",
+    changedPaths: [
+      {
+        path: "/branches/feature-x/test/parser.test.ts",
+        action: "A",
+        kind: "file",
+        copyFrom: null,
+        textMods: null,
+        propMods: null,
+      },
+    ],
+    hasChildren: false,
+  },
+];
+
 export const mockBranches: BranchNode[] = [
   { kind: "trunk", name: "trunk", url: `${MOCK_REPO_ROOT}/trunk` },
   { kind: "branch", name: "feature-x", url: `${MOCK_REPO_ROOT}/branches/feature-x` },

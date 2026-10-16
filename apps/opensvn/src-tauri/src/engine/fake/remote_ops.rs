@@ -140,6 +140,7 @@ impl FakeEngine {
             limit: Some(1),
             discover_changed_paths: false,
             strict_node_history: false,
+            ..Default::default()
         };
         let mut found = (None, "1970-01-01T00:00:00Z".to_owned());
         session
@@ -333,12 +334,7 @@ impl FakeEngine {
         };
         session.ensure_authenticated(&ctx.cancel).await?;
         self.log_wait().await;
-        let filter = req
-            .filter
-            .as_ref()
-            .map(|f| f.to_lowercase())
-            .filter(|f| !f.is_empty());
-        let limit = req.limit.clamp(1, 1000) as usize;
+        let mut pager = mapping::LogPager::new(req);
         let ra = LogRequest {
             paths: vec![path],
             start: revnum(req.from_rev),
@@ -346,34 +342,23 @@ impl FakeEngine {
             limit: None,
             discover_changed_paths: req.with_paths,
             strict_node_history: req.stop_on_copy.unwrap_or(false),
+            include_merged_revisions: req.include_merged.unwrap_or(false),
+            revprops: mapping::log_revprops(req),
         };
-        let mut matched = Vec::new();
+        let mut done = false;
         session
             .log(
                 &ra,
                 &mut |e| {
-                    let hit = filter.as_ref().is_none_or(|f| {
-                        e.message
-                            .as_deref()
-                            .unwrap_or("")
-                            .to_lowercase()
-                            .contains(f)
-                            || e.author.as_deref().unwrap_or("").to_lowercase().contains(f)
-                    });
-                    if hit && matched.len() <= limit {
-                        matched.push(e);
+                    if !done {
+                        done = !pager.accept(e);
                     }
                     Ok(())
                 },
                 &ctx.cancel,
             )
             .await?;
-        let next_rev = (matched.len() > limit).then(|| Rev(matched[limit].rev.0));
-        matched.truncate(limit);
-        Ok(LogPage {
-            entries: matched.into_iter().map(mapping::log_entry).collect(),
-            next_rev,
-        })
+        Ok(pager.page())
     }
 
     pub(super) async fn do_blame(
@@ -395,6 +380,7 @@ impl FakeEngine {
             limit: None,
             discover_changed_paths: false,
             strict_node_history: true,
+            ..Default::default()
         };
         let mut revs = Vec::new();
         session

@@ -51,7 +51,8 @@ export function HistoryScreen({
     if (focusRev != null) setSelectedRev(focusRev);
   }, [focusRev]);
 
-  const selected = h.entries.find((e) => e.rev === selectedRev) ?? null;
+  const selectedRow = h.rows.find((r) => r.entry.rev === selectedRev) ?? null;
+  const selected = selectedRow?.entry ?? null;
   const pair =
     compareRev !== null && selectedRev !== null && compareRev !== selectedRev
       ? { from: Math.min(compareRev, selectedRev), to: Math.max(compareRev, selectedRev) }
@@ -82,28 +83,30 @@ export function HistoryScreen({
             <VirtualList
               label={t("revisions")}
               className="h-full"
-              count={h.entries.length}
+              count={h.rows.length}
               rowHeight={ROW_H}
               onActivate={(i) => {
-                const e = h.entries[i];
+                const e = h.rows[i]?.entry;
                 if (e) setSelectedRev(e.rev);
               }}
               onToggle={(i) => {
-                const e = h.entries[i];
-                if (e) toggleCompare(e.rev);
+                const r = h.rows[i];
+                // Only the node's own revisions can be compared.
+                if (r && r.depth === 0) toggleCompare(r.entry.rev);
               }}
               onActiveChange={(i) => {
                 if (
                   h.hasNextPage &&
                   !h.isFetchingNextPage &&
-                  i >= h.entries.length - PREFETCH_MARGIN
+                  i >= h.rows.length - PREFETCH_MARGIN
                 ) {
                   void h.fetchNextPage();
                 }
               }}
               renderRow={(i, ctx) => {
-                const e = h.entries[i];
-                if (!e) return null;
+                const row = h.rows[i];
+                if (!row) return null;
+                const e = row.entry;
                 return (
                   <RevisionRow
                     id={ctx.id}
@@ -114,7 +117,9 @@ export function HistoryScreen({
                     author={e.author ?? c("unknownAuthor")}
                     when={relativeTime(e.date)}
                     selected={e.rev === selectedRev}
-                    badge={e.rev === compareRev ? t("compareBadge") : undefined}
+                    badge={row.depth === 0 && e.rev === compareRev ? t("compareBadge") : undefined}
+                    indent={row.depth}
+                    note={row.mergedBy !== null ? t("mergedIn", { rev: row.mergedBy }) : undefined}
                     onSelect={setSelectedRev}
                   />
                 );
@@ -153,16 +158,18 @@ export function HistoryScreen({
         <div className="min-h-0 flex-1">
           <RevisionDetails
             entry={selected}
+            target={target}
+            merged={(selectedRow?.depth ?? 0) > 0}
             repoRootUrl={repoRootUrl}
             nav={nav}
             compareRev={compareRev}
-            onMarkCompare={toggleCompare}
+            onMarkCompare={(selectedRow?.depth ?? 0) > 0 ? undefined : toggleCompare}
           />
         </div>
       </section>
       {comparing && pair && (
         <CompareDialog
-          entries={h.entries}
+          target={target}
           from={pair.from}
           to={pair.to}
           repoRootUrl={repoRootUrl}

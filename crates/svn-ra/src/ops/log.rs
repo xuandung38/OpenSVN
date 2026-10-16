@@ -50,10 +50,8 @@ pub(crate) async fn log(
             limit,
             discover_changed_paths: req.discover_changed_paths,
             strict_node_history: req.strict_node_history,
-            // TODO(ra-api): `svn_ra_api::LogRequest` has no fields for merged revisions (`-g`)
-            // or a revision-property selection yet; add them there and pass them through here.
-            include_merged_revisions: false,
-            revprops: LogRevprops::Default,
+            include_merged_revisions: req.include_merged_revisions,
+            revprops: wire_revprops(&req.revprops),
             paths: paths.clone(),
         };
         // libsvn_ra_serf addresses the newer end of the range so that paths are looked up where
@@ -84,6 +82,16 @@ pub(crate) async fn log(
             retry.progressed();
         }
         retry.again(err, cancel).await?;
+    }
+}
+
+/// The wire form of a revision-property selection.
+fn wire_revprops(r: &svn_ra_api::LogRevprops) -> LogRevprops {
+    match r {
+        svn_ra_api::LogRevprops::Default => LogRevprops::Default,
+        svn_ra_api::LogRevprops::All => LogRevprops::All,
+        svn_ra_api::LogRevprops::None => LogRevprops::None,
+        svn_ra_api::LogRevprops::Only(names) => LogRevprops::Only(names.clone()),
     }
 }
 
@@ -284,6 +292,9 @@ mod tests {
             message: None,
             changed_paths: Vec::new(),
             has_children,
+            merge_depth: 0,
+            subtractive_merge: false,
+            revprops: Vec::new(),
         }
     }
 
@@ -295,6 +306,7 @@ mod tests {
             limit,
             discover_changed_paths: false,
             strict_node_history,
+            ..Default::default()
         }
     }
 
