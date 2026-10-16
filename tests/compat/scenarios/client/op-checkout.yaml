@@ -1,0 +1,18 @@
+# Engine checkout read by svn 1.14 and 1.15, and an svn checkout read by the engine.
+name: op-checkout
+repo: basic
+steps:
+  - { on: engine, wc: e, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn14, wc: o14, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn14, wc: e, svn: [status] }
+  - { on: svn15, wc: e, svn: [status] }
+  - { on: engine, wc: o, svn: [status] }
+  - { on: engine, wc: o14, svn: [status] }
+  # Depth and revision are recorded the same way.
+  - { on: engine, wc: e2, svn: [checkout, "{url}/trunk", ".", -r, "5", --depth, immediates] }
+  - { on: svn15, wc: o2, svn: [checkout, "{url}/trunk", ".", -r, "5", --depth, immediates] }
+compare:
+  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e, right: o14, checks: [tree, status, info, wcdb], reader: svn14, ignore: [dav_cache] }
+  - { left: e2, right: o2, checks: [tree, status, info, wcdb], ignore: [dav_cache] }

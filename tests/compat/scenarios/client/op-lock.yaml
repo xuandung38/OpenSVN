@@ -1,0 +1,24 @@
+# The engine locks, svn sees the token and unlocks; svn locks, the engine unlocks.
+name: op-lock
+repo: basic
+fresh_repo: true
+steps:
+  - { on: engine, wc: e, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: s, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/trunk", "."] }
+  - { on: engine, wc: e, svn: [lock, -m, "engine lock", locked.txt] }
+  # svn 1.14 commits with the engine's lock token, and releases it.
+  - { on: svn15, wc: e, sh: "chmod u+w locked.txt && printf 'edited under lock\\n' >> locked.txt" }
+  - { on: svn14, wc: e, svn: [commit, -m, "commit under the engine's lock"] }
+  - { on: svn15, wc: s, svn: [update] }
+  - { on: svn15, wc: s, svn: [lock, -m, "svn lock", locked.txt, README.txt] }
+  - { on: engine, wc: s, svn: [unlock, locked.txt] }
+  - { on: svn14, wc: s, svn: [unlock, README.txt] }
+  - { on: engine, wc: e, svn: [lock, README.txt] }
+  - { on: svn15, wc: e, svn: [unlock, README.txt] }
+  - { on: svn15, wc: e, svn: [update] }
+  - { on: svn15, wc: s, svn: [update] }
+  - { on: svn15, wc: o, svn: [update] }
+compare:
+  - { left: e, right: o, checks: [tree, status, info] }
+  - { left: s, right: o, checks: [tree, status, info] }

@@ -466,11 +466,6 @@ fn only_planned_items_are_not_yet_available() {
         .collect();
     assert_eq!(
         not_yet,
-        [
-            "app.check-app-updates",
-            "wc.sparse",
-            "wc.upgrade",
-            "branch.merge",
-        ]
+        ["app.check-app-updates", "wc.upgrade", "branch.merge",]
     );
 }

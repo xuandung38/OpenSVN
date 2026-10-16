@@ -1,0 +1,21 @@
+# Same schedule (add, delete, move file and dir) by the engine and by svn: wc.db must match;
+# then the other client reads it and reverts nothing.
+name: op-add-delete-move
+repo: basic
+steps:
+  - { on: engine, wc: e, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: e, sh: "mkdir newdir && printf 'n\\n' > newdir/n.txt && printf 'a\\n' > a.txt" }
+  - { on: svn15, wc: o, sh: "mkdir newdir && printf 'n\\n' > newdir/n.txt && printf 'a\\n' > a.txt" }
+  - { on: engine, wc: e, svn: [add, a.txt, newdir] }
+  - { on: svn15, wc: o, svn: [add, a.txt, newdir] }
+  - { on: engine, wc: e, svn: [delete, crlf.txt] }
+  - { on: svn15, wc: o, svn: [delete, crlf.txt] }
+  - { on: engine, wc: e, svn: [move, src/app.c, src/moved.c] }
+  - { on: svn15, wc: o, svn: [move, src/app.c, src/moved.c] }
+  - { on: engine, wc: e, svn: [move, docs, documentation] }
+  - { on: svn15, wc: o, svn: [move, docs, documentation] }
+  - { on: svn14, wc: e, svn: [status] }
+compare:
+  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e, right: o, checks: [status], reader: svn14 }

@@ -23,7 +23,10 @@
 
 /* Modified by OpenSVN: extracted from subversion/libsvn_wc/wc-metadata.sql at tag 1.14.5;
  * the STMT markers and the user_version define block were removed (OpenSVN sets
- * user_version = 31 from Rust). The statements themselves are unchanged. */
+ * user_version = 31 from Rust). The statements themselves are unchanged, except that the
+ * comment inside nodes_update_checksum_trigger now precedes the statement: svn strips comments
+ * when it builds its schema (transform_sql.py), so SQLite stores the trigger without it, and an
+ * OpenSVN wc.db now stores the same text. */
 
 /* ------------------------------------------------------------------------- */
 
@@ -496,10 +499,12 @@ BEGIN
   WHERE checksum = OLD.checksum;
 END;
 
+/* Upstream condition, commented out there:
+     WHEN NEW.checksum IS NOT OLD.checksum
+       AND (NEW.checksum IS NOT NULL OR OLD.checksum IS NOT NULL) */
 CREATE TRIGGER nodes_update_checksum_trigger
 AFTER UPDATE OF checksum ON nodes
 WHEN NEW.checksum IS NOT OLD.checksum
-  /* AND (NEW.checksum IS NOT NULL OR OLD.checksum IS NOT NULL) */
 BEGIN
   UPDATE pristine SET refcount = refcount + 1
   WHERE checksum = NEW.checksum;

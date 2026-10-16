@@ -1,10 +1,13 @@
 import { useQueryClient } from "@tanstack/react-query";
+import { X } from "lucide-react";
 import { useCallback } from "react";
 import { Button } from "../../../components/ui/button";
 import { EmptyState } from "../../../components/ui/empty-state";
+import { SafeText } from "../../../components/ui/safe-text";
 import { useToast } from "../../../components/ui/toast";
 import type { PathGrantInfo } from "../../../ipc/bindings";
 import { ipc, toAppError, unwrap } from "../../../ipc/client";
+import { useRecentUrls } from "../../../ipc/queries";
 import { queryKeys } from "../../../ipc/query-keys";
 import { useT } from "../../../lib/i18n/i18n";
 import { dialogStrings } from "../dialogs/dialog-strings";
@@ -61,23 +64,80 @@ export function WelcomeScreen() {
   const { openDialog } = useWcSession();
   const addExisting = useAddExistingWorkingCopy();
   return (
-    <EmptyState
-      title={t("welcomeTitle")}
-      description={`${t("welcomeHint")} ${t("dropHint")}`}
-      actions={
-        <>
-          <Button
-            variant="primary"
-            title={shortcutLabel("checkout")}
-            onClick={() => openDialog({ kind: "checkout" })}
+    <div className="flex h-full flex-col items-center justify-center gap-4 overflow-auto p-6">
+      <div className="h-auto">
+        <EmptyState
+          title={t("welcomeTitle")}
+          description={`${t("welcomeHint")} ${t("dropHint")}`}
+          actions={
+            <>
+              <Button
+                variant="primary"
+                title={shortcutLabel("checkout")}
+                onClick={() => openDialog({ kind: "checkout" })}
+              >
+                {t("checkoutAction")}
+              </Button>
+              <Button title={shortcutLabel("addExisting")} onClick={() => void addExisting()}>
+                {t("addExistingAction")}
+              </Button>
+            </>
+          }
+        />
+      </div>
+      <RecentRepositories onCheckout={(url) => openDialog({ kind: "checkout", url })} />
+    </div>
+  );
+}
+
+/**
+ * Repository URLs used recently (`app.sqlite` keeps a capped list): one click starts a checkout of
+ * one, and each can be removed from the list.
+ */
+function RecentRepositories({ onCheckout }: { onCheckout: (url: string) => void }) {
+  const t = useT(wcStrings);
+  const toast = useToast();
+  const qc = useQueryClient();
+  const recent = useRecentUrls();
+  const urls = recent.data ?? [];
+  if (urls.length === 0) return null;
+  const remove = async (url: string) => {
+    try {
+      const left = await unwrap(ipc().commands.recentUrlRemove(url));
+      qc.setQueryData(queryKeys.recentUrls, left);
+      toast.show(t("recentRemoved"));
+    } catch (e) {
+      toast.show(toAppError(e).message, 6000);
+    }
+  };
+  return (
+    <section aria-labelledby="welcome-recent" className="w-full max-w-[560px]">
+      <h2
+        id="welcome-recent"
+        className="m-0 mb-1.5 text-[11px] font-medium tracking-[.06em] text-muted-text uppercase"
+      >
+        {t("recentTitle")}
+      </h2>
+      <ul className="m-0 list-none rounded-md border border-line p-0">
+        {urls.map((url) => (
+          <li
+            key={url}
+            className="flex items-center gap-1.5 border-b border-line px-2 py-1 last:border-b-0"
           >
-            {t("checkoutAction")}
-          </Button>
-          <Button title={shortcutLabel("addExisting")} onClick={() => void addExisting()}>
-            {t("addExistingAction")}
-          </Button>
-        </>
-      }
-    />
+            <button
+              type="button"
+              aria-label={t("recentCheckout", { url })}
+              onClick={() => onCheckout(url)}
+              className="min-w-0 flex-1 cursor-pointer truncate border-0 bg-transparent p-0 text-left font-mono text-[12px] text-accent-text hover:underline"
+            >
+              <SafeText>{url}</SafeText>
+            </button>
+            <Button small aria-label={t("recentRemove", { url })} onClick={() => void remove(url)}>
+              <X size={14} aria-hidden="true" />
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }

@@ -13,14 +13,20 @@ import { SignInDialog } from "../features/remote/auth/sign-in-dialog";
 import { TrustCertDialog } from "../features/remote/auth/trust-cert-dialog";
 import { CreateBranchTagDialog } from "../features/remote/branch/create-branch-tag-dialog";
 import { RemoteEditDialog } from "../features/remote/browse/remote-edit-dialog";
+import { UploadDialog } from "../features/remote/browse/upload-dialog";
+import { CompareDialog } from "../features/remote/history/compare-dialog";
 import { RevisionDiffDialog } from "../features/remote/history/revision-diff-dialog";
 import { LockDialog } from "../features/remote/lock/lock-dialog";
 import { SettingsSheet } from "../features/remote/settings/settings-sheet";
+import { CheckoutDialog } from "../features/wc/dialogs/checkout-dialog";
 import { ShortcutsDialog } from "../features/wc/shortcuts-dialog";
+import { sparseStrings } from "../features/wc/sparse/sparse-strings";
+import { WcSessionProvider } from "../features/wc/wc-session";
+import { WelcomeScreen } from "../features/wc/welcome/welcome-screen";
 import type { AppError, OperationHandle } from "../ipc/bindings";
 import { applyProgress, newOpState, type OpState } from "../ipc/events";
 import { mockWorkingCopies } from "../ipc/mock/data";
-import { MOCK_REPO_ROOT } from "../ipc/mock/remote-data";
+import { MOCK_REPO_ROOT, mockLogWithPaths } from "../ipc/mock/remote-data";
 import type { Lang } from "../lib/i18n/i18n";
 import { expectNoSeriousA11yViolations, prepareDocument } from "../test-axe";
 import { renderApp, setupMockIpc, stubLayout } from "../test-utils";
@@ -278,6 +284,34 @@ const DIALOGS: [string, () => ReactElement][] = [
     ),
   ],
   [
+    "upload file",
+    () => <UploadDialog folderUrl={`${MOCK_REPO_ROOT}/trunk`} rev={48200} onClose={noop} />,
+  ],
+  [
+    "compare two revisions (file list)",
+    () => (
+      <CompareDialog
+        entries={mockLogWithPaths}
+        from={mockLogWithPaths[3]?.rev ?? 0}
+        to={mockLogWithPaths[0]?.rev ?? 0}
+        repoRootUrl={MOCK_REPO_ROOT}
+        onClose={noop}
+      />
+    ),
+  ],
+  [
+    "compare two revisions (diff)",
+    () => (
+      <RevisionDiffDialog
+        url={`${MOCK_REPO_ROOT}/trunk/src/engine/renderer.ts`}
+        from={48200}
+        rev={48210}
+        path="/trunk/src/engine/renderer.ts"
+        onClose={noop}
+      />
+    ),
+  ],
+  [
     "revision diff",
     () => (
       <RevisionDiffDialog
@@ -333,6 +367,40 @@ for (const lang of ["en", "vi"] as Lang[]) {
         await settle();
         await expectNoSeriousA11yViolations(`settings: ${page.textContent} (${lang})`);
       }
+    });
+
+    test("checkout with the folder tree open (Choose folders)", async () => {
+      const user = userEvent.setup();
+      renderApp(<CheckoutDialog onClose={noop} />);
+      const dlg = await screen.findByRole("dialog", { hidden: true });
+      await user.type(
+        within(dlg).getAllByRole("combobox", { hidden: true })[0] as HTMLElement,
+        `${MOCK_REPO_ROOT}/trunk`,
+      );
+      await user.click(
+        within(dlg).getByRole("button", { name: sparseStrings[lang].chooseFolders, hidden: true }),
+      );
+      await waitFor(() =>
+        expect(within(dlg).getAllByRole("combobox", { hidden: true }).length).toBeGreaterThan(3),
+      );
+      // One folder open, so a nested list is scanned too.
+      const expand = within(dlg)
+        .getAllByRole("button", { hidden: true })
+        .find((b) => b.getAttribute("aria-expanded") === "false" && b.querySelector("svg"));
+      await user.click(expand as HTMLElement);
+      await settle();
+      await expectNoSeriousA11yViolations(`checkout folder tree (${lang})`);
+    });
+
+    test("welcome with recent repositories", async () => {
+      renderApp(
+        <WcSessionProvider wc={null} files={[]}>
+          <WelcomeScreen />
+        </WcSessionProvider>,
+      );
+      await screen.findAllByRole("listitem");
+      await settle();
+      await expectNoSeriousA11yViolations(`welcome (${lang})`);
     });
 
     test("settings: remove-certificate and clear-cache confirmations", async () => {

@@ -1,8 +1,9 @@
 //! Read side of the BASE caches kept next to the node: the repository LOCK cache, the `dav_cache`
 //! blob and the `inherited_props` cache. All three belong to the BASE (`op_depth = 0`) row.
 //!
-//! Only readers live here; the lock cache is written through [`super::WcTxn::lock_add`] and
-//! [`super::WcTxn::lock_remove`].
+//! The lock cache is written through [`super::WcTxn::lock_add`] and
+//! [`super::WcTxn::lock_remove`]; the inherited-properties cache through
+//! [`WcDb::set_base_inherited_props`].
 
 use rusqlite::{Connection, OptionalExtension, params};
 use svn_types::{RelPath, Result};
@@ -120,6 +121,50 @@ impl WcDb {
             base_blob(c, self.wc_id, path, "dav_cache")?
                 .map(|b| decode_props(&b))
                 .transpose()
+        })
+    }
+
+    /// BASE nodes at or below `path` whose inherited-properties cache is set, sorted by path
+    /// (`svn_wc__get_cached_iprop_children`, before the depth filter).
+    pub fn iprop_cached_below(&self, path: &RelPath) -> Result<Vec<RelPath>> {
+        let rows: Vec<String> = self.with_read(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT local_relpath FROM nodes WHERE wc_id = ?1 AND op_depth = 0 \
+                     AND inherited_props IS NOT NULL AND (?2 = '' OR local_relpath = ?2 \
+                     OR substr(local_relpath, 1, length(?2) + 1) = ?2 || '/') \
+                     ORDER BY local_relpath",
+                )
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map(params![self.wc_id, path.as_str()], |r| r.get(0))
+                .map_err(sql_err)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sql_err)
+        })?;
+        rows.into_iter()
+            .map(|p| RelPath::new(&p).map_err(|_| corrupt(format!("bad relpath '{p}'"))))
+            .collect()
+    }
+
+    /// Stores (`Some`) or clears (`None`) the inherited-properties cache of the BASE node at
+    /// `path`, as svn's update editor does for the working copy root and switched nodes
+    /// (`svn_wc__db_base_add_*` with `iprops`). An empty list is stored as `()`: "cached, no
+    /// parent has properties". A missing BASE node is not an error (nothing to cache on).
+    pub fn set_base_inherited_props(
+        &self,
+        path: &RelPath,
+        iprops: Option<&InheritedProps>,
+    ) -> Result<()> {
+        let blob = iprops.map(|i| skel::unparse_iprops(i).unparse());
+        self.with_write(|tx| {
+            tx.execute(
+                "UPDATE nodes SET inherited_props = ?3 \
+                 WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = 0",
+                params![self.wc_id, path.as_str(), blob],
+            )
+            .map(|_| ())
+            .map_err(sql_err)
         })
     }
 

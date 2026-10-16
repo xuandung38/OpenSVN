@@ -4,7 +4,7 @@
 use opensvn_ipc::{
     AppError, CheckoutRequest, CleanupRequest, CommitRequest, Depth, ErrorCode, IncompleteCheckout,
     ItemProps, OpResult, OperationHandle, OperationKind, ResolveRequest, Rev, RevertRequest,
-    UpdateRequest, WcFormat, WcId,
+    SparseEntry, UpdateRequest, WcFormat, WcId,
 };
 use tauri::State;
 
@@ -483,6 +483,32 @@ pub async fn set_depth(
             title,
             move |engine, wc, ctx| async move {
                 engine.set_depth(&wc, &path, depth, &ctx).await?;
+                Ok(OpResult::Done)
+            },
+        )
+    })
+    .await
+}
+
+/// "Choose folders" on an existing working copy: sets the depth of each folder, parents first
+/// (`svn update --parents --set-depth` per folder; `""` is the root, which cannot be excluded),
+/// bringing in folders the working copy does not have. One operation; local changes are never
+/// removed.
+#[tauri::command]
+#[specta::specta]
+pub async fn wc_sparse_apply(
+    state: State<'_, AppState>,
+    wc_id: WcId,
+    entries: Vec<SparseEntry>,
+) -> Result<OperationHandle, AppError> {
+    guard(async {
+        crate::engine::mapping::sparse_steps(&entries, true).map_err(|e| AppError::from(&e))?;
+        state.start_wc_op(
+            OperationKind::SetDepth,
+            &wc_id,
+            "Choose folders".to_owned(),
+            move |engine, wc, ctx| async move {
+                engine.sparse_apply(&wc, &entries, &ctx).await?;
                 Ok(OpResult::Done)
             },
         )

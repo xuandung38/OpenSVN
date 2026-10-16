@@ -14,9 +14,6 @@ use crate::errors::invalid_argument;
 use crate::path_grants::MAIN_WINDOW;
 use crate::wc::checkout_target::expand_root;
 
-/// How many recent URLs the checkout dialog suggests.
-const RECENT_URL_LIMIT: u32 = 20;
-
 /// Every registered working copy, including ones whose folder is gone or moved (`missing`).
 #[tauri::command]
 #[specta::specta]
@@ -48,7 +45,21 @@ pub async fn wc_locate(
 #[tauri::command]
 #[specta::specta]
 pub async fn recent_urls(state: State<'_, AppState>) -> Result<Vec<String>, AppError> {
-    guard(async { Ok(state.db.recent_url_list(RECENT_URL_LIMIT)?) }).await
+    guard(async { Ok(state.db.recent_url_list(crate::db::RECENT_URL_CAP)?) }).await
+}
+
+/// Forgets a recent repository URL (the welcome screen's "Remove"); returns the list left.
+#[tauri::command]
+#[specta::specta]
+pub async fn recent_url_remove(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<Vec<String>, AppError> {
+    guard(async {
+        state.db.recent_url_remove(&url)?;
+        Ok(state.db.recent_url_list(crate::db::RECENT_URL_CAP)?)
+    })
+    .await
 }
 
 /// A folder grant for the default checkout folder (`general.checkoutRoot`), created when missing.

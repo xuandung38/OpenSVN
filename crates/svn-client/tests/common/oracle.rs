@@ -20,8 +20,16 @@ use svn_wc::skel::{Skel, parse_proplist};
 use super::{rp, session};
 use opensvn_svn_oracle as _;
 
-/// Resolves the oracle or reports a skip.
+/// Resolves the oracle or reports a skip. svn 1.14 and 1.15 write the same working copies for
+/// everything these tests compare, so either runs them (`OPENSVN_SVN_BIN=<svn 1.14.x>`); a test
+/// that needs 1.15 behaviour asks for [`oracle_1_15`].
 pub fn oracle() -> Option<Oracle> {
+    Oracle::resolve(MinVersion::V1_14).expect("oracle")
+}
+
+/// [`oracle`] for a case svn 1.14 gets wrong itself (it skips with a message on 1.14).
+#[allow(dead_code)]
+pub fn oracle_1_15() -> Option<Oracle> {
     Oracle::resolve(MinVersion::V1_15).expect("oracle")
 }
 

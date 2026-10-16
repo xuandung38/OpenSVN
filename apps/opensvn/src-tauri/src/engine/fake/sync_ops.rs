@@ -1,14 +1,19 @@
 //! Operations that talk to the fake repository: checkout, update, switch, commit, remote status.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use bytes::Bytes;
-use opensvn_ipc::{CommitRequest, Depth, FileKind, FileStatus, RemoteStatus, Rev, UpdateRequest};
+use opensvn_ipc::{
+    CommitRequest, Depth, FileKind, FileStatus, RemoteStatus, Rev, SparseDepth, SparseEntry,
+    UpdateRequest,
+};
 use svn_ra_api::RaSession;
 use svn_ra_api::fake::{FakeChange, FakeRaSession};
 use svn_types::{ErrorCode, NodeKind, PropChange, RelPath, Revnum, SvnError};
 
 use super::FakeEngine;
+use super::sparse::{Layout, Tree as SparseTree};
 use super::state::{FakeNode, FakeWc, Sched, rel};
 use crate::engine::context::{OpContext, ProgressUpdate};
 use crate::engine::facade::{CheckoutPlan, RemoteScan, WcInfo, WcRef};
@@ -160,11 +165,33 @@ impl FakeEngine {
             ignores: Vec::new(),
             dead_owner_locks: Vec::new(),
             foreign_locks: Vec::new(),
+            depths: BTreeMap::new(),
         };
+        // A sparse checkout: the checkout depth, then the folder depths, parents first.
+        let layout = match req.sparse.as_deref() {
+            Some(entries) if !entries.is_empty() => {
+                let tree = snap_tree(&snap);
+                let mut layout = Layout::checkout(&tree, sparse_of(req.depth));
+                for (path, depth) in crate::engine::mapping::sparse_steps(entries, false)? {
+                    layout.set_depth(&tree, &path, depth);
+                }
+                Some(layout)
+            }
+            _ => None,
+        };
+        if let Some(l) = &layout {
+            wc.depths = layout_depths(l);
+        } else if req.depth != Depth::Infinity {
+            wc.depths.insert(RelPath::root(), sparse_of(req.depth));
+        }
         for (i, (path, item)) in snap.items.into_iter().enumerate() {
             // Work-queue phase: a cancel here discards the partial working copy.
             self.queue_tick(ctx).await?;
-            if depth_allows(req.depth, &path, item.kind) {
+            let wanted = match &layout {
+                Some(l) => l.present.contains_key(&path),
+                None => depth_allows(req.depth, &path, item.kind),
+            };
+            if wanted {
                 let mut node = match item.kind {
                     FileKind::Dir => FakeNode::dir(snap.rev),
                     _ => FakeNode::file(&item.content, snap.rev),
@@ -667,5 +694,134 @@ fn finish_commit(w: &mut FakeWc, plan: &CommitPlan, rev: u64, keep_locks: bool) 
         if !keep_locks {
             n.lock = None;
         }
+    }
+}
+
+fn sparse_of(depth: Depth) -> SparseDepth {
+    match depth {
+        Depth::Empty => SparseDepth::Empty,
+        Depth::Files => SparseDepth::Files,
+        Depth::Immediates => SparseDepth::Immediates,
+        Depth::Infinity => SparseDepth::Infinity,
+    }
+}
+
+fn snap_tree(snap: &Snapshot) -> SparseTree {
+    snap.items
+        .iter()
+        .map(|(p, i)| (p.clone(), i.kind))
+        .collect()
+}
+
+/// What `FakeWc::depths` keeps of a layout: folders not at depth infinity, and excluded ones.
+fn layout_depths(l: &Layout) -> BTreeMap<RelPath, SparseDepth> {
+    l.present
+        .iter()
+        .filter_map(|(p, d)| {
+            d.filter(|d| *d != SparseDepth::Infinity)
+                .map(|d| (p.clone(), d))
+        })
+        .chain(l.excluded.iter().map(|p| (p.clone(), SparseDepth::Exclude)))
+        .collect()
+}
+
+/// The layout of an existing fake working copy.
+fn wc_layout(wc: &FakeWc) -> Layout {
+    let mut l = Layout::default();
+    for (p, n) in &wc.nodes {
+        if n.sched == Sched::Unversioned || n.sched == Sched::Added {
+            continue;
+        }
+        let d = (n.kind == FileKind::Dir).then(|| {
+            wc.depths
+                .get(p)
+                .copied()
+                .filter(|d| *d != SparseDepth::Exclude)
+                .unwrap_or(SparseDepth::Infinity)
+        });
+        l.present.insert(p.clone(), d);
+    }
+    l.present.entry(RelPath::root()).or_insert(Some(
+        wc.depths
+            .get(&RelPath::root())
+            .copied()
+            .unwrap_or(SparseDepth::Infinity),
+    ));
+    l.excluded = wc
+        .depths
+        .iter()
+        .filter(|(_, d)| **d == SparseDepth::Exclude)
+        .map(|(p, _)| p.clone())
+        .collect();
+    l
+}
+
+impl FakeEngine {
+    pub(super) fn do_wc_depths(&self, root: &Path) -> Result<Vec<SparseEntry>, SvnError> {
+        self.with_wc(root, |wc| {
+            Ok(wc_layout(wc)
+                .depths()
+                .into_iter()
+                .map(|(p, depth)| SparseEntry {
+                    path: p.as_str().to_owned(),
+                    depth,
+                })
+                .collect())
+        })
+    }
+
+    /// "Choose folders": the new layout from HEAD; folders that leave the working copy must be
+    /// unmodified.
+    pub(super) async fn do_sparse_apply(
+        &self,
+        wc: &WcRef,
+        entries: &[SparseEntry],
+        ctx: &OpContext,
+    ) -> Result<(), SvnError> {
+        ctx.check()?;
+        let steps = crate::engine::mapping::sparse_steps(entries, true)?;
+        let (url, before) = self.with_wc(&wc.root, |w| Ok((w.info().url, wc_layout(w))))?;
+        let (session, base) = self.locate(&url)?;
+        session.ensure_authenticated(&ctx.cancel).await?;
+        let snap = self.snapshot(&session, &base, None, ctx).await?;
+        let tree = snap_tree(&snap);
+        let mut after = before.clone();
+        for (path, depth) in &steps {
+            after.set_depth(&tree, path, *depth);
+        }
+        self.with_wc(&wc.root, |w| {
+            let dropped: Vec<RelPath> = before
+                .present
+                .keys()
+                .filter(|p| !after.present.contains_key(*p))
+                .cloned()
+                .collect();
+            if dropped.iter().any(|p| {
+                w.nodes
+                    .get(p)
+                    .is_some_and(|n| n.sched != Sched::Normal || n.work != n.base || n.conflicted)
+            }) {
+                return Err(SvnError::new(
+                    ErrorCode::WcInvalidOperation,
+                    "cannot reduce depth: local changes below",
+                ));
+            }
+            for p in dropped {
+                w.nodes.remove(&p);
+            }
+            for (path, item) in &snap.items {
+                if after.present.contains_key(path) && !w.nodes.contains_key(path) {
+                    let mut node = match item.kind {
+                        FileKind::Dir => FakeNode::dir(snap.rev),
+                        _ => FakeNode::file(&item.content, snap.rev),
+                    };
+                    node.props = item.props.clone();
+                    node.base_props = item.props.clone();
+                    w.nodes.insert(path.clone(), node);
+                }
+            }
+            w.depths = layout_depths(&after);
+            Ok(())
+        })
     }
 }

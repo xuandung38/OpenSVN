@@ -28,7 +28,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use opensvn_ipc::{ConnectionWait, Depth, OpStage, Rev, UpdateRequest, WcFormat};
+use opensvn_ipc::{
+    ConnectionWait, Depth, OpStage, Rev, SparseDepth, SparseEntry, UpdateRequest, WcFormat,
+};
 use svn_ra_api::RaSession;
 use svn_types::{CancelToken, ErrorCode, RelPath, RepoUrl, Revnum, SvnError};
 
@@ -37,11 +39,6 @@ use super::{ConnectOptions, RealEngine, SessionConnector, wc_read};
 use crate::engine::context::{OpContext, ProgressUpdate};
 use crate::engine::facade::{CheckoutPlan, EngineResult, WcInfo, WcRef};
 
-/// Error of a feature the real engine does not offer yet; the message is shown to the user.
-fn unsupported(message: impl Into<String>) -> SvnError {
-    SvnError::new(ErrorCode::WcInvalidOperation, message)
-}
-
 /// `svn-client` depth of an IPC depth.
 fn client_depth(depth: Depth) -> svn_types::Depth {
     match depth {
@@ -49,6 +46,37 @@ fn client_depth(depth: Depth) -> svn_types::Depth {
         Depth::Files => svn_types::Depth::Files,
         Depth::Immediates => svn_types::Depth::Immediates,
         Depth::Infinity => svn_types::Depth::Infinity,
+    }
+}
+
+/// The folders of a sparse checkout in the order they are applied (parents first, see
+/// [`crate::engine::mapping::sparse_steps`]), with `svn-client` depths.
+fn sparse_steps(
+    entries: &[SparseEntry],
+    with_root: bool,
+) -> EngineResult<Vec<(RelPath, svn_types::Depth)>> {
+    Ok(crate::engine::mapping::sparse_steps(entries, with_root)?
+        .into_iter()
+        .map(|(rel, depth)| {
+            let depth = match depth {
+                SparseDepth::Empty => svn_types::Depth::Empty,
+                SparseDepth::Files => svn_types::Depth::Files,
+                SparseDepth::Immediates => svn_types::Depth::Immediates,
+                SparseDepth::Infinity => svn_types::Depth::Infinity,
+                SparseDepth::Exclude => svn_types::Depth::Exclude,
+            };
+            (rel, depth)
+        })
+        .collect())
+}
+
+/// IPC folder depth of a recorded directory depth.
+fn sparse_depth(depth: svn_types::Depth) -> SparseDepth {
+    match depth {
+        svn_types::Depth::Empty => SparseDepth::Empty,
+        svn_types::Depth::Files => SparseDepth::Files,
+        svn_types::Depth::Immediates => SparseDepth::Immediates,
+        _ => SparseDepth::Infinity,
     }
 }
 
@@ -248,12 +276,7 @@ impl RealEngine {
                  check out with pristine copies instead",
             ));
         }
-        if plan.sparse.as_ref().is_some_and(|s| !s.is_empty()) {
-            return Err(unsupported(
-                "sparse checkouts (a different depth per folder) are not supported yet; check \
-                 out with a single depth instead",
-            ));
-        }
+        let sparse = sparse_steps(plan.sparse.as_deref().unwrap_or_default(), false)?;
         if !plan.path.is_absolute() {
             return Err(SvnError::new(
                 ErrorCode::Internal,
@@ -265,20 +288,86 @@ impl RealEngine {
         let session = self.session_at(&plan.url, ctx).await?;
         ctx.progress
             .report(ProgressUpdate::stage(PHASE_CHECKOUT, OpStage::Fetching));
-        let summary = svn_client::checkout(
-            &self.sync_ctx(ctx, PHASE_CHECKOUT, plan.ignore_externals),
-            session.as_ref(),
+        if sparse.is_empty() {
+            let summary = svn_client::checkout(
+                &self.sync_ctx(ctx, PHASE_CHECKOUT, plan.ignore_externals),
+                session.as_ref(),
+                &plan.path,
+                plan.rev.map(|r| Revnum(r.0)),
+                client_depth(plan.depth),
+                false,
+                &ctx.cancel,
+            )
+            .await?;
+            report_external_warnings(&summary, ctx);
+        } else {
+            self.sparse_checkout(plan, &sparse, session.as_ref(), ctx)
+                .await?;
+        }
+        ctx.progress
+            .report(ProgressUpdate::stage(PHASE_CHECKOUT, OpStage::Finishing));
+        wc_read::wc_info(&plan.path, ctx).await
+    }
+
+    /// A checkout with a depth per folder: the root at `plan.depth`, then every folder of
+    /// `steps` (parents first) like `svn update --parents --set-depth`, all at one revision.
+    /// The working copy ends up as svn 1.15 leaves it after the same commands. Externals come
+    /// last, through an update of the root at that revision, so only those of folders the
+    /// working copy has are fetched.
+    async fn sparse_checkout(
+        &self,
+        plan: &CheckoutPlan,
+        steps: &[(RelPath, svn_types::Depth)],
+        session: &dyn RaSession,
+        ctx: &OpContext,
+    ) -> EngineResult<()> {
+        let rev = match plan.rev {
+            Some(r) => Revnum(r.0),
+            None => session.youngest_rev(&ctx.cancel).await?,
+        };
+        let client = self.sync_ctx(ctx, PHASE_CHECKOUT, true);
+        svn_client::checkout(
+            &client,
+            session,
             &plan.path,
-            plan.rev.map(|r| Revnum(r.0)),
+            Some(rev),
             client_depth(plan.depth),
             false,
             &ctx.cancel,
         )
         .await?;
-        ctx.progress
-            .report(ProgressUpdate::stage(PHASE_CHECKOUT, OpStage::Finishing));
-        report_external_warnings(&summary, ctx);
-        wc_read::wc_info(&plan.path, ctx).await
+        for (rel, depth) in steps {
+            ctx.check()?;
+            let target = svn_types::safe_join(&plan.path, rel)?;
+            if *depth == svn_types::Depth::Exclude {
+                // Only what the working copy has can be excluded; the rest stays out anyway.
+                svn_client::set_depth(&client, session, &target, Some(rev), *depth, &ctx.cancel)
+                    .await?;
+            } else {
+                svn_client::set_depth_parents(
+                    &client,
+                    session,
+                    &target,
+                    Some(rev),
+                    *depth,
+                    &ctx.cancel,
+                )
+                .await?;
+            }
+        }
+        if !plan.ignore_externals {
+            let summary = svn_client::update(
+                &self.sync_ctx(ctx, PHASE_CHECKOUT, false),
+                session,
+                &plan.path,
+                Some(rev),
+                svn_types::Depth::Unknown,
+                &ctx.cancel,
+            )
+            .await?;
+            report_external_warnings(&summary, ctx);
+        }
+        Ok(())
     }
 
     /// Updates the given paths, all to the same revision, with their externals unless
@@ -370,7 +459,9 @@ impl RealEngine {
     }
 
     /// `svn update --set-depth DEPTH PATH`: crops (never removing locally modified items) or
-    /// widens the folder, then updates it to HEAD at the new depth.
+    /// widens the folder, then updates it to HEAD at the new depth. A folder the working copy
+    /// does not have yet (outside its parent's depth, or excluded) is brought in with the
+    /// folders above it that are missing too (`svn update --parents --set-depth`).
     pub(super) async fn do_set_depth(
         &self,
         wc: &WcRef,
@@ -378,43 +469,130 @@ impl RealEngine {
         depth: Depth,
         ctx: &OpContext,
     ) -> EngineResult<()> {
+        self.do_set_depth_inner(wc, path, client_depth(depth), ctx)
+            .await
+    }
+
+    /// The recorded depth of every folder below the root (see [`crate::engine::EngineFacade::wc_depths`]).
+    pub(super) async fn do_wc_depths(
+        &self,
+        wc: &WcRef,
+        ctx: &OpContext,
+    ) -> EngineResult<Vec<SparseEntry>> {
+        ctx.check()?;
+        let root = wc.root.clone();
+        wc_read::blocking(move || {
+            let db = wc_read::open_db(&root)?;
+            let root_depth = db
+                .read_base(&RelPath::root())?
+                .and_then(|n| n.depth)
+                .unwrap_or(svn_types::Depth::Infinity);
+            let mut out = vec![SparseEntry {
+                path: String::new(),
+                depth: sparse_depth(root_depth),
+            }];
+            let mut stack = vec![RelPath::root()];
+            while let Some(dir) = stack.pop() {
+                let mut subdirs = Vec::new();
+                for node in db.base_children(&dir)? {
+                    if node.kind != svn_types::NodeKind::Dir || node.file_external {
+                        continue;
+                    }
+                    let depth = match node.presence {
+                        svn_wc::db::Presence::Excluded => SparseDepth::Exclude,
+                        p if p.is_present() => {
+                            sparse_depth(node.depth.unwrap_or(svn_types::Depth::Infinity))
+                        }
+                        _ => continue,
+                    };
+                    if depth != SparseDepth::Exclude {
+                        subdirs.push(node.relpath.clone());
+                    }
+                    out.push(SparseEntry {
+                        path: node.relpath.as_str().to_owned(),
+                        depth,
+                    });
+                }
+                stack.extend(subdirs);
+            }
+            out.sort_by_cached_key(|e| e.path.split('/').map(str::to_owned).collect::<Vec<_>>());
+            Ok(out)
+        })
+        .await
+    }
+
+    /// Sets the depth of several folders, parents first (see [`crate::engine::EngineFacade::sparse_apply`]).
+    pub(super) async fn do_sparse_apply(
+        &self,
+        wc: &WcRef,
+        entries: &[SparseEntry],
+        ctx: &OpContext,
+    ) -> EngineResult<()> {
+        for (rel, depth) in sparse_steps(entries, true)? {
+            self.do_set_depth_inner(wc, rel.as_str(), depth, ctx)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::do_set_depth`] with every svn depth, `exclude` included.
+    pub(super) async fn do_set_depth_inner(
+        &self,
+        wc: &WcRef,
+        path: &str,
+        depth: svn_types::Depth,
+        ctx: &OpContext,
+    ) -> EngineResult<()> {
         ctx.check()?;
         let rel = RelPath::new(path)?;
         let target = svn_types::safe_join(&wc.root, &rel)?;
-        // The session is anchored at the folder itself, so the drive targets the session root
-        // (the report then starts with the folder, as the HTTP layer requires).
+        // A present folder: the session is anchored at the folder itself, so the drive targets
+        // the session root (the report then starts with the folder, as the HTTP layer
+        // requires). A missing one is added by a drive anchored at the working copy root.
         let (root, rel2) = (wc.root.clone(), rel.clone());
-        let url = wc_read::blocking(move || {
+        let (url, absent) = wc_read::blocking(move || {
             let db = wc_read::open_db(&root)?;
             let (repos_root, _) = svn_client::wc::repos_identity(&db)?;
-            let base = db.read_base(&rel2)?.ok_or_else(|| {
-                SvnError::new(
-                    ErrorCode::PathNotFound,
-                    format!("'{rel2}' is not under version control"),
-                )
-            })?;
             let root_url = RepoUrl::parse(&repos_root)?;
-            match base.repos_relpath.as_deref() {
-                Some(p) if !p.is_empty() && base.kind == svn_types::NodeKind::Dir => {
-                    Ok(root_url.join(&RelPath::new(p)?)?.to_string())
+            let base = db.read_base(&rel2)?;
+            match base.as_ref().filter(|b| b.presence.is_present()) {
+                Some(b) => match b.repos_relpath.as_deref() {
+                    Some(p) if !p.is_empty() && b.kind == svn_types::NodeKind::Dir => {
+                        Ok((root_url.join(&RelPath::new(p)?)?.to_string(), false))
+                    }
+                    // A file has no depth: svn-client refuses it before talking to the server.
+                    Some("") if b.kind == svn_types::NodeKind::Dir => {
+                        Ok((root_url.to_string(), false))
+                    }
+                    _ => Ok((wc_read::describe(&db)?.url, false)),
+                },
+                None if rel2.is_root() || db.read_node(&rel2)?.is_some_and(|c| c.op_depth > 0) => {
+                    Err(SvnError::new(
+                        ErrorCode::PathNotFound,
+                        format!("'{rel2}' is not under version control"),
+                    ))
                 }
-                // A file has no depth: svn-client refuses it before talking to the server.
-                Some("") if base.kind == svn_types::NodeKind::Dir => Ok(root_url.to_string()),
-                _ => Ok(wc_read::describe(&db)?.url),
+                None => Ok((wc_read::describe(&db)?.url, true)),
             }
         })
         .await?;
         let session = self.session_at(&url, ctx).await?;
         // `svn-client::set_depth` does not process externals (svn's `--set-depth` would).
-        svn_client::set_depth(
-            &self.sync_ctx(ctx, PHASE_UPDATE, true),
-            session.as_ref(),
-            &target,
-            None,
-            client_depth(depth),
-            &ctx.cancel,
-        )
-        .await?;
+        let client = self.sync_ctx(ctx, PHASE_UPDATE, true);
+        if absent && depth != svn_types::Depth::Exclude {
+            svn_client::set_depth_parents(
+                &client,
+                session.as_ref(),
+                &target,
+                None,
+                depth,
+                &ctx.cancel,
+            )
+            .await?;
+        } else {
+            svn_client::set_depth(&client, session.as_ref(), &target, None, depth, &ctx.cancel)
+                .await?;
+        }
         Ok(())
     }
 }

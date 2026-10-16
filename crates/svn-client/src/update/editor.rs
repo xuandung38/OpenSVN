@@ -880,8 +880,12 @@ impl DeltaEditor for UpdateEditor {
         }
         let name = wc.file_name().unwrap_or("").to_owned();
         let new_repos = repos_child(&p.repos, &name);
-        // Below an `immediates` level a new directory starts out empty, as in svn.
-        let depth = if p.limit == Depth::Immediates || p.depth == Depth::Immediates {
+        // Below an `immediates` level a new directory starts out empty, as in svn. The target
+        // of the drive itself (brought in by `--set-depth`) gets the requested depth, like
+        // svn's `add_directory`.
+        let depth = if wc == self.target_wc {
+            concrete(self.s.depth)
+        } else if p.limit == Depth::Immediates || p.depth == Depth::Immediates {
             Depth::Empty
         } else {
             Depth::Infinity

@@ -20,6 +20,7 @@ mod conflict_record;
 mod editor;
 mod file_install;
 mod finish;
+mod iprops;
 mod props;
 mod reporter;
 mod restore;
@@ -28,6 +29,7 @@ mod state;
 mod text_sink;
 
 pub use editor::UpdateEditor;
+pub(crate) use iprops::to_cache as iprops_cache;
 pub use props::{PropMerge, merge_props};
 pub use reporter::build_report;
 pub(crate) use run::RECONNECT_DELAYS;

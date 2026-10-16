@@ -71,6 +71,42 @@ pub(crate) fn log_entry(e: svn_types::LogEntry) -> LogEntry {
     }
 }
 
+/// The folder depths of a sparse checkout or "Choose folders", parents first; a folder given
+/// twice is refused. The root (`""`) may only be listed by "Choose folders" (`with_root`; a
+/// checkout's root takes the checkout depth) and never be excluded.
+pub(crate) fn sparse_steps(
+    entries: &[opensvn_ipc::SparseEntry],
+    with_root: bool,
+) -> Result<Vec<(svn_types::RelPath, opensvn_ipc::SparseDepth)>, svn_types::SvnError> {
+    let mut steps = entries
+        .iter()
+        .map(|e| {
+            let p = svn_types::RelPath::new(&e.path)?;
+            if p.is_root() && !with_root {
+                return Err(svn_types::SvnError::new(
+                    svn_types::ErrorCode::WcInvalidOperation,
+                    "the depth of the checkout root is the checkout depth, not a folder depth",
+                ));
+            }
+            if p.is_root() && e.depth == opensvn_ipc::SparseDepth::Exclude {
+                return Err(svn_types::SvnError::new(
+                    svn_types::ErrorCode::WcInvalidOperation,
+                    "the working copy root cannot be excluded",
+                ));
+            }
+            Ok((p, e.depth))
+        })
+        .collect::<Result<Vec<_>, svn_types::SvnError>>()?;
+    steps.sort_by_cached_key(|(p, _)| p.components().map(str::to_owned).collect::<Vec<_>>());
+    if let Some(w) = steps.windows(2).find(|w| w[0].0 == w[1].0) {
+        return Err(svn_types::SvnError::new(
+            svn_types::ErrorCode::WcInvalidOperation,
+            format!("the folder '{}' is listed twice", w[0].0),
+        ));
+    }
+    Ok(steps)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

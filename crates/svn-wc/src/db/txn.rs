@@ -184,7 +184,136 @@ impl WcTxn<'_> {
         let Some(node) = self.read_base(root)? else {
             return Ok(());
         };
-        self.bump_node(node, to_i64(rev)?, depth, skipped, None, true, false)
+        self.bump_node(node, to_i64(rev)?, depth, skipped, None, true, false)?;
+        self.bump_moved_away(root)
+    }
+
+    /// The end of svn's `bump_revisions_post_update`: `bump_moved_away`, for the moves whose
+    /// source the update left as the destination copied it. svn then replaces the moved-here
+    /// layer with the source's new BASE (`replace_moved_layer`); content being equal, that
+    /// changes only the revisions, so the destination is based on the revision the source now
+    /// is. A move whose source has a conflict, or whose source changed, is left alone (svn
+    /// raises a "moved away, incoming edit" tree conflict there instead).
+    fn bump_moved_away(&self, root: &RelPath) -> Result<()> {
+        let moves: Vec<(String, String)> = {
+            let mut stmt = self
+                .conn
+                .prepare(&format!(
+                    "SELECT local_relpath, moved_to FROM nodes WHERE wc_id = ?1 AND op_depth > 0 \
+                     AND moved_to IS NOT NULL AND (?2 = '' OR {})",
+                    scope_sql()
+                ))
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map(params![self.wc_id, root.as_str()], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .map_err(sql_err)?;
+            rows.collect::<rusqlite::Result<_>>().map_err(sql_err)?
+        };
+        for (src, dst) in moves {
+            let conflicted: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM actual_node WHERE wc_id = ?1 \
+                     AND local_relpath = ?2 AND conflict_data IS NOT NULL)",
+                    params![self.wc_id, src],
+                    |r| r.get(0),
+                )
+                .map_err(sql_err)?;
+            if conflicted {
+                continue;
+            }
+            let dst_rel =
+                RelPath::new(&dst).map_err(|_| nodes::corrupt(format!("bad moved_to '{dst}'")))?;
+            let src_rows = self.layer_rows(&src, 0)?;
+            let dst_rows = self.layer_rows(&dst, i64::from(relpath_depth(&dst_rel)))?;
+            let same = src_rows.len() == dst_rows.len()
+                && src_rows.iter().all(|(k, s)| {
+                    dst_rows.get(k).is_some_and(|d| {
+                        s.presence == d.presence
+                            && s.kind == d.kind
+                            && s.checksum == d.checksum
+                            && s.repos_path == d.repos_path
+                            && s.props == d.props
+                    })
+                });
+            if !same
+                || src_rows
+                    .iter()
+                    .all(|(k, s)| dst_rows[k].revision == s.revision)
+            {
+                continue;
+            }
+            let op_depth = i64::from(relpath_depth(&dst_rel));
+            for (suffix, s) in &src_rows {
+                super::connection::cached_exec(
+                    self.conn,
+                    "UPDATE nodes SET revision = ?4, changed_revision = ?5, changed_date = ?6, \
+                     changed_author = ?7 WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = ?3",
+                    params![
+                        self.wc_id,
+                        format!("{dst}{suffix}"),
+                        op_depth,
+                        s.revision,
+                        s.changed_revision,
+                        s.changed_date,
+                        s.changed_author
+                    ],
+                )
+                .map_err(sql_err)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Rows of `path` and its descendants at `op_depth`, keyed by the part of the path below
+    /// `path` (`""` or `/name...`), with properties decoded so their order does not matter.
+    fn layer_rows(
+        &self,
+        path: &str,
+        op_depth: i64,
+    ) -> Result<std::collections::BTreeMap<String, LayerRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT local_relpath, presence, kind, checksum, properties, repos_path, revision, \
+                 changed_revision, changed_date, changed_author FROM nodes \
+                 WHERE wc_id = ?1 AND op_depth = ?3 AND {}",
+                scope_sql()
+            ))
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![self.wc_id, path, op_depth], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<Vec<u8>>>(4)?,
+                    LayerRow {
+                        presence: r.get(1)?,
+                        kind: r.get(2)?,
+                        checksum: r.get(3)?,
+                        props: Vec::new(),
+                        repos_path: r.get(5)?,
+                        revision: r.get(6)?,
+                        changed_revision: r.get(7)?,
+                        changed_date: r.get(8)?,
+                        changed_author: r.get(9)?,
+                    },
+                ))
+            })
+            .map_err(sql_err)?;
+        let mut out = std::collections::BTreeMap::new();
+        for row in rows {
+            let (rel, props, mut row) = row.map_err(sql_err)?;
+            let mut props = match props {
+                Some(b) => nodes::decode_props(&b)?,
+                None => Props::new(),
+            };
+            props.sort();
+            row.props = props;
+            out.insert(rel[path.len()..].to_owned(), row);
+        }
+        Ok(out)
     }
 
     /// [`WcTxn::bump_revisions_post_update`] after a switch of `root` to `new_repos_relpath`:
@@ -216,7 +345,8 @@ impl WcTxn<'_> {
             Some(new_repos_relpath),
             true,
             false,
-        )
+        )?;
+        self.bump_moved_away(root)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -885,4 +1015,17 @@ impl WcTxn<'_> {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// One `NODES` row as [`WcTxn::bump_moved_away`] compares and copies it.
+struct LayerRow {
+    presence: String,
+    kind: String,
+    checksum: Option<String>,
+    props: Props,
+    repos_path: Option<String>,
+    revision: Option<i64>,
+    changed_revision: Option<i64>,
+    changed_date: Option<i64>,
+    changed_author: Option<String>,
 }

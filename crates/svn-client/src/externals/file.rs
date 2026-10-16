@@ -87,6 +87,16 @@ pub(super) async fn ensure(
         return Err(not_in_repository(url, &wc_root));
     }
     let fetched = fetch(session.as_ref(), &db, &name, rev, job).await?;
+    // svn caches what the file inherits at its repository location (a file external is an
+    // update root); a server that cannot say leaves the empty cache `mark_file_external` sets.
+    let iprops = match session
+        .inherited_props(&RelPath::new(&wanted)?, rev, job.cancel)
+        .await
+    {
+        Ok(items) => Some(crate::update::iprops_cache(items)),
+        Err(e) if e.code == ErrorCode::ServerUnsupported => None,
+        Err(e) => return Err(e),
+    };
     let reg = NewExternal {
         kind: NodeKind::File,
         repos_root: wc_root.trim_end_matches('/').to_owned(),
@@ -119,6 +129,10 @@ pub(super) async fn ensure(
         )
     })
     .await?;
+    if let Some(iprops) = iprops {
+        let (db, local) = (Arc::clone(job.db), job.local.clone());
+        blocking(move || db.set_base_inherited_props(&local, Some(&iprops))).await?;
+    }
     let action = if existed {
         ExternalAction::Updated
     } else {

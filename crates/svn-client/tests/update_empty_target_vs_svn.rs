@@ -11,7 +11,8 @@
 //! `new.txt` (with a property and a changelist) and makes the directory `sub` (with an added
 //! child), then removes `new.txt` and `sub` from disk.
 //!
-//! Skipped when no svn 1.15 is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
+//! Skipped when no svn 1.14+ is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`); the
+//! case with working rows below the target needs svn 1.15 (1.14 fails it itself).
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod common;
@@ -125,7 +126,9 @@ fn differences(oracle: &opensvn_svn_oracle::Oracle, theirs: &Path, ours: &Path) 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn update_of_an_empty_target_with_working_rows_below_matches_svn() {
-    let Some(oracle) = oracle() else { return };
+    // svn 1.14.3 fails this update itself ("Can't install 'A/E/new.txt' from pristine store,
+    // because no checksum is recorded"); 1.15 fixed it.
+    let Some(oracle) = oracle_1_15() else { return };
     let repo = Repo::new(&oracle);
     build(&repo);
     let sb = Sandbox::new();
