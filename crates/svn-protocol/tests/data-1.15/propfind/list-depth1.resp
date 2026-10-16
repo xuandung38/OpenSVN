@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:ns1="http://subversion.tigris.org/xmlns/dav/" xmlns:ns0="DAV:">
+<D:response xmlns:lp1="DAV:" xmlns:lp2="http://subversion.tigris.org/xmlns/dav/" xmlns:g0="DAV:">
+<D:href>/svn/repo/!svn/rvr/5/trunk/</D:href>
+<D:propstat>
+<D:prop>
+<lp1:resourcetype><D:collection/></lp1:resourcetype>
+<lp2:deadprop-count>0</lp2:deadprop-count>
+<lp1:version-name>4</lp1:version-name>
+<lp1:creationdate>2026-10-15T15:12:51.865285Z</lp1:creationdate>
+<lp1:creator-displayname>alice</lp1:creator-displayname>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+<D:propstat>
+<D:prop>
+<g0:getcontentlength/>
+</D:prop>
+<D:status>HTTP/1.1 404 Not Found</D:status>
+</D:propstat>
+</D:response>
+<D:response xmlns:lp1="DAV:" xmlns:lp2="http://subversion.tigris.org/xmlns/dav/" xmlns:g0="DAV:">
+<D:href>/svn/repo/!svn/rvr/5/trunk/src/</D:href>
+<D:propstat>
+<D:prop>
+<lp1:resourcetype><D:collection/></lp1:resourcetype>
+<lp2:deadprop-count>0</lp2:deadprop-count>
+<lp1:version-name>2</lp1:version-name>
+<lp1:creationdate>2026-10-15T15:12:51.435464Z</lp1:creationdate>
+<lp1:creator-displayname>alice</lp1:creator-displayname>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+<D:propstat>
+<D:prop>
+<g0:getcontentlength/>
+</D:prop>
+<D:status>HTTP/1.1 404 Not Found</D:status>
+</D:propstat>
+</D:response>
+<D:response xmlns:lp1="DAV:" xmlns:lp2="http://subversion.tigris.org/xmlns/dav/" xmlns:g0="DAV:">
+<D:href>/svn/repo/!svn/rvr/5/trunk/docs/</D:href>
+<D:propstat>
+<D:prop>
+<lp1:resourcetype><D:collection/></lp1:resourcetype>
+<lp2:deadprop-count>0</lp2:deadprop-count>
+<lp1:version-name>4</lp1:version-name>
+<lp1:creationdate>2026-10-15T15:12:51.865285Z</lp1:creationdate>
+<lp1:creator-displayname>alice</lp1:creator-displayname>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+<D:propstat>
+<D:prop>
+<g0:getcontentlength/>
+</D:prop>
+<D:status>HTTP/1.1 404 Not Found</D:status>
+</D:propstat>
+</D:response>
+<D:response xmlns:lp1="DAV:" xmlns:lp2="http://subversion.tigris.org/xmlns/dav/">
+<D:href>/svn/repo/!svn/rvr/5/trunk/unicod%c3%a9%20file.txt</D:href>
+<D:propstat>
+<D:prop>
+<lp1:resourcetype/>
+<lp1:getcontentlength>10</lp1:getcontentlength>
+<lp2:deadprop-count>0</lp2:deadprop-count>
+<lp1:version-name>2</lp1:version-name>
+<lp1:creationdate>2026-10-15T15:12:51.435464Z</lp1:creationdate>
+<lp1:creator-displayname>alice</lp1:creator-displayname>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+</D:response>
+<D:response xmlns:lp1="DAV:" xmlns:lp2="http://subversion.tigris.org/xmlns/dav/">
+<D:href>/svn/repo/!svn/rvr/5/trunk/a.txt</D:href>
+<D:propstat>
+<D:prop>
+<lp1:resourcetype/>
+<lp1:getcontentlength>17</lp1:getcontentlength>
+<lp2:deadprop-count>1</lp2:deadprop-count>
+<lp1:version-name>3</lp1:version-name>
+<lp1:creationdate>2026-10-15T15:12:51.633372Z</lp1:creationdate>
+<lp1:creator-displayname>alice</lp1:creator-displayname>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+</D:response>
+</D:multistatus>

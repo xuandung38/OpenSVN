@@ -113,7 +113,8 @@ pub async fn repository_reads(h: &dyn Harness) {
     let entries = e
         .repo_list(&format!("{url}/trunk"), None, &ctx())
         .await
-        .expect("list");
+        .expect("list")
+        .entries;
     let names: Vec<_> = entries.iter().map(|x| x.name.as_str()).collect();
     assert!(
         names.contains(&"README.md") && names.contains(&"src"),
@@ -693,7 +694,13 @@ pub async fn switch_to_a_branch(h: &dyn Harness) {
     .expect("copy");
     let (wc, _) = checkout(h, "switch", None).await;
     let reached = e
-        .switch(&wc, &format!("{url}/branches/switch-target"), None, &ctx())
+        .switch(
+            &wc,
+            &format!("{url}/branches/switch-target"),
+            None,
+            false,
+            &ctx(),
+        )
         .await
         .expect("switch");
     let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
@@ -756,7 +763,7 @@ pub async fn branch_detection_follows_a_switch(h: &dyn Harness) {
         .iter()
         .find(|n| n.kind == BranchKind::Branch && n.name == "feature-y")
         .expect("listed branch");
-    e.switch(&wc, &target.url, None, &ctx())
+    e.switch(&wc, &target.url, None, false, &ctx())
         .await
         .expect("switch");
     let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
@@ -775,7 +782,7 @@ pub async fn branch_detection_follows_a_switch(h: &dyn Harness) {
     );
     assert_eq!(current.url, target.url);
 
-    e.switch(&wc, &format!("{url}/lib-copy"), None, &ctx())
+    e.switch(&wc, &format!("{url}/lib-copy"), None, false, &ctx())
         .await
         .expect("switch outside the layout");
     let info = e.wc_info(&wc.root, &ctx()).await.expect("info");
@@ -1107,6 +1114,7 @@ pub async fn commit_with_auto_add_remove(h: &dyn Harness) {
         .repo_list(&format!("{url}/trunk"), None, &ctx())
         .await
         .expect("list")
+        .entries
         .into_iter()
         .map(|x| x.name)
         .collect();

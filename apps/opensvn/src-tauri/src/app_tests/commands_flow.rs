@@ -619,9 +619,15 @@ async fn a_switch_at_the_same_revision_announces_the_new_location() {
     );
 
     let url = wc.url.replace("/trunk", "/branches/feature-x");
-    let handle = commands::switch(f.state(), wc.id.clone(), url.clone(), Some(wc.base_rev))
-        .await
-        .unwrap();
+    let handle = commands::switch(
+        f.state(),
+        wc.id.clone(),
+        url.clone(),
+        Some(wc.base_rev),
+        false,
+    )
+    .await
+    .unwrap();
     let OpResult::NewRev { new_rev } = f.wait_op(&handle).await.unwrap() else {
         panic!("switch result is a revision");
     };

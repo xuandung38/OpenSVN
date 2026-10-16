@@ -139,6 +139,18 @@ describe("error mapping", () => {
     expect(commit.key).toBe("errCommitUnsure");
   });
 
+  test("a switch refused for unrelated history gets the short text that names the way out", () => {
+    const t = errorText({
+      code: "unrelated-resources",
+      message: "'https://svn.example.test/repo/other' shares no common ancestry with '/w/wc'",
+      detail:
+        "E195012: 'https://svn.example.test/repo/other' shares no common ancestry with '/w/wc'",
+    });
+    expect(t.key).toBe("errUnrelated");
+    expect(t.detail).toContain("E195012");
+    expect(t.detail).toContain("(unrelated-resources)");
+  });
+
   test("other errors keep the backend's message and detail", () => {
     const t = errorText({ code: "out-of-date", message: "File is out of date", detail: "E160028" });
     expect(t).toEqual({ key: null, message: "File is out of date", detail: "E160028" });

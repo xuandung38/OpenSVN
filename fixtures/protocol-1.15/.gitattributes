@@ -1,0 +1,2 @@
+# Recorded wire traffic (CRLF headers, binary svndiff bodies) is replayed byte for byte.
+*.http binary

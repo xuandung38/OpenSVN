@@ -1,9 +1,18 @@
 # svn-protocol notes: what was verified against real traffic
 
 Scope of this file: facts about the Subversion HTTPv2 (mod_dav_svn) wire protocol that the
-`svn-protocol` goldens depend on. "Verified" means observed in a recording under `tests/data/`
-(Apache 2.4.68 + mod_dav_svn **1.14.5**, client **svn 1.15.0** / serf 1.3.10). Everything else is
-marked unverified. Behaviour of a 1.15 server and of VisualSVN is not yet recorded.
+`svn-protocol` goldens depend on. "Verified" means observed in both recording sets:
+
+| Set | Server | Client |
+|---|---|---|
+| `tests/data/` | Apache 2.4.68 (Debian) + mod_dav_svn **1.14.5** | svn 1.15.0 / serf 1.3.10 |
+| `tests/data-1.15/` | Apache 2.4.69 + mod_dav_svn **1.15.0** (`docker/nix/subversion-1.15.nix`) | svn 1.15.0 / serf 1.3.10 |
+| `fixtures/protocol/` | Apache 2.4.58 (Ubuntu) + mod_dav_svn **1.14.3** | svn 1.14.3 |
+| `fixtures/protocol-1.15/` | Apache 2.4.69 + mod_dav_svn **1.15.0** | svn 1.15.0 / serf 1.3.10 |
+
+Every `*_golden.rs` test runs once per `tests/` set (`common::for_each_set`), and
+`svn-ra/tests/fixture_replay.rs` replays every session of both `fixtures/` sets. Everything else is
+marked unverified. Behaviour of VisualSVN is not yet recorded.
 
 ## How fixtures are captured
 
@@ -20,6 +29,20 @@ crates/svn-protocol/tools/capture/run.sh /tmp/raw          # needs docker, svn, 
 python3 crates/svn-protocol/tools/capture/extract.py /tmp/raw crates/svn-protocol/tests/data
 ```
 
+The 1.15 sets were recorded without docker, from a native Apache and the nix build of 1.15.0:
+
+```
+nix-build docker/nix/subversion-1.15.nix --arg httpServer true -o target/svn-1.15-http
+nix-build '<nixpkgs>' -A apacheHttpd -o target/httpd
+export PATH=$PWD/target/svn-1.15-http/bin:$PWD/target/httpd/bin:$PATH
+export CAPTURE_HTTPD=$PWD/target/httpd/bin/httpd CAPTURE_HTTPD_MODULES=$PWD/target/httpd/modules \
+       CAPTURE_SVN_MODULES=$PWD/target/svn-1.15-http/modules
+crates/svn-protocol/tools/capture/run.sh /tmp/raw-115
+python3 crates/svn-protocol/tools/capture/extract.py /tmp/raw-115 crates/svn-protocol/tests/data-1.15
+CAPTURE_OUT=fixtures/protocol-1.15 fixtures/protocol/capture.sh
+fixtures/check-no-real-hosts.sh                            # also scans tests/data and tests/data-1.15
+```
+
 * `proxy.py` forwards plain HTTP, forces `Accept-Encoding: identity` upstream and logs decoded
   request/response bodies (chunked request bodies are re-assembled).
 * `extract.py` rewrites `127.0.0.1:18081` to `svn.test.local`, drops `Authorization`, `Date`,
@@ -32,7 +55,10 @@ python3 crates/svn-protocol/tools/capture/extract.py /tmp/raw crates/svn-protoco
 * `list-depth1` was produced with `curl` using the exact PROPFIND body svn sends for stat,
   because svn 1.15 lists directories with `S:list-report` against a server that advertises `list`.
 * Quirk: server answers listings in hash order, not sorted.
-* P06 will provide the official harness and a 1.15 server; this tooling is deliberately minimal.
+* `run.sh` is one scenario, so both `tests/` sets hold the same exchanges at the same revision
+  numbers and the golden assertions (`size == 17`, `copyfrom-rev == 4`, ...) hold for both.
+  `commit-control-chars` used to edit `src/b.txt`, which `commit-full` deletes; it now edits
+  `src/deep/c.cfg` (r12 in `data-1.15`). The `data/` set predates that fix.
 
 ### Fuzzing
 
@@ -83,6 +109,28 @@ keeps the buffer at one byte per character. The input is
 `util::tests::base64_stream_rejects_non_ascii_instead_of_splitting_a_char`, and
 `tests/fuzz_regressions.rs`, which replays the artifact and checks every split point reports the
 response as corrupt. Both reruns marked "after the fix" ran on the fixed code.
+
+#### Local run, 1 hour per target, 2026-10-15
+
+Setup: `cargo +nightly fuzz run <target> corpus/<target> -- -max_total_time=3600`, cargo-fuzz
+0.13.2, nightly rustc 1.101.0 (2026-10-14), 4-core container. Two batches of four targets ran in
+parallel (15:16–17:16 UTC); the first batch shared the machine with the local gates for about 40
+minutes, so its exec/s is lower. Every target except `href_vetting` started from the
+`tests/data/**/*.resp` and `tests/data-1.15/**/*.resp` bodies. Code: this branch (1.15 goldens),
+no parser change since the 16-minute run above.
+
+| Target | Time | Execs | exec/s | cov | ft | Corpus | Crash |
+|---|---|---|---|---|---|---|---|
+| `error_body` | 60 min | 49,876,393 | 13,850 | 1,875 | 9,378 | 2,120 | none |
+| `file_revs` | 60 min | 15,780,761 | 4,382 | 3,537 | 17,473 | 3,512 | none |
+| `get_locks` | 60 min | 40,248,797 | 11,177 | 2,130 | 10,124 | 2,166 | none |
+| `href_vetting` | 60 min | 15,283,462 | 4,244 | 4,802 | 22,709 | 4,648 | none |
+| `log_parser` | 60 min | 31,235,964 | 8,674 | 2,548 | 11,833 | 2,289 | none |
+| `multistatus` | 60 min | 33,705,240 | 9,359 | 2,302 | 11,718 | 2,579 | none |
+| `update_parser` | 60 min | 5,335,516 | 1,481 | 4,769 | 17,817 | 2,613 | none |
+| `xml_reader` | 60 min | 20,326,660 | 5,644 | 1,555 | 8,585 | 1,670 | none |
+
+No crash, so `tests/fuzz_regressions.rs` gained no new input.
 
 ## Verified facts
 
@@ -164,7 +212,7 @@ not.** The builders follow this (test `wire_parity`).
   the report and is covered by synthetic tests only.
 * The errcode table in `errors.rs` was generated from `svn_error_codes.h` of 1.15.0.
 
-### update-report (verified with svn 1.15.0 against 1.14.5)
+### update-report (verified with svn 1.15.0 against 1.14.5 and 1.15.0)
 
 * `REPORT !svn/me`. Body: optional `send-all="true"` attribute, `S:include-props yes` (skelta
   only), `S:src-path` (server path of the session URL), `S:target-revision` (omitted for HEAD),
@@ -212,6 +260,26 @@ not.** The builders follow this (test `wire_parity`).
 `S:txdelta` (base64 svndiff against the previous version). `include-merged-revisions` position
 and `S:merged-revision` / `S:remove-prop` are from the client source.
 
+## mod_dav_svn 1.15.0 compared with 1.14
+
+Recorded with the same client (svn 1.15.0) and the same scenario, then compared after masking
+UUIDs, timestamps, lock tokens and the `User-Agent`. No parser change was needed.
+
+* **OPTIONS:** the same headers, the same `DAV:` capability tokens (no new 1.15 token), the same
+  `SVN-Allow-Bulk-Updates`, `SVN-Supported-Posts` and stub headers, and the same body.
+* **Every other answer** (PROPFIND, GET, log/get-locks/list/file-revs/update reports, LOCK/UNLOCK,
+  POST/MKCOL/PUT/COPY/PROPPATCH/DELETE/MERGE, 401/404/409/423 errors) carries the same elements and
+  values. The only differences are orders the parsers already must not depend on:
+  * element order inside `S:log-item` (`D:creator-displayname`, `S:date`, `D:comment`) and of
+    `S:rev-prop` inside `S:file-rev`;
+  * `S:set-prop` order inside an update drive (property hash order).
+* Differences that come from Apache or its configuration, not from mod_dav_svn: the 401/201 HTML
+  pages of Apache 2.4.69 use an HTML 4.01 doctype and carry no `<address>` signature line, and
+  `allprop` has no `D:getcontenttype` when `mod_mime` is not loaded (the native capture server
+  loads only the modules it needs).
+* Client-side orders (`S:entry` attribute and entry order, `create-txn-with-props` property order)
+  differ between runs as before; the request tests compare them as XML or as skel lists.
+
 ## Capabilities and fallbacks (mod_dav_svn 1.8 - 1.15, HTTPv2)
 
 Behaviour is chosen from the `OPTIONS` answer only, never from a version string. Releases are
@@ -243,10 +311,10 @@ and 1.10 servers once the compat images exist; no behaviour was verified against
   16 MiB, log message 16 MiB (raise it per parser), 10k elements per property value, 1024
   properties and 64 MiB of property text per `D:response`, 1M changed paths per log item, error
   message 4 KiB (control characters stripped, `…` marks the cut), error body 64 KiB. Exceeding a
-  cap is `ErrorCode::Corrupt`. Text inside elements a parser does not know is never buffered.
+  cap is `ErrorCode::ProtocolViolation`. Text inside elements a parser does not know is never buffered.
 * We always send `S:encode-binary-props`, so log fields (author, date, message, custom revprops)
   and get-locks fields can arrive with `encoding="base64"`. They are decoded (UTF-8 required for
-  text fields); any other encoding value is `Corrupt`. Verified for a commit message containing
+  text fields); any other encoding value is `ProtocolViolation`. Verified for a commit message containing
   ESC (`log/control-chars`). svn refuses control characters in lock comments, so lock fields are
   covered by synthetic tests only.
 * The XML reader rejects what expat rejects: characters outside XML 1.0 `Char` (also as
@@ -260,7 +328,7 @@ and 1.10 servers once the compat images exist; no behaviour was verified against
 `UpdateParser` accepts exactly one anonymous root `open-directory`, entries only below
 directories, `txdelta`/`fetch-file` only below a file and at most once, property changes only
 below a node, and nothing after the root closes; end tags must match the open element by
-namespace and name. Every violation is `Corrupt`. `DriveChecker` re-checks a finished event
+namespace and name. Every violation is `ProtocolViolation`. `DriveChecker` re-checks a finished event
 stream (usable as a debug assertion in the driver and as the fuzz oracle).
 
 * The first event is `ReportStart { send_all, inline_props }`. In skelta (`send_all` false) a
@@ -295,7 +363,7 @@ stream (usable as a debug assertion in the driver and as the fuzz oracle).
 
 ## Not verified yet
 
-* Behaviour of a Subversion **1.15 server** (needs P06 image) and of **VisualSVN**.
+* Behaviour of **VisualSVN** (only mod_dav_svn 1.14.3, 1.14.5 and 1.15.0 are recorded).
 * `Timeout` header semantics on LOCK, HTTP status for a failed `If:` precondition (assumed 412 ->
   `LockTokenInvalid`), `Negotiate` challenge headers.
 * `strict-node-history` element position; `mergeinfo-report` and `get-location-segments` bodies.

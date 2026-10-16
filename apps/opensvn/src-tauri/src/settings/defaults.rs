@@ -1,6 +1,6 @@
 //! Default values of every setting (docs/system-design/03 section 6.3).
 
-use opensvn_ipc::{DiffMode, Language, ProxySetting, Settings, Theme, WcFormat};
+use opensvn_ipc::{Density, DiffMode, Language, LogLevel, ProxySetting, Settings, Theme, WcFormat};
 
 /// Default for `integrations.webRevisionUrl`.
 pub const DEFAULT_WEB_REVISION_URL: &str = "https://{server}/!/#{repo}/commit/r{rev}/";
@@ -21,9 +21,14 @@ pub fn defaults(locale: Option<&str>) -> Settings {
         general_checkout_root: "~/svn".to_owned(),
         general_check_interval_min: 10,
         general_language: language_from_locale(locale),
+        general_open_last_wc: true,
+        general_log_level: LogLevel::Info,
         appearance_theme: Theme::System,
+        appearance_font_size: 13,
+        appearance_density: Density::Comfortable,
         diff_mode: DiffMode::Split,
         diff_ignore_whitespace: false,
+        diff_tab_width: 4,
         network_max_connections: 4,
         network_timeout_sec: 60,
         network_reconnect_wait_min: 10,
@@ -31,6 +36,7 @@ pub fn defaults(locale: Option<&str>) -> Settings {
         network_negotiate: true,
         wc_default_format: WcFormat::V31,
         wc_read_subversion_config: true,
+        wc_global_ignores: String::new(),
         cache_max_size_gb: 2,
         integrations_web_revision_url: DEFAULT_WEB_REVISION_URL.to_owned(),
         integrations_web_file_url: DEFAULT_WEB_FILE_URL.to_owned(),

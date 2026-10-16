@@ -131,20 +131,63 @@ fn anything_else_in_the_admin_area_is_never_removed() {
 }
 
 #[test]
-fn areas_without_evidence_of_a_creation_are_not_skeletons() {
-    // An empty `.svn`, or `.svn/tmp` alone: what a creator has before it holds its lock, or
-    // anything else. Never taken over.
-    for with_tmp in [false, true] {
+fn a_tmp_with_unknown_files_is_not_a_skeleton() {
+    // `.svn/tmp` with no lock file and no database but something else in `tmp`, or next to it
+    // an empty `pristine` (made only under the lock): never taken over.
+    type Extra = fn(&Path);
+    let cases: [(&str, Extra); 2] = [
+        ("unknown file in tmp", |r| {
+            fs::write(r.join(".svn/tmp/svn-AbCd"), b"keep").unwrap();
+        }),
+        ("pristine without lock", |r| {
+            fs::create_dir(r.join(".svn/pristine")).unwrap();
+        }),
+    ];
+    for (what, extra) in cases {
         let t = tempfile::tempdir().unwrap();
-        fs::create_dir(t.path().join(".svn")).unwrap();
-        if with_tmp {
-            fs::create_dir(t.path().join(".svn/tmp")).unwrap();
-        }
+        fs::create_dir_all(t.path().join(".svn/tmp")).unwrap();
+        extra(t.path());
         let before = snapshot(&t.path().join(".svn"));
-        let err = WcDb::create(t.path(), &new_wc()).expect_err("foreign");
-        assert_eq!(err.code, ErrorCode::WcFormatUnsupported, "{}", err.message);
-        assert_eq!(snapshot(&t.path().join(".svn")), before);
+        let err = WcDb::create(t.path(), &new_wc()).expect_err(what);
+        assert_eq!(
+            err.code,
+            ErrorCode::WcFormatUnsupported,
+            "{what}: {}",
+            err.message
+        );
+        assert_eq!(snapshot(&t.path().join(".svn")), before, "{what}");
     }
+}
+
+#[test]
+fn an_empty_tmp_alone_is_taken_over() {
+    // A creator killed between its `mkdir` of `.svn/tmp` and the lock file.
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir_all(t.path().join(".svn/tmp")).unwrap();
+    drop(WcDb::create(t.path(), &new_wc()).expect("restart"));
+    assert_fresh(t.path());
+}
+
+#[test]
+fn an_empty_admin_dir_is_taken_over() {
+    // A creator killed between its `mkdir` of `.svn` and that of `.svn/tmp` leaves an empty
+    // `.svn`, which holds nothing to lose: the next creation builds the working copy in it.
+    let t = tempfile::tempdir().unwrap();
+    fs::write(t.path().join("user.txt"), b"mine").unwrap();
+    fs::create_dir(t.path().join(".svn")).unwrap();
+    drop(WcDb::create(t.path(), &new_wc()).expect("restart"));
+    assert_fresh(t.path());
+    assert_eq!(fs::read(t.path().join("user.txt")).unwrap(), b"mine");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_an_empty_dir_is_not_taken_over() {
+    let t = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), t.path().join(".svn")).unwrap();
+    assert!(WcDb::create(t.path(), &new_wc()).is_err());
+    assert!(names(outside.path()).is_empty());
 }
 
 #[test]
@@ -199,10 +242,19 @@ fn snapshot(dir: &Path) -> Vec<(String, Option<Vec<u8>>)> {
 
 #[test]
 fn concurrent_takeovers_of_a_skeleton_have_one_winner() {
-    for legacy in [false, true] {
+    for (legacy, empty, bare_tmp) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
         for _ in 0..20 {
             let t = tempfile::tempdir().unwrap();
-            if legacy {
+            if empty {
+                fs::create_dir(t.path().join(".svn")).unwrap();
+            } else if bare_tmp {
+                fs::create_dir_all(t.path().join(".svn/tmp")).unwrap();
+            } else if legacy {
                 fs::create_dir_all(t.path().join(".svn/tmp")).unwrap();
                 fs::write(t.path().join(".svn").join(DB_FILE), b"").unwrap();
             } else {

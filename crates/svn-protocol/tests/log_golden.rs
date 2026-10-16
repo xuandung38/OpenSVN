@@ -3,7 +3,9 @@
 
 mod common;
 
-use common::{SvnXmlLogRow, companion, load, run_split, svn_log_xml};
+use common::{
+    DATA_SETS, SvnXmlLogRow, companion, for_each_set, load, run_split, svn_log_xml, use_set,
+};
 use proptest::prelude::*;
 use svn_protocol::log::{LogItem, LogParser, parse_log};
 use svn_protocol::{ResponseParser, parse_timestamp};
@@ -92,84 +94,96 @@ fn log_with_copy_matches_svn_cli() {
 
 #[test]
 fn limited_log_with_all_revprops_matches_svn_cli() {
-    assert_matches_svn_cli("log/limit2-all-revprops");
-    assert_eq!(
-        parse_log(&load("log/limit2-all-revprops").resp_body)
-            .unwrap()
-            .len(),
-        2
-    );
+    for_each_set(|| {
+        assert_matches_svn_cli("log/limit2-all-revprops");
+        assert_eq!(
+            parse_log(&load("log/limit2-all-revprops").resp_body)
+                .unwrap()
+                .len(),
+            2
+        );
+    });
 }
 
 #[test]
 fn merged_revisions_are_nested_and_the_end_marker_is_consumed() {
-    assert_matches_svn_cli("log/merged-revisions");
-    let items = parse_log(&load("log/merged-revisions").resp_body).unwrap();
-    let shape: Vec<(u64, u32, bool)> = items
-        .iter()
-        .map(|i| (i.entry.rev.0, i.merge_depth, i.entry.has_children))
-        .collect();
-    assert_eq!(
-        shape.iter().map(|s| s.1).collect::<Vec<_>>(),
-        [0, 1, 1, 0, 0]
-    );
-    assert!(shape[0].2, "the merge commit has children");
-    assert!(
-        items.iter().all(|i| i.entry.rev.0 != u64::MAX),
-        "the -1 marker must not leak"
-    );
+    for_each_set(|| {
+        assert_matches_svn_cli("log/merged-revisions");
+        let items = parse_log(&load("log/merged-revisions").resp_body).unwrap();
+        let shape: Vec<(u64, u32, bool)> = items
+            .iter()
+            .map(|i| (i.entry.rev.0, i.merge_depth, i.entry.has_children))
+            .collect();
+        assert_eq!(
+            shape.iter().map(|s| s.1).collect::<Vec<_>>(),
+            [0, 1, 1, 0, 0]
+        );
+        assert!(shape[0].2, "the merge commit has children");
+        assert!(
+            items.iter().all(|i| i.entry.rev.0 != u64::MAX),
+            "the -1 marker must not leak"
+        );
+    });
 }
 
 #[test]
 fn copy_source_is_reported() {
-    let items = parse_log(&load("log/head5-verbose").resp_body).unwrap();
-    assert!(!items.is_empty());
-    let all = parse_log(&load("log/root-with-copy").resp_body).unwrap();
-    let copied = all
-        .iter()
-        .flat_map(|i| &i.entry.changed_paths)
-        .find(|p| p.copy_from.is_some())
-        .expect("the capture contains a copy");
-    assert_eq!(copied.action, ChangeAction::Added);
-    assert_eq!(copied.path.as_str(), "/branches/b1");
-    let (src, rev) = copied.copy_from.as_ref().unwrap();
-    assert_eq!((src.as_str(), *rev), ("/trunk/src", Revnum(4)));
+    for_each_set(|| {
+        let items = parse_log(&load("log/head5-verbose").resp_body).unwrap();
+        assert!(!items.is_empty());
+        let all = parse_log(&load("log/root-with-copy").resp_body).unwrap();
+        let copied = all
+            .iter()
+            .flat_map(|i| &i.entry.changed_paths)
+            .find(|p| p.copy_from.is_some())
+            .expect("the capture contains a copy");
+        assert_eq!(copied.action, ChangeAction::Added);
+        assert_eq!(copied.path.as_str(), "/branches/b1");
+        let (src, rev) = copied.copy_from.as_ref().unwrap();
+        assert_eq!((src.as_str(), *rev), ("/trunk/src", Revnum(4)));
+    });
 }
 
 #[test]
 fn entry_without_changed_paths_or_message() {
-    let items = parse_log(&load("log/single-rev-no-paths").resp_body).unwrap();
-    assert_eq!(items.len(), 1);
-    assert!(items[0].entry.changed_paths.is_empty());
-    assert_eq!(items[0].entry.message, None);
-    assert_eq!(items[0].entry.rev, Revnum(2));
+    for_each_set(|| {
+        let items = parse_log(&load("log/single-rev-no-paths").resp_body).unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].entry.changed_paths.is_empty());
+        assert_eq!(items[0].entry.message, None);
+        assert_eq!(items[0].entry.rev, Revnum(2));
+    });
 }
 
 #[test]
 fn unicode_and_markup_in_messages_survive() {
-    let items = parse_log(&load("log/head-verbose").resp_body).unwrap();
-    let initial = items.iter().find(|i| i.entry.rev == Revnum(2)).unwrap();
-    let msg = initial.entry.message.as_deref().unwrap();
-    assert!(
-        msg.starts_with("initial: files & props <&> unicode"),
-        "{msg}"
-    );
+    for_each_set(|| {
+        let items = parse_log(&load("log/head-verbose").resp_body).unwrap();
+        let initial = items.iter().find(|i| i.entry.rev == Revnum(2)).unwrap();
+        let msg = initial.entry.message.as_deref().unwrap();
+        assert!(
+            msg.starts_with("initial: files & props <&> unicode"),
+            "{msg}"
+        );
+    });
 }
 
 #[test]
 fn items_stream_out_before_the_document_ends() {
-    let f = load("log/head-verbose");
-    let mut p = LogParser::new();
-    let cut = f.resp_body.len() * 2 / 3;
-    let early = p.feed(&f.resp_body[..cut]).unwrap();
-    assert!(
-        !early.is_empty(),
-        "no item emitted after two thirds of the body"
-    );
-    let mut all = early;
-    all.extend(p.feed(&f.resp_body[cut..]).unwrap());
-    all.extend(p.finish().unwrap());
-    assert_eq!(all, parse_log(&f.resp_body).unwrap());
+    for_each_set(|| {
+        let f = load("log/head-verbose");
+        let mut p = LogParser::new();
+        let cut = f.resp_body.len() * 2 / 3;
+        let early = p.feed(&f.resp_body[..cut]).unwrap();
+        assert!(
+            !early.is_empty(),
+            "no item emitted after two thirds of the body"
+        );
+        let mut all = early;
+        all.extend(p.feed(&f.resp_body[cut..]).unwrap());
+        all.extend(p.finish().unwrap());
+        assert_eq!(all, parse_log(&f.resp_body).unwrap());
+    });
 }
 
 #[test]
@@ -221,21 +235,26 @@ fn unknown_elements_are_ignored() {
 
 #[test]
 fn http_errors_are_not_log_documents() {
-    let f = load("errors/not-found-404-html");
-    assert_eq!(
-        parse_log(&f.resp_body).unwrap_err().code,
-        ErrorCode::Corrupt
-    );
+    for_each_set(|| {
+        let f = load("errors/not-found-404-html");
+        assert_eq!(
+            parse_log(&f.resp_body).unwrap_err().code,
+            ErrorCode::ProtocolViolation
+        );
+    });
 }
 
 proptest! {
     #[test]
     fn chunking_never_changes_the_result(cuts in proptest::collection::vec(0usize..16384, 0..16)) {
-        for name in ["log/head-verbose", "log/merged-revisions", "log/root-with-copy"] {
-            let f = load(name);
-            let whole = parse_log(&f.resp_body).unwrap();
-            let split = run_split(LogParser::new(), &f.resp_body, &cuts);
-            prop_assert_eq!(whole, split);
+        for set in DATA_SETS {
+            use_set(set);
+            for name in ["log/head-verbose", "log/merged-revisions", "log/root-with-copy"] {
+                let f = load(name);
+                let whole = parse_log(&f.resp_body).unwrap();
+                let split = run_split(LogParser::new(), &f.resp_body, &cuts);
+                prop_assert_eq!(whole, split);
+            }
         }
     }
 
@@ -247,22 +266,24 @@ proptest! {
 
 #[test]
 fn display_paths_are_lenient_but_stay_out_of_the_contract_until_asked() {
-    use svn_protocol::RepoDisplayPath;
-    let items = parse_log(&load("log/head-verbose").resp_body).unwrap();
-    let item = items
-        .into_iter()
-        .find(|i| i.entry.rev == Revnum(2))
-        .unwrap();
-    let entry = item.entry;
-    assert!(!entry.changed_paths.is_empty());
-    assert!(
-        entry
-            .changed_paths
-            .iter()
-            .all(|p| p.path.as_str().starts_with('/'))
-    );
-    // Windows-reserved and colon names display fine, and need an explicit step to become a RelPath.
-    let p = RepoDisplayPath::parse("/trunk/aux.c:stream").unwrap();
-    assert!(svn_types::RelPath::from_server(p.as_str().trim_start_matches('/')).is_err());
-    assert!(RepoDisplayPath::parse("/a/../b").is_err());
+    for_each_set(|| {
+        use svn_protocol::RepoDisplayPath;
+        let items = parse_log(&load("log/head-verbose").resp_body).unwrap();
+        let item = items
+            .into_iter()
+            .find(|i| i.entry.rev == Revnum(2))
+            .unwrap();
+        let entry = item.entry;
+        assert!(!entry.changed_paths.is_empty());
+        assert!(
+            entry
+                .changed_paths
+                .iter()
+                .all(|p| p.path.as_str().starts_with('/'))
+        );
+        // Windows-reserved and colon names display fine, and need an explicit step to become a RelPath.
+        let p = RepoDisplayPath::parse("/trunk/aux.c:stream").unwrap();
+        assert!(svn_types::RelPath::from_server(p.as_str().trim_start_matches('/')).is_err());
+        assert!(RepoDisplayPath::parse("/a/../b").is_err());
+    });
 }

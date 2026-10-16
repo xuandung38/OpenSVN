@@ -21,7 +21,7 @@ impl RepoDisplayPath {
     pub fn parse(path: &str) -> Result<Self> {
         let rel = path.strip_prefix('/').ok_or_else(|| {
             SvnError::new(
-                ErrorCode::Corrupt,
+                ErrorCode::ProtocolViolation,
                 format!("repository path is not absolute: {path:?}"),
             )
         })?;

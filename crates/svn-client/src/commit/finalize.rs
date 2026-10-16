@@ -122,8 +122,11 @@ fn commit_info(
 }
 
 /// Puts every committed text into the pristine store (synced, in place, read-only) and returns
-/// the rows to record. A text whose row already exists is skipped: the row is authoritative,
-/// and on a re-run after a crash the journal's copy may already be gone.
+/// the rows to record. A text whose row already exists is not stored again: the row is
+/// authoritative, and on a re-run after a crash the journal's copy may already be gone. Its
+/// row is returned too, so the transaction checks that its file is still there (an
+/// unreferenced row may be vacuumed by another client's `svn cleanup` meanwhile; the
+/// transaction then fails and a re-run stores the text from the journal).
 fn install_pristines(
     db: &WcDb,
     journal: &JournalData,
@@ -133,6 +136,7 @@ fn install_pristines(
     let store = db.pristine_store();
     let mut seen = HashSet::new();
     let mut jobs = Vec::new();
+    let mut stored = Vec::new();
     for item in &journal.items {
         let Some(text) = &item.text else { continue };
         let sha1 = Sha1Digest::from_hex(&text.sha1).ok_or_else(|| bad_digest("sha1", item))?;
@@ -140,23 +144,26 @@ fn install_pristines(
         if !seen.insert(sha1) {
             continue;
         }
-        match svn_wc::pristine::PristineIndex::lookup(store.index(), &sha1)
-            .map_err(SvnError::from)?
-        {
-            Some(row) if row.hydrated => continue,
-            Some(_) => return Err(PristineError::RehydrateUnsupported(sha1).into()),
-            None => {}
-        }
         let record = PristineRecord {
             sha1,
             md5,
             size: text.size,
             hydrated: true,
         };
+        match svn_wc::pristine::PristineIndex::lookup(store.index(), &sha1)
+            .map_err(SvnError::from)?
+        {
+            Some(row) if row.hydrated => {
+                stored.push(record);
+                continue;
+            }
+            Some(_) => return Err(PristineError::RehydrateUnsupported(sha1).into()),
+            None => {}
+        }
         jobs.push((data_dir.join(&text.data), record));
     }
     if jobs.is_empty() {
-        return Ok(Vec::new());
+        return Ok(stored);
     }
     let batch = store.batch().map_err(SvnError::from)?;
     // The journal's copy becomes the pristine (renamed, not copied, on the same file system).
@@ -186,5 +193,7 @@ fn install_pristines(
         }
     })?;
     batch.sync_dirs(&records).map_err(SvnError::from)?;
+    let mut records = records;
+    records.extend(stored);
     Ok(records)
 }

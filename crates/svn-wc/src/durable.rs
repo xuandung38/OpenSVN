@@ -37,6 +37,7 @@ pub fn batched_sync(path: &Path) -> bool {
 }
 
 /// `statfs` magic numbers (`linux/magic.h`) of the filesystems [`batched_sync`] trusts.
+#[cfg(any(target_os = "linux", test))]
 const LOCAL_BLOCK_FS: [u32; 5] = [
     0xEF53,      // ext2, ext3, ext4
     0x5846_5342, // xfs
@@ -47,6 +48,8 @@ const LOCAL_BLOCK_FS: [u32; 5] = [
 
 /// Whether the `statfs` filesystem type `f_type` is one [`batched_sync`] trusts. The magic is
 /// 32 bits wide; `f_type` is a signed word on some targets, so only the low 32 bits count.
+/// Only Linux reads `statfs` for this; elsewhere it exists for the unit tests.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn local_block_fs(f_type: u64) -> bool {
     LOCAL_BLOCK_FS.contains(&(f_type as u32))
 }

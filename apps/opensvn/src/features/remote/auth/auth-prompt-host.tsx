@@ -4,7 +4,6 @@ import { useToast } from "../../../components/ui/toast";
 import type { AuthResponse } from "../../../ipc/bindings";
 import { ipc, unwrap } from "../../../ipc/client";
 import { type AuthPromptInfo, normalizeAuthPrompt } from "./auth-model";
-import { certDecisionFor } from "./cert-decision";
 import { SignInDialog } from "./sign-in-dialog";
 import { TrustCertDialog } from "./trust-cert-dialog";
 
@@ -69,6 +68,7 @@ export function AuthPromptHost() {
         key={current.requestId}
         prompt={current}
         onSubmit={(a) => void respond(current.requestId, { kind: "credentials", ...a })}
+        onNegotiate={() => void respond(current.requestId, { kind: "negotiate" })}
         onCancel={() => void respond(current.requestId, { kind: "cancel" })}
       />
     );
@@ -77,12 +77,7 @@ export function AuthPromptHost() {
     <TrustCertDialog
       key={current.requestId}
       prompt={current}
-      onDecision={(d) =>
-        void respond(current.requestId, {
-          kind: "certificate",
-          decision: certDecisionFor(d),
-        })
-      }
+      onDecision={(decision) => void respond(current.requestId, { kind: "certificate", decision })}
     />
   );
 }

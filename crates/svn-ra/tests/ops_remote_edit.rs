@@ -232,6 +232,16 @@ impl RaSession for HttpSession {
     ) -> Result<()> {
         unsupported()
     }
+    async fn get_location_segments(
+        &self,
+        _p: &RelPath,
+        _peg: Option<Revnum>,
+        _s: Option<Revnum>,
+        _e: Option<Revnum>,
+        _c: &CancelToken,
+    ) -> Result<Vec<svn_ra_api::LocationSegment>> {
+        unsupported()
+    }
     async fn do_update(
         &self,
         _r: UpdateRequest,

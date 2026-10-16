@@ -60,6 +60,11 @@ impl Svn {
         run(c, &format!("svn {}", args.join(" "))).map(|o| String::from_utf8_lossy(&o).into_owned())
     }
 
+    /// A ready `svnadmin` command of the same installation.
+    pub fn admin(&self) -> Command {
+        self.oracle.svnadmin()
+    }
+
     /// `svnadmin create <path>`.
     pub fn create_repo(&self, path: &Path) -> Result<()> {
         let mut c = self.oracle.svnadmin();

@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes } from "react";
+import type { ButtonHTMLAttributes, Ref } from "react";
 import { cn } from "../../lib/cn";
 
 export type ButtonVariant = "default" | "primary" | "danger";
@@ -13,6 +13,8 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   /** 11px compact button used inside blocks (conflict hunks, banners). */
   small?: boolean;
+  /** React 19 passes `ref` as a prop; it reaches the <button> through the rest props. */
+  ref?: Ref<HTMLButtonElement>;
 }
 
 export function Button({

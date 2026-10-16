@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:update-report xmlns:S="svn:" xmlns:V="http://subversion.tigris.org/xmlns/dav/" xmlns:D="DAV:" send-all="true" inline-props="true">
+<S:target-revision rev="11"/>
+<S:open-directory rev="11">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/11/trunk</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">11</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-15T15:13:07.429301Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">e23e297c-c8aa-11f1-b558-3de6f34b8b80</S:set-prop>
+</S:open-directory>
+</S:update-report>

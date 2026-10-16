@@ -789,3 +789,202 @@ fn stale_tmp_files_of_the_engine_go_and_nothing_else() {
     }));
     db.wc_lock_release(&RelPath::root()).expect("release");
 }
+
+/// `svn cleanup` breaks our lock (`break_locks`) and empties `.svn/tmp`, our marker included.
+/// A write that verifies the lock fails then, the lock is forgotten, and releasing it later
+/// leaves the row of the client that took the working copy over alone.
+#[test]
+fn a_lock_broken_by_another_client_is_detected_and_its_new_row_left_alone() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = wc(tmp.path());
+    let store = Arc::new(MemoryLockOwnership::for_current_process("boot"));
+    db.set_lock_owner(owner(&store, 1));
+    db.wc_lock_obtain(&RelPath::root(), -1, ObtainMode::Normal)
+        .expect("lock");
+    db.with_txn(|t| t.verify_wc_lock()).expect("still ours");
+
+    // svn cleanup: row deleted and taken again by svn, `.svn/tmp` emptied.
+    let tmp_dir = tmp.path().join(".svn/tmp");
+    for e in std::fs::read_dir(&tmp_dir).expect("tmp").flatten() {
+        std::fs::remove_file(e.path()).expect("rm");
+    }
+    db.with_write(|tx| {
+        tx.execute("DELETE FROM wc_lock", []).map_err(sql_err)?;
+        tx.execute(
+            "INSERT INTO wc_lock (wc_id, local_dir_relpath, locked_levels) VALUES (1, '', -1)",
+            [],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    })
+    .expect("svn takes it");
+
+    let err = db
+        .with_txn(|t| {
+            t.verify_wc_lock()?;
+            t.base_add(&rp("d"), &base_dir("d"))
+        })
+        .expect_err("lock broken");
+    assert_eq!(err.code, ErrorCode::WcBusy, "{err}");
+    assert!(
+        err.message
+            .contains("cleaned up by another client during the update"),
+        "{err}"
+    );
+    assert!(
+        db.read_base(&rp("d")).expect("read").is_none(),
+        "nothing written"
+    );
+    assert_eq!(
+        db.wc_lock_held(&RelPath::root()).expect("held"),
+        LockState::HeldByOther,
+        "no longer ours"
+    );
+    db.wc_lock_release(&RelPath::root())
+        .expect("release is quiet");
+    assert_eq!(
+        db.wc_lock_held(&RelPath::root()).expect("held"),
+        LockState::HeldByOther,
+        "svn's row stays"
+    );
+    assert!(
+        store
+            .owned_by_dead_process(&tmp.path().canonicalize().expect("c"))
+            .expect("records")
+            .is_empty()
+    );
+
+    // svn releases; we can lock again.
+    db.with_write(|tx| {
+        tx.execute("DELETE FROM wc_lock", []).map_err(sql_err)?;
+        Ok(())
+    })
+    .expect("svn done");
+    db.wc_lock_obtain(&RelPath::root(), -1, ObtainMode::Normal)
+        .expect("lock again");
+    db.with_txn(|t| t.verify_wc_lock()).expect("ours again");
+
+    // Only the row gone (marker kept) is a broken lock too.
+    db.with_write(|tx| {
+        tx.execute("DELETE FROM wc_lock", []).map_err(sql_err)?;
+        Ok(())
+    })
+    .expect("break");
+    let err = db.with_txn(|t| t.verify_wc_lock()).expect_err("row gone");
+    assert_eq!(err.code, ErrorCode::WcBusy);
+    db.wc_lock_release(&RelPath::root()).expect("release");
+    assert!(
+        std::fs::read_dir(&tmp_dir)
+            .expect("tmp")
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().starts_with("opensvn-lock-")),
+        "marker of the lost lock removed"
+    );
+
+    // A release that finds its marker gone (no verify in between) leaves the row alone too.
+    db.wc_lock_obtain(&RelPath::root(), -1, ObtainMode::Normal)
+        .expect("lock");
+    for e in std::fs::read_dir(&tmp_dir).expect("tmp").flatten() {
+        std::fs::remove_file(e.path()).expect("rm");
+    }
+    db.wc_lock_release(&RelPath::root()).expect("release");
+    assert_eq!(
+        db.wc_lock_held(&RelPath::root()).expect("held"),
+        LockState::HeldByOther,
+        "the row is not ours to delete any more"
+    );
+}
+
+/// The race against the real `svn cleanup`: we hold the lock and have reused an unreferenced
+/// pristine row ("already stored", the update's `place`), the NODES transaction is still to
+/// come. svn breaks our lock, vacuums the row with its file and empties `.svn/tmp` (our kept
+/// copy too). The transaction must fail without re-creating the row, and releasing must leave
+/// the working copy usable by svn.
+#[test]
+fn real_svn_cleanup_between_place_and_the_nodes_transaction() {
+    use svn_wc::db::BaseNode;
+    use svn_wc::pristine::{Placement, PristineIndex as _};
+
+    if skip_without_svn() {
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let base = tmp.path().canonicalize().expect("canon");
+    let url = create_repo(&base);
+    let w = checkout(&base, &url, "w", &[]);
+
+    let db = WcDb::open(&w).expect("open");
+    let store = Arc::new(MemoryLockOwnership::for_current_process("boot"));
+    db.set_lock_owner(owner(&store, std::process::id()));
+    let text = b"left behind by an earlier operation\n";
+    let rec = db
+        .pristine_store()
+        .install(&mut &text[..], None, None)
+        .expect("install");
+    db.wc_lock_obtain(&RelPath::root(), -1, ObtainMode::Cleanup)
+        .expect("lock");
+    let copy = {
+        use std::io::Write as _;
+        let mut f = tempfile::NamedTempFile::new_in(w.join(".svn/tmp")).expect("temp");
+        f.write_all(text).expect("write");
+        f.into_temp_path()
+    };
+    let Placement::AlreadyStored(spare) = db
+        .pristine_store()
+        .place(copy, &rec, true, &mut std::collections::HashSet::new())
+        .expect("place")
+    else {
+        panic!("the unreferenced row is reused");
+    };
+
+    svn(&w, &["cleanup"]);
+
+    let stored = db.pristine_store().path_of(&rec.sha1);
+    assert!(!stored.exists(), "svn vacuumed the unreferenced text");
+    assert!(!spare.exists(), "svn emptied .svn/tmp");
+    let node = BaseNode {
+        kind: NodeKind::File,
+        checksum: Some(rec.sha1.to_svn_string()),
+        properties: Some(Vec::new()),
+        depth: None,
+        ..base_dir("g.txt")
+    };
+    let err = db
+        .with_txn(|t| {
+            t.verify_wc_lock()?;
+            t.record_pristine_or_restore(&rec, Some(&spare))?;
+            t.base_add(&rp("g.txt"), &node)
+        })
+        .expect_err("cleaned up");
+    assert_eq!(err.code, ErrorCode::WcBusy, "{err}");
+    assert!(
+        err.message
+            .contains("cleaned up by another client during the update"),
+        "{err}"
+    );
+    // Without the lock check the pristine check still refuses the row.
+    let err = db
+        .with_txn(|t| {
+            t.record_pristine_or_restore(&rec, Some(&spare))?;
+            t.base_add(&rp("g.txt"), &node)
+        })
+        .expect_err("text gone");
+    assert_eq!(err.code, ErrorCode::WcBusy, "{err}");
+    assert!(
+        db.pristine_store()
+            .index()
+            .lookup(&rec.sha1)
+            .expect("lookup")
+            .is_none(),
+        "no row without its file"
+    );
+    assert!(db.read_base(&rp("g.txt")).expect("read").is_none());
+
+    db.wc_lock_release(&RelPath::root()).expect("release");
+    drop(spare);
+    drop(db);
+    // svn sees a consistent, unlocked working copy.
+    assert_eq!(svn_stdout(&w, &["status"]).trim(), "");
+    svn(&w, &["cleanup"]);
+    svn(&w, &["update", "-q"]);
+}

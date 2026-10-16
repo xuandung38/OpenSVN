@@ -123,6 +123,9 @@ export const dialogStrings = defineStrings({
     switchBody: "Local changes are carried over to the new location.",
     switchAction: "Switch",
     switchUrlInvalid: "Enter a URL inside {root}.",
+    switchIgnoreAncestry: "Ignore ancestry",
+    switchIgnoreAncestryHint:
+      "Switch even if the URL shares no history with the working copy. Files are matched by path only; folders with local changes may end in tree conflicts.",
     webLinkChecking: "Checking the VisualSVN web link…",
     webLinkConverted: "Converted VisualSVN web link to repository URL {url}",
     webLinkRev: "Revision {rev} from the link was filled in.",
@@ -323,6 +326,9 @@ export const dialogStrings = defineStrings({
     switchBody: "Thay đổi local sẽ được mang sang vị trí mới.",
     switchAction: "Switch",
     switchUrlInvalid: "Nhập URL nằm trong {root}.",
+    switchIgnoreAncestry: "Bỏ qua kiểm tra nguồn gốc (ignore ancestry)",
+    switchIgnoreAncestryHint:
+      "Switch cả khi URL không có lịch sử chung với working copy. File chỉ được đối chiếu theo đường dẫn; thư mục có thay đổi local có thể bị tree conflict.",
     webLinkChecking: "Đang kiểm tra link web VisualSVN…",
     webLinkConverted: "Đã chuyển link web VisualSVN thành URL repository {url}",
     webLinkRev: "Đã điền revision {rev} lấy từ link.",
