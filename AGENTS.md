@@ -132,6 +132,7 @@ Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo,
 13. **`pnpm test:browser` trên WebKit (#12, follow-up).** Máy dev chưa có WebKit của Playwright nên mới chạy Chromium. Cần chạy `pnpm exec playwright-core install webkit` (hoặc dùng máy có sẵn), chạy script rồi xem ảnh trong `test-results/browser`.
 14. **Mục View dạng check trong menu native (#18, follow-up).** Show unversioned/ignored, Group by changelist, Show as tree hiện là mục thường và báo trạng thái bằng toast. Nên dùng `CheckMenuItem` và đồng bộ trạng thái từ UI (cần lệnh IPC như `menu_set_layout`).
 15. **Compare ở revision cụ thể hoặc tính cả thay đổi local (#18, follow-up).** Compare hiện so hai URL ở HEAD và so từng thư mục theo last-changed revision và kích thước. Muốn chính xác theo nội dung hoặc gồm working copy thì cần lệnh diff URL↔URL ở backend.
+16. **History chờ quá lâu với revision import lớn sau authz (#192, follow-up).** Sau khi `log_get` không còn giữ working copy, `e2e/rss.test.mjs` (`OPENSVN_RSS_FILES=20000`) không còn báo refresh busy (0 lần, 0,5 s). Test giờ dừng ở bước History: không thấy `Incoming 19` sau 120 s. Trên `visualsvn-like.sh` (svn-basic, có authz), riêng `svn log -l 100` của svn 1.15 CLI đã mất 35 s, có `-v` hay không cũng vậy, vì server kiểm authz cho 20k đường dẫn của r1. Sau Update, thanh History, màn History và danh sách Incoming tải lại log cùng lúc. Cần đo số lời gọi log song song và cân nhắc gom chúng lại, hoặc nâng ngưỡng chờ của test.
 
 ## 6. Việc cần người thật (không tự động được)
 
