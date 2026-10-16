@@ -162,6 +162,12 @@ pub async fn wait_for_network(
             return Ok(NetworkOutcome::GaveUp);
         }
         let retry_in = delay.min(wait.max_wait - waited);
+        // Registered before the state goes out: a "Retry now" sent as soon as the user sees
+        // the wait wakes it. The app wakes only registered waiters, so a press while nothing
+        // waits is not kept for a later wait.
+        let poked = wait.retry_now.notified();
+        tokio::pin!(poked);
+        poked.as_mut().enable();
         wait.emit(WaitState::Waiting {
             retry_in,
             waited,
@@ -173,7 +179,7 @@ pub async fn wait_for_network(
             () = cancel.cancelled() => {
                 cancel.check()?;
             }
-            () = wait.retry_now.notified() => {}
+            () = poked => {}
             () = tokio::time::sleep(retry_in) => {}
         }
         attempt += 1;

@@ -277,6 +277,26 @@ async fn diagnostics_preview_then_export_through_a_native_save_dialog() {
 }
 
 #[tokio::test]
+async fn logs_reveal_shows_the_app_logs_folder_only() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let logs = f.state().data_dir.join("logs");
+    // Nothing logged yet: the folder is created and shown itself.
+    commands::logs_reveal(f.state()).await.unwrap();
+    assert!(logs.is_dir());
+    std::fs::write(logs.join(crate::logging::LOG_FILE), b"line\n").unwrap();
+    // Then the current log is selected inside it.
+    commands::logs_reveal(f.state()).await.unwrap();
+    let calls = f.opener.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls,
+        [
+            format!("reveal {}", logs.display()),
+            format!("reveal {}", logs.join(crate::logging::LOG_FILE).display()),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn updater_token_is_write_only_and_only_sent_to_the_update_check() {
     let f = Fixture::new(Duration::ZERO).await;
     assert!(!commands::updater_token_status(f.state()).await.unwrap());

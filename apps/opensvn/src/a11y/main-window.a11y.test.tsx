@@ -1,8 +1,10 @@
-import { configure, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, configure, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { AppShell } from "../app/app-shell";
-import { clearMockWorkingCopies, resetWcMock } from "../ipc/mock/wc-mock-commands";
+import { mockEmit } from "../ipc/mock/adapter";
+import { MOCK_WC_ID } from "../ipc/mock/data";
+import { clearMockWorkingCopies, resetWcMock, setMockWcBranch } from "../ipc/mock/wc-mock-commands";
 import type { Lang } from "../lib/i18n/i18n";
 import { expectNoSeriousA11yViolations, prepareDocument } from "../test-axe";
 import { renderApp, setupMockIpc, stubLayout } from "../test-utils";
@@ -67,6 +69,34 @@ for (const lang of ["en", "vi"] as Lang[]) {
       renderApp(<AppShell />);
       await screen.findByText(l.welcome);
       await expectNoSeriousA11yViolations(`welcome (${lang})`);
+    });
+
+    test("banner strip: another program's lock, out of date, on a tag", async () => {
+      setMockWcBranch(MOCK_WC_ID, {
+        kind: "tag",
+        name: "v1.2",
+        url: "https://svn.example.com/repos/game/tags/v1.2",
+      });
+      renderApp(<AppShell />);
+      await screen.findByRole("option", { name: /src\/engine\/renderer\.ts/ });
+      await act(async () => {
+        mockEmit("wc://banner", { wcId: MOCK_WC_ID, kind: "wc-busy", data: ["src"] });
+        mockEmit("op://started", { opId: "c1", kind: "commit", wcId: MOCK_WC_ID, title: "Commit" });
+        mockEmit("op://failed", {
+          opId: "c1",
+          error: {
+            code: "out-of-date",
+            message: "out of date",
+            detail: null,
+            path: null,
+            retryable: false,
+            actions: ["update"],
+          },
+        });
+      });
+      await waitFor(() => expect(screen.getAllByRole("status").length).toBeGreaterThanOrEqual(2));
+      expect(screen.getAllByRole("alert").length).toBeGreaterThanOrEqual(1);
+      await expectNoSeriousA11yViolations(`banners (${lang})`);
     });
 
     test("changes, history and browse views and the toolbar popovers", async () => {

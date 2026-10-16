@@ -10,6 +10,7 @@ client bugs before trying OpenSVN against the real server. One script builds it:
 | VisualSVN Server | Here |
 | --- | --- |
 | Active Directory (Kerberos KDC) | MIT krb5 KDC, realm `OPENSVN.TEST`, users `alice` / `alice-pass`, `bob` / `bob-pass` |
+| Active Directory domain controller | `VSVN_KDC=samba`: Samba AD DC, realm `AD.OPENSVN.TEST`, same users as domain accounts, AES only (see below) |
 | Service principal `HTTP/<fqdn>` | `HTTP/svn.opensvn.test`, keytab for Apache |
 | Integrated Windows Authentication + Basic | `/svn`: `mod_auth_gssapi`, Negotiate first, Basic checked against the KDC (`GssapiBasicAuth On`) |
 | Integrated Windows Authentication only | `/svn-sso`: Negotiate only |
@@ -74,6 +75,55 @@ make -j4 && make install
 
 `up` then also starts a second Apache with that module on `:18444` (same repositories, same
 locations).
+
+### Samba AD DC variant
+
+`VSVN_KDC=samba` replaces the MIT KDC with a real Active Directory domain controller (Samba 4.19,
+Ubuntu 24.04). Apache, mod_auth_gssapi, both mod_dav_svn versions, the repositories and the test
+suites stay the same; state lives in `/tmp/opensvn-visualsvn-ad`.
+
+```sh
+VSVN_KDC=samba scripts/test-env/visualsvn-like.sh install   # adds samba-ad-dc, samba-ad-provision, python3-samba, ldb-tools
+VSVN_KDC=samba scripts/test-env/visualsvn-like.sh up
+eval "$(VSVN_KDC=samba scripts/test-env/visualsvn-like.sh env)"
+klist -e        # alice@AD.OPENSVN.TEST, Etype aes256-cts-hmac-sha1-96
+```
+
+What it adds over the MIT realm, as an AD domain does it:
+
+- `samba-tool domain provision` (realm `AD.OPENSVN.TEST`, NetBIOS domain `OPENSVNAD`, no DNS
+  server, loopback only); `alice` and `bob` are domain users (`sAMAccountName`, UPN
+  `alice@ad.opensvn.test`), `alice` is in the group `SVN Developers`.
+- Tickets carry a PAC: the Negotiate header of a request is about 2.8 KB instead of a few hundred
+  bytes.
+- Apache's identity is a service account, `svc-svn`, with the SPN `HTTP/svn.opensvn.test` and
+  `msDS-SupportedEncryptionTypes = 24`; its keytab comes from `samba-tool domain exportkeytab`
+  (AES256 and AES128 keys only).
+- AES only: the KDC never issues RC4 (`kdc supported enctypes = 24`) and `krb5.conf` permits only
+  the two AES enctypes, as on a domain with RC4 switched off.
+- Basic on `/svn` (`GssapiBasicAuth On`) checks the password against the domain controller.
+
+Limits:
+
+- Samba has no setting for the KDC port: it listens on `127.0.0.1:88`. `up` needs root, and no
+  other KDC may use port 88.
+- Ubuntu's samba-tool needs the Python the bindings were built for (3.12); the script finds it when
+  `python3` is a newer version.
+- No DNS-based KDC discovery and no cross-realm trust: `krb5.conf` names the KDC.
+
+### Secret Service (Linux keychain)
+
+`scripts/test-env/secret-service-roundtrip.sh` runs secure-store's `os_store_roundtrip` (set, get,
+delete through the Secret Service API, the way the app stores passwords on Linux) without a
+desktop: a private bus from `dbus-run-session`, and `gnome-keyring-daemon --unlock` creating and
+unlocking a login keyring with a throwaway password in a temporary `HOME`. The user's own keyring
+is never touched. `install` adds `dbus`, `dbus-x11` and `gnome-keyring`; the nightly workflow runs
+it.
+
+```sh
+scripts/test-env/secret-service-roundtrip.sh install
+scripts/test-env/secret-service-roundtrip.sh --locked
+```
 
 ## Test suites
 
@@ -156,6 +206,50 @@ that commit nothing new, and an update must finish it once the connection works 
 asserts the number of cuts, so run it against the server directly, not through another faulty
 proxy.
 
+### The whole suite through the proxy, with explicit expectations
+
+Run `real_engine_dav` through the proxy in each fault mode with the faults and the proxy log
+named, one test at a time (the proxy's cut counter is shared by all connections, so parallel
+tests would make the cut pattern random):
+
+```sh
+D=/tmp/opensvn-visualsvn F="--reset-after 2 --idle-reset 2"
+python3 scripts/test-env/flaky-tls-proxy.py --listen 18461 --upstream svn.opensvn.test:18443 \
+  --cert $D/certs/server.crt --key $D/certs/server.key --ca $D/certs/ca.crt \
+  --log-requests $F 2>/tmp/proxy.log &
+OPENSVN_COMPAT_FAULTS="$F" OPENSVN_COMPAT_PROXY_LOG=/tmp/proxy.log \
+OPENSVN_COMPAT_LOCAL_URL=https://svn.opensvn.test:18461/svn-basic \
+  cargo test -p opensvn --features real-engine,engine-conformance --test real_engine_dav \
+  -- --ignored --test-threads=1
+```
+
+Modes used for the PR tables: `--reset-after 2`, `--idle-reset 2`, both, `--stale-after 2`,
+`--truncate-every 2 --truncate-at 1024 --truncate-method REPORT,GET`.
+
+- Reads must succeed: they are sent again on a fresh connection, and checkout, update, switch
+  and the streamed reads resume.
+- A write is never sent twice (#166). When the proxy breaks a connection under a write, the
+  write fails with an unknown outcome or the connection failure. `write_op!`
+  (`engine/conformance.rs`) then checks with the proxy log that a write really met the fault,
+  that no write request line repeats, and with `svnadmin lstxns` that no transaction is left.
+  The scenario then ends ("ends as designed" in the output), because repeating the write would
+  meet the same fault (`--reset-after 2` resets the third request of every connection, and a
+  commit sends more writes than that over one connection). The rest of the scenario is covered
+  by the direct run.
+- The tests that start their own proxy skip themselves when `OPENSVN_COMPAT_FAULTS` is set.
+
+### A switch cut off mid-answer
+
+`switch_cut_mid_answer_resumes_until_done` cuts every `REPORT` answer after 128 KiB. Each
+resumed drive gets further, and the switch finishes with every node below the branch and the
+local edits kept. `switch_cut_at_the_same_offset_is_finished_by_the_same_switch` always cuts
+inside a 2 MiB file. The switch gives up after two resumes that commit nothing new and leaves
+the working copy half-switched but consistent (the root at the branch, `incomplete`). The same
+switch finishes it once the connection works. In the app, `dav_resume`'s
+`a_switch_cut_for_good_is_finished_by_continue_switch` does the same through the commands
+("Continue switch", from the `switch_journal` table) and compares the result with
+`svn checkout` of the branch.
+
 ### Network outage during a checkout (`dav_resume`)
 
 `apps/opensvn/src-tauri/src/app_tests/dav_resume.rs` drives the whole app (commands, operation
@@ -205,6 +299,39 @@ Large content, release build, same container (svn 1.14.3 CLI for comparison):
 | commit of a 1-byte change in 40 MB | 42 MB uploaded (#132) | 9 KB |
 | commit 10k files | 158 s | 44 s |
 | checkout 10k files | 100 s (#121) | 4.5 s |
+
+### Samba AD DC (2026-10-15, Samba 4.19.5, same Apache and mod_auth_gssapi)
+
+| Suite | mod_dav_svn 1.14.3 | 1.15.0 |
+| --- | --- | --- |
+| `real_engine_dav`, Basic (`/svn-basic`) | 27/27 | 27/27 |
+| `real_engine_dav`, SSO, Negotiate only (`/svn-sso`) | 27/27 | 27/27 |
+| `real_engine_dav`, SSO, Negotiate + Basic (`/svn`) | 27/27 | |
+| `visualsvn_like` (without `big_`) | 18/18 | 18/18 |
+| `visualsvn_like` `big_*` (debug build) | 2/2 | – |
+
+Through `flaky-tls-proxy.py --idle-reset 2 --stale-after 3`, `real_engine_dav` passes 26/27 on
+both versions; the one left, `writes_after_a_pause_survive_a_proxy_that_dropped_the_idle_connection`,
+starts its own proxy and passes when run against the server directly. With `--reset-after 2`
+(every reused connection reset under its third request, writes included) the cases whose
+commit, lock or copy is cut fail by design (a cut write is never sent again): 16 of 27, the same 15
+as on main plus the new `branch_detection_follows_a_switch`, which copies a branch first.
+
+Memory of a 1 GiB download plus a 1 GiB upload through TLS
+(`crates/svn-ra/tests/transport_streaming.rs::one_gib_download_and_upload_keep_memory_flat`,
+release build, 4 cores; budget 50 MiB, checked every night):
+
+| Run | Download | Upload | Baseline RSS | Peak growth |
+| --- | --- | --- | --- | --- |
+| 1 | 0.71 s | 0.52 s | 9 MiB | 3 MiB |
+| 2 | 0.73 s | 0.48 s | 9 MiB | 4 MiB |
+| 3 | 0.82 s | 0.52 s | 9 MiB | 3 MiB |
+| 4 | 0.65 s | 0.53 s | 9 MiB | 3 MiB |
+
+```sh
+cargo test --release -p svn-ra --test transport_streaming -- --ignored --exact \
+  one_gib_download_and_upload_keep_memory_flat --nocapture
+```
 
 Fixed with this environment: repository listings never showed locks over DAV; locking an
 `svn:needs-lock` file left it read-only; the server URL `https://host/svn/` failed with

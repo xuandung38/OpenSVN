@@ -90,6 +90,11 @@ pub struct CleanupRequest {
     pub remove_unversioned: Option<bool>,
     pub remove_ignored: Option<bool>,
     pub vacuum_pristines: Option<bool>,
+    /// Also removes the working copy locks another program (svn, TortoiseSVN, an IDE) left
+    /// behind. Set only after the user ticked the explicit confirmation: the engine refuses while
+    /// a process it can see still has the working copy open, never touches a lock of a running
+    /// operation of this app, and never deletes files.
+    pub break_foreign_locks: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]

@@ -153,6 +153,11 @@ pub struct SvnError {
     /// outcome-unknown write; kept apart from [`SvnError::connection`] so that write paths keep
     /// their own rules.
     pub unreachable: bool,
+    /// The request never left the client: no connection to the server could be opened (TCP
+    /// connect, proxy tunnel or TLS handshake failed or timed out), so not one byte of it reached
+    /// the server. Such a failure may still carry a [`SvnError::connection`] (a handshake reset
+    /// or a connect timeout); for a write it means "not done", never "outcome unknown".
+    pub not_sent: bool,
     /// The repositories of the `SVNParentPath` location the URL turned out to be (VisualSVN
     /// Server's `https://host/svn/`), when it is one and the server lists them.
     pub repositories: Option<Box<[ParentRepo]>>,
@@ -182,6 +187,7 @@ impl SvnError {
             svn_code: None,
             connection: None,
             unreachable: false,
+            not_sent: false,
             repositories: None,
             child: None,
         }
@@ -199,6 +205,26 @@ impl SvnError {
         let mut e = Some(self);
         while let Some(err) = e {
             if err.unreachable {
+                return true;
+            }
+            e = err.child.as_deref();
+        }
+        false
+    }
+
+    /// Marks the request as never sent (see [`SvnError::not_sent`]).
+    #[must_use]
+    pub fn with_not_sent(mut self) -> Self {
+        self.not_sent = true;
+        self
+    }
+
+    /// Whether this error or one of its causes says the request never reached the server: it
+    /// was [`SvnError::not_sent`] or the server was unreachable.
+    pub fn is_not_sent(&self) -> bool {
+        let mut e = Some(self);
+        while let Some(err) = e {
+            if err.not_sent || err.unreachable {
                 return true;
             }
             e = err.child.as_deref();
@@ -306,6 +332,22 @@ mod tests {
         assert_eq!(
             wrapped.connection_failure(),
             Some(ConnectionFailure::TlsClosedUncleanly)
+        );
+    }
+
+    #[test]
+    fn not_sent_is_found_in_the_cause_chain_and_covers_unreachable() {
+        let sent = SvnError::new(ErrorCode::Network, "reset")
+            .with_connection(ConnectionFailure::ConnectionReset);
+        assert!(!sent.is_not_sent());
+        let handshake = sent.clone().with_not_sent();
+        let wrapped = SvnError::new(ErrorCode::Internal, "lock").with_child(handshake);
+        assert!(!wrapped.not_sent);
+        assert!(wrapped.is_not_sent());
+        assert!(
+            SvnError::new(ErrorCode::Network, "refused")
+                .with_unreachable()
+                .is_not_sent()
         );
     }
 

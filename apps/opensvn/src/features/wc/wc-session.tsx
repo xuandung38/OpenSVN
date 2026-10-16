@@ -18,14 +18,27 @@ export type WcDialog =
   | { kind: "changelist"; paths: string[] }
   | { kind: "update-rev" }
   | { kind: "switch" }
-  | { kind: "cleanup" }
+  | {
+      kind: "cleanup";
+      /** Opened from the "in use by another program" banner: the lock option is shown first. */
+      foreignLock?: boolean;
+    }
+  | { kind: "properties"; paths: string[] }
+  | { kind: "layout" }
   | { kind: "resolver"; path: string | null }
+  | { kind: "compare" }
+  | { kind: "report" }
   | { kind: "repo-rename"; wcId: string; name: string }
   | { kind: "repo-remove"; wcId: string; name: string };
 
 /** Dialogs that do not belong to the current working copy (they survive switching to another). */
 export function isAppDialog(d: WcDialog | null): boolean {
-  return d?.kind === "checkout" || d?.kind === "repo-rename" || d?.kind === "repo-remove";
+  return (
+    d?.kind === "checkout" ||
+    d?.kind === "repo-rename" ||
+    d?.kind === "repo-remove" ||
+    d?.kind === "report"
+  );
 }
 
 export interface WcLinks {

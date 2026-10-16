@@ -1,4 +1,8 @@
+import { CompareDialog } from "../compare/compare-dialog";
 import { ConflictResolver } from "../conflicts/conflict-resolver";
+import { ReportProblemDialog } from "../help/report-problem-dialog";
+import { LayoutDialog } from "../props/layout-dialog";
+import { PropertiesDialog } from "../props/properties-dialog";
 import { RemoveRepoDialog, RenameRepoDialog } from "../repos/repo-dialogs";
 import { isAppDialog, useWcSession } from "../wc-session";
 import { CheckoutDialog } from "./checkout-dialog";
@@ -40,12 +44,20 @@ export function WcDialogHost() {
     case "switch":
       return <SwitchDialog onClose={closeDialog} />;
     case "cleanup":
-      return <CleanupDialog onClose={closeDialog} />;
+      return <CleanupDialog foreignLock={dialog.foreignLock ?? false} onClose={closeDialog} />;
+    case "properties":
+      return <PropertiesDialog paths={dialog.paths} onClose={closeDialog} />;
+    case "layout":
+      return <LayoutDialog onClose={closeDialog} />;
     case "repo-rename":
       return <RenameRepoDialog wcId={dialog.wcId} name={dialog.name} onClose={closeDialog} />;
     case "repo-remove":
       return <RemoveRepoDialog wcId={dialog.wcId} name={dialog.name} onClose={closeDialog} />;
     case "resolver":
       return <ConflictResolver initialPath={dialog.path} onClose={closeDialog} />;
+    case "compare":
+      return <CompareDialog onClose={closeDialog} />;
+    case "report":
+      return <ReportProblemDialog onClose={closeDialog} />;
   }
 }

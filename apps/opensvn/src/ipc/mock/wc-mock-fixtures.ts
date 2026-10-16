@@ -71,6 +71,9 @@ export function freshMainStatus(): FileStatus[] {
         mine: true,
       },
     }),
+    // Listed only with View > Show ignored files.
+    status("build/game.exe", { text: "ignored", size: 812_000 }),
+    status("src/engine/audio.ts.orig", { text: "ignored", size: 2048 }),
   ];
 }
 
@@ -85,13 +88,25 @@ const CONFLICT_TEXT = [
   "",
 ].join("\n");
 
+/** A small SVG picture as a data URI (a circle of `color` and radius `r` on a light square). */
+function mockImage(color: string, r: number): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 80 60"><rect width="80" height="60" fill="#f1f3f6"/><circle cx="40" cy="30" r="${r}" fill="${color}"/></svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
 /** Diff of one file against its base, shaped like the backend's `diff_get` answer. */
 export function mockWcDiff(path: string, forceLarge: boolean): FileDiff {
   const name = path.split("/").pop() ?? path;
   const base = { ...NO_DIFF, path };
   switch (path) {
     case "assets/textures/hero-diffuse.png":
-      return { ...base, binary: true, mime: "image/png" };
+      // The real backend serves both sides through the asset protocol; inline images stand in.
+      return {
+        ...base,
+        binary: true,
+        mime: "image/png",
+        image: { leftUrl: mockImage("#2363d1", 22), rightUrl: mockImage("#d13a23", 30) },
+      };
     case "assets/models/crate.fbx":
       return { ...base, binary: true, mime: "application/octet-stream" };
     case "data/big-table.csv":

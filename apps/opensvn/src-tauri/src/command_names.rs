@@ -42,6 +42,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "reveal_in_os",
     "open_external",
     "diagnostics_export",
+    "logs_reveal",
     "wc_list",
     "wc_add_existing",
     "wc_remove",
@@ -75,5 +76,6 @@ pub const COMMAND_NAMES: &[&str] = &[
     "set_depth",
     "upgrade_format",
     "resolve",
+    "props_get",
     "props_set",
 ];

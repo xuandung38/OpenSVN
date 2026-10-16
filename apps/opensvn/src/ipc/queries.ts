@@ -37,15 +37,20 @@ export function useRecentUrls() {
   });
 }
 
-export function useStatus(wcId: WcId | null) {
+/** Status of a working copy; ignored entries only with `includeIgnored` (View > Show ignored files). */
+export function useStatus(wcId: WcId | null, includeIgnored = false) {
   return useQuery({
-    queryKey: queryKeys.status(wcId ?? ""),
+    // Under the status key, so every status invalidation refreshes both variants.
+    queryKey: [...queryKeys.status(wcId ?? ""), { includeIgnored }],
     enabled: wcId !== null,
+    // Keeps the list on screen while the other variant of the same working copy loads (never
+    // another working copy's files).
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === wcId ? prev : undefined),
     queryFn: () =>
       unwrap(
         ipc().commands.statusGet({
           wcId: wcId as WcId,
-          includeIgnored: false,
+          includeIgnored,
           includeUnversioned: true,
         }),
       ),

@@ -10,8 +10,12 @@ use opensvn_ipc::{
     AppError, GrantKind, OpResult, OperationHandle, PathGrantId, PickRequest, ProgramKind,
     WorkingCopy,
 };
+use serde_json::Value;
 use tauri::Manager;
-use tauri::test::MockRuntime;
+use tauri::WebviewWindowBuilder;
+use tauri::ipc::{CallbackFn, InvokeBody};
+use tauri::test::{INVOKE_KEY, MockRuntime, get_ipc_response};
+use tauri::webview::InvokeRequest;
 
 use crate::app_state::{AppDeps, AppState, EngineSource};
 use crate::engine::FakeEngine;
@@ -292,4 +296,70 @@ impl Fixture {
         }
         panic!("operation {} did not end", handle.op_id.0);
     }
+}
+
+/// App with the real ACL (from `capabilities/` and the generated permissions) and a `main` window,
+/// over the engine and doubles of `f`.
+pub fn ipc_app(f: &Fixture) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRuntime>) {
+    let (app, main, _) = ipc_app_with_events(f);
+    (app, main)
+}
+
+/// Like [`ipc_app`], with the events of its own app state.
+pub fn ipc_app_with_events(
+    f: &Fixture,
+) -> (
+    tauri::App<MockRuntime>,
+    tauri::WebviewWindow<MockRuntime>,
+    Arc<RecordingEvents>,
+) {
+    let reg = crate::builder::<MockRuntime>();
+    let app = tauri::test::mock_builder()
+        .plugin(tauri_plugin_opener::init())
+        .invoke_handler(reg.invoke_handler())
+        .build(crate::app_context())
+        .unwrap();
+    let events = Arc::new(RecordingEvents::default());
+    let state = AppState::build(AppDeps {
+        data_dir: tempfile::tempdir().unwrap().keep(),
+        engine: EngineSource::Ready(f.engine.clone()),
+        credentials: Arc::new(secure_store::MemoryStore::new()),
+        events: events.clone(),
+        picker: f.picker.clone(),
+        status_timing: StatusTiming::default(),
+        path_picker: f.paths.clone(),
+        opener: f.opener.clone(),
+        notifier: f.notifier.clone(),
+        menu: f.menu.clone(),
+        updates: f.updates.clone(),
+        secrets: f.secrets.clone(),
+        launcher: f.launcher.clone(),
+    })
+    .unwrap();
+    app.manage(state);
+    let main = WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::App("index.html".into()))
+        .build()
+        .unwrap();
+    (app, main, events)
+}
+
+/// Calls `cmd` through the IPC layer as the WebView does: JSON in, JSON (or the error) out.
+pub fn invoke(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    cmd: &str,
+    body: Value,
+) -> Result<Value, Value> {
+    let res = get_ipc_response(
+        window,
+        InvokeRequest {
+            cmd: cmd.into(),
+            callback: CallbackFn(0),
+            error: CallbackFn(1),
+            url: "tauri://localhost".parse().unwrap(),
+            body: InvokeBody::Json(body),
+            headers: Default::default(),
+            invoke_key: INVOKE_KEY.to_string(),
+        },
+    );
+    res.map(|b| b.deserialize::<Value>().unwrap())
 }

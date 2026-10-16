@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 790e378ddf2c453206e88f8e3caeb954bb8d4f5c94fb07759ae2cbf4859ad696 # shrinks to secrets = ["0Aa_a~/~aa0_"], lines = [(15, 0)], place = 0, hide_paths = false, hide_commit_messages = false
+cc ecee1d0b5db485d8d30fab489d1866e6ae94cb699308ca1923a35c988561643c # shrinks to secrets = ["aA-0a0_a0%AA"], lines = [(0, 0)], place = 4, hide_paths = false, hide_commit_messages = false

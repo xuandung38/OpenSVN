@@ -398,6 +398,14 @@ impl RaSession for RecRa {
         let mut s = RecRa::new(self.inner.at(url)?);
         s.log = Arc::clone(&self.log);
         s.reports = Arc::clone(&self.reports);
+        // A server that always cuts at the same point does so at every URL.
+        *s.update_break_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = self
+            .update_break_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         Ok(Box::new(s))
     }
     async fn ensure_authenticated(&self, cancel: &CancelToken) -> Result<()> {

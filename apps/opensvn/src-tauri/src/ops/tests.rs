@@ -3,7 +3,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use opensvn_ipc::{AppError, ErrorCode, OpId, OpResult, OperationKind, WcId};
+use opensvn_ipc::{AppError, ErrorCode, OpId, OpResult, OperationHandle, OperationKind, WcId};
+use tokio::sync::oneshot;
 
 use super::events::RecordingEvents;
 use super::manager::HISTORY_LIMIT;
@@ -414,26 +415,70 @@ async fn no_progress_follows_the_end_of_an_operation() {
     );
 }
 
+/// Spawns an operation that waits for "Retry now" the way the network wait does: it registers
+/// first, then says it is waiting (`waiting` resolves). Finishes once woken.
+fn spawn_waiting(
+    m: &OperationManager,
+    title: &'static str,
+) -> (OperationHandle, oneshot::Receiver<()>) {
+    let (tx, rx) = oneshot::channel();
+    let h = m.spawn(OperationKind::Checkout, None, title, |ctx| async move {
+        let poked = ctx.retry_now.notified();
+        tokio::pin!(poked);
+        poked.as_mut().enable();
+        let _ = tx.send(());
+        poked.await;
+        Ok(OpResult::Done)
+    });
+    (h, rx)
+}
+
 #[tokio::test]
 async fn retry_now_wakes_an_operation_that_waits_for_the_connection() {
     let (m, events) = manager();
-    let spawn = |title: &'static str| {
-        m.spawn(OperationKind::Checkout, None, title, |ctx| async move {
-            ctx.retry_now.notified().await;
-            Ok(OpResult::Done)
-        })
-    };
-    let one = spawn("Checkout one");
+    let (one, waiting) = spawn_waiting(&m, "Checkout one");
+    waiting.await.unwrap();
     m.retry_now(&one.op_id).unwrap();
     wait_for(&events, "finished", &one.op_id).await;
     // Finished: ignored; unknown: an error.
     m.retry_now(&one.op_id).unwrap();
     assert!(m.retry_now(&OpId("nope".into())).is_err());
-    // The system woke up: every running operation tries again.
-    let (a, b) = (spawn("Checkout a"), spawn("Checkout b"));
+    // The system woke up: every waiting operation tries again.
+    let (a, wa) = spawn_waiting(&m, "Checkout a");
+    let (b, wb) = spawn_waiting(&m, "Checkout b");
+    wa.await.unwrap();
+    wb.await.unwrap();
     m.retry_all_now();
     wait_for(&events, "finished", &a.op_id).await;
     wait_for(&events, "finished", &b.op_id).await;
+}
+
+/// A "Retry now" (or a wake-up) while the operation still works, not waiting for the network,
+/// is dropped: it must not cut short the operation's next wait.
+#[tokio::test]
+async fn retry_now_is_not_kept_for_an_operation_that_does_not_wait() {
+    let (m, _events) = manager();
+    let (go_tx, go_rx) = oneshot::channel::<()>();
+    let (out_tx, out_rx) = oneshot::channel::<bool>();
+    let h = m.spawn(
+        OperationKind::Checkout,
+        None,
+        "Checkout",
+        |ctx| async move {
+            // Still downloading.
+            go_rx.await.unwrap();
+            // The connection is lost now: the wait must not end at once.
+            let woken = tokio::time::timeout(Duration::from_millis(200), ctx.retry_now.notified())
+                .await
+                .is_ok();
+            let _ = out_tx.send(woken);
+            Ok(OpResult::Done)
+        },
+    );
+    m.retry_now(&h.op_id).unwrap();
+    m.retry_all_now();
+    go_tx.send(()).unwrap();
+    assert!(!out_rx.await.unwrap(), "a press before the wait woke it");
 }
 
 #[tokio::test]

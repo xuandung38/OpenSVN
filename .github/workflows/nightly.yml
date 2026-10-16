@@ -3,8 +3,9 @@ name: nightly
 # Crash suite (random SIGKILL + named failpoints) and benchmarks against the svn CLI, both on a
 # local Apache + mod_dav_svn. Ubuntu 24.04 packages Subversion 1.14.3, so the server and the CLI
 # baseline are 1.14.3 here; the crash suite's oracle client is svn 1.15.0, built from source
-# (.github/actions/install-svn-115), which also lets the concurrency suite run. The app job runs the
-# real app (tauri-driver under Xvfb): crash e2e, RSS on a 100k-file working copy, a 10 min soak.
+# (.github/actions/install-svn-115), which also lets the concurrency suite run. Also: memory of a
+# 1 GiB transfer, Linux Secret Service round trip. The app job runs the real app (tauri-driver
+# under Xvfb): crash e2e, RSS on a 100k-file working copy, a 10 min soak.
 on:
   schedule:
     - cron: "17 19 * * *" # 02:17 Asia/Ho_Chi_Minh
@@ -85,6 +86,30 @@ jobs:
           name: crash-report
           path: crash-report
           retention-days: 14
+
+  transport-and-keyring:
+    name: 1 GiB transfer memory, Secret Service round trip
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install D-Bus and gnome-keyring
+        run: scripts/test-env/secret-service-roundtrip.sh install
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # 1 GiB down and 1 GiB up through TLS; fails when peak RSS grows by 50 MiB or more
+      # (docs/visualsvn-test-env.md records the usual growth).
+      - name: 1 GiB download and upload keep memory flat (release)
+        # Explicit bash runs with pipefail: a failing test fails the step despite `tee`.
+        shell: bash
+        run: |
+          cargo test --release -p svn-ra --locked --test transport_streaming \
+            -- --ignored --exact one_gib_download_and_upload_keep_memory_flat --nocapture \
+            | tee transport-memory.txt
+          grep '^download' transport-memory.txt >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Secret Service round trip (headless gnome-keyring)
+        run: scripts/test-env/secret-service-roundtrip.sh --locked
 
   bench:
     name: benchmarks vs svn CLI
