@@ -92,7 +92,7 @@ fn connector(ca: &Path) -> Arc<HttpConnector> {
 /// `commit -m MSG [PATH...] [--no-unlock]`, `revert [-R] PATH...`, `add PATH...`,
 /// `delete [--keep-local] PATH...`, `move FROM TO`, `lock [-m MSG] [--force] PATH...`,
 /// `unlock [--force] PATH...`, `cleanup [--remove-unversioned] [--remove-ignored]
-/// [--vacuum-pristines]`, `resolve --accept base|working|mine-full|theirs-full PATH...`,
+/// [--vacuum-pristines]`, `resolve --accept base|working|mine-full|theirs-full|mine-conflict PATH...`,
 /// `propset NAME VALUE PATH...`, `propdel NAME PATH...`, `status` (must read the working copy).
 struct EngineCli {
     rt: tokio::runtime::Runtime,
@@ -327,6 +327,7 @@ impl EngineCli {
                     Some("working") => ResolveChoice::Working,
                     Some("mine-full") => ResolveChoice::Mine,
                     Some("theirs-full") => ResolveChoice::Theirs,
+                    Some("mine-conflict") => ResolveChoice::MineConflict,
                     other => bail!("resolve --accept {other:?} is not supported"),
                 };
                 for path in c.rels() {

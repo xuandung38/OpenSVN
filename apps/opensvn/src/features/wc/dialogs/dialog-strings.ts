@@ -175,6 +175,13 @@ export const dialogStrings = defineStrings({
     treeKeepLocalHint: "Keep the working copy as it is now and mark the conflict resolved.",
     treeTakeIncoming: "Take the incoming state",
     treeTakeIncomingHint: "Replace your local state with the server's version.",
+    treeLocalMoved: "You moved this item to {path}, and the incoming update changed it.",
+    treeMovedApply: "Apply the incoming changes to {path}",
+    treeMovedApplyHint:
+      "Merge the server's changes into the moved item. Your local edits stay; overlapping edits are marked as conflicts.",
+    treeMovedKeep: "Keep {path} as it is",
+    treeMovedKeepHint:
+      "Leave out the incoming changes for the moved item. From now on the move counts as a copy plus a delete.",
     openExternalEditor: "Open in external editor",
     previous: "Previous",
     next: "Next",
@@ -382,6 +389,13 @@ export const dialogStrings = defineStrings({
     treeKeepLocalHint: "Giữ working copy như hiện tại và đánh dấu đã giải quyết.",
     treeTakeIncoming: "Lấy trạng thái từ server",
     treeTakeIncomingHint: "Thay trạng thái local của bạn bằng bản của server.",
+    treeLocalMoved: "Bạn đã di chuyển mục này sang {path}, còn bản update đã sửa nó.",
+    treeMovedApply: "Áp dụng thay đổi từ server vào {path}",
+    treeMovedApplyHint:
+      "Gộp thay đổi của server vào mục đã di chuyển. Sửa đổi local được giữ nguyên; chỗ sửa trùng nhau được đánh dấu conflict.",
+    treeMovedKeep: "Giữ nguyên {path}",
+    treeMovedKeepHint:
+      "Bỏ qua thay đổi từ server cho mục đã di chuyển. Từ giờ việc di chuyển được tính là một bản copy và một lần xóa.",
     openExternalEditor: "Mở bằng editor ngoài",
     previous: "Trước",
     next: "Sau",

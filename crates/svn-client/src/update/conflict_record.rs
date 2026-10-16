@@ -68,6 +68,15 @@ pub enum NewConflict {
     Prop(PropConflict),
     /// Tree conflict.
     Tree(TreeReason, TreeAction),
+    /// Tree conflict "local moved away" on the source op root `src` of a move to `dst`.
+    MovedAway {
+        /// Incoming action.
+        action: TreeAction,
+        /// Source op root of the move (the conflict victim).
+        src: String,
+        /// Destination op root of the move.
+        dst: String,
+    },
 }
 
 impl NewConflict {
@@ -80,6 +89,12 @@ impl NewConflict {
                 action,
                 move_src_op_root: None,
                 move_dst_op_root: None,
+            }),
+            Self::MovedAway { action, src, dst } => Conflict::Tree(TreeConflict {
+                reason: TreeReason::MovedAway,
+                action,
+                move_src_op_root: Some(src),
+                move_dst_op_root: Some(dst),
             }),
         }
     }

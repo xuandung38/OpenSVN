@@ -292,6 +292,14 @@ impl WcTxn<'_> {
 
     /// Rows of `path` and its descendants at `op_depth`, keyed by the part of the path below
     /// `path` (`""` or `/name...`), with properties decoded so their order does not matter.
+    pub fn layer(
+        &self,
+        path: &RelPath,
+        op_depth: u32,
+    ) -> Result<std::collections::BTreeMap<String, LayerRow>> {
+        self.layer_rows(path.as_str(), i64::from(op_depth))
+    }
+
     fn layer_rows(
         &self,
         path: &str,
@@ -1040,15 +1048,25 @@ impl WcTxn<'_> {
     }
 }
 
-/// One `NODES` row as [`WcTxn::bump_moved_away`] compares and copies it.
-struct LayerRow {
-    presence: String,
-    kind: String,
-    checksum: Option<String>,
-    props: Props,
-    repos_path: Option<String>,
-    revision: Option<i64>,
-    changed_revision: Option<i64>,
-    changed_date: Option<i64>,
-    changed_author: Option<String>,
+/// One `NODES` row of a layer, as [`WcTxn::layer`] returns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerRow {
+    /// `presence` word.
+    pub presence: String,
+    /// `kind` word.
+    pub kind: String,
+    /// Pristine checksum (`$sha1$...`).
+    pub checksum: Option<String>,
+    /// Pristine properties, sorted.
+    pub props: Props,
+    /// Repository path.
+    pub repos_path: Option<String>,
+    /// Revision.
+    pub revision: Option<i64>,
+    /// Last changed revision.
+    pub changed_revision: Option<i64>,
+    /// Last changed date.
+    pub changed_date: Option<i64>,
+    /// Last changed author.
+    pub changed_author: Option<String>,
 }

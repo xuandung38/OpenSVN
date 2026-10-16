@@ -82,7 +82,7 @@ impl UpdateEditor {
         }
         let shadowing = db.read_node(wc)?.filter(|c| c.op_depth > 0);
         let reason = match &shadowing {
-            Some(c) if c.presence == Presence::BaseDeleted => Some(TreeReason::Deleted),
+            Some(c) if c.presence == Presence::BaseDeleted => Some(self.deleted_reason(wc, c)),
             Some(_) => Some(TreeReason::Replaced),
             None if inspect::subtree_has_local_changes(&db, wc)? => Some(TreeReason::Edited),
             None => None,
@@ -111,7 +111,7 @@ impl UpdateEditor {
                 new.as_ref(),
             );
             let path = wc.clone();
-            let recorded = reason.clone();
+            let conflict = self.tree_conflict(wc, reason.clone(), TreeAction::Delete);
             self.defer(
                 wc,
                 Box::new(move |t| {
@@ -123,12 +123,7 @@ impl UpdateEditor {
                     if let Some(m) = &marker {
                         t.base_add(&path, m)?;
                     }
-                    conflict_record::record(
-                        t,
-                        &path,
-                        &info,
-                        vec![NewConflict::Tree(recorded, TreeAction::Delete)],
-                    )
+                    conflict_record::record(t, &path, &info, vec![conflict])
                 }),
             )?;
             self.batch.removed(wc.clone());
@@ -267,7 +262,7 @@ impl UpdateEditor {
             new_side.as_ref(),
         );
         if let Some(tc) = &d.tree_conflict {
-            conflicts.push(NewConflict::Tree(tc.reason.clone(), tc.action.clone()));
+            conflicts.push(self.tree_conflict(&d.wc, tc.reason.clone(), tc.action.clone()));
             action = Some(UpdateAction::TreeConflicted);
         }
         let path = d.wc.clone();

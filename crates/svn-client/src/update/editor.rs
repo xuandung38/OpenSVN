@@ -67,6 +67,9 @@ pub struct UpdateEditor {
     /// deleted: an add of the same name that follows is a replacement (svn's
     /// `deletion_conflicts`), see [`UpdateEditor::take_replacement`].
     pub(super) deletion_conflicts: HashMap<RelPath, (Node, TreeReason)>,
+    /// Destination of each local move whose source this drive found deleted (the root of a
+    /// "moved away" tree conflict), by source op root.
+    pub(super) moved_away: HashMap<RelPath, String>,
     finished: bool,
     /// Nodes prepared but not committed yet.
     pub(super) batch: Batch,
@@ -121,6 +124,7 @@ impl UpdateEditor {
                 files: HashMap::new(),
                 skipped: Vec::new(),
                 deletion_conflicts: HashMap::new(),
+                moved_away: HashMap::new(),
                 finished: false,
                 batch: Batch::default(),
                 staged: None,
@@ -382,6 +386,38 @@ impl UpdateEditor {
         (old, Some(new))
     }
 
+    /// Reason of a tree conflict on `wc`, whose top working row `cur` deletes the BASE node:
+    /// `moved-away` when `wc` is the source op root of a local move (svn's `check_tree_conflict`
+    /// after `scan_deletion`), `deleted` otherwise.
+    pub(super) fn deleted_reason(&mut self, wc: &RelPath, cur: &Node) -> TreeReason {
+        match &cur.moved_to {
+            Some(dst) if cur.op_depth == relpath_depth(wc) => {
+                self.moved_away.insert(wc.clone(), dst.as_str().to_owned());
+                TreeReason::MovedAway
+            }
+            _ => TreeReason::Deleted,
+        }
+    }
+
+    /// The tree conflict to record on `wc`: a `moved-away` one names both ends of the move, as
+    /// svn records them.
+    pub(super) fn tree_conflict(
+        &self,
+        wc: &RelPath,
+        reason: TreeReason,
+        action: TreeAction,
+    ) -> NewConflict {
+        match (reason, self.moved_away.get(wc)) {
+            (TreeReason::MovedAway, Some(dst)) => NewConflict::MovedAway {
+                action,
+                src: wc.as_str().to_owned(),
+                dst: dst.clone(),
+            },
+            (TreeReason::MovedAway, None) => NewConflict::Tree(TreeReason::Deleted, action),
+            (reason, _) => NewConflict::Tree(reason, action),
+        }
+    }
+
     /// Records a tree conflict on `wc` and remembers that the path was left alone.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn record_tree_conflict(
@@ -403,13 +439,14 @@ impl UpdateEditor {
             new.as_ref(),
         );
         let path = wc.clone();
+        let conflict = self.tree_conflict(wc, reason, action);
         self.defer(
             wc,
             Box::new(move |t| {
                 if copy_base {
                     t.convert_base_to_copy(&path)?;
                 }
-                conflict_record::record(t, &path, &info, vec![NewConflict::Tree(reason, action)])
+                conflict_record::record(t, &path, &info, vec![conflict])
             }),
         )?;
         self.skipped.push(wc.clone());
@@ -444,14 +481,10 @@ impl UpdateEditor {
             left.as_ref(),
             right.as_ref(),
         );
-        self.s.db.with_txn(|t| {
-            conflict_record::record(
-                t,
-                wc,
-                &info,
-                vec![NewConflict::Tree(reason, TreeAction::Replace)],
-            )
-        })?;
+        let conflict = self.tree_conflict(wc, reason, TreeAction::Replace);
+        self.s
+            .db
+            .with_txn(|t| conflict_record::record(t, wc, &info, vec![conflict]))?;
         let layer = self
             .s
             .db
@@ -570,8 +603,9 @@ impl UpdateEditor {
                 // Deleted or replaced locally: the drive goes on below with BASE only (svn's
                 // `shadowed` directory), the working layer stays as it is and the tree
                 // conflict is recorded once, on this directory, when it closes.
+                let cur = cur.clone();
                 let reason = if cur.presence == Presence::BaseDeleted {
-                    TreeReason::Deleted
+                    self.deleted_reason(&wc, &cur)
                 } else {
                     TreeReason::Replaced
                 };
@@ -1345,7 +1379,7 @@ impl UpdateEditor {
                     if let Some(c) = cur.as_ref().filter(|c| c.op_depth > 0) {
                         tree_conflict = Some(if c.presence == Presence::BaseDeleted {
                             PendingTreeConflict {
-                                reason: TreeReason::Deleted,
+                                reason: self.deleted_reason(&wc, c),
                                 action: TreeAction::Edit,
                             }
                         } else {

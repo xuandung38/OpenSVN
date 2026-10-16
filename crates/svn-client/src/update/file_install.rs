@@ -105,6 +105,7 @@ impl UpdateEditor {
                 matches!(
                     t.reason,
                     TreeReason::Deleted
+                        | TreeReason::MovedAway
                         | TreeReason::Replaced
                         | TreeReason::Added
                         | TreeReason::MovedHere
@@ -345,7 +346,7 @@ impl UpdateEditor {
             action = UpdateAction::Conflicted;
         }
         if let Some(tc) = &f.tree_conflict {
-            conflicts.push(NewConflict::Tree(tc.reason.clone(), tc.action.clone()));
+            conflicts.push(self.tree_conflict(&wc, tc.reason.clone(), tc.action.clone()));
         }
 
         // 4. One transaction.

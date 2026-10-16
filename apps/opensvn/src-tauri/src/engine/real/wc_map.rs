@@ -86,6 +86,7 @@ pub(super) fn resolve_choice(
         Ipc::Theirs => Client::TheirsFull,
         Ipc::Working => Client::Working,
         Ipc::Base => Client::Base,
+        Ipc::MineConflict => Client::MineConflict,
     };
     (c, svn_client::local::ResolveScope::ALL)
 }

@@ -1,0 +1,37 @@
+# An update edits a file and a folder the working copy moved away: both clients record "local
+# moved away, incoming edit" on the move sources. One client resolves the other's working copy
+# with mine-conflict (the edits go to the move destinations, merged into a local edit) or
+# working (the move becomes a copy).
+name: op-resolve-moved-away
+repo: basic
+fresh_repo: true
+steps:
+  - { on: svn15, wc: w, svn: [checkout, "{url}/trunk", "."] }
+  - { on: engine, wc: e, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: s, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: w, sh: "printf 'server line\\n' >> docs/index.md && printf 'server\\n' >> src/app.c" }
+  - { on: svn15, wc: w, svn: [commit, -m, "incoming edits"] }
+  - { on: engine, wc: e, svn: [move, docs/index.md, docs/moved.md] }
+  - { on: engine, wc: e, svn: [move, src, source] }
+  - { on: svn15, wc: s, svn: [move, docs/index.md, docs/moved.md] }
+  - { on: svn15, wc: s, svn: [move, src, source] }
+  - { on: svn15, wc: o, svn: [move, docs/index.md, docs/moved.md] }
+  - { on: svn15, wc: o, svn: [move, src, source] }
+  - { on: svn15, wc: e, sh: "printf 'local line\\n' >> source/app.c" }
+  - { on: svn15, wc: s, sh: "printf 'local line\\n' >> source/app.c" }
+  - { on: svn15, wc: o, sh: "printf 'local line\\n' >> source/app.c" }
+  # The engine updates into the conflicts, svn resolves them; svn updates, the engine resolves.
+  - { on: engine, wc: e, svn: [update] }
+  - { on: svn14, wc: e, svn: [resolve, --accept, mine-conflict, src] }
+  - { on: svn14, wc: e, svn: [resolve, --accept, working, docs/index.md] }
+  - { on: svn15, wc: s, svn: [update, --accept, postpone] }
+  - { on: engine, wc: s, svn: [resolve, --accept, mine-conflict, src] }
+  - { on: engine, wc: s, svn: [resolve, --accept, working, docs/index.md] }
+  # The oracle: svn alone.
+  - { on: svn15, wc: o, svn: [update, --accept, postpone] }
+  - { on: svn15, wc: o, svn: [resolve, --accept, mine-conflict, src] }
+  - { on: svn15, wc: o, svn: [resolve, --accept, working, docs/index.md] }
+compare:
+  - { left: e, right: o, checks: [tree, status, info, wcdb] }
+  - { left: s, right: o, checks: [tree, status, info, wcdb] }

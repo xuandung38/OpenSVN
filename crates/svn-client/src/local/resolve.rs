@@ -8,6 +8,7 @@ use svn_wc::workqueue::WorkItem;
 
 use super::lock::write_op;
 use super::state::subtree;
+use super::update_move;
 use crate::wc::skels;
 
 /// Which version of the conflicted content to keep (`--accept`).
@@ -21,6 +22,11 @@ pub enum ResolveChoice {
     MineFull,
     /// The incoming whole version (`theirs-full`).
     TheirsFull,
+    /// Tree conflicts: the local change wins and the incoming one is carried over to it
+    /// (`mine-conflict`; for a node moved away, the destination receives the incoming changes).
+    MineConflict,
+    /// Tree conflicts: the incoming change wins (`theirs-conflict`).
+    TheirsConflict,
 }
 
 /// Which kinds of conflict to resolve.
@@ -42,6 +48,9 @@ impl ResolveScope {
         tree: true,
     };
 }
+
+/// Subversion's `SVN_ERR_WC_CONFLICT_RESOLVER_FAILURE`.
+pub const SVN_ERR_WC_CONFLICT_RESOLVER_FAILURE: u32 = 155_027;
 
 fn invalid(msg: impl Into<String>) -> SvnError {
     SvnError::new(ErrorCode::WcInvalidOperation, msg)
@@ -66,7 +75,7 @@ pub fn resolve(
         let mut done = Vec::new();
         for n in nodes {
             cancel.check()?;
-            if resolve_one(db, &n, scope, choice)? {
+            if resolve_one(db, cancel, &n, scope, choice)? {
                 done.push(n);
             }
         }
@@ -76,6 +85,7 @@ pub fn resolve(
 
 fn resolve_one(
     db: &WcDb,
+    cancel: &CancelToken,
     rel: &RelPath,
     scope: ResolveScope,
     choice: ResolveChoice,
@@ -84,6 +94,31 @@ fn resolve_one(
         return Ok(false);
     };
     let mut skel = ConflictSkel::from_skel(&record.skel)?;
+    if scope.tree
+        && let Some(mv) = update_move::victim(&skel)?
+    {
+        // "Local moved away, incoming edit" (svn 1.15's resolver): the move's source is
+        // deleted, so it has no text or property conflict of its own.
+        match choice {
+            ResolveChoice::MineConflict => {
+                update_move::update_destination(db, cancel, &mv, &record)?
+            }
+            ResolveChoice::Working => update_move::break_move(db, &mv, &record)?,
+            _ => {
+                return Err(SvnError::new(
+                    ErrorCode::WcInvalidOperation,
+                    format!(
+                        "inapplicable conflict resolution option given for conflicted path \
+                         '{rel}': a local move away versus an incoming edit is resolved with \
+                         mine-conflict (update the move destination) or working (break the \
+                         move)"
+                    ),
+                )
+                .with_svn_code(SVN_ERR_WC_CONFLICT_RESOLVER_FAILURE));
+            }
+        }
+        return Ok(true);
+    }
     let mut work: Vec<WorkItem> = Vec::new();
     let mut resolve_text = false;
     let mut resolve_props = false;
@@ -98,6 +133,11 @@ fn resolve_one(
             ResolveChoice::Base => Some(&text.original),
             ResolveChoice::MineFull => Some(&text.mine),
             ResolveChoice::TheirsFull => Some(&text.their),
+            ResolveChoice::MineConflict | ResolveChoice::TheirsConflict => {
+                return Err(invalid(format!(
+                    "'{rel}' has a text conflict: choose a whole version or the working file"
+                )));
+            }
         };
         if let Some(src) = source {
             let src = src
@@ -125,6 +165,12 @@ fn resolve_one(
             ResolveChoice::Base => Some(prop.old_props.clone().unwrap_or_default()),
             ResolveChoice::MineFull => Some(prop.mine_props.clone().unwrap_or_default()),
             ResolveChoice::TheirsFull => Some(prop.their_props.clone().unwrap_or_default()),
+            ResolveChoice::MineConflict | ResolveChoice::TheirsConflict => {
+                return Err(invalid(format!(
+                    "'{rel}' has a property conflict: choose a whole version or the working \
+                     properties"
+                )));
+            }
         };
         new_props_for_txn = new_props;
         work.extend(
