@@ -159,7 +159,8 @@ fn parse_props(body: &[u8]) -> Vec<(String, Option<Vec<u8>>)> {
 }
 
 /// Parses `svnadmin dump` output (format 2, no deltas) into per-revision fake changes.
-/// Copies are not supported; scenarios must not use `svn copy`.
+/// Copies keep their history (`FakeChange::Copy`); the properties of copied children are known
+/// only as far as the latest revision tells.
 pub fn parse_dump(data: &[u8]) -> Vec<Vec<FakeChange>> {
     let mut revs: Vec<Vec<FakeChange>> = Vec::new();
     let mut known_props: HashMap<String, BTreeMap<String, Vec<u8>>> = HashMap::new();
@@ -206,10 +207,31 @@ pub fn parse_dump(data: &[u8]) -> Vec<Vec<FakeChange>> {
             cur.push(FakeChange::Delete(rp(&path)));
             known_props.retain(|k, _| k != &path && !k.starts_with(&format!("{path}/")));
         }
-        assert!(
-            get("Node-copyfrom-path").is_none(),
-            "copies are not supported"
-        );
+        if let Some(from) = get("Node-copyfrom-path") {
+            let rev = get("Node-copyfrom-rev").expect("copyfrom-rev");
+            cur.push(FakeChange::Copy {
+                from: rp(&from),
+                rev: svn_types::Revnum(rev.parse().expect("copyfrom-rev")),
+                to: rp(&path),
+            });
+            let copied: Vec<(String, BTreeMap<String, Vec<u8>>)> = known_props
+                .iter()
+                .filter_map(|(k, v)| {
+                    let rest = if *k == from {
+                        ""
+                    } else {
+                        k.strip_prefix(&format!("{from}/"))?
+                    };
+                    let to = if rest.is_empty() {
+                        path.clone()
+                    } else {
+                        format!("{path}/{rest}")
+                    };
+                    Some((to, v.clone()))
+                })
+                .collect();
+            known_props.extend(copied);
+        }
         let kind = get("Node-kind").expect("kind");
         let plen: usize = get("Prop-content-length").map_or(0, |v| v.parse().expect("plen"));
         let tlen: Option<usize> = get("Text-content-length").map(|v| v.parse().expect("tlen"));
@@ -223,12 +245,19 @@ pub fn parse_dump(data: &[u8]) -> Vec<Vec<FakeChange>> {
                 }
             }
         }
-        if kind == "dir" {
+        if get("Node-copyfrom-path").is_some() {
+            // The copy brought the node; only a changed text is sent.
+            if let Some(t) = text.filter(|_| kind == "file") {
+                cur.push(FakeChange::PutFile(rp(&path), t));
+            }
+        } else if kind == "dir" {
             cur.push(FakeChange::PutDir(rp(&path)));
         } else if let Some(t) = text {
             cur.push(FakeChange::PutFile(rp(&path), t));
         }
-        if plen > 0 || action == "add" || action == "replace" {
+        if plen > 0
+            || ((action == "add" || action == "replace") && get("Node-copyfrom-path").is_none())
+        {
             let old = known_props.get(&path).cloned().unwrap_or_default();
             if plen > 0 {
                 for (k, v) in &new_props {

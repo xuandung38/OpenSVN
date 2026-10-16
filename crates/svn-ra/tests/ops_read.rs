@@ -335,6 +335,8 @@ async fn hostile_hrefs_are_refused_or_skipped() {
                     5,
                 ),
                 response(&format!("{rvr}/trunk/%2e%2e/escape"), false, 5),
+                response(&format!("{rvr}/trunk/CON.txt"), false, 5),
+                response(&format!("{rvr}/trunk/a%3ab.txt"), false, 5),
             ]),
         ),
     )
@@ -351,6 +353,21 @@ async fn hostile_hrefs_are_refused_or_skipped() {
         .map(|e| e.name)
         .collect();
     assert_eq!(names, ["ok.txt"]);
+    // The refused entries stay out, but their number reaches the caller.
+    for depth in [Depth::Immediates, Depth::Files, Depth::Infinity] {
+        let listing = s
+            .list_counted(&RelPath::root(), None, depth, &cancel)
+            .await
+            .unwrap();
+        let names: Vec<_> = listing.entries.into_iter().map(|e| e.name).collect();
+        assert_eq!(names, ["ok.txt"], "{depth:?}");
+        assert_eq!(listing.rejected, 4, "{depth:?}");
+    }
+    let empty = s
+        .list_counted(&RelPath::root(), None, Depth::Empty, &cancel)
+        .await
+        .unwrap();
+    assert_eq!((empty.entries.len(), empty.rejected), (0, 0));
     let reqs = requests(&srv).await;
     assert!(reqs.iter().all(|(_, p)| p.starts_with("/svn/repo/")));
 }
@@ -404,7 +421,7 @@ async fn get_file_detects_a_checksum_mismatch() {
         .get_file(&p("a.txt"), None, &mut out, &CancelToken::new())
         .await
         .unwrap_err();
-    assert_eq!(err.code, ErrorCode::Corrupt);
+    assert_eq!(err.code, ErrorCode::ProtocolViolation);
 }
 
 #[tokio::test]
@@ -992,7 +1009,7 @@ async fn one_level_listings_enforce_the_entry_limit() {
 }
 
 /// The cap is enforced while the answer streams in: an answer whose tail is broken still
-/// fails on the cap (it would be `Corrupt` if the whole body were read before counting).
+/// fails on the cap (it would be `ProtocolViolation` if the whole body were read before counting).
 #[tokio::test]
 async fn entry_limit_is_enforced_while_streaming() {
     let srv = server(Bulk::Prefer).await;
@@ -1036,7 +1053,7 @@ async fn entry_limit_is_enforced_while_streaming() {
         )
         .await
         .unwrap_err();
-    assert_eq!(err.code, ErrorCode::Corrupt, "{err:?}");
+    assert_eq!(err.code, ErrorCode::ProtocolViolation, "{err:?}");
 }
 
 #[tokio::test]
@@ -1082,4 +1099,129 @@ async fn get_locks_drops_locks_outside_the_requested_scope() {
         .await
         .unwrap();
     assert_eq!(paths(near), ["/trunk/d/a.txt"]);
+}
+
+fn segments_report(segments: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+         <S:get-location-segments-report xmlns:S=\"svn:\" xmlns:D=\"DAV:\">{segments}\
+         </S:get-location-segments-report>"
+    )
+}
+
+#[tokio::test]
+async fn location_segments_take_a_repository_path_and_follow_copies() {
+    let srv = server(Bulk::Prefer).await;
+    Mock::given(method("REPORT"))
+        .and(path("/svn/repo/!svn/rvr/9/branches/b"))
+        .and(body_string_contains("<S:peg-revision>9</S:peg-revision>"))
+        .and(body_string_contains(
+            "<S:start-revision>9</S:start-revision>",
+        ))
+        .and(body_string_contains("<S:end-revision>0</S:end-revision>"))
+        .respond_with(xml(
+            200,
+            segments_report(
+                "<S:location-segment path=\"branches/b\" range-start=\"7\" range-end=\"9\"/>\
+                 <S:location-segment range-start=\"6\" range-end=\"6\"/>\
+                 <S:location-segment path=\"trunk\" range-start=\"1\" range-end=\"5\"/>",
+            ),
+        ))
+        .mount(&srv)
+        .await;
+    // The session is rooted at trunk; the path is still taken from the repository root.
+    let s = session(&srv).await;
+    let got = s
+        .get_location_segments(
+            &p("branches/b"),
+            Some(Revnum(9)),
+            None,
+            None,
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap();
+    let got: Vec<_> = got
+        .into_iter()
+        .map(|s| {
+            (
+                s.path.map(|p| p.as_str().to_owned()),
+                s.range_start.0,
+                s.range_end.0,
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (Some("branches/b".to_owned()), 7, 9),
+            (None, 6, 6),
+            (Some("trunk".to_owned()), 1, 5),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn location_segments_out_of_order_or_out_of_range_violate_the_protocol() {
+    for bad in [
+        // Oldest first.
+        "<S:location-segment path=\"trunk\" range-start=\"1\" range-end=\"5\"/>\
+         <S:location-segment path=\"branches/b\" range-start=\"7\" range-end=\"9\"/>",
+        // Overlapping.
+        "<S:location-segment path=\"branches/b\" range-start=\"5\" range-end=\"9\"/>\
+         <S:location-segment path=\"trunk\" range-start=\"1\" range-end=\"5\"/>",
+        // Younger than the start revision.
+        "<S:location-segment path=\"branches/b\" range-start=\"7\" range-end=\"10\"/>",
+    ] {
+        let srv = server(Bulk::Prefer).await;
+        mount(
+            &srv,
+            "REPORT",
+            "/svn/repo/!svn/rvr/9/branches/b",
+            xml(200, segments_report(bad)),
+        )
+        .await;
+        let s = session(&srv).await;
+        let err = s
+            .get_location_segments(
+                &p("branches/b"),
+                Some(Revnum(9)),
+                None,
+                None,
+                &CancelToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolViolation, "{bad}: {err}");
+    }
+}
+
+#[tokio::test]
+async fn location_segments_of_a_missing_node_is_path_not_found() {
+    let srv = server(Bulk::Prefer).await;
+    mount(
+        &srv,
+        "REPORT",
+        "/svn/repo/!svn/rvr/9/nowhere",
+        xml(
+            404,
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+             <D:error xmlns:D=\"DAV:\" xmlns:m=\"http://apache.org/dav/xmlns\" \
+             xmlns:C=\"svn:\"><C:error/><m:human-readable errcode=\"160013\">\
+             File not found: revision 9, path '/nowhere'</m:human-readable></D:error>",
+        ),
+    )
+    .await;
+    let s = session(&srv).await;
+    let err = s
+        .get_location_segments(
+            &p("nowhere"),
+            Some(Revnum(9)),
+            None,
+            None,
+            &CancelToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PathNotFound, "{err}");
 }

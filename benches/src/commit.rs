@@ -21,6 +21,8 @@
 
 #[cfg(target_os = "linux")]
 mod commit_bench;
+#[cfg(target_os = "linux")]
+mod machine;
 
 #[cfg(target_os = "linux")]
 fn main() {

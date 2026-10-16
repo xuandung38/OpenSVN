@@ -266,12 +266,12 @@ fn create_rejects_pre_1_7_and_foreign_admin_areas_without_touching_them() {
         b"10\nold"
     );
     assert!(!legacy.path().join(".svn/wc.db").exists());
-    // An empty .svn directory is rejected the same way and left in place.
+    // An empty .svn directory is not foreign: a creator killed between its first two `mkdir`s
+    // leaves one, and the working copy is built in it (see `create.rs`).
     let empty = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(empty.path().join(".svn")).expect("mkdir");
-    let err = WcDb::create(empty.path(), &new).expect_err("empty adm");
-    assert_eq!(err.code, ErrorCode::WcFormatUnsupported);
-    assert!(empty.path().join(".svn").is_dir());
+    drop(WcDb::create(empty.path(), &new).expect("empty adm"));
+    assert!(empty.path().join(".svn/wc.db").is_file());
 }
 
 #[test]

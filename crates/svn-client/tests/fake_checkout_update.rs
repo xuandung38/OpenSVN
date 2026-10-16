@@ -212,10 +212,10 @@ async fn cancelled_update_is_resumed_by_the_next_update() {
     );
 }
 
-/// A nested target whose parent is switched cannot be anchored at the session URL: both an
-/// update and a switch of it are refused before anything changes.
+/// A nested target whose parent is switched is anchored at that parent, over a session at the
+/// parent's own URL, like svn: an update keeps it on the branch and a switch moves it.
 #[tokio::test(flavor = "multi_thread")]
-async fn nested_target_below_a_switched_parent_is_refused_for_update_and_switch() {
+async fn nested_target_below_a_switched_parent_is_anchored_at_the_parent() {
     let s = session();
     s.seed(
         "a",
@@ -241,13 +241,16 @@ async fn nested_target_below_a_switched_parent_is_refused_for_update_and_switch(
         &url("branches/b/src"),
         None,
         Depth::Unknown,
+        true,
         &cancel,
     )
     .await
     .expect("switch trunk/src");
     assert_eq!(read(&wc.join("trunk/src/lib/a.rs")), "branch\n");
 
-    let err = update(
+    s.seed("a", "r2", &[put("branches/b/src/lib/a.rs", "branch 2\n")])
+        .expect("r2");
+    update(
         &ctx(),
         &s,
         &wc.join("trunk/src/lib"),
@@ -256,24 +259,132 @@ async fn nested_target_below_a_switched_parent_is_refused_for_update_and_switch(
         &cancel,
     )
     .await
-    .expect_err("update below a switched parent");
-    assert_eq!(err.code, svn_types::ErrorCode::WcInvalidOperation, "{err}");
-    let err = svn_client::switch(
+    .expect("update below a switched parent");
+    assert_eq!(read(&wc.join("trunk/src/lib/a.rs")), "branch 2\n");
+    svn_client::switch(
         &ctx(),
         &s,
         &wc.join("trunk/src/lib"),
         &url("branches/b/other"),
         None,
         Depth::Unknown,
+        true,
         &cancel,
     )
     .await
-    .expect_err("switch below a switched parent");
-    assert_eq!(err.code, svn_types::ErrorCode::WcInvalidOperation, "{err}");
-    assert!(err.to_string().contains("switched"), "{err}");
+    .expect("switch below a switched parent");
+    assert_eq!(read(&wc.join("trunk/src/lib/x.rs")), "other\n");
+    assert!(!wc.join("trunk/src/lib/a.rs").exists());
+    let db = open_db(&wc);
+    let rows = base_rows(&db);
+    let lib = rows
+        .iter()
+        .find(|r| r.0 == "trunk/src/lib")
+        .expect("trunk/src/lib");
+    assert_eq!(lib.4, "branches/b/other", "{rows:?}");
+}
+
+/// `svn switch`'s ancestry check: a location with no history in common with the working copy is
+/// refused (E195012) before anything changes, a copy of it is taken, and `ignore_ancestry`
+/// takes anything in the repository. A folder switched on its own is checked too.
+#[tokio::test(flavor = "multi_thread")]
+async fn switch_refuses_unrelated_locations_unless_ancestry_is_ignored() {
+    let s = session();
+    s.seed("a", "r1", &[put("trunk/src/a.rs", "trunk\n")])
+        .expect("seed");
+    s.seed(
+        "a",
+        "r2",
+        &[svn_ra_api::fake::FakeChange::Copy {
+            from: rp("trunk"),
+            rev: Revnum(1),
+            to: rp("branches/b"),
+        }],
+    )
+    .expect("branch");
+    s.seed("a", "r3", &[put("other/src/a.rs", "other\n")])
+        .expect("unrelated");
+    let at_trunk = s
+        .at(&svn_types::RepoUrl::parse(&format!("{ROOT_URL}/trunk")).expect("url"))
+        .expect("session at trunk");
+    let sb = Sandbox::new();
+    let wc = sb.path("wc");
+    let cancel = CancelToken::new();
+    checkout(
+        &ctx(),
+        &at_trunk,
+        &wc,
+        None,
+        Depth::Infinity,
+        false,
+        &cancel,
+    )
+    .await
+    .expect("checkout");
+    std::fs::write(wc.join("src/a.rs"), "trunk\nlocal\n").expect("edit");
+    let url = |rel: &str| svn_types::RepoUrl::parse(&format!("{ROOT_URL}/{rel}")).expect("url");
+    let before = base_rows(&open_db(&wc));
+
+    for target in [wc.clone(), wc.join("src")] {
+        let what = if target == wc { "other" } else { "other/src" };
+        let err = svn_client::switch(
+            &ctx(),
+            &at_trunk,
+            &target,
+            &url(what),
+            None,
+            Depth::Unknown,
+            false,
+            &cancel,
+        )
+        .await
+        .expect_err("unrelated switch");
+        assert_eq!(err.code, svn_types::ErrorCode::UnrelatedResources, "{err}");
+        assert_eq!(err.svn_code, Some(195_012), "{err}");
+        assert_eq!(base_rows(&open_db(&wc)), before, "nothing changed");
+        assert_eq!(read(&wc.join("src/a.rs")), "trunk\nlocal\n");
+    }
+
+    svn_client::switch(
+        &ctx(),
+        &at_trunk,
+        &wc,
+        &url("branches/b"),
+        None,
+        Depth::Unknown,
+        false,
+        &cancel,
+    )
+    .await
+    .expect("switch to the branch");
+    let db = open_db(&wc);
     assert_eq!(
-        read(&wc.join("trunk/src/lib/a.rs")),
-        "branch\n",
-        "nothing changed"
+        db.read_base(&rp("src"))
+            .expect("base")
+            .and_then(|n| n.repos_relpath)
+            .as_deref(),
+        Some("branches/b/src")
+    );
+    assert_eq!(read(&wc.join("src/a.rs")), "trunk\nlocal\n");
+
+    svn_client::switch(
+        &ctx(),
+        &s.at(&url("branches/b")).expect("session at the branch"),
+        &wc,
+        &url("other"),
+        None,
+        Depth::Unknown,
+        true,
+        &cancel,
+    )
+    .await
+    .expect("switch ignoring ancestry");
+    assert_eq!(
+        open_db(&wc)
+            .read_base(&rp("src"))
+            .expect("base")
+            .and_then(|n| n.repos_relpath)
+            .as_deref(),
+        Some("other/src")
     );
 }

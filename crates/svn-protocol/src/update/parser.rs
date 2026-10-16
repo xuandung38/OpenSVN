@@ -69,8 +69,8 @@ enum Capture {
 ///
 /// The parser is the gate for the drive order: it accepts exactly one root `open-directory`,
 /// children only below directories, at most one `txdelta`/`fetch-file` per file and nothing after
-/// the root closes. Any violation is `Corrupt`, so a consumer can rely on the event stream
-/// being a valid editor drive.
+/// the root closes. Any violation is `ProtocolViolation`, so a consumer can rely on the event
+/// stream being a valid editor drive.
 pub struct UpdateParser {
     urls: UrlBuilder,
     xml: XmlReader,

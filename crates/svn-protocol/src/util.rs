@@ -4,9 +4,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use svn_types::{ErrorCode, Revnum, SvnError, Timestamp};
 
-/// Error for data that violates the wire protocol.
+/// Error for server data that violates the wire protocol ([`ErrorCode::ProtocolViolation`]):
+/// never a sign of a damaged working copy.
 pub(crate) fn corrupt(msg: impl Into<String>) -> SvnError {
-    SvnError::new(ErrorCode::Corrupt, msg)
+    SvnError::new(ErrorCode::ProtocolViolation, msg)
 }
 
 /// Decodes `%XX` escapes. Invalid escapes and non UTF-8 results are rejected.

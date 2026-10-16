@@ -44,6 +44,8 @@ export const historyStrings = defineStrings({
     diffAfter: "After",
     loadFailed: "Could not load history",
     loadingHistory: "Loading history…",
+    noHistory: "No revisions yet",
+    noHistoryHint: "The server has no history for this working copy.",
   },
   vi: {
     title: "Lịch sử",
@@ -88,5 +90,7 @@ export const historyStrings = defineStrings({
     diffAfter: "Sau",
     loadFailed: "Không tải được lịch sử",
     loadingHistory: "Đang tải lịch sử…",
+    noHistory: "Chưa có revision",
+    noHistoryHint: "Server không có lịch sử cho working copy này.",
   },
 });

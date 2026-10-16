@@ -20,7 +20,8 @@ pub struct EngineDirs<'a>(pub &'a dyn EngineFacade);
 impl DirLister for EngineDirs<'_> {
     async fn dirs(&self, url: &str) -> Result<Vec<String>, AppError> {
         match self.0.repo_list(url, None, &OpContext::background()).await {
-            Ok(entries) => Ok(entries
+            Ok(listing) => Ok(listing
+                .entries
                 .into_iter()
                 .filter(|e| e.kind == EntryKind::Dir)
                 .map(|e| e.name)

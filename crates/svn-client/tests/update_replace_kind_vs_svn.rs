@@ -288,6 +288,7 @@ async fn run(op: Op) {
                     &url,
                     Some(Revnum(2)),
                     Depth::Unknown,
+                    true,
                     &CancelToken::new(),
                 )
                 .await

@@ -1,0 +1,11 @@
+<S:update-report
+   xmlns:S="svn:">
+<S:include-props>yes</S:include-props>
+<S:src-path>/svn/repo/trunk</S:src-path>
+<S:target-revision>5</S:target-revision>
+<S:depth>unknown</S:depth>
+<S:entry
+   start-empty="true"
+   rev="5"
+   depth="infinity"></S:entry>
+</S:update-report>

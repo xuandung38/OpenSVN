@@ -1,0 +1,11 @@
+---
+source: crates/svn-protocol/tests/request_snapshots.rs
+expression: "render(&svn_protocol::location_segments::location_segments_request(&urls(),\n&rel(\"branches/b c\"), Revnum(9), Revnum(9), Revnum(0),).unwrap())"
+---
+REPORT http://svn.test.local/svn/repo/!svn/rvr/9/branches/b%20c
+Content-Type: text/xml
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+
+<S:get-location-segments xmlns:S="svn:"><S:path></S:path><S:peg-revision>9</S:peg-revision><S:start-revision>9</S:start-revision><S:end-revision>0</S:end-revision></S:get-location-segments>

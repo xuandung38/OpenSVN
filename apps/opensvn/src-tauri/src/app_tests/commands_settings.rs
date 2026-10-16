@@ -409,3 +409,46 @@ async fn diff_external_needs_a_configured_tool_and_launches_it_on_read_only_copi
     assert_eq!(err.code, opensvn_ipc::ErrorCode::InvalidArgument);
     assert_eq!(f.launcher.launched.lock().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn clear_cache_drops_status_snapshots_and_keeps_settings_and_certificates() {
+    use opensvn_ipc::{FileKind, FileStatus, NodeStatus, PropStatus, WcId};
+    let f = Fixture::new(Duration::ZERO).await;
+    let status = &f.state().status;
+    // The publisher's own `cache.sqlite`, opened a second time to seed a snapshot.
+    let cache = crate::db::CacheDb::open(&f.state().data_dir).unwrap();
+    let wc = WcId("w1".into());
+    let row = FileStatus {
+        path: "a.txt".into(),
+        kind: FileKind::File,
+        text: NodeStatus::Modified,
+        props: PropStatus::None,
+        tree_conflict: false,
+        moved_from: None,
+        moved_to: None,
+        changelist: None,
+        lock: None,
+        needs_lock: false,
+        remote: None,
+        binary: false,
+        size: None,
+    };
+    cache.status_snapshot_replace(&wc, &[row]).unwrap();
+    assert!(status.cached(&wc).unwrap().is_some());
+    f.state()
+        .db
+        .cert_trust("svn.test.local", 8443, &"ab".repeat(32), "CN=svn", "")
+        .unwrap();
+    commands::settings_set(
+        f.state(),
+        patch(serde_json::json!({"diff.tabWidth": 8})).into(),
+    )
+    .await
+    .unwrap();
+
+    commands::cache_clear(f.state()).await.unwrap();
+
+    assert!(status.cached(&wc).unwrap().is_none());
+    assert_eq!(commands::certs_list(f.state()).await.unwrap().len(), 1);
+    assert_eq!(f.state().settings.get().diff_tab_width, 8);
+}

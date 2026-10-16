@@ -3,6 +3,8 @@ import { beforeAll, expect, test, vi } from "vitest";
 import { HOSTILE_NAME, MOCK_REPO_ROOT, MOCK_REPO_UUID } from "../../../ipc/mock/remote-data";
 import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../../test-utils";
 import { BrowseScreen } from "./browse-screen";
+import { DirTable } from "./dir-table";
+import type { NodeActionHandlers } from "./node-actions";
 import { flattenForest, flattenTree, type TreeRow } from "./repo-tree";
 
 beforeAll(async () => {
@@ -82,6 +84,32 @@ test("lists the folder, renders a hostile file name as text and keeps it inert",
   expect(await screen.findByText(HOSTILE_NAME)).toBeTruthy();
   expect(container.querySelector("img")).toBeNull();
   expect(document.querySelector("script")).toBeNull();
+  // Entries the backend refused for their names are counted, never listed.
+  expect(screen.getByRole("note").textContent).toBe(
+    "2 items have names this app cannot use safely and are not shown",
+  );
+});
+
+test("a folder holding only refused names says so instead of reading as empty", () => {
+  const table = (hidden: number) => (
+    <DirTable
+      dirUrl={`${MOCK_REPO_ROOT}/names`}
+      entries={[]}
+      hidden={hidden}
+      selectedUrl={null}
+      handlers={{} as NodeActionHandlers}
+      onSelect={noop}
+    />
+  );
+  const { unmount } = renderApp(table(1));
+  expect(screen.getByRole("note").textContent).toBe(
+    "1 item has a name this app cannot use safely and is not shown",
+  );
+  expect(screen.queryByText("This folder is empty")).toBeNull();
+  unmount();
+  renderApp(table(0));
+  expect(screen.queryByRole("note")).toBeNull();
+  expect(screen.getByText("This folder is empty")).toBeTruthy();
 });
 
 test("keyboard: Enter on a file opens Preview, showing its text without HTML", async () => {

@@ -1,4 +1,4 @@
-//! The update parser is the gate for the editor drive order: every violation is `Corrupt`.
+//! The update parser is the gate for the editor drive order: every violation is `ProtocolViolation`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
@@ -36,7 +36,7 @@ fn check(evs: &[UpdateEvent]) {
 
 fn corrupt(doc: &str, why: &str) {
     let err = parse(doc).expect_err(why);
-    assert_eq!(err.code, ErrorCode::Corrupt, "{why}: {err}");
+    assert_eq!(err.code, ErrorCode::ProtocolViolation, "{why}: {err}");
 }
 
 #[test]

@@ -295,10 +295,11 @@ test("hostile repository renders as text, runs nothing, and its escaping symlink
   await app.waitText("link /etc/passwd", 30_000);
   assert.doesNotMatch(await app.bodyText(), /root:x?:0:0:/, "a symlink preview showed its target");
   // Raw-markup and Windows-invalid names (names/): the engine rejects server names it could not
-  // write safely (RelPath::from_server), so the listing shows none of them; their text is in the
-  // History changed paths above.
+  // write safely (RelPath::from_server), so the listing shows none of them, only how many it hid
+  // (never "empty"); their text is in the History changed paths above.
   await clickLast("treeitem", /^names$/);
-  await app.waitText("This folder is empty", 30_000);
+  await app.waitText("10 items have names this app cannot use safely and are not shown", 30_000);
+  assert.doesNotMatch(await app.bodyText(), /This folder is empty/, "names/ shown as empty");
   await assertNothingExecuted("browse");
 
   // Properties: local property edits put the hostile values into the diff view as text.

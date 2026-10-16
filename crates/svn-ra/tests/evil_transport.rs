@@ -144,7 +144,7 @@ async fn redirects_with_parser_rewritten_locations_are_refused() {
     }
 }
 
-/// A body far larger than the caller's limit fails fast with `Corrupt` instead of buffering.
+/// A body far larger than the caller's limit fails fast with `ProtocolViolation` instead of buffering.
 #[tokio::test]
 async fn oversized_body_is_cut_off_at_the_limit() {
     let ca = TestCa::new();
@@ -162,7 +162,7 @@ async fn oversized_body_is_cut_off_at_the_limit() {
         .await
         .unwrap();
     let err = resp.bytes(1 << 20).await.expect_err("over the limit");
-    assert_eq!(err.code, ErrorCode::Corrupt);
+    assert_eq!(err.code, ErrorCode::ProtocolViolation);
 }
 
 /// A server that sends headers and then stalls is cut off by the read timeout.
@@ -307,7 +307,10 @@ async fn hostile_update_reports_over_the_wire_are_rejected() {
         let body = resp.bytes(1 << 20).await.unwrap();
         let err = parse_update(&urls, &body).expect_err(id);
         assert!(
-            matches!(err.code, ErrorCode::UnsafePath | ErrorCode::Corrupt),
+            matches!(
+                err.code,
+                ErrorCode::UnsafePath | ErrorCode::ProtocolViolation
+            ),
             "{id}: {err:?}"
         );
     }

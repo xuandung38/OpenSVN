@@ -88,7 +88,7 @@ fn connector(ca: &Path) -> Arc<HttpConnector> {
 /// `svn`-style command lines executed by the real engine.
 ///
 /// Supported: `checkout URL [PATH] [-r N] [--depth D] [--ignore-externals]`,
-/// `update [PATH...] [-r N] [--set-depth D]`, `switch URL [-r N]`,
+/// `update [PATH...] [-r N] [--set-depth D]`, `switch URL [-r N] [--ignore-ancestry]`,
 /// `commit -m MSG [PATH...] [--no-unlock]`, `revert [-R] PATH...`, `add PATH...`,
 /// `delete [--keep-local] PATH...`, `move FROM TO`, `lock [-m MSG] [--force] PATH...`,
 /// `unlock [--force] PATH...`, `cleanup [--remove-unversioned] [--remove-ignored]
@@ -261,7 +261,8 @@ impl EngineCli {
                 if c.args.len() > 1 && !rel(&c.args[1]).is_empty() {
                     bail!("the engine switches the working copy root only");
                 }
-                e.switch(&wc, url, c.rev, &ctx).await?;
+                e.switch(&wc, url, c.rev, c.flag(&["--ignore-ancestry"]), &ctx)
+                    .await?;
             }
             "commit" | "ci" => {
                 let paths = c.rels();

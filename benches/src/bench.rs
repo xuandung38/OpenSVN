@@ -16,6 +16,7 @@ struct Args {
     binaries: usize,
     binary_mb: usize,
     update_files: usize,
+    commit_files: usize,
     reps: usize,
     out: PathBuf,
 }
@@ -26,6 +27,7 @@ fn parse(argv: &[String]) -> Result<Args> {
         binaries: 4,
         binary_mb: 64,
         update_files: 10_000,
+        commit_files: 1_000,
         reps: 3,
         out: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/bench-report/bench.md"),
     };
@@ -38,12 +40,15 @@ fn parse(argv: &[String]) -> Result<Args> {
             "--binaries" => a.binaries = n()?,
             "--binary-mb" => a.binary_mb = n()?,
             "--update-files" => a.update_files = n()?,
+            "--commit-files" => a.commit_files = n()?,
             "--reps" => a.reps = n()?.max(1),
             "--out" => a.out = PathBuf::from(v),
             other => return Err(err(format!("unknown option {other}"))),
         }
     }
     a.update_files = a.update_files.min(a.files);
+    // Every repetition of each client commits its own files (no out-of-date conflicts).
+    a.commit_files = a.commit_files.min(a.files / (2 * a.reps));
     Ok(a)
 }
 
@@ -64,7 +69,8 @@ pub fn main() -> i32 {
     }
 }
 
-/// `compare-svn engine <state> checkout|update <url> <wc> [rev]` / `... status <wc>`.
+/// `compare-svn engine <state> checkout|update <url> <wc> [rev]` / `... status <wc>` /
+/// `... commit <url> <wc> <message>`.
 fn engine_cmd(args: &[String]) -> Result<()> {
     let get = |i: usize| {
         args.get(i)
@@ -98,6 +104,11 @@ fn engine_cmd(args: &[String]) -> Result<()> {
             "status" => {
                 let n = engine.status(Path::new(get(2)?)).await?.len();
                 println!("entries={n}");
+            }
+            "commit" => {
+                let (url, wc, msg) = (get(2)?, PathBuf::from(get(3)?), get(4)?);
+                let rev = engine.commit(url, &wc, msg).await?;
+                println!("rev={:?}", rev.map(|r| r.0));
             }
             other => return Err(err(format!("unknown engine op {other}"))),
         }
@@ -178,13 +189,13 @@ impl Bench<'_> {
     fn engine(&self, args: &[&str]) -> Command {
         let mut c = Command::new(&self.exe);
         c.arg("engine").arg(&self.state).args(args);
-        c
+        crate::machine::wrap(c)
     }
 
     fn svn(&self, args: &[&str]) -> Command {
         let mut c = self.svn.cmd();
         c.args(args);
-        c
+        crate::machine::wrap(c)
     }
 
     /// The working copy is clean and at `rev` according to the svn CLI.
@@ -439,23 +450,78 @@ fn run(a: &Args) -> Result<()> {
         b.check_clean(&wc_eng, 2, "engine update")?;
     }
 
-    let rows = [checkout, update, status_first, status_repeat, status_own];
+    // Commit of `commit_files` modified text files, each client from its own working copy and
+    // on its own files.
+    let mut commit = Row::new(&format!("commit ({} modified files)", a.commit_files));
+    for rep in 0..a.reps {
+        let order = if rep % 2 == 0 { [0, 1] } else { [1, 0] };
+        for who in order {
+            let (wc, k) = if who == 0 {
+                (&wc_svn, 2 * rep)
+            } else {
+                (&wc_eng, 2 * rep + 1)
+            };
+            let mut last = (String::new(), Vec::new());
+            for j in 0..a.commit_files {
+                let i = k + j * 2 * a.reps;
+                let p = wc.join(file_path(i));
+                let mut t = std::fs::read(&p).map_err(|e| err(format!("read: {e}")))?;
+                t.extend_from_slice(format!("committed in rep {rep}\n").as_bytes());
+                write(&p, &t)?;
+                last = (file_path(i), t);
+            }
+            let msg = format!("commit rep {rep}");
+            let w = wc.to_string_lossy().into_owned();
+            if who == 0 {
+                commit.svn.push(time(
+                    &mut b.svn(&["commit", "-q", "-m", &msg, &w]),
+                    "svn commit",
+                )?);
+            } else {
+                commit.engine.push(time(
+                    &mut b.engine(&["commit", &url, &w, &msg]),
+                    "engine commit",
+                )?);
+            }
+            let st = svn.run_in(wc, &["status", "-q"])?;
+            if !st.trim().is_empty() {
+                return Err(err(format!("{msg}: not clean after the commit:\n{st}")));
+            }
+            if svn.cat(&format!("{url}/{}", last.0))? != last.1 {
+                return Err(err(format!("{msg}: {} has the wrong content", last.0)));
+            }
+        }
+        eprintln!(
+            "commit rep {rep}: svn {} engine {}",
+            secs(*commit.svn.last().unwrap_or(&Duration::ZERO)),
+            secs(*commit.engine.last().unwrap_or(&Duration::ZERO))
+        );
+    }
+
+    let rows = [
+        checkout,
+        update,
+        status_first,
+        status_repeat,
+        status_own,
+        commit,
+    ];
     let repeat_engine = median(&rows[3].engine);
     let mut md = String::from("# Benchmark: OpenSVN engine vs svn CLI\n\n");
     md.push_str(&format!(
-        "- svn CLI: {} ({})\n- server: {} + mod_dav_svn, HTTP on 127.0.0.1\n- dataset: {} text files + {} x {} MiB binaries, {} MiB in r1\n- machine: {} CPUs, {}\n- build: {}\n- repetitions: {} (median shown, min in brackets)\n\n",
-        version_of("svn", "--version"),
+        "- svn CLI: {} ({})\n- server: {}, HTTP on 127.0.0.1\n- dataset: {} text files + {} x {} MiB binaries, {} MiB in r1\n- machine: {}\n- filesystem of the working copies: {}\n- build: {}\n- repetitions: {} (median shown, min in brackets; every repetition below)\n\n",
+        version_of(&svn.cmd().get_program().to_string_lossy(), "--version"),
         {
             let (x, y, z) = svn.version();
             format!("{x}.{y}.{z}")
         },
-        version_of("apache2", "-v"),
+        crate::machine::server(&url),
         a.files,
         a.binaries,
         a.binary_mb,
         total >> 20,
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
-        version_of("uname", "-sr"),
+        crate::machine::machine(),
+        crate::machine::filesystem(scratch.path()),
         if cfg!(debug_assertions) { "DEBUG (not representative)" } else { "release" },
         a.reps
     ));
@@ -492,7 +558,22 @@ fn run(a: &Args) -> Result<()> {
         },
         secs(repeat_engine)
     ));
-    md.push_str("\nEach number is the wall time of a separate process (`svn` or `compare-svn engine`), process start included. Every engine checkout/update is followed by an untimed `svn status` + `svn info` check (clean, right revision).\n");
+    md.push_str("\n## Every repetition\n\n| operation | svn CLI | engine |\n|---|---|---|\n");
+    let all = |v: &[Duration]| {
+        v.iter()
+            .map(|d| format!("{:.2}", d.as_secs_f64()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    for r in &rows {
+        md.push_str(&format!(
+            "| {} | {} | {} |\n",
+            r.name,
+            all(&r.svn),
+            all(&r.engine)
+        ));
+    }
+    md.push_str("\nEach number is the wall time of a separate process (`svn` or `compare-svn engine`), process start included. Every engine checkout/update is followed by an untimed `svn status` + `svn info` check (clean, right revision); every commit by `svn status` (clean) and `svn cat` of a committed file.\n");
     if let Some(p) = a.out.parent() {
         std::fs::create_dir_all(p).map_err(|e| err(format!("mkdir {}: {e}", p.display())))?;
     }
