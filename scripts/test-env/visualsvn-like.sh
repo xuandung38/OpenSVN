@@ -8,6 +8,11 @@
 #   scripts/test-env/visualsvn-like.sh down      # stop KDC + Apache (keeps the state dir)
 #   scripts/test-env/visualsvn-like.sh purge     # down + delete the state dir
 #
+# VSVN_KDC=samba swaps the MIT KDC for a Samba Active Directory domain controller: realm
+# AD.OPENSVN.TEST, users and a service account (SPN HTTP/<host>) created the way AD does it, AES
+# enctypes only. Its KDC listens on 127.0.0.1:88 (Samba has no setting for the port), so it needs
+# root and no other KDC on that port. Same commands, state in /tmp/opensvn-visualsvn-ad.
+#
 # Everything lives in $VSVN_DIR (default /tmp/opensvn-visualsvn). Test-only secrets; never reuse.
 # Runs as root (container/VM) or as a user who may edit /etc/hosts via sudo. When run as root,
 # Apache drops to www-data and repositories must be created through $VSVN_DIR/bin/svnadmin.
@@ -15,13 +20,26 @@ set -euo pipefail
 # Repository names with Vietnamese characters need a UTF-8 locale for svnadmin/svnlook.
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
-VSVN_DIR="${VSVN_DIR:-/tmp/opensvn-visualsvn}"
-REALM="${VSVN_REALM:-OPENSVN.TEST}"
+# mit: MIT krb5 KDC (default). samba: Samba AD DC (see above).
+KDC_KIND="${VSVN_KDC:-mit}"
+case "$KDC_KIND" in
+  mit)
+    VSVN_DIR="${VSVN_DIR:-/tmp/opensvn-visualsvn}"
+    REALM="${VSVN_REALM:-OPENSVN.TEST}"
+    ;;
+  samba)
+    VSVN_DIR="${VSVN_DIR:-/tmp/opensvn-visualsvn-ad}"
+    REALM="${VSVN_REALM:-AD.OPENSVN.TEST}"
+    ;;
+  *) echo "visualsvn-like: VSVN_KDC must be mit or samba" >&2; exit 1 ;;
+esac
+# NetBIOS name of the AD domain (samba).
+AD_DOMAIN="${VSVN_AD_DOMAIN:-OPENSVNAD}"
 HOST="${VSVN_HOST:-svn.opensvn.test}"
 # Short (NetBIOS-style) name of the same server: no service principal exists for it, as for a
 # VisualSVN server opened as https://svnhost/ instead of its full name.
 SHORT_HOST="${VSVN_SHORT_HOST:-svnhost}"
-KDC_PORT="${VSVN_KDC_PORT:-18888}"
+if [ "$KDC_KIND" = samba ]; then KDC_PORT=88; else KDC_PORT="${VSVN_KDC_PORT:-18888}"; fi
 HTTPS_PORT="${VSVN_HTTPS_PORT:-18443}"
 HTTP_PORT="${VSVN_HTTP_PORT:-18080}"
 HTTPS115_PORT="${VSVN_HTTPS115_PORT:-18444}"
@@ -42,15 +60,28 @@ apache_user() {
 }
 
 cmd_install() {
+  local extra=()
+  if [ "$KDC_KIND" = samba ]; then
+    extra=(samba samba-ad-dc samba-ad-provision python3-samba ldb-tools)
+  fi
   as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     krb5-kdc krb5-admin-server krb5-user libkrb5-dev libclang-dev clang pkg-config \
-    apache2 apache2-utils libapache2-mod-auth-gssapi libapache2-mod-svn subversion openssl curl
+    apache2 apache2-utils libapache2-mod-auth-gssapi libapache2-mod-svn subversion openssl curl \
+    "${extra[@]}"
 }
 
 # --- Kerberos ---------------------------------------------------------------------------------
 
 write_krb5_conf() {
   mkdir -p "$VSVN_DIR/krb5kdc"
+  local enctypes=""
+  if [ "$KDC_KIND" = samba ]; then
+    # AD domains with RC4 switched off (the Windows default since the 2022 hardening): clients
+    # and Apache never accept anything but AES.
+    enctypes="  permitted_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96
+  default_tkt_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96
+  default_tgs_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96"
+  fi
   cat >"$VSVN_DIR/krb5.conf" <<EOF
 [libdefaults]
   default_realm = $REALM
@@ -61,6 +92,7 @@ write_krb5_conf() {
   rdns = false
   udp_preference_limit = 1
   default_ccache_name = FILE:$VSVN_DIR/ccache
+$enctypes
 
 [realms]
   $REALM = {
@@ -116,6 +148,79 @@ start_kdc() {
   if [ -s "$VSVN_DIR/kdc.pid" ] && kill -0 "$(cat "$VSVN_DIR/kdc.pid")" 2>/dev/null; then return; fi
   krb5kdc -P "$VSVN_DIR/kdc.pid"
   for _ in $(seq 50); do [ -s "$VSVN_DIR/kdc.pid" ] && break; sleep 0.1; done
+}
+
+# --- Samba AD DC (VSVN_KDC=samba) ---------------------------------------------------------------
+
+SAMBA_DIR() { echo "$VSVN_DIR/samba"; }
+
+# samba-tool imports the samba Python bindings, built for the distribution's Python; a newer
+# python3 picked first in PATH (or set as the default) does not have them.
+samba_tool() {
+  local py conf; conf="$(SAMBA_DIR)/etc/smb.conf"
+  # The domain's own smb.conf, once `domain provision` wrote it.
+  local opts=(); [ -e "$conf" ] && opts=(-s "$conf")
+  for py in python3 python3.12 python3.11 python3.13; do
+    if command -v "$py" >/dev/null && "$py" -c 'import samba, ldb' 2>/dev/null; then
+      "$py" "$(command -v samba-tool)" "$@" "${opts[@]}"
+      return
+    fi
+  done
+  die "no python3 with the samba bindings (install python3-samba)"
+}
+
+setup_realm_samba() {
+  [ "$(id -u)" = 0 ] || die "the Samba AD DC runs as root"
+  krb_env
+  local d; d="$(SAMBA_DIR)"
+  if [ ! -e "$d/private/sam.ldb" ]; then
+    command -v samba >/dev/null || die "samba not found (run: VSVN_KDC=samba $0 install)"
+    rm -rf "$d"
+    # No DNS server (the test host is in /etc/hosts), loopback only.
+    samba_tool domain provision --realm="$REALM" --domain="$AD_DOMAIN" --server-role=dc \
+      --dns-backend=NONE --use-rfc2307 --host-name=dc1 --targetdir="$d" \
+      --adminpass="Admin-pass-$(openssl rand -hex 8)" \
+      --option="interfaces=lo" --option="bind interfaces only=yes" >"$VSVN_DIR/provision.log" 2>&1 \
+      || die "samba-tool domain provision failed; see $VSVN_DIR/provision.log"
+    # Only the KDC; logs and the pid file in the state dir. 24 = AES128 | AES256: the KDC never
+    # issues an RC4 ticket, for any account.
+    sed -i -e 's|^\tserver services = .*|\tserver services = kdc|' \
+      -e "s|^\tlog file = .*|\tlog file = $VSVN_DIR/logs/samba.log\n\tpid directory = $d/run\n\tkdc supported enctypes = 24\n\tkdc default domain supported enctypes = 24|" \
+      "$d/etc/smb.conf"
+    mkdir -p "$d/run" "$VSVN_DIR/logs"
+    # The users keep the passwords of the MIT realm, so the suites run unchanged.
+    samba_tool domain passwordsettings set --complexity=off --min-pwd-length=1 \
+      --history-length=0 --min-pwd-age=0 --max-pwd-age=0 >/dev/null
+    samba_tool user create "$USER_PRINC" "$USER_PASS" --given-name=Alice --surname=Tester \
+      --mail-address="alice@${REALM,,}" >/dev/null
+    samba_tool user create bob bob-pass --given-name=Bob --surname=Reader >/dev/null
+    samba_tool group add "SVN Developers" >/dev/null
+    samba_tool group addmembers "SVN Developers" "$USER_PRINC" >/dev/null
+    # The web server's service account, as for VisualSVN: a domain user with the HTTP SPN, AES
+    # only (msDS-SupportedEncryptionTypes), its keys exported to Apache's keytab.
+    samba_tool user create svc-svn "Svc-$(openssl rand -hex 16)" --description="VisualSVN Server" >/dev/null
+    samba_tool user setexpiry svc-svn --noexpiry >/dev/null
+    samba_tool spn add "HTTP/$HOST" svc-svn >/dev/null
+    local base; base="DC=${REALM,,}"; base="${base//./,DC=}"
+    printf 'dn: CN=svc-svn,CN=Users,%s\nchangetype: modify\nreplace: msDS-SupportedEncryptionTypes\nmsDS-SupportedEncryptionTypes: 24\n' \
+      "$base" | ldbmodify -H "$d/private/sam.ldb" >/dev/null
+    rm -f "$VSVN_DIR/http.keytab"
+    samba_tool domain exportkeytab "$VSVN_DIR/http.keytab" --principal="HTTP/$HOST" >/dev/null
+  fi
+  chown "$(apache_user)" "$VSVN_DIR/http.keytab"
+  chmod 600 "$VSVN_DIR/http.keytab"
+}
+
+start_kdc_samba() {
+  local d pid; d="$(SAMBA_DIR)"
+  pid="$d/run/samba.pid"
+  if [ -s "$pid" ] && kill -0 "$(cat "$pid")" 2>/dev/null; then return; fi
+  samba -D -s "$d/etc/smb.conf"
+  for _ in $(seq 100); do
+    (exec 3<>"/dev/tcp/127.0.0.1/$KDC_PORT") 2>/dev/null && return
+    sleep 0.1
+  done
+  die "the Samba KDC did not start; see $VSVN_DIR/logs/samba.log"
 }
 
 # --- TLS ----------------------------------------------------------------------------------------
@@ -375,8 +480,13 @@ cmd_up() {
   chmod 755 "$VSVN_DIR"
   ensure_hosts
   write_krb5_conf
-  setup_realm
-  start_kdc
+  if [ "$KDC_KIND" = samba ]; then
+    setup_realm_samba
+    start_kdc_samba
+  else
+    setup_realm
+    start_kdc
+  fi
   make_certs
   write_svnadmin_wrapper
   make_repos
@@ -391,7 +501,8 @@ cmd_up() {
   krb_env
   echo "$USER_PASS" | kinit "$USER_PRINC@$REALM" >/dev/null
   echo "up: https://$HOST:$HTTPS_PORT/svn (Negotiate+Basic), /svn-sso, /svn-basic; http://$HOST:$HTTP_PORT/svn"
-  echo "ticket for $USER_PRINC@$REALM in $KRB5CCNAME; eval \"\$($0 env)\" before running the tests"
+  local again="$0"; [ "$KDC_KIND" = samba ] && again="VSVN_KDC=samba $0"
+  echo "ticket for $USER_PRINC@$REALM in $KRB5CCNAME; eval \"\$($again env)\" before running the tests"
 }
 
 cmd_down() {
@@ -401,6 +512,8 @@ cmd_down() {
     rm -f "$f"
   done
   if [ -s "$VSVN_DIR/kdc.pid" ]; then kill "$(cat "$VSVN_DIR/kdc.pid")" 2>/dev/null || true; rm -f "$VSVN_DIR/kdc.pid"; fi
+  local samba_pid; samba_pid="$(SAMBA_DIR)/run/samba.pid"
+  if [ -s "$samba_pid" ]; then kill "$(cat "$samba_pid")" 2>/dev/null || true; rm -f "$samba_pid"; fi
 }
 
 cmd_env() {
@@ -417,6 +530,7 @@ export OPENSVN_VSVN_SHORT_HOST='$SHORT_HOST'
 export NO_PROXY="\${NO_PROXY:+\$NO_PROXY,}$HOST,$SHORT_HOST" no_proxy="\${no_proxy:+\$no_proxy,}$HOST,$SHORT_HOST"
 export OPENSVN_VSVN_HTTPS_PORT='$HTTPS_PORT'
 export OPENSVN_VSVN_HTTP_PORT='$HTTP_PORT'
+export OPENSVN_VSVN_REALM='$REALM'
 # Error logs of the servers: the DAV suite fails when a request crashed a child.
 export OPENSVN_COMPAT_LOCAL_ERROR_LOGS='$VSVN_DIR/logs/error-14.log:$VSVN_DIR/logs/error-15.log'
 EOF

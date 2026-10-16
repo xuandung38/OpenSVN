@@ -94,8 +94,9 @@ struct LockOutcome {
     recovered: Vec<String>,
     /// Directories the user has to look at (foreign rows, dead records without a marker).
     needs_user_action: Vec<String>,
-    /// A lock row of another program is still in place: nothing may write to the working copy.
-    foreign_held: bool,
+    /// Directories whose lock row of another program is still in place (sorted): nothing may
+    /// write to the working copy.
+    foreign: Vec<String>,
 }
 
 fn add_once(list: &mut Vec<String>, dir: &str) {
@@ -128,6 +129,11 @@ fn recover_locks(db: &WcDb, owner: LockOwner) -> EngineResult<LockOutcome> {
         add_once(&mut needs_user_action, dir);
     }
     needs_user_action.sort();
+    let foreign_held = !left.is_empty();
+    let mut foreign = left;
+    foreign.sort();
+    foreign.dedup();
+    debug_assert_eq!(foreign_held, !foreign.is_empty());
     Ok(LockOutcome {
         recovered: cleanup
             .recovered
@@ -135,7 +141,7 @@ fn recover_locks(db: &WcDb, owner: LockOwner) -> EngineResult<LockOutcome> {
             .map(|d| d.as_str().to_owned())
             .collect(),
         needs_user_action,
-        foreign_held: !left.is_empty(),
+        foreign,
     })
 }
 
@@ -292,12 +298,14 @@ impl RealEngine {
     ) -> EngineResult<RecoveryReport> {
         let (handle, owner) = (db.clone(), self.lock_owner());
         let locks = blocking(move || recover_locks(&handle, owner)).await?;
+        let foreign_held = !locks.foreign.is_empty();
         let mut report = RecoveryReport {
             recovered: locks.recovered,
             needs_user_action: locks.needs_user_action,
+            foreign_locks: locks.foreign,
         };
         // Work items cannot run while somebody else holds a directory lock.
-        let work_left = if locks.foreign_held {
+        let work_left = if foreign_held {
             let handle = db.clone();
             blocking(move || queue_is_pending(&handle)).await?
         } else {
@@ -308,7 +316,7 @@ impl RealEngine {
             db,
             repo_root_url,
             &mut report,
-            locks.foreign_held || work_left,
+            foreign_held || work_left,
             ctx,
         )
         .await?;

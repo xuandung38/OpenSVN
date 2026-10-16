@@ -1,26 +1,31 @@
 import type { ReactNode } from "react";
 import { ModalDialog } from "./modal-dialog";
 
-/** 480px dialog: header 15px/600 with bottom border, body, right-aligned footer (Cancel first). */
+/**
+ * 480px dialog (640px when `wide`): header 15px/600 with bottom border, body, right-aligned footer
+ * (Cancel first).
+ */
 export function Dialog({
   open,
   onClose,
   title,
   children,
   footer,
+  wide = false,
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   children: ReactNode;
   footer?: ReactNode;
+  wide?: boolean;
 }) {
   return (
     <ModalDialog
       open={open}
       onClose={onClose}
       label={title}
-      className="w-[480px] max-w-[92%] rounded-[10px]"
+      className={`${wide ? "w-[640px]" : "w-[480px]"} max-w-[92%] rounded-[10px]`}
     >
       <header className="border-b border-line px-4 py-3 text-[15px] font-semibold">{title}</header>
       <div className="flex flex-col gap-2.5 px-4 py-3.5">{children}</div>

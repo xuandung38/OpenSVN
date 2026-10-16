@@ -549,6 +549,7 @@ scenario!(repo_info_at_a_peg_revision);
 scenario!(cancellation_and_errors);
 scenario!(working_copy_metadata_operations);
 scenario!(switch_to_a_branch);
+scenario!(branch_detection_follows_a_switch);
 scenario!(repository_content_tools);
 scenario!(open_recovers_dead_locks_and_reports_foreign_ones);
 scenario!(locked_unmodified_file_in_status);
@@ -2433,5 +2434,293 @@ async fn switch_cut_at_the_same_offset_is_finished_by_the_same_switch() {
     );
     assert_eq!(count_files(&wc.root.join("aaa")), 8);
     assert_only_local_edits(&changes(e, &wc).await);
+    assert_no_prompt();
+}
+
+// ---- switch keeps excluded children (svn 1.15) ----
+
+/// BASE rows that do not depend on the client or the repository URL.
+fn base_rows(wc: &Path) -> Vec<String> {
+    let db = WcDb::open(wc).unwrap();
+    db.with_read(|c| {
+        let mut s = c
+            .prepare(
+                "SELECT local_relpath, presence, kind, revision, repos_path, depth FROM nodes \
+                 WHERE op_depth = 0 ORDER BY local_relpath",
+            )
+            .unwrap();
+        let rows = s
+            .query_map([], |r| {
+                Ok(format!(
+                    "{}|{}|{}|{:?}|{:?}|{:?}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .unwrap();
+        Ok(rows.map(|r| r.unwrap()).collect::<Vec<_>>())
+    })
+    .unwrap()
+}
+
+/// An excluded folder stays excluded when the working copy is switched to a branch over
+/// mod_dav_svn: its BASE row moves to the branch at the new revision, like `svn switch` leaves
+/// it. With a local server and svn 1.15 (`OPENSVN_SVN_BIN`), the rows are compared with svn's
+/// own switch of the same repository (over `file://`).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn switch_keeps_an_excluded_folder_excluded_like_svn() {
+    use opensvn_lib::engine::real::SessionConnector as _;
+    for (version, host) in servers() {
+        eprintln!("server {version}");
+        let h = harness(&host, "switch-excluded");
+        let url = h.repo_url();
+        let e = h.engine();
+        let root = h.work_dir().join("excluded");
+        let info = e
+            .checkout(
+                &CheckoutPlan {
+                    url: format!("{url}/trunk"),
+                    path: root.clone(),
+                    rev: None,
+                    depth: Depth::Infinity,
+                    sparse: None,
+                    format: WcFormat::V31,
+                    store_pristine: true,
+                    ignore_externals: false,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("checkout");
+        let wc = WcRef {
+            id: WcId("excluded".into()),
+            root: PathBuf::from(info.root_path),
+        };
+        // `svn update --set-depth exclude src`, through a session at the folder.
+        let cancel = svn_types::CancelToken::new();
+        let src_url = svn_types::RepoUrl::parse(&format!("{url}/trunk/src")).unwrap();
+        let session = connector()
+            .connect_with(
+                &src_url,
+                &opensvn_lib::engine::real::ConnectOptions::at_url(&ctx()),
+                &cancel,
+            )
+            .await
+            .expect("session");
+        let client = svn_client::ClientCtx::new(LockOwner {
+            store: h.store.clone() as Arc<dyn LockOwnershipStore>,
+            pid: std::process::id(),
+            boot_id: THIS_BOOT.to_owned(),
+        });
+        svn_client::set_depth(
+            &client,
+            session.as_ref(),
+            &wc.root.join("src"),
+            None,
+            svn_types::Depth::Exclude,
+            &cancel,
+        )
+        .await
+        .expect("exclude src");
+        let branched = opensvn_lib::write_op!(
+            &h,
+            e.copy_location(
+                &CopyLocationRequest {
+                    from_url: format!("{url}/trunk"),
+                    from_rev: None,
+                    to_url: format!("{url}/branches/b"),
+                    message: "Branch".into(),
+                    switch_wc_id: None,
+                    from_wc: None,
+                },
+                None,
+                &ctx(),
+            )
+        )
+        .expect("branch");
+        let reached = e
+            .switch(&wc, &format!("{url}/branches/b"), None, false, &ctx())
+            .await
+            .expect("switch");
+        assert_eq!(reached, branched);
+        let rows = base_rows(&wc.root);
+        assert!(
+            rows.contains(&format!(
+                "src|excluded|dir|Some({})|Some(\"branches/b/src\")|None",
+                reached.0
+            )),
+            "{rows:#?}"
+        );
+        assert!(!wc.root.join("src").exists());
+
+        // The same with svn 1.15 on the same repository.
+        let (Host::Local { repos, .. }, Some(oracle)) = (
+            &host,
+            opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15)
+                .ok()
+                .flatten(),
+        ) else {
+            eprintln!("no local repository or svn 1.15: the svn comparison is skipped");
+            continue;
+        };
+        let file_url = opensvn_svn_oracle::Oracle::file_url(&repos.join(&h.scratch.name));
+        let theirs = h.tmp.path().join("svn-wc");
+        let svn = |args: &[&str]| {
+            let out = oracle.svn().args(args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "svn {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let t = theirs.to_str().unwrap();
+        svn(&["checkout", "-q", &format!("{file_url}/trunk@1"), t]);
+        svn(&[
+            "update",
+            "-q",
+            "--set-depth",
+            "exclude",
+            &format!("{t}/src"),
+        ]);
+        svn(&[
+            "switch",
+            "-q",
+            &format!("{file_url}/branches/b@{}", branched.0),
+            t,
+        ]);
+        assert_eq!(rows, base_rows(&theirs), "server {version}");
+    }
+    assert_no_prompt();
+}
+
+/// Switching the working copy while `src` is switched on its own to an unrelated location:
+/// `src` comes back below the root at the new branch, read from where it was switched to
+/// (`link_path`), as svn 1.15 leaves it on the same repository.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn switching_the_parent_of_a_switched_folder_matches_svn() {
+    use opensvn_lib::engine::real::SessionConnector as _;
+    for (version, host) in servers() {
+        eprintln!("server {version}");
+        let h = harness(&host, "switch-parent");
+        let url = h.repo_url();
+        let e = h.engine();
+        for to in ["branches/b", "branches/c"] {
+            opensvn_lib::write_op!(
+                &h,
+                e.copy_location(
+                    &CopyLocationRequest {
+                        from_url: format!("{url}/trunk"),
+                        from_rev: None,
+                        to_url: format!("{url}/{to}"),
+                        message: "Branch".into(),
+                        switch_wc_id: None,
+                        from_wc: None,
+                    },
+                    None,
+                    &ctx(),
+                )
+            )
+            .expect("copy");
+        }
+        let root = h.work_dir().join("parent");
+        let info = e
+            .checkout(
+                &CheckoutPlan {
+                    url: format!("{url}/trunk"),
+                    path: root.clone(),
+                    rev: None,
+                    depth: Depth::Infinity,
+                    sparse: None,
+                    format: WcFormat::V31,
+                    store_pristine: true,
+                    ignore_externals: false,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("checkout");
+        let wc = WcRef {
+            id: WcId("parent".into()),
+            root: PathBuf::from(info.root_path),
+        };
+        // `src` to the whole branch `b` (another path, so ancestry is ignored, as svn needs).
+        let cancel = svn_types::CancelToken::new();
+        let session = connector()
+            .connect_with(
+                &svn_types::RepoUrl::parse(&format!("{url}/trunk")).unwrap(),
+                &opensvn_lib::engine::real::ConnectOptions::at_url(&ctx()),
+                &cancel,
+            )
+            .await
+            .expect("session");
+        let client = svn_client::ClientCtx::new(LockOwner {
+            store: h.store.clone() as Arc<dyn LockOwnershipStore>,
+            pid: std::process::id(),
+            boot_id: THIS_BOOT.to_owned(),
+        });
+        svn_client::switch(
+            &client,
+            session.as_ref(),
+            &wc.root.join("src"),
+            &svn_types::RepoUrl::parse(&format!("{url}/branches/b")).unwrap(),
+            None,
+            svn_types::Depth::Unknown,
+            true,
+            &cancel,
+        )
+        .await
+        .expect("switch src");
+        assert!(wc.root.join("src/README.md").exists());
+        e.switch(&wc, &format!("{url}/branches/c"), None, false, &ctx())
+            .await
+            .expect("switch the working copy");
+        let rows = base_rows(&wc.root);
+        assert!(
+            rows.iter()
+                .any(|r| r.starts_with("src/main.rs|normal|file|")
+                    && r.contains("branches/c/src/main.rs")),
+            "{rows:#?}"
+        );
+        assert!(!wc.root.join("src/README.md").exists());
+
+        let (Host::Local { repos, .. }, Some(oracle)) = (
+            &host,
+            opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15)
+                .ok()
+                .flatten(),
+        ) else {
+            eprintln!("no local repository or svn 1.15: the svn comparison is skipped");
+            continue;
+        };
+        let file_url = opensvn_svn_oracle::Oracle::file_url(&repos.join(&h.scratch.name));
+        let theirs = h.tmp.path().join("svn-wc");
+        let t = theirs.to_str().unwrap();
+        let src = format!("{t}/src");
+        for args in [
+            vec!["checkout", "-q", &format!("{file_url}/trunk@1")[..], t],
+            vec![
+                "switch",
+                "-q",
+                "--ignore-ancestry",
+                &format!("{file_url}/branches/b@3")[..],
+                &src[..],
+            ],
+            vec!["switch", "-q", &format!("{file_url}/branches/c@3")[..], t],
+        ] {
+            let out = oracle.svn().args(&args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "svn {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        assert_eq!(rows, base_rows(&theirs), "server {version}");
+    }
     assert_no_prompt();
 }

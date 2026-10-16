@@ -23,7 +23,7 @@ owner_paths: [".github/workflows/release.yml", "packaging/", "apps/opensvn/src-t
 - **Không kênh beta tự ký mỗi merge**; bản thử nội bộ = build thủ công không auto-update.
 - `release.yml`: tag `v*` → build 3 OS → (chờ duyệt environment) ký → đẩy Release lên `OpenSVN-releases` + `latest.json`; release notes từ conventional commits; actions pin SHA.
 - Cấu hình bundle/updater ở `tauri.bundle.conf.json` (merge `--config`), không sửa `tauri.conf.json` của P08.
-- Icon tạm + bundle id `vn.opensvn.app` (xác nhận PO).
+- Icon tạm + bundle id `com.opensvn.desktop` (PO đã chốt ngày 2026-10-16, thay cho `vn.opensvn.app`).
 - Hướng dẫn cài & cập nhật nội bộ → PR `docs/deployment-guide.md` cho lead.
 - Non-functional: build tái lập (pin toolchain, lockfile `--locked`); không commit chứng chỉ/khóa.
 

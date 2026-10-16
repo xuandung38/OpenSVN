@@ -43,6 +43,7 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             set_depth,
             upgrade_format,
             resolve,
+            props_get,
             props_set,
             repo_info,
             repo_resolve_url,

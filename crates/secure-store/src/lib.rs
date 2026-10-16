@@ -197,7 +197,8 @@ fn native_store() -> Result<Arc<keyring_core::CredentialStore>> {
 /// Secret Service (zbus) store; fails with a clear error when no keyring daemon is running and
 /// never falls back to plaintext.
 ///
-/// Unverified: not run on Linux yet; needs a headless gnome-keyring session (follow-up for P13).
+/// Round trip verified with a headless gnome-keyring: `scripts/test-env/secret-service-roundtrip.sh`
+/// (also in the nightly workflow).
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn native_store() -> Result<Arc<keyring_core::CredentialStore>> {
     let store = zbus_secret_service_keyring_store::Store::new().map_err(|e| {

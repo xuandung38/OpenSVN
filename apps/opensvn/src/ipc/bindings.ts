@@ -93,6 +93,16 @@ export const commands = {
 	setDepth: (wcId: WcId, path: string, depth: Depth) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("set_depth", { wcId, path, depth })),
 	upgradeFormat: (wcId: WcId, to: number) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("upgrade_format", { wcId, to })),
 	resolve: (request: ResolveRequest) => typedError<null, AppError>(__TAURI_INVOKE("resolve", { request })),
+	/**
+	 *  Properties of each of `paths` (working copy relative, `""` is the root), local changes
+	 *  included, in the order given. Values that are not UTF-8 text come back flagged `binary`.
+	 */
+	propsGet: (wcId: WcId, paths: string[]) => typedError<ItemProps[], AppError>(__TAURI_INVOKE("props_get", { wcId, paths })),
+	/**
+	 *  Sets (`value`) or deletes (`None`) property `name` on `path`. Subversion properties are checked
+	 *  as `svn propset` checks them (known names, where they apply, `svn:eol-style`, `svn:mime-type`,
+	 *  `svn:externals` and `svn:mergeinfo` values) and canonicalized (`svn:needs-lock` becomes `*`).
+	 */
 	propsSet: (wcId: WcId, path: string, name: string, value: string | null) => typedError<null, AppError>(__TAURI_INVOKE("props_set", { wcId, path, name, value })),
 	repoInfo: (url: string) => typedError<RepoInfo, AppError>(__TAURI_INVOKE("repo_info", { url })),
 	/**
@@ -330,7 +340,12 @@ export type Banner = {
 	data: string[],
 };
 
-export type BannerKind = "conflicts" | "mixed-rev" | "lock-stolen" | "needs-cleanup";
+export type BannerKind = "conflicts" | "mixed-rev" | "lock-stolen" | "needs-cleanup" | 
+/**
+ *  Another program (svn, TortoiseSVN, an IDE) holds the working copy lock. `data` lists the
+ *  locked directories (`""` is the root).
+ */
+"wc-busy";
 
 /**  Blame result line. */
 export type BlameLine = {
@@ -419,6 +434,13 @@ export type CleanupRequest = {
 	removeUnversioned: boolean | null,
 	removeIgnored: boolean | null,
 	vacuumPristines: boolean | null,
+	/**
+	 *  Also removes the working copy locks another program (svn, TortoiseSVN, an IDE) left
+	 *  behind. Set only after the user ticked the explicit confirmation: the engine refuses while
+	 *  a process it can see still has the working copy open, never touches a lock of a running
+	 *  operation of this app, and never deletes files.
+	 */
+	breakForeignLocks: boolean | null,
 };
 
 export type CommitRequest = {
@@ -683,6 +705,15 @@ export type IncompleteCheckout = {
 	/**  Revision the checkout was reaching. */
 	rev: Rev,
 	rootPath: string,
+};
+
+/**  Properties of one item (`props_get`). */
+export type ItemProps = {
+	/**  Working copy relative path (`""` is the root). */
+	path: string,
+	kind: FileKind,
+	/**  Sorted by name. */
+	props: PropEntry[],
 };
 
 export type Language = "vi" | "en";
@@ -954,6 +985,15 @@ export type PropChange = {
 	name: string,
 	before: string | null,
 	after: string | null,
+};
+
+/**  One versioned property of a working copy item, local changes included. */
+export type PropEntry = {
+	name: string,
+	/**  The value as text; bytes that are not UTF-8 show as U+FFFD (see `binary`). */
+	value: string,
+	/**  The value is not UTF-8 text: shown, never edited (saving the text back would change it). */
+	binary: boolean,
 };
 
 export type PropStatus = "none" | "normal" | "modified" | "conflicted";

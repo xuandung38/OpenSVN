@@ -10,4 +10,5 @@ mod commands_settings;
 mod dav_resume;
 mod engine_startup;
 mod fixture;
+mod ipc_commands;
 mod security;

@@ -90,6 +90,7 @@
     "allow-set-depth",
     "allow-upgrade-format",
     "allow-resolve",
+    "allow-props-get",
     "allow-props-set"
   ]
 }
