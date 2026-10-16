@@ -19,6 +19,7 @@ use svn_types::{
     PropChange, PropStatus, RelPath, RepoUrl, Reporter, Result, Revnum, SvnError, WcStatus,
     WindowSink,
 };
+use svn_wc::db::WcDb;
 
 use crate::ctx::ClientCtx;
 use crate::status::{StatusOptions, local_status};
@@ -85,6 +86,16 @@ fn is_regular_prop(name: &str) -> bool {
 fn depth_of(d: Depth) -> Depth {
     match d {
         Depth::Unknown | Depth::Exclude => Depth::Infinity,
+        d => d,
+    }
+}
+
+/// The depth a working-copy comparison asks the server for. Like svn (`libsvn_client/diff.c`), a
+/// full depth is sent as `unknown`, so the report's recorded depths hold: `infinity` would make
+/// the server treat every sparse folder as a depth upgrade and send what it leaves out as added.
+fn wc_request_depth(d: Depth) -> Depth {
+    match depth_of(d) {
+        Depth::Infinity => Depth::Unknown,
         d => d,
     }
 }
@@ -258,6 +269,7 @@ async fn drive(
     report: &(dyn Fn() -> svn_ra_api::ReportFn + Send + Sync),
     right: &RepoUrl,
     right_rev: Option<Revnum>,
+    depth: Depth,
     opts: SummaryOptions,
     cancel: &CancelToken,
 ) -> Result<Collected> {
@@ -269,6 +281,7 @@ async fn drive(
             report(),
             right,
             right_rev,
+            depth,
             opts,
             cancel,
         )
@@ -302,6 +315,7 @@ async fn drive_once(
     report: svn_ra_api::ReportFn,
     right: &RepoUrl,
     right_rev: Option<Revnum>,
+    depth: Depth,
     opts: SummaryOptions,
     cancel: &CancelToken,
 ) -> Result<Collected> {
@@ -316,7 +330,7 @@ async fn drive_once(
             UpdateRequest {
                 revision: right_rev,
                 target,
-                depth: depth_of(opts.depth),
+                depth,
                 mode: UpdateMode::Diff(right.clone()),
                 send_copyfrom: false,
                 ignore_ancestry: opts.ignore_ancestry,
@@ -403,6 +417,7 @@ pub async fn summarize_repos(
         &report,
         right,
         right_rev,
+        depth,
         opts,
         cancel,
     )
@@ -441,16 +456,24 @@ pub async fn summarize_repos(
 #[derive(Debug, Clone, Copy)]
 struct Local {
     kind: NodeKind,
+    /// Kind in BASE when it can differ from `kind` (a replaced node); `kind` otherwise.
+    base_kind: NodeKind,
     status: NodeStatus,
     props: bool,
 }
 
-fn local_of(s: &WcStatus) -> Local {
-    Local {
+fn local_of(db: &WcDb, s: &WcStatus) -> Result<Local> {
+    let base_kind = if s.text == NodeStatus::Replaced {
+        db.read_base(&s.path)?.map_or(s.kind, |n| n.kind)
+    } else {
+        s.kind
+    };
+    Ok(Local {
         kind: s.kind,
+        base_kind,
         status: s.text,
         props: matches!(s.props, PropStatus::Modified | PropStatus::Conflicted),
-    }
+    })
 }
 
 /// The node exists in the working tree (scheduled additions included).
@@ -510,13 +533,13 @@ pub async fn summarize_wc(
             ctx.config.global_ignores.clone(),
         );
         tokio::task::spawn_blocking(move || {
-            local_status(&db, &rel, &status_opts, globals.as_deref(), &cancel)
+            local_status(&db, &rel, &status_opts, globals.as_deref(), &cancel)?
+                .iter()
+                .map(|s| Ok((s.path.clone(), local_of(&db, s)?)))
+                .collect::<Result<BTreeMap<_, _>>>()
         })
         .await
         .map_err(|e| SvnError::new(ErrorCode::Internal, format!("worker failed: {e}")))??
-        .iter()
-        .map(|s| (s.path.clone(), local_of(s)))
-        .collect()
     };
     let root = root_string(session);
     let report = || {
@@ -535,6 +558,7 @@ pub async fn summarize_wc(
         &report,
         right,
         right_rev,
+        wc_request_depth(opts.depth),
         opts,
         cancel,
     )
@@ -634,7 +658,8 @@ fn combine(
         return;
     };
     // BASE has every node of the working copy but a plain addition; with no repository-side
-    // change, the right side has exactly what BASE has.
+    // change, the right side has exactly what BASE has (its kind too: a local replacement may
+    // have changed it).
     let base_has = l.status != NodeStatus::Added;
     let right_has = match on_right.map(|e| e.kind) {
         Some(SummaryKind::Deleted) => false,
@@ -642,7 +667,7 @@ fn combine(
         None => base_has,
     };
     let left_has = in_working(Some(l));
-    let kind_right = on_right.map_or(l.kind, |e| e.node_kind);
+    let kind_right = on_right.map_or(l.base_kind, |e| e.node_kind);
     match (left_has, right_has) {
         (false, false) => {}
         (true, false) => out.push(entry(l.kind, SummaryKind::Deleted, false)),

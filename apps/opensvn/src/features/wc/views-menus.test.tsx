@@ -324,6 +324,21 @@ test("the View options menu in the Changes list toggles the same prefs", async (
   await waitFor(() => expect(mockMenuViewState()?.tree).toBe(true));
 });
 
+test("a View check item clicked while a dialog is open gets its mark put back", async () => {
+  await boot();
+  await waitFor(() => expect(mockMenuViewState()?.tree).toBe(false));
+  await emit("menu://branch/compare");
+  await screen.findByRole("dialog", { name: "Compare with branch", hidden: true });
+  const sent = () => mockCalls.filter((c) => c.name === "menuSetView").length;
+  const before = sent();
+  // The native item has flipped its own mark; the app ignores the click behind the dialog and
+  // sends the unchanged choices again.
+  await emit("menu://view/tree");
+  await waitFor(() => expect(sent()).toBeGreaterThan(before));
+  expect(mockMenuViewState()?.tree).toBe(false);
+  expect(parseViewPrefs(localStorage.getItem("opensvn.viewPrefs")).tree).toBe(false);
+});
+
 test("Branch > Compare with branch: pick a branch, summary of differences, diff a file", async () => {
   await boot();
   await emit("menu://branch/compare");

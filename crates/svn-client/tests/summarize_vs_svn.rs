@@ -329,3 +329,112 @@ async fn a_working_copy_with_local_changes_against_another_location_matches_svn(
         assert_eq!(rows, svn_rows, "working copy -> {right}@{right_rev:?}");
     }
 }
+
+/// A sparse working copy (folders below the root left at depth empty) against its own location
+/// and against the branch: the folders it leaves out are not "added" (svn sends a full depth as
+/// `unknown`, so the recorded depths hold). A folder replaced locally by a file, with no change
+/// on the repository side, is a deletion and an addition, as in svn. A file replaced by a folder
+/// is checked on our side only: svn 1.15 fails on it (E145001, "Can only get the pristine
+/// contents of files").
+#[tokio::test]
+async fn a_sparse_working_copy_with_local_kind_changes_matches_svn() {
+    let Some(oracle) = oracle_1_15() else { return };
+    let repo = Repo::new(&oracle);
+    build(&repo);
+    let fake = repo.fake(None);
+    let sb = Sandbox::new();
+    let theirs = repo.base().join("svnwc-sparse");
+    repo.svn(
+        &repo.base(),
+        &[
+            "checkout",
+            "-q",
+            "-r",
+            "4",
+            "--depth",
+            "immediates",
+            &format!("{}/trunk", repo.url),
+            theirs.to_str().unwrap(),
+        ],
+    );
+    let at_trunk = fake.at(&fake_url("trunk")).expect("session");
+    let mine = sb.path("wc");
+    checkout(
+        &ctx(),
+        &at_trunk,
+        &mine,
+        Some(Revnum(4)),
+        Depth::Immediates,
+        false,
+        &CancelToken::new(),
+    )
+    .await
+    .expect("checkout");
+    for wc in [&theirs, &mine] {
+        // svn 1.15 marks a file whose properties alone differ as modified in this mode too
+        // ("MM" for `y` against the branch), though `svn diff` shows only the property change;
+        // a local edit makes both sides agree that the text differs.
+        write(&wc.join("y"), "y\nlocal\n");
+        // Folder (at depth empty) -> file.
+        repo.svn(wc, &["rm", "-q", "n"]);
+        write(&wc.join("n"), "n is a file\n");
+        repo.svn(wc, &["add", "-q", "n"]);
+    }
+    for (right, right_rev) in [("trunk", Some(4)), ("branches/b", None)] {
+        let right_url = format!(
+            "{}/{right}@{}",
+            repo.url,
+            right_rev.map_or("HEAD".to_owned(), |r: u64| r.to_string())
+        );
+        let mut svn_rows = svn_summary(
+            &repo,
+            &theirs,
+            &["--old=.", &format!("--new={right_url}")],
+            ".",
+        );
+        svn_rows.retain(|r| !r.0.is_empty());
+        let summary = summarize_wc(
+            &ctx(),
+            &at_trunk,
+            &mine,
+            &fake_url(right),
+            right_rev.map(Revnum),
+            SummaryOptions::default(),
+            &CancelToken::new(),
+        )
+        .await
+        .expect("summarize");
+        let mut rows = ours(&summary.entries);
+        rows.retain(|r| !r.0.is_empty());
+        assert_eq!(
+            rows, svn_rows,
+            "sparse working copy -> {right}@{right_rev:?}"
+        );
+    }
+
+    // File -> folder, ours only.
+    repo.svn(&mine, &["rm", "-q", "--force", "y"]);
+    std::fs::create_dir(mine.join("y")).expect("mkdir");
+    repo.svn(&mine, &["add", "-q", "y"]);
+    let summary = summarize_wc(
+        &ctx(),
+        &at_trunk,
+        &mine,
+        &fake_url("trunk"),
+        Some(Revnum(4)),
+        SummaryOptions::default(),
+        &CancelToken::new(),
+    )
+    .await
+    .expect("summarize");
+    let rows = ours(&summary.entries);
+    for wanted in [
+        ("y", "deleted", "none", "dir"),
+        ("y", "added", "none", "file"),
+    ] {
+        assert!(
+            rows.iter().any(|r| (r.0.as_str(), r.1, r.2, r.3) == wanted),
+            "{wanted:?} in {rows:?}"
+        );
+    }
+}

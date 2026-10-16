@@ -6,6 +6,7 @@ import { openExternalUrl } from "../../lib/external-link";
 import { useT } from "../../lib/i18n/i18n";
 import type { ThemeChoice } from "../../lib/theme";
 import { DOCS_URL } from "./help/help-links";
+import { resendMenuView } from "./menu-view-sync";
 import { matchShortcut, SHORTCUTS, type ShortcutId } from "./shortcuts";
 import { runUiCommand } from "./ui-commands";
 import { useWcActions } from "./use-wc-actions";
@@ -403,15 +404,20 @@ export function useWcShortcuts(props: {
     };
     window.addEventListener("keydown", onKey);
 
-    const off = bus.onMenu((name) => {
+    const onMenu = (id: MenuAction | undefined) => {
       if (document.querySelector("dialog[open]")) return;
-      const id = MENU_ACTIONS[name];
       if (!id) return;
       if (isEcho(lastKey, id)) {
         lastKey.delete(id);
         return;
       }
       if (run(id)) lastMenu.set(id, Date.now());
+    };
+    const off = bus.onMenu((name) => {
+      const id = MENU_ACTIONS[name];
+      onMenu(id);
+      // The native check item flipped its mark whether or not the toggle ran.
+      if (id && id in VIEW_TOGGLES) resendMenuView();
     });
     return () => {
       window.removeEventListener("keydown", onKey);

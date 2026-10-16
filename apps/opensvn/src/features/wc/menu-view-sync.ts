@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import type { MenuViewState } from "../../ipc/bindings";
 import { ipc } from "../../ipc/client";
-import { useViewPrefs, type ViewPrefs } from "./view-prefs";
+import { getViewPrefs, useViewPrefs, type ViewPrefs } from "./view-prefs";
 
 /** The check marks of the native View menu for `prefs`. */
 export function menuViewState(prefs: ViewPrefs): MenuViewState {
@@ -28,4 +28,15 @@ export function useMenuViewSync(): void {
       .then(() => ipc().commands.menuSetView(view))
       .catch(() => {});
   }, [showUnversioned, showIgnored, groupByChangelist, tree]);
+}
+
+/**
+ * Sends the stored choices to the native menu again. A check item flips its own mark when it is
+ * clicked, so a click the app does not act on (a dialog is open, or the same key press already
+ * ran the toggle) would leave the mark inverted; this puts it back.
+ */
+export function resendMenuView(): void {
+  void Promise.resolve()
+    .then(() => ipc().commands.menuSetView(menuViewState(getViewPrefs())))
+    .catch(() => {});
 }
