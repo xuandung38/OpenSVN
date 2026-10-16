@@ -228,15 +228,52 @@ Modes used for the PR tables: `--reset-after 2`, `--idle-reset 2`, both, `--stal
 
 - Reads must succeed: they are sent again on a fresh connection, and checkout, update, switch
   and the streamed reads resume.
-- A write is never sent twice (#166). When the proxy breaks a connection under a write, the
-  write fails with an unknown outcome or the connection failure. `write_op!`
+- Writes must succeed too under the faults the transport keeps them away from: a connection
+  reset or closed after two or more requests (`--reset-after 2`, `--close-after 2`), or dropped
+  after more than a second idle (`--idle-reset 2`, `--stale-after 2`). A connection that carries
+  writes is used for at most two requests (`TransportConfig::write_connection_requests`), never
+  after more than a second idle (`write_reuse_window`), and `MERGE`, `LOCK` and `UNLOCK` each
+  open a new one. After each scenario the suite reads the proxy log and fails if any write met a
+  fault (`writes_hit_by_the_proxy`).
+- Under any other fault (`--close-after 1`, cut write responses, outages) a write is never sent
+  twice (#166). When the proxy breaks a connection under a write, the write fails with an
+  unknown outcome or the connection failure (a commit whose transaction the server then
+  confirmed deleted fails with `CommitNotApplied`: nothing was committed). `write_op!`
   (`engine/conformance.rs`) then checks with the proxy log that a write really met the fault,
   that no write request line repeats, and with `svnadmin lstxns` that no transaction is left.
-  The scenario then ends ("ends as designed" in the output), because repeating the write would
-  meet the same fault (`--reset-after 2` resets the third request of every connection, and a
-  commit sends more writes than that over one connection). The rest of the scenario is covered
-  by the direct run.
+  The scenario then ends ("ends as designed" in the output, with `--nocapture`), because
+  repeating the write would meet the same fault. The rest of the scenario is covered by the
+  direct run.
 - The tests that start their own proxy skip themselves when `OPENSVN_COMPAT_FAULTS` is set.
+  Run directly, `a_commit_gets_through_a_proxy_that_resets_connections_after_two_requests`
+  commits 61 files, locks, unlocks and copies through `--reset-after 2`, and
+  `a_cut_put_commits_nothing_and_the_same_commit_can_be_sent_again` cuts a `PUT` answer: the
+  commit fails with `CommitNotApplied` (IPC `commit-not-applied`, Retry), no transaction is
+  left, and the same commit goes through once the connection behaves.
+
+### Commit timing and connections
+
+`crates/svn-ra/tests/commit_timing.rs` commits 1, 100 and 1000 new files and reads the number of
+connections and full TLS handshakes of each commit from the access log (`port=` is the client
+port, `tls=` says `Initial` or `Resumed`). `OPENSVN_TIMING_WRITE_REQUESTS` overrides
+`write_connection_requests` (`0`: no limit):
+
+```sh
+OPENSVN_TIMING_URLS=https://svn.opensvn.test:18443/svn-basic,https://svn.opensvn.test:18444/svn-basic \
+  cargo test --release -p svn-ra --test commit_timing -- --ignored --nocapture
+```
+
+To see the cost of round trips, run it through `scripts/test-env/latency-proxy.py`, a plain TCP
+proxy (TLS stays end to end) that delays every chunk by a one-way time in both directions and
+the first byte of a connection by one more round trip (the TCP handshake):
+
+```sh
+python3 scripts/test-env/latency-proxy.py 18461 127.0.0.1 18443 5 &   # 10 ms round trip
+OPENSVN_VSVN_HTTPS115_PORT=18462 OPENSVN_TIMING_URLS=https://svn.opensvn.test:18461/svn-basic \
+  cargo test --release -p svn-ra --test commit_timing -- --ignored --nocapture
+```
+
+(`OPENSVN_VSVN_HTTPS115_PORT` tells the test which proxied port reads the 1.15 access log.)
 
 ### A switch cut off mid-answer
 
