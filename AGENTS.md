@@ -108,6 +108,7 @@ Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #
 | #180 `fix/cleanup-vacuum-race` | `svn cleanup` của client khác giữa lúc update/checkout: transaction NODES kiểm tra file pristine dùng lại (khôi phục từ bản giữ lại hoặc dừng), kiểm tra lock còn là của mình, release không xóa row của client khác | | Đang review |
 | `chore/release-prep` | Phần #22 làm được khi chưa có secret: `check-token-scope.sh` kiểm scope token đọc của updater, release notes sinh từ conventional commit, checklist kiểm tay chữ ký và N-1→N trên macOS/Windows, ghi chú cần quyết định bundle id | #22 | Draft |
 | #167 `test/fixtures-hostile-repo` | Fixture WC format 31 từ svn 1.15 (42 trạng thái) và f32 (43 trạng thái); repo "độc" + evil server chạy không cần Docker; e2e `hostile.test.mjs`; `xtask compat fixtures` chạy các generator; log/author có UTF-8 hỏng hiển thị bằng U+FFFD | #8, #18 | Đang review |
+| #185 `fix/switch-exclude-ancestry` | Switch với `--depth` hẹp khớp svn 1.15: node ngoài depth (cả dòng `exclude`) giữ vị trí cũ, chỉ node được bump mới dời sang vị trí mới (bỏ `relocate_subtree` cho cả cây); test oracle cho dòng `exclude` ở mọi depth, switch thư mục cha của thư mục đã switch, ancestry (nhánh/tag/file copy được, không chung lịch sử bị từ chối); DAV so với svn 1.15 | — | Đang review |
 
 Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: xem/diff file Word/Excel, hiển thị %/ETA khi checkout, giữ nguyên byte đường dẫn (NFC/NFD), build Mac. Hỏi chủ repo trước khi làm những mảng này.
 
