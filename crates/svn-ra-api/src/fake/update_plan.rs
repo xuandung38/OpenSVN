@@ -22,6 +22,11 @@ pub(super) struct ReportEntry {
     pub deleted: bool,
     /// Depth the working copy has at this path (`Exclude`: excluded node).
     pub depth: Depth,
+    /// `link_path`: the URL the working copy has this path (and what is below it) from.
+    pub link_url: Option<RepoUrl>,
+    /// [`Self::link_url`] below the repository root, for a switch (see
+    /// [`PlanInput::full_trees`]); `None` otherwise.
+    pub link: Option<RelPath>,
 }
 
 /// Reporter that records entries.
@@ -45,6 +50,8 @@ impl Reporter for CollectingReporter {
             start_empty,
             deleted: false,
             depth,
+            link_url: None,
+            link: None,
         });
         Ok(())
     }
@@ -55,13 +62,15 @@ impl Reporter for CollectingReporter {
             start_empty: true,
             deleted: true,
             depth: Depth::Infinity,
+            link_url: None,
+            link: None,
         });
         Ok(())
     }
     fn link_path(
         &mut self,
         path: &RelPath,
-        _url: &RepoUrl,
+        url: &RepoUrl,
         rev: Revnum,
         depth: Depth,
         start_empty: bool,
@@ -73,6 +82,8 @@ impl Reporter for CollectingReporter {
             start_empty,
             deleted: false,
             depth,
+            link_url: Some(url.clone()),
+            link: None,
         });
         Ok(())
     }
@@ -123,6 +134,10 @@ pub(super) struct PlanInput<'a> {
     pub target_rev: Revnum,
     pub target_tree: &'a Tree,
     pub base_trees: &'a HashMap<Revnum, Tree>,
+    /// Whole repository trees at the revisions of linked entries: in a switch, a path below a
+    /// `link_path` is what the working copy has from the link's source (svn_repos' `s_path`),
+    /// while the target stays where the switch puts it.
+    pub full_trees: &'a HashMap<Revnum, Tree>,
     pub entries: &'a [ReportEntry],
     /// Anchor-relative path being updated.
     pub anchor_target: RelPath,
@@ -233,6 +248,24 @@ impl Planner<'_> {
             .max_by_key(|e| e.path.as_str().len())
     }
 
+    /// The tree and the path in it of what the working copy has at `path` at `rev`: the
+    /// session-relative base tree, or the source of the nearest linked entry at or above it.
+    fn source(&self, path: &RelPath, rev: Revnum) -> Option<(&Tree, RelPath)> {
+        let linked = self
+            .input
+            .entries
+            .iter()
+            .filter(|e| e.link.is_some() && !e.deleted && path.starts_with(&e.path))
+            .max_by_key(|e| e.path.as_str().len());
+        match linked.and_then(|e| e.link.as_ref().map(|l| (e, l))) {
+            Some((e, l)) => Some((
+                self.input.full_trees.get(&rev)?,
+                remap(path, &e.path, l).ok()?,
+            )),
+            None => Some((self.input.base_trees.get(&rev)?, path.clone())),
+        }
+    }
+
     /// The node the working copy has at `path`, like svn_repos' `update_entry`: a path reported
     /// with its own `set_path` exists at the reported revision even when it is `start_empty`
     /// (that only empties its children), and even below a `start_empty` parent.
@@ -244,11 +277,8 @@ impl Planner<'_> {
         if e.deleted || (e.start_empty && e.path != *path) {
             return None;
         }
-        self.input
-            .base_trees
-            .get(&e.rev)?
-            .get(path)
-            .map(|n| (n, e.rev))
+        let (tree, at) = self.source(path, e.rev)?;
+        tree.get(&at).map(|n| (n, e.rev))
     }
 
     fn new_node(&self, path: &RelPath) -> Result<Option<&Node>> {
@@ -379,9 +409,9 @@ impl Planner<'_> {
                 .governing(dir)
                 .filter(|e| !e.deleted && !e.start_empty)
                 .map(|e| e.rev);
-            if let Some(t) = rev.and_then(|r| self.input.base_trees.get(&r)) {
+            if let Some((t, at)) = rev.and_then(|r| self.source(dir, r)) {
                 names.extend(
-                    super::repo::children(t, dir)
+                    super::repo::children(t, &at)
                         .filter_map(|(k, _)| k.file_name().map(str::to_owned)),
                 );
             }

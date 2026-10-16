@@ -1,5 +1,6 @@
 import type { FileStatus } from "../../ipc/bindings";
 import { type StatusCode, statusCode } from "../../lib/status";
+import type { ViewPrefs } from "./view-prefs";
 
 /** Status glyph of a changed file, or `null` when the row is not a local change (normal, ignored...). */
 export function fileGlyph(f: FileStatus): StatusCode | null {
@@ -34,7 +35,7 @@ export function lockFiles(files: readonly FileStatus[]): FileStatus[] {
  * means "add on commit"), and conflicted files cannot be committed.
  */
 export function tickedByDefault(f: FileStatus): boolean {
-  return f.text !== "unversioned" && !isConflicted(f);
+  return f.text !== "unversioned" && f.text !== "ignored" && !isConflicted(f);
 }
 
 export type ChipId = "modified" | "added" | "unversioned" | "conflicted" | "locked";
@@ -68,17 +69,102 @@ export function filterFiles(
   );
 }
 
+/**
+ * Files of the Changes list under the View options (doc 01 8.4): the local changes, without
+ * unversioned files when those are hidden, plus ignored files when those are shown. Ignored files
+ * only reach the UI when the status was asked to include them.
+ */
+export function listedFiles(
+  files: readonly FileStatus[],
+  prefs: Pick<ViewPrefs, "showUnversioned" | "showIgnored">,
+): FileStatus[] {
+  return files.filter((f) =>
+    f.text === "ignored"
+      ? prefs.showIgnored
+      : fileGlyph(f) !== null && (prefs.showUnversioned || f.text !== "unversioned"),
+  );
+}
+
+/** Glyph of a row of the Changes list: like `fileGlyph`, plus `I` for a shown ignored file. */
+export function rowGlyph(f: FileStatus): StatusCode | null {
+  return f.text === "ignored" ? "I" : fileGlyph(f);
+}
+
+/** Whether a row can be ticked for commit: ignored files are listed for reference only. */
+export function isTickable(f: FileStatus): boolean {
+  return f.text !== "ignored";
+}
+
 export type ListRow =
   | { kind: "group"; name: string | null; paths: string[] }
-  | { kind: "file"; file: FileStatus };
+  /** A folder of the tree view; `paths` are the listed files below it. */
+  | { kind: "dir"; path: string; name: string; depth: number; paths: string[] }
+  /** `depth` is set in the tree view, where the row shows the file name only. */
+  | { kind: "file"; file: FileStatus; depth?: number };
+
+export interface RowOptions {
+  /** Group by changelist (headers appear only when some file has one). */
+  group: boolean;
+  /** Show as a folder tree instead of flat paths. */
+  tree: boolean;
+}
+
+/** Segment-wise order, so every file of a folder is contiguous (`a/x` before `a-b/y`). */
+function comparePaths(a: string, b: string): number {
+  const x = a.split("/");
+  const y = b.split("/");
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    const p = x[i] as string;
+    const q = y[i] as string;
+    if (p !== q) {
+      // A folder sorts before the files next to it.
+      if (i === x.length - 1 && i < y.length - 1) return 1;
+      if (i === y.length - 1 && i < x.length - 1) return -1;
+      return p < q ? -1 : 1;
+    }
+  }
+  return x.length - y.length;
+}
+
+/** Folder rows followed by their files, depth first. */
+function treeRows(files: readonly FileStatus[]): ListRow[] {
+  const sorted = [...files].sort((a, b) => comparePaths(a.path, b.path));
+  const rows: ListRow[] = [];
+  const dirs: Extract<ListRow, { kind: "dir" }>[] = [];
+  let open: string[] = [];
+  for (const file of sorted) {
+    const parts = file.path === "" ? [] : file.path.split("/").slice(0, -1);
+    let same = 0;
+    while (same < open.length && same < parts.length && open[same] === parts[same]) same++;
+    open = open.slice(0, same);
+    for (let i = same; i < parts.length; i++) {
+      const name = parts[i] as string;
+      open.push(name);
+      const dir = { kind: "dir" as const, path: open.join("/"), name, depth: i, paths: [] };
+      dirs.push(dir);
+      rows.push(dir);
+    }
+    rows.push({ kind: "file", file, depth: parts.length });
+  }
+  for (const d of dirs) {
+    d.paths = sorted.filter((f) => f.path.startsWith(`${d.path}/`)).map((f) => f.path);
+  }
+  return rows;
+}
 
 /**
- * Flat rows for the virtual list. Group headers appear only when at least one file belongs to a
- * changelist; files without changelist come first (doc 01 3.3).
+ * Flat rows for the virtual list. With `group`, headers appear only when at least one file belongs
+ * to a changelist; files without changelist come first (doc 01 3.3). With `tree`, each group (or
+ * the whole list) is shown as a folder tree.
  */
-export function buildRows(files: readonly FileStatus[]): ListRow[] {
-  if (!files.some((f) => f.changelist !== null)) {
-    return files.map((file) => ({ kind: "file", file }));
+export function buildRows(
+  files: readonly FileStatus[],
+  opts: RowOptions = { group: true, tree: false },
+): ListRow[] {
+  const body = (list: readonly FileStatus[]): ListRow[] =>
+    opts.tree ? treeRows(list) : list.map((file) => ({ kind: "file", file }));
+  if (!opts.group || !files.some((f) => f.changelist !== null)) {
+    return body(files);
   }
   const groups = new Map<string | null, FileStatus[]>();
   for (const f of files) {
@@ -93,7 +179,7 @@ export function buildRows(files: readonly FileStatus[]): ListRow[] {
   for (const name of names) {
     const list = groups.get(name) ?? [];
     rows.push({ kind: "group", name, paths: list.map((f) => f.path) });
-    for (const file of list) rows.push({ kind: "file", file });
+    rows.push(...body(list));
   }
   return rows;
 }

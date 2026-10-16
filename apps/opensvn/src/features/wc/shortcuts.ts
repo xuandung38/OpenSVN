@@ -1,13 +1,35 @@
 /** Keyboard shortcuts of doc 01 section 8. `Mod` is Cmd on macOS and Ctrl elsewhere. */
 
+export type ShortcutOs = "mac" | "win";
+
+/** Set only in dev/mock sessions (`?os=mac|win`), so one browser can show either platform. */
+let osOverride: ShortcutOs | null = null;
+
+/**
+ * Makes `isMac` (and so every shortcut label and key match) behave as on `os`; `null` goes back to
+ * the real platform. Only `main.tsx` calls it, and only when mock mode is allowed (never in a
+ * release build), plus tests.
+ */
+export function setShortcutOs(os: ShortcutOs | null): void {
+  osOverride = os;
+}
+
+/** The `os` query parameter of a dev/mock URL (`?os=mac` or `?os=win`), or `null`. */
+export function shortcutOsFromQuery(search: string): ShortcutOs | null {
+  const v = new URLSearchParams(search).get("os")?.toLowerCase();
+  return v === "mac" || v === "win" ? v : null;
+}
+
 /**
  * True on macOS (and iOS). `navigator.platform` is deprecated and may be frozen or empty, so the
  * newer `userAgentData.platform` and the user agent string back it up; WKWebView reports
- * "MacIntel" in `platform` and "Macintosh" in its user agent.
+ * "MacIntel" in `platform` and "Macintosh" in its user agent. A dev/mock `?os=` override
+ * (`setShortcutOs`) wins.
  */
 export function isMac(
   nav: Pick<Navigator, "platform" | "userAgent"> | undefined = globalNavigator(),
 ): boolean {
+  if (osOverride) return osOverride === "mac";
   if (!nav) return false;
   const uaData = (nav as { userAgentData?: { platform?: string } }).userAgentData;
   return /mac|iphone|ipad/i.test(uaData?.platform || nav.platform || nav.userAgent || "");

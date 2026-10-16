@@ -691,6 +691,7 @@ impl UpdateEditor {
             shadow: p.shadow.or(p.obstructed.then_some(0)),
             // A shadowed child keeps local rows below it (see `DirState::fresh`).
             fresh: p.fresh && p.shadow.is_none() && !p.obstructed,
+            was_incomplete: p.was_incomplete,
         })
     }
 
@@ -749,6 +750,8 @@ pub(super) struct ParentInfo {
     shadow: Option<u32>,
     /// See [`DirState::fresh`].
     fresh: bool,
+    /// See [`DirState::was_incomplete`].
+    was_incomplete: bool,
 }
 
 impl ParentInfo {
@@ -763,6 +766,7 @@ impl ParentInfo {
             not_present_on_drop: false,
             shadow: None,
             fresh: false,
+            was_incomplete: false,
         }
     }
 
@@ -1286,6 +1290,7 @@ impl UpdateEditor {
         };
         let mut tree_conflict = None;
         let mut adopt_existing = false;
+        let mut maybe_interrupted_install = false;
         let mut shadow = if skipped { None } else { p.shadow };
         if !skipped && add && !blind && shadow.is_none() {
             shadow = self.take_replacement(&wc, &new_repos, NodeKind::File)?;
@@ -1325,10 +1330,18 @@ impl UpdateEditor {
                             reason: self.local_add_reason(&wc, c)?,
                             action: TreeAction::Add,
                         });
-                    } else if self.disk_kind(&wc)?.is_some() {
+                    } else if let Some(kind) = self.disk_kind(&wc)? {
                         if self.s.allow_unversioned_obstructions {
                             adopt_existing = true;
                         } else {
+                            // In a directory an interrupted update left incomplete, the file
+                            // may be one that update installed just before it stopped: svn
+                            // 1.15 renames the working file into place inside the transaction
+                            // that adds its BASE row, so a kill between the two leaves the file
+                            // without its row. Adopted at close when its text is the incoming
+                            // one (see `finish_file`).
+                            maybe_interrupted_install = p.was_incomplete
+                                && matches!(kind, NodeKind::File | NodeKind::Symlink);
                             // The server's file becomes BASE, the local one stays on disk as
                             // an unversioned obstruction (recorded at close).
                             tree_conflict = Some(PendingTreeConflict {
@@ -1365,6 +1378,7 @@ impl UpdateEditor {
                 new_repos,
                 base,
                 adopt_existing,
+                maybe_interrupted_install,
                 prop_changes: Vec::new(),
                 entry: EntryProps::default(),
                 text: Arc::new(Mutex::new(None)),
