@@ -227,3 +227,44 @@ pub enum AccountMethod {
     Basic,
     Negotiate,
 }
+
+/// The check marks of View › Show unversioned files / Show ignored files / Group by changelist /
+/// Show as tree in the native menu. The UI owns these choices (remembered per user) and sends
+/// them with `menu_set_view` whenever one changes; the defaults are the UI's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuViewState {
+    pub show_unversioned: bool,
+    pub show_ignored: bool,
+    pub group_by_changelist: bool,
+    pub tree: bool,
+}
+
+impl Default for MenuViewState {
+    fn default() -> Self {
+        Self {
+            show_unversioned: true,
+            show_ignored: false,
+            group_by_changelist: true,
+            tree: false,
+        }
+    }
+}
+
+/// `compare_summarize`: the working copy's location (or the working copy itself) against
+/// another folder of the same repository, like `svn diff --summarize`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareRequest {
+    pub wc_id: WcId,
+    /// The working copy's own URL at this revision (`None`: HEAD). Ignored with
+    /// `include_local`.
+    pub left_rev: Option<Rev>,
+    /// Compare the working copy itself, local changes included (`svn diff --old=WC`), instead
+    /// of its URL.
+    pub include_local: bool,
+    /// The other folder; must be in the working copy's repository.
+    pub right_url: String,
+    /// `None`: HEAD.
+    pub right_rev: Option<Rev>,
+}

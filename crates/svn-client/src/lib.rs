@@ -17,6 +17,7 @@ pub mod netwait;
 pub mod ops;
 pub mod sparse;
 pub mod status;
+pub mod summarize;
 pub mod update;
 pub mod wc;
 
@@ -31,3 +32,6 @@ pub use netwait::{NetworkWait, WaitState};
 pub use ops::{switch, update};
 pub use sparse::{set_depth, set_depth_parents};
 pub use status::{StatusOptions, status, status_remote};
+pub use summarize::{
+    Summary, SummaryEntry, SummaryKind, SummaryOptions, summarize_repos, summarize_wc,
+};

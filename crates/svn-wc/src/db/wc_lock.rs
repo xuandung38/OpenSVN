@@ -372,6 +372,29 @@ impl WcDb {
         Ok(())
     }
 
+    /// The error to report for `err`, the failure of an operation that holds the lock on `dir`.
+    /// When another client broke that lock in the meantime (see the module documentation), the
+    /// operation failed because of it: `svn cleanup` empties `.svn/tmp`, so a temp file or a
+    /// pristine install fails on a vanished path before the next write transaction sees the
+    /// lost lock. That is reported like the lock check of a transaction does ("cleaned up by
+    /// another client", [`ErrorCode::WcBusy`]), and the lock is forgotten. Any other failure,
+    /// and a cancellation, passes unchanged.
+    pub fn wc_lock_explain_failure(&self, dir: &RelPath, err: SvnError) -> SvnError {
+        if matches!(err.code, ErrorCode::WcBusy | ErrorCode::Cancelled) {
+            return err;
+        }
+        if self.held_markers().lost.contains(dir) {
+            return lock_lost();
+        }
+        if !self.owned().contains_key(dir) {
+            return err;
+        }
+        match self.with_read(|c| self.wc_lock_verify_in(c)) {
+            Err(lost) if lost.code == ErrorCode::WcBusy => lost,
+            _ => err,
+        }
+    }
+
     /// Stops claiming the lock on `dir`, which another client broke: no row is touched (the
     /// row there now, if any, is not ours), our marker and ownership record go.
     fn lose_lock(&self, dir: &RelPath) {

@@ -22,13 +22,15 @@ pub struct CleanupReport {
 /// Cleans the working copy: recovers stale locks of dead application processes, takes the
 /// write lock (failing with `WcBusy` when a foreign process holds it), completes the pending
 /// work queue, deletes unreferenced pristine texts and removes the engine's own stale temp files
-/// from `.svn/tmp` ([`WcDb::remove_stale_tmp_files`]).
+/// from `.svn/tmp` ([`WcDb::remove_stale_tmp_files`]). Like svn's, it also empties the RA
+/// layer's cache (`NODES.dav_cache`), which the next update fills again.
 pub fn cleanup(db: &WcDb, cancel: &CancelToken) -> Result<CleanupReport> {
     let locks = db.wc_cleanup_locks()?;
     let root = RelPath::root();
     db.wc_lock_obtain(&root, -1, ObtainMode::Cleanup)?;
     let result = (|| {
         let work_items = run_work_queue(db, cancel)?;
+        db.with_txn(|t| t.clear_dav_cache(&root))?;
         let pristines_removed = db.pristine_store().remove_unreferenced()?;
         let tmp_files_removed = db.remove_stale_tmp_files()?;
         Ok(CleanupReport {

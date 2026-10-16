@@ -629,7 +629,12 @@ impl<'a> WorkQueueRunner<'a> {
         // Never next to the destination: a crash between create and rename would leave a
         // `wq-*` file in the user's folder (#120). `.svn/tmp` is on the same filesystem.
         let tmp_dir = self.tmp_dir()?;
-        let src_perms = fs::metadata(&src_abs).ok().map(|m| m.permissions());
+        // The source's permissions, but never read-only: the pristine store keeps its texts
+        // read-only, and the copies svn makes of them (conflict markers, a resolved text) are
+        // writable.
+        let src_perms = fs::metadata(&src_abs)
+            .ok()
+            .map(|m| writable(m.permissions()));
         let mut reader = Source::File(reader);
         write_atomically(&dst_abs, &tmp_dir, &mut reader, translator, true, |tmp| {
             if let Some(p) = &src_perms {
@@ -639,6 +644,21 @@ impl<'a> WorkQueueRunner<'a> {
             Ok(())
         })
     }
+}
+
+/// `perms` with the owner's write permission (the read-only flag off elsewhere).
+fn writable(mut perms: fs::Permissions) -> fs::Permissions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(perms.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
+    {
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+    }
+    perms
 }
 
 /// Writes the working form of the normal-form text `reader` into a new synced file in

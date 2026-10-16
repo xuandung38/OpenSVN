@@ -27,6 +27,7 @@ pub fn defaults(locale: Option<&str>) -> Settings {
         appearance_theme: Theme::System,
         appearance_font_size: 13,
         appearance_density: Density::Comfortable,
+        appearance_hardware_acceleration: true,
         diff_mode: DiffMode::Split,
         diff_ignore_whitespace: false,
         diff_tab_width: 4,

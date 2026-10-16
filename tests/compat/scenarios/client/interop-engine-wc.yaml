@@ -28,6 +28,8 @@ steps:
   - { on: svn14, wc: e, svn: [cleanup] }
   - { on: svn15, wc: e, svn: [cleanup] }
   - { on: svn15, wc: o, svn: [update] }
+  # The same cleanup as e's (it empties the RA layer's cache, dav_cache).
+  - { on: svn15, wc: o, svn: [cleanup] }
   - { on: svn15, wc: e-taken, sh: "cp -a ../e/. ." }
   - { on: svn15, wc: o-taken, sh: "cp -a ../o/. ." }
   # svn 1.14 commits the engine's changes, svn 1.15 updates, and both clean up.
@@ -41,9 +43,9 @@ steps:
   - { on: engine, wc: e, svn: [update] }
   - { on: engine, wc: e, svn: [status] }
 compare:
-  - { left: e-edited, right: o-edited, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e-edited, right: o-edited, checks: [tree, status, info, wcdb] }
   - { left: e-edited, right: o-edited, checks: [status, info], reader: svn14 }
-  - { left: e-taken, right: o-taken, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e-taken, right: o-taken, checks: [tree, status, info, wcdb] }
   # Not wcdb: svn itself records a committed node differently from a checked-out one (NULL
   # instead of empty properties, cached dav props), so a committed and a fresh copy differ.
   - { left: e, right: f, checks: [tree, status, info] }

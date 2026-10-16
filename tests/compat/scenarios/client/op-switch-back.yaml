@@ -9,5 +9,5 @@ steps:
   - { on: svn14, wc: e, svn: [switch, "{url}/trunk", "."] }
   - { on: svn15, wc: o, svn: [switch, "{url}/trunk", "."] }
 compare:
-  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
-  - { left: s, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e, right: o, checks: [tree, status, info, wcdb] }
+  - { left: s, right: o, checks: [tree, status, info, wcdb] }

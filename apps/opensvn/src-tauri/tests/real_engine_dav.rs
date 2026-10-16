@@ -58,7 +58,7 @@ use opensvn_ipc::{
 };
 use opensvn_lib::engine::conformance::{self, Harness, PlantedOwner};
 use opensvn_lib::engine::real::{ClientRecovery, HttpConnector, RealEngine, RealEngineConfig};
-use opensvn_lib::engine::{CheckoutPlan, EngineFacade, OpContext, StatusQuery, WcRef};
+use opensvn_lib::engine::{CheckoutPlan, CompareLeft, EngineFacade, OpContext, StatusQuery, WcRef};
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject as _;
 use svn_ra::transport::{
@@ -406,6 +406,12 @@ fn writes_hit_by_the_proxy(scratch: &Scratch, mark: usize) -> Vec<String> {
         })
         .map(|l| (*l).to_owned())
         .collect()
+}
+
+/// The proxy cuts answers: the svn command line client, which the comparisons with svn run
+/// through the same URL, does not resume a cut answer (E120106), so they cannot run.
+fn proxy_cuts_answers() -> bool {
+    std::env::var("OPENSVN_COMPAT_FAULTS").is_ok_and(|f| f.contains("--truncate"))
 }
 
 fn proxy_log() -> String {
@@ -2528,6 +2534,291 @@ fn svn_cli(oracle: &opensvn_svn_oracle::Oracle, cwd: &Path, args: &[&str]) {
     run(c, None);
 }
 
+/// [`svn_cli`] that returns what svn printed.
+fn svn_cli_out(oracle: &opensvn_svn_oracle::Oracle, cwd: &Path, args: &[&str]) -> String {
+    let mut c = oracle.svn();
+    c.current_dir(cwd)
+        .args([
+            "--username",
+            "tester",
+            "--password",
+            "tester-pass",
+            "--no-auth-cache",
+            "--config-option",
+        ])
+        .arg(format!(
+            "servers:global:ssl-authority-files={}",
+            ca_path().display()
+        ))
+        .args(args);
+    let out = c.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{c:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// `(path, item, props, kind)` rows of `svn diff --summarize --xml`, relative to `base` (a URL,
+/// or `.` for a working copy), sorted; the root is left out when `skip_root`.
+fn summary_rows(xml: &str, base: &str, skip_root: bool) -> Vec<(String, String, String, String)> {
+    let attr = |tag: &str, name: &str| {
+        let key = format!("{name}=\"");
+        let start = tag.find(&key).unwrap() + key.len();
+        tag[start..start + tag[start..].find('"').unwrap()].to_owned()
+    };
+    let mut rows: Vec<_> = xml
+        .split("<path")
+        .skip(1)
+        .filter(|c| c.starts_with(char::is_whitespace))
+        .map(|chunk| {
+            let close = chunk.find('>').unwrap();
+            let (tag, text) = (
+                &chunk[..close],
+                &chunk[close + 1..chunk.find("</path>").unwrap()],
+            );
+            let path = if text == base || text == "." {
+                String::new()
+            } else {
+                text.strip_prefix(&format!("{base}/"))
+                    .unwrap_or(text)
+                    .to_owned()
+            };
+            (
+                path,
+                attr(tag, "item"),
+                attr(tag, "props"),
+                attr(tag, "kind"),
+            )
+        })
+        .filter(|r| !(skip_root && r.0.is_empty()))
+        .collect();
+    rows.sort();
+    rows
+}
+
+fn engine_rows(
+    s: &opensvn_ipc::CompareSummary,
+    skip_root: bool,
+) -> Vec<(String, String, String, String)> {
+    use opensvn_ipc::{CompareChange as C, EntryKind};
+    let mut rows: Vec<_> = s
+        .entries
+        .iter()
+        .map(|e| {
+            (
+                e.path.clone(),
+                match e.change {
+                    C::Added => "added",
+                    C::Deleted => "deleted",
+                    C::Modified => "modified",
+                    C::Normal => "none",
+                }
+                .to_owned(),
+                if e.props_changed { "modified" } else { "none" }.to_owned(),
+                if e.kind == EntryKind::Dir {
+                    "dir"
+                } else {
+                    "file"
+                }
+                .to_owned(),
+            )
+        })
+        .filter(|r| !(skip_root && r.0.is_empty()))
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// Compare with branch (#18 follow-up): the summary of two folders at chosen revisions over
+/// DAV, and of a working copy with local changes against a folder, is the one svn 1.15 prints
+/// for `svn diff --summarize` against the same server (text, file and folder properties, a
+/// deleted folder with what it held, an added folder, a move, a replaced file, nothing at all).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn compare_summary_matches_svn() {
+    let Some(oracle) =
+        opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15).unwrap()
+    else {
+        return;
+    };
+    if negotiate_mode() {
+        eprintln!("skipping: svn is given Basic credentials");
+        return;
+    }
+    // svn itself builds the history and answers through the same URL: a proxy that cuts
+    // answers fails svn (E120106), not the engine. The engine's retry of a cut comparison is
+    // covered by `summarize_reconnect` (svn-client).
+    if behind_a_faulty_proxy() {
+        eprintln!("skipping: svn cannot work through the faulty proxy");
+        return;
+    }
+    for (version, host) in servers() {
+        eprintln!("compare_summary_matches_svn: server {version}");
+        let h = harness(&host, "compare-svn");
+        let url = h.repo_url();
+        let work = h.work_dir();
+        std::fs::create_dir_all(&work).unwrap();
+        // r2: more content on trunk; r3: the branch; r4: edits on trunk; r5: one on the branch.
+        svn_cli(
+            &oracle,
+            &work,
+            &["checkout", "-q", &format!("{url}/trunk"), "seed"],
+        );
+        let seed = work.join("seed");
+        for (p, text) in [
+            ("d/a", "a\n"),
+            ("d/sub/b", "b\n"),
+            ("e/c", "c\n"),
+            ("e/deep/f", "f\n"),
+            ("x", "x\n"),
+            ("y", "y\n"),
+            ("z", "z\n"),
+        ] {
+            h.write_file(&seed, p, text).unwrap();
+        }
+        svn_cli(&oracle, &seed, &["add", "-q", "d", "e", "x", "y", "z"]);
+        svn_cli(&oracle, &seed, &["commit", "-q", "-m", "r2"]);
+        svn_cli(
+            &oracle,
+            &work,
+            &[
+                "copy",
+                "-q",
+                "-m",
+                "r3",
+                &format!("{url}/trunk"),
+                &format!("{url}/branches/cmp"),
+            ],
+        );
+        svn_cli(&oracle, &seed, &["update", "-q"]);
+        h.write_file(&seed, "x", "x\nmore\n").unwrap();
+        svn_cli(&oracle, &seed, &["propset", "-q", "p", "v", "y"]);
+        svn_cli(&oracle, &seed, &["propset", "-q", "dp", "v", "d"]);
+        svn_cli(&oracle, &seed, &["rm", "-q", "e", "z"]);
+        h.write_file(&seed, "z", "zz\n").unwrap();
+        h.write_file(&seed, "n/m/g", "g\n").unwrap();
+        svn_cli(&oracle, &seed, &["add", "-q", "z", "n"]);
+        svn_cli(&oracle, &seed, &["mv", "-q", "d/a", "d/a2"]);
+        svn_cli(&oracle, &seed, &["commit", "-q", "-m", "r4"]);
+        svn_cli(
+            &oracle,
+            &work,
+            &["checkout", "-q", &format!("{url}/branches/cmp"), "br"],
+        );
+        h.write_file(&work.join("br"), "x", "x\nbranch\n").unwrap();
+        svn_cli(&oracle, &work.join("br"), &["commit", "-q", "-m", "r5"]);
+
+        let wc = checkout_trunk(&h, "ours").await;
+        // The last column: whether anything differs.
+        for (left, left_rev, right, right_rev, differs) in [
+            ("branches/cmp", 5, "trunk", None, true),
+            ("trunk", 5, "branches/cmp", None, true),
+            ("trunk", 2, "trunk", Some(4), true),
+            ("trunk", 4, "trunk", Some(3), true),
+            ("trunk", 2, "branches/cmp", Some(3), false),
+        ] {
+            let left_url = format!("{url}/{left}");
+            let right_arg = format!(
+                "{url}/{right}@{}",
+                right_rev.map_or("HEAD".to_owned(), |r: u64| r.to_string())
+            );
+            let theirs = summary_rows(
+                &svn_cli_out(
+                    &oracle,
+                    &work,
+                    &[
+                        "diff",
+                        "--summarize",
+                        "--xml",
+                        &format!("{left_url}@{left_rev}"),
+                        &right_arg,
+                    ],
+                ),
+                &left_url,
+                false,
+            );
+            let ours = h
+                .engine
+                .compare_summarize(
+                    CompareLeft::Url {
+                        url: &left_url,
+                        rev: Some(opensvn_ipc::Rev(left_rev)),
+                    },
+                    &format!("{url}/{right}"),
+                    right_rev.map(opensvn_ipc::Rev),
+                    &ctx(),
+                )
+                .await
+                .expect("compare");
+            assert_eq!(
+                engine_rows(&ours, false),
+                theirs,
+                "{version}: {left}@{left_rev} -> {right}@{right_rev:?}"
+            );
+            assert_eq!(ours.left_rev, Some(opensvn_ipc::Rev(left_rev)));
+            assert_eq!(
+                !theirs.is_empty(),
+                differs,
+                "{version}: {left}@{left_rev} -> {right}"
+            );
+        }
+
+        // A working copy with local changes, against the branch (svn: `--old=WC --new=URL`;
+        // the root left out, see `summarize_wc`).
+        svn_cli(
+            &oracle,
+            &work,
+            &["checkout", "-q", &format!("{url}/trunk"), "theirs"],
+        );
+        let theirs_wc = work.join("theirs");
+        for root in [&theirs_wc, &wc.root] {
+            h.write_file(root, "y", "y\nlocal\n").unwrap();
+            h.write_file(root, "q", "q\n").unwrap();
+        }
+        svn_cli(&oracle, &theirs_wc, &["add", "-q", "q"]);
+        svn_cli(&oracle, &theirs_wc, &["rm", "-q", "d/sub/b"]);
+        h.engine
+            .add_paths(&wc, &["q".to_owned()], &ctx())
+            .await
+            .expect("add");
+        h.engine
+            .delete_paths(&wc, &["d/sub/b".to_owned()], false, &ctx())
+            .await
+            .expect("delete");
+        let theirs = summary_rows(
+            &svn_cli_out(
+                &oracle,
+                &theirs_wc,
+                &[
+                    "diff",
+                    "--summarize",
+                    "--xml",
+                    "--old=.",
+                    &format!("--new={url}/branches/cmp"),
+                ],
+            ),
+            ".",
+            true,
+        );
+        let ours = h
+            .engine
+            .compare_summarize(
+                CompareLeft::Wc(&wc),
+                &format!("{url}/branches/cmp"),
+                None,
+                &ctx(),
+            )
+            .await
+            .expect("compare the working copy");
+        assert!(!theirs.is_empty());
+        assert_eq!(engine_rows(&ours, true), theirs, "{version}: working copy");
+        assert_eq!(ours.left_rev, None);
+    }
+    assert_no_prompt();
+}
+
 /// A checkout with a depth per folder through the real engine leaves the same wc.db as svn
 /// 1.15 after `svn checkout --depth` and `svn update --parents --set-depth` per folder against
 /// the same server; "Choose folders" afterwards too.
@@ -2541,6 +2832,10 @@ async fn sparse_checkout_matches_svn() {
     };
     if negotiate_mode() {
         eprintln!("skipping: svn is given Basic credentials");
+        return;
+    }
+    if proxy_cuts_answers() {
+        eprintln!("SKIPPED: svn cannot resume an answer the proxy cuts (E120106)");
         return;
     }
     let entry = |path: &str, depth: SparseDepth| SparseEntry {
@@ -2736,6 +3031,8 @@ async fn switch_setup(
         .collect();
     dirs.sort();
     dirs.dedup();
+    // The branch itself exists (the copy above); files may go straight into it.
+    dirs.retain(|d| d != "branches/sw");
     let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
     h.scratch.load(&add_dump(&dirs, &files));
     let healthy = FlakyProxy::start(base, &[], h.scratch_dir().join("proxy-0.log"))?;
@@ -3222,6 +3519,686 @@ async fn switching_the_parent_of_a_switched_folder_matches_svn() {
             );
         }
         assert_eq!(rows, base_rows(&theirs), "server {version}");
+    }
+    assert_no_prompt();
+}
+
+// ---- update of a working copy with a switched subtree ----
+
+/// An update of a working copy whose `src` is switched to a branch takes `src` from the branch
+/// (the reporter sends it with `link_path`, and mod_dav_svn follows the link in the target as
+/// svn_repos does): the branch's edit arrives, trunk's does not. The same sequence on the fake
+/// session is `crates/svn-client/tests/update_switched_subtree_vs_svn.rs`; here the rows are
+/// compared with svn 1.15's own update of the same repository (over `file://`).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn update_of_a_switched_folder_takes_it_from_its_branch_like_svn() {
+    use opensvn_lib::engine::real::SessionConnector as _;
+    for (version, host) in servers() {
+        eprintln!("server {version}");
+        let h = harness(&host, "update-switched");
+        let url = h.repo_url();
+        let e = h.engine();
+        // r2: the branch.
+        opensvn_lib::write_op!(
+            &h,
+            e.copy_location(
+                &CopyLocationRequest {
+                    from_url: format!("{url}/trunk"),
+                    from_rev: None,
+                    to_url: format!("{url}/branches/b"),
+                    message: "Branch".into(),
+                    switch_wc_id: None,
+                    from_wc: None,
+                },
+                None,
+                &ctx(),
+            )
+        )
+        .expect("branch");
+        let wc = checkout_trunk(&h, "switched").await;
+        let cancel = svn_types::CancelToken::new();
+        let session = connector()
+            .connect_with(
+                &svn_types::RepoUrl::parse(&format!("{url}/trunk/src")).unwrap(),
+                &opensvn_lib::engine::real::ConnectOptions::at_url(&ctx()),
+                &cancel,
+            )
+            .await
+            .expect("session");
+        let client = svn_client::ClientCtx::new(LockOwner {
+            store: h.store.clone() as Arc<dyn LockOwnershipStore>,
+            pid: std::process::id(),
+            boot_id: THIS_BOOT.to_owned(),
+        });
+        svn_client::switch(
+            &client,
+            session.as_ref(),
+            &wc.root.join("src"),
+            &svn_types::RepoUrl::parse(&format!("{url}/branches/b/src")).unwrap(),
+            None,
+            svn_types::Depth::Unknown,
+            false,
+            &cancel,
+        )
+        .await
+        .expect("switch src");
+        // r3: an edit of `src/main.rs` on the branch; r4: another one on trunk.
+        let commit_in = |at: &'static str, text: &'static str, name: &'static str| {
+            let h = &h;
+            async move {
+                let plan = CheckoutPlan {
+                    url: format!("{}/{at}", h.repo_url()),
+                    path: h.work_dir().join(name),
+                    rev: None,
+                    depth: Depth::Infinity,
+                    sparse: None,
+                    format: WcFormat::V31,
+                    store_pristine: true,
+                    ignore_externals: false,
+                };
+                let info = h.engine.checkout(&plan, &ctx()).await.expect("checkout");
+                let other = WcRef {
+                    id: WcId(name.to_owned()),
+                    root: PathBuf::from(info.root_path),
+                };
+                h.write_file(&other.root, "src/main.rs", text).unwrap();
+                let mark = h.write_mark();
+                match h
+                    .engine
+                    .commit(
+                        &other,
+                        &CommitRequest {
+                            wc_id: other.id.clone(),
+                            paths: vec!["src/main.rs".into()],
+                            message: "Edit".into(),
+                            keep_locks: false,
+                            auto_add_remove: false,
+                        },
+                        &ctx(),
+                    )
+                    .await
+                {
+                    Ok(rev) => Some(rev),
+                    Err(e) if conformance::broken_write_ends_scenario(h, mark, &e) => None,
+                    Err(e) => panic!("commit: {e:?}"),
+                }
+            }
+        };
+        if commit_in("branches/b", "fn main() { branch() }\n", "branch-edit")
+            .await
+            .is_none()
+        {
+            continue;
+        }
+        let Some(head) = commit_in("trunk", "fn main() { trunk() }\n", "trunk-edit").await else {
+            continue;
+        };
+        let reached = e
+            .update(
+                &wc,
+                &UpdateRequest {
+                    wc_id: wc.id.clone(),
+                    paths: None,
+                    rev: None,
+                    depth: None,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("update");
+        assert_eq!(reached, head);
+        assert_eq!(
+            std::fs::read_to_string(wc.root.join("src/main.rs")).unwrap(),
+            "fn main() { branch() }\n"
+        );
+        let rows = nodes_rows(&wc.root)
+            .into_iter()
+            .map(|r| r.rsplit_once('|').unwrap().0.to_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            rows.iter()
+                .any(|r| r.starts_with("src/main.rs|0|normal|file|")
+                    && r.contains("branches/b/src/main.rs")),
+            "{rows:#?}"
+        );
+
+        let (Host::Local { repos, .. }, Some(oracle)) = (
+            &host,
+            opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15)
+                .ok()
+                .flatten(),
+        ) else {
+            eprintln!("no local repository or svn 1.15: the svn comparison is skipped");
+            continue;
+        };
+        let file_url = opensvn_svn_oracle::Oracle::file_url(&repos.join(&h.scratch.name));
+        let theirs = h.tmp.path().join("svn-wc");
+        let t = theirs.to_str().unwrap();
+        let src = format!("{t}/src");
+        for args in [
+            vec!["checkout", "-q", &format!("{file_url}/trunk@2")[..], t],
+            vec![
+                "switch",
+                "-q",
+                &format!("{file_url}/branches/b/src@2")[..],
+                &src[..],
+            ],
+            vec!["update", "-q", t],
+        ] {
+            let out = oracle.svn().args(&args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "svn {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        // Authors differ (svn over file:// commits as the local user): compared without them.
+        let theirs_rows = nodes_rows(&theirs)
+            .into_iter()
+            .map(|r| r.rsplit_once('|').unwrap().0.to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, theirs_rows, "server {version}");
+    }
+    assert_no_prompt();
+}
+
+// ---- a switch with a narrow depth, cut and resumed ----
+
+/// A switch with `--depth files` and `--depth immediates` through a proxy that cuts every
+/// `REPORT` answer after 64 KiB: the drive breaks inside the files of the target, is resumed at
+/// the switched target (the folders it has not finished reported with `link_path`), and ends
+/// with the BASE rows svn 1.15's own switch at that depth leaves on the same repository (over
+/// `file://`): nodes within the depth at the branch, the folders' content outside the depth
+/// where it was.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
+async fn switch_with_a_narrow_depth_cut_mid_answer_matches_svn() {
+    use opensvn_lib::engine::real::SessionConnector as _;
+    const FILES: usize = 24;
+    const SIZE: usize = 8192;
+    if behind_a_faulty_proxy() {
+        eprintln!("SKIPPED: starts its own flaky proxy, so it runs against the server directly");
+        return;
+    }
+    let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
+        eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
+        return;
+    };
+    let Host::Local { base, repos } = &host else {
+        unreachable!()
+    };
+    let Some(oracle) =
+        opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15).unwrap()
+    else {
+        return;
+    };
+    for (depth, word) in [
+        (svn_types::Depth::Files, "files"),
+        (svn_types::Depth::Immediates, "immediates"),
+    ] {
+        let mut files = Vec::new();
+        for f in 0..FILES {
+            files.push((format!("branches/sw/top{f:02}.bin"), noise(SIZE)));
+        }
+        files.push(("branches/sw/deep/deep.bin".to_owned(), noise(SIZE)));
+        let Some((h, wc, port)) =
+            switch_setup(&host, base, &format!("switchdepth-{word}"), files).await
+        else {
+            eprintln!("SKIPPED: no server certificate next to the CA for the flaky proxy");
+            return;
+        };
+        let cutting = proxy_on(
+            base,
+            port,
+            &[
+                "--truncate-every",
+                "1",
+                "--truncate-at",
+                "65536",
+                "--truncate-method",
+                "REPORT",
+            ],
+            h.scratch_dir().join("proxy-1.log"),
+        );
+        let at = |rel: &str| {
+            svn_types::RepoUrl::parse(&format!("{}/{}/{rel}", cutting.url(base), h.scratch.name))
+                .unwrap()
+        };
+        let cancel = svn_types::CancelToken::new();
+        let session = connector()
+            .connect_with(
+                &at("trunk"),
+                &opensvn_lib::engine::real::ConnectOptions::at_url(&ctx()),
+                &cancel,
+            )
+            .await
+            .expect("session");
+        let client = svn_client::ClientCtx::new(LockOwner {
+            store: h.store.clone() as Arc<dyn LockOwnershipStore>,
+            pid: std::process::id(),
+            boot_id: THIS_BOOT.to_owned(),
+        });
+        let sum = svn_client::switch(
+            &client,
+            session.as_ref(),
+            &wc.root,
+            &at("branches/sw"),
+            None,
+            depth,
+            false,
+            &cancel,
+        )
+        .await
+        .unwrap_or_else(|err| {
+            panic!(
+                "--depth {word}: {err:?}\n{}",
+                std::fs::read_to_string(&cutting.log).unwrap_or_default()
+            )
+        });
+        assert!(
+            cutting.cuts() >= 2,
+            "--depth {word}: {}",
+            std::fs::read_to_string(&cutting.log).unwrap_or_default()
+        );
+        let reached = sum.revision.expect("revision").0;
+        let rows = base_rows(&wc.root);
+
+        let file_url = opensvn_svn_oracle::Oracle::file_url(&repos.join(&h.scratch.name));
+        let theirs = h.tmp.path().join("svn-wc");
+        let t = theirs.to_str().unwrap();
+        for args in [
+            vec![
+                "checkout",
+                "-q",
+                &format!("{file_url}/trunk@{reached}")[..],
+                t,
+            ],
+            vec![
+                "switch",
+                "-q",
+                "--depth",
+                word,
+                &format!("{file_url}/branches/sw@{reached}")[..],
+                t,
+            ],
+        ] {
+            let out = oracle.svn().args(&args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "svn {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        assert_eq!(rows, base_rows(&theirs), "--depth {word}");
+        assert_eq!(
+            std::fs::read_to_string(wc.root.join("README.md")).unwrap(),
+            "local edit\n"
+        );
+    }
+    assert_no_prompt();
+}
+
+// ---- the RA layer's cache (`NODES.dav_cache`) ----
+
+/// BASE rows with the RA layer's cache, the repository name masked (each client works on its
+/// own copy of the same repository).
+fn dav_rows(wc: &Path, repo: &str) -> Vec<String> {
+    let db = WcDb::open(wc).unwrap();
+    db.with_read(|c| {
+        let mut s = c
+            .prepare(
+                "SELECT local_relpath, presence, revision, repos_path, checksum, dav_cache \
+                 FROM nodes WHERE op_depth = 0 ORDER BY local_relpath",
+            )
+            .unwrap();
+        let rows = s
+            .query_map([], |r| {
+                let dav: Option<Vec<u8>> = r.get(5)?;
+                Ok(format!(
+                    "{}|{}|{:?}|{:?}|{:?}|{}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    dav.map(|d| {
+                        let props = svn_wc::skel::parse_proplist(
+                            &svn_wc::skel::Skel::parse(&d).expect("dav_cache skel"),
+                        )
+                        .expect("dav_cache properties");
+                        props
+                            .iter()
+                            .map(|(k, v)| {
+                                format!(
+                                    "{}={}",
+                                    String::from_utf8_lossy(k),
+                                    String::from_utf8_lossy(v).replace(repo, "{repo}")
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(";")
+                    })
+                    .unwrap_or_else(|| "NULL".into()),
+                ))
+            })
+            .unwrap();
+        Ok(rows.map(|r| r.unwrap()).collect::<Vec<_>>())
+    })
+    .unwrap()
+}
+
+/// The engine fills `NODES.dav_cache` like svn 1.15 over mod_dav_svn: every file it receives
+/// caches its `D:checked-in` href as `svn:wc:ra_dav:version-url` (names with spaces, `%`, `#`
+/// and Vietnamese letters percent-encoded as the server sends them), a commit drops the cache
+/// of what it committed, an update leaves untouched files alone, a switch empties the target's
+/// cache before its drive, and cleanup empties it. The engine works on one copy of the
+/// repository, svn on another, through the same steps; the rows must be equal at every step.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn dav_cache_matches_svn() {
+    let Some(oracle) =
+        opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15).unwrap()
+    else {
+        return;
+    };
+    if negotiate_mode() {
+        eprintln!("skipping: svn is given Basic credentials");
+        return;
+    }
+    if proxy_cuts_answers() {
+        eprintln!("SKIPPED: svn cannot resume an answer the proxy cuts (E120106)");
+        return;
+    }
+    for (version, host) in servers() {
+        eprintln!("server {version}");
+        let h = harness(&host, "dav-cache");
+        let theirs_repo = Scratch::new(&host, "dav-cache-svn");
+        let e = h.engine();
+        let ours_url = h.repo_url();
+        let theirs_url = theirs_repo.url();
+        let (ours_name, theirs_name) = (h.scratch.name.clone(), theirs_repo.name.clone());
+        let tmp = h.tmp.path().to_path_buf();
+        let svn = |cwd: &Path, args: &[&str]| svn_cli(&oracle, cwd, args);
+        let ours = h.work_dir().join("ours");
+        let theirs = tmp.join("theirs");
+        let compare = |what: &str| {
+            assert_eq!(
+                dav_rows(&ours, &ours_name),
+                dav_rows(&theirs, &theirs_name),
+                "server {version}: {what}"
+            );
+        };
+        let wc = WcRef {
+            id: WcId("ours".into()),
+            root: ours.clone(),
+        };
+        let update = || async {
+            e.update(
+                &wc,
+                &UpdateRequest {
+                    wc_id: wc.id.clone(),
+                    paths: None,
+                    rev: None,
+                    depth: None,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("update")
+        };
+        let commit = |paths: Vec<String>| async {
+            let mark = h.write_mark();
+            match e
+                .commit(
+                    &wc,
+                    &CommitRequest {
+                        wc_id: wc.id.clone(),
+                        paths,
+                        message: "Edit".into(),
+                        keep_locks: false,
+                        auto_add_remove: true,
+                    },
+                    &ctx(),
+                )
+                .await
+            {
+                Ok(_) => true,
+                Err(err) if conformance::broken_write_ends_scenario(&h, mark, &err) => false,
+                Err(err) => panic!("commit: {err:?}"),
+            }
+        };
+        let both = |rel: &str, text: &str| {
+            for root in [&ours, &theirs] {
+                let p = root.join(rel);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, text).unwrap();
+            }
+        };
+
+        // Checkout of trunk, then files with names that need encoding, committed by each.
+        e.checkout(
+            &CheckoutPlan {
+                url: format!("{ours_url}/trunk"),
+                path: ours.clone(),
+                rev: None,
+                depth: Depth::Infinity,
+                sparse: None,
+                format: WcFormat::V31,
+                store_pristine: true,
+                ignore_externals: false,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("checkout");
+        svn(
+            &tmp,
+            &[
+                "checkout",
+                "-q",
+                &format!("{theirs_url}/trunk"),
+                theirs.to_str().unwrap(),
+            ],
+        );
+        compare("checkout");
+        let odd = ["Tài liệu/Đọc tôi %#.txt", "a b/x y.txt"];
+        for f in odd {
+            both(f, "odd\n");
+        }
+        svn(&theirs, &["add", "-q", "Tài liệu", "a b"]);
+        if !commit(vec!["Tài liệu".into(), "a b".into()]).await {
+            continue;
+        }
+        svn(&theirs, &["commit", "-q", "-m", "Edit"]);
+        compare("commit of new files");
+        update().await;
+        svn(&theirs, &["update", "-q"]);
+        compare("update after the commit");
+
+        // An edit committed from a second working copy of each: the update brings it.
+        let other = |name: &str| tmp.join(name);
+        e.checkout(
+            &CheckoutPlan {
+                url: format!("{ours_url}/trunk"),
+                path: other("ours-2"),
+                rev: None,
+                depth: Depth::Infinity,
+                sparse: None,
+                format: WcFormat::V31,
+                store_pristine: true,
+                ignore_externals: false,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("second checkout");
+        let second = WcRef {
+            id: WcId("ours-2".into()),
+            root: other("ours-2"),
+        };
+        svn(
+            &tmp,
+            &[
+                "checkout",
+                "-q",
+                &format!("{theirs_url}/trunk"),
+                other("theirs-2").to_str().unwrap(),
+            ],
+        );
+        for root in [other("ours-2"), other("theirs-2")] {
+            std::fs::write(root.join("Tài liệu/Đọc tôi %#.txt"), "odd\nedited\n").unwrap();
+        }
+        let mark = h.write_mark();
+        match e
+            .commit(
+                &second,
+                &CommitRequest {
+                    wc_id: second.id.clone(),
+                    paths: vec!["Tài liệu/Đọc tôi %#.txt".into()],
+                    message: "Edit".into(),
+                    keep_locks: false,
+                    auto_add_remove: false,
+                },
+                &ctx(),
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(err) if conformance::broken_write_ends_scenario(&h, mark, &err) => continue,
+            Err(err) => panic!("commit: {err:?}"),
+        }
+        svn(&other("theirs-2"), &["commit", "-q", "-m", "Edit"]);
+        update().await;
+        svn(&theirs, &["update", "-q"]);
+        compare("update with an incoming edit");
+
+        // A local edit keeps the cache; a commit of it drops it.
+        both("README.md", "hello\nlocal\n");
+        compare("local edit");
+        if !commit(vec!["README.md".into()]).await {
+            continue;
+        }
+        svn(&theirs, &["commit", "-q", "-m", "Edit"]);
+        compare("commit of an edit");
+
+        // A switch (to the same URL: nothing to send) empties the cache of the target.
+        update().await;
+        svn(&theirs, &["update", "-q"]);
+        e.switch(&wc, &format!("{ours_url}/trunk"), None, false, &ctx())
+            .await
+            .expect("switch");
+        svn(
+            &theirs,
+            &["switch", "-q", &format!("{theirs_url}/trunk"), "."],
+        );
+        compare("switch");
+        // And an update to an older revision and back fills it again.
+        e.update(
+            &wc,
+            &UpdateRequest {
+                wc_id: wc.id.clone(),
+                paths: None,
+                rev: Some(opensvn_ipc::Rev(1)),
+                depth: None,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("update -r 1");
+        svn(&theirs, &["update", "-q", "-r", "1"]);
+        compare("update -r 1");
+        update().await;
+        svn(&theirs, &["update", "-q"]);
+        compare("update to HEAD");
+
+        // svn 1.14 and 1.15 work on the engine's working copy while its cache is filled: each
+        // reads, updates and commits through a copy of it (the copies leave `ours` as it is).
+        assert!(
+            dav_rows(&ours, &ours_name)
+                .iter()
+                .any(|r| r.contains("ra_dav:version-url")),
+            "server {version}: the engine's cache is empty before the svn round trip"
+        );
+        for (name, bin) in [
+            ("svn14", Some(PathBuf::from("/usr/bin/svn"))),
+            ("svn15", None),
+        ] {
+            if bin.as_ref().is_some_and(|b| !b.exists()) {
+                continue;
+            }
+            let copy = tmp.join(format!("ours-{name}"));
+            let mut cp = Command::new("cp");
+            cp.arg("-a").arg(&ours).arg(&copy);
+            run(cp, None);
+            let cli = |args: &[&str]| {
+                let mut c = bin.as_ref().map_or_else(|| oracle.svn(), Command::new);
+                c.current_dir(&copy)
+                    .env("LC_ALL", "C.UTF-8")
+                    .args([
+                        "--username",
+                        "tester",
+                        "--password",
+                        "tester-pass",
+                        "--no-auth-cache",
+                        "--non-interactive",
+                        "--config-option",
+                    ])
+                    .arg(format!(
+                        "servers:global:ssl-authority-files={}",
+                        ca_path().display()
+                    ))
+                    .args(args);
+                run(c, None);
+            };
+            cli(&["status"]);
+            cli(&["info", "-R"]);
+            cli(&["update", "-q"]);
+            std::fs::write(
+                copy.join("Tài liệu/Đọc tôi %#.txt"),
+                format!("odd\nedited\n{name}\n"),
+            )
+            .unwrap();
+            cli(&["commit", "-q", "-m", name]);
+            cli(&["update", "-q"]);
+            cli(&["status"]);
+        }
+
+        // Cleanup empties it.
+        e.cleanup(
+            &wc,
+            &opensvn_ipc::CleanupRequest {
+                wc_id: wc.id.clone(),
+                remove_unversioned: None,
+                remove_ignored: None,
+                vacuum_pristines: None,
+                break_foreign_locks: None,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("cleanup");
+        svn(&theirs, &["cleanup"]);
+        compare("cleanup");
+        // svn 1.14 and 1.15 take the engine's working copy as it is.
+        for bin in [Some("/usr/bin/svn"), None] {
+            let mut c = match bin {
+                Some(b) if Path::new(b).exists() => Command::new(b),
+                Some(_) => continue,
+                None => oracle.svn(),
+            };
+            let out = c
+                .current_dir(&ours)
+                .env("LC_ALL", "C.UTF-8")
+                .args(["status", "--xml"])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
     assert_no_prompt();
 }

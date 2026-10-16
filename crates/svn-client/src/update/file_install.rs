@@ -105,6 +105,7 @@ impl UpdateEditor {
                 matches!(
                     t.reason,
                     TreeReason::Deleted
+                        | TreeReason::MovedAway
                         | TreeReason::Replaced
                         | TreeReason::Added
                         | TreeReason::MovedHere
@@ -345,7 +346,7 @@ impl UpdateEditor {
             action = UpdateAction::Conflicted;
         }
         if let Some(tc) = &f.tree_conflict {
-            conflicts.push(NewConflict::Tree(tc.reason.clone(), tc.action.clone()));
+            conflicts.push(self.tree_conflict(&wc, tc.reason.clone(), tc.action.clone()));
         }
 
         // 4. One transaction.
@@ -413,6 +414,15 @@ impl UpdateEditor {
         let path = wc.clone();
         let shadow = f.shadow;
         let had_base = old.is_some();
+        // The RA layer's wcprops (`svn:wc:ra_dav:version-url` over DAV) go into `dav_cache`,
+        // applied to what the node had, like svn's `close_file`; a node without any keeps none.
+        let wc_changes: Vec<svn_types::PropChange> = f
+            .prop_changes
+            .iter()
+            .filter(|c| c.name.starts_with("svn:wc:"))
+            .cloned()
+            .collect();
+        let mut node = node;
         // svn sets the ACTUAL properties of every node it does not shadow; a clean update's add
         // can find a local add's properties there (they go, its changelist stays).
         let clean_add = self.s.clean && f.added;
@@ -421,6 +431,15 @@ impl UpdateEditor {
             Box::new(move |t| {
                 if let Some(record) = &new_pristine {
                     t.record_pristine_or_restore(record, spare.as_deref())?;
+                }
+                if had_base || !wc_changes.is_empty() {
+                    let old = if had_base {
+                        t.dav_cache(&path)?.unwrap_or_default()
+                    } else {
+                        Props::new()
+                    };
+                    let dav = super::props::apply_wc_props(old, &wc_changes);
+                    node.dav_cache = (!dav.is_empty()).then(|| svn_wc::db::encode_props(&dav));
                 }
                 t.base_add(&path, &node)?;
                 if let Some(ext) = &file_external {

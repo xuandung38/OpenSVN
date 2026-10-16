@@ -43,6 +43,15 @@ fn submenu<'a>(spec: &'a [Entry], name: &str) -> &'a [Entry] {
         .unwrap()
 }
 
+/// The id and accelerator of an entry that emits `menu://<id>` (a plain or a check item).
+fn action_of(e: &Entry) -> Option<(&'static str, Option<&'static str>)> {
+    match e {
+        Entry::Item { id, accel, .. } => Some((id, *accel)),
+        Entry::Check { id, .. } => Some((id, None)),
+        _ => None,
+    }
+}
+
 fn has_item(entries: &[Entry], wanted: &str) -> bool {
     let mut all = Vec::new();
     flatten(entries, &mut all);
@@ -182,8 +191,8 @@ fn ids_are_unique_and_accelerators_do_not_collide_per_platform() {
         let mut ids = HashSet::new();
         let mut accels = HashSet::new();
         for e in all {
-            if let Entry::Item { id, accel, .. } = e {
-                assert!(ids.insert(*id), "duplicate id {id} on {os:?}");
+            if let Some((id, accel)) = action_of(e) {
+                assert!(ids.insert(id), "duplicate id {id} on {os:?}");
                 if let Some(a) = accel {
                     assert!(
                         accels.insert(accelerator(a)),
@@ -218,7 +227,7 @@ fn every_menu_event_is_a_name_tauri_accepts() {
             let mut all = Vec::new();
             flatten(&spec, &mut all);
             for e in all {
-                if let Entry::Item { id, .. } = e
+                if let Some((id, _)) = action_of(e)
                     && let Some(name) = event_for(id)
                 {
                     assert!(is_valid_event_name(&name), "{name} ({os:?})");
@@ -289,9 +298,117 @@ fn the_native_menu_builds_for_every_os_description() {
     let app = tauri::test::mock_app();
     for os in [Os::Darwin, Os::Windows, Os::Linux] {
         for layout in [true, false] {
-            build_menu(&app, os, layout).unwrap();
+            build_menu(&app, os, layout, &MenuViewState::default()).unwrap();
         }
     }
+}
+
+const VIEW_CHECKS: [&str; 4] = [
+    "view.show-unversioned",
+    "view.show-ignored",
+    "view.group-changelist",
+    "view.tree",
+];
+
+/// The four View toggles are check items (a check mark, not a toast) on macOS, Windows and Linux,
+/// in both layout variants, and nothing else is.
+#[test]
+fn view_toggles_are_check_items_on_every_os() {
+    for os in [Os::Darwin, Os::Windows, Os::Linux] {
+        for layout in [true, false] {
+            let spec = menu_spec(os, layout);
+            let view = submenu(&spec, "View");
+            let mut all = Vec::new();
+            flatten(&spec, &mut all);
+            let checks: Vec<&str> = all
+                .iter()
+                .filter_map(|e| match e {
+                    Entry::Check { id, .. } => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(checks, VIEW_CHECKS, "{os:?}");
+            for id in VIEW_CHECKS {
+                assert!(
+                    view.iter()
+                        .any(|e| matches!(e, Entry::Check { id: c, .. } if *c == id)),
+                    "{id} in View on {os:?}"
+                );
+                assert!(!has_item(&spec, id), "{id} is still a plain item on {os:?}");
+                assert_eq!(event_for(id), Some(event_name(id)), "{id}");
+            }
+        }
+    }
+}
+
+#[test]
+fn check_marks_follow_the_view_state() {
+    let view = MenuViewState {
+        show_unversioned: false,
+        show_ignored: true,
+        group_by_changelist: false,
+        tree: true,
+    };
+    assert_eq!(
+        VIEW_CHECKS.map(|id| checked(id, &view)),
+        [Some(false), Some(true), Some(false), Some(true)]
+    );
+    assert_eq!(
+        VIEW_CHECKS.map(|id| checked(id, &MenuViewState::default())),
+        [Some(true), Some(false), Some(true), Some(false)]
+    );
+    assert_eq!(checked("view.changes", &view), None);
+}
+
+/// The built menu carries the marks of the UI's state on every OS description, and
+/// `menu_set_view` updates them in place.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn the_native_check_items_carry_and_follow_the_ui_state() {
+    let app = tauri::test::mock_app();
+    let view = MenuViewState {
+        show_unversioned: false,
+        show_ignored: true,
+        group_by_changelist: true,
+        tree: true,
+    };
+    for os in [Os::Darwin, Os::Windows, Os::Linux] {
+        for layout in [true, false] {
+            let (_, checks) = build_menu(&app, os, layout, &view).unwrap();
+            let marks: Vec<(&str, bool)> = checks
+                .iter()
+                .map(|(id, c)| (*id, c.is_checked().unwrap()))
+                .collect();
+            assert_eq!(
+                marks,
+                [
+                    ("view.show-unversioned", false),
+                    ("view.show-ignored", true),
+                    ("view.group-changelist", true),
+                    ("view.tree", true),
+                ],
+                "{os:?}"
+            );
+        }
+    }
+
+    let menu = TauriMenu::new(app.handle().clone());
+    menu.install(true).unwrap();
+    assert_eq!(
+        menu.check_marks(),
+        VIEW_CHECKS.map(|id| (id, checked(id, &MenuViewState::default()).unwrap()))
+    );
+    menu.set_view(view).unwrap();
+    assert_eq!(
+        menu.check_marks(),
+        VIEW_CHECKS.map(|id| (id, checked(id, &view).unwrap()))
+    );
+    // Switching the Branch / Location variant rebuilds the menu with the same marks.
+    menu.set_layout_mode(false).unwrap();
+    assert_eq!(
+        menu.check_marks(),
+        VIEW_CHECKS.map(|id| (id, checked(id, &view).unwrap()))
+    );
 }
 
 /// Event names the UI subscribes to (`MENU_EVENTS` in `src/ipc/events.ts`).
@@ -335,11 +452,11 @@ fn every_item_of_this_menu_is_handled_by_the_ui_or_natively() {
             let mut all = Vec::new();
             flatten(&spec, &mut all);
             for e in all {
-                let Entry::Item { id, accel, .. } = e else {
+                let Some((id, accel)) = action_of(e) else {
                     continue;
                 };
                 let native = native_action(id).is_some();
-                let in_ui = ui.contains(*id);
+                let in_ui = ui.contains(id);
                 assert!(
                     native ^ in_ui,
                     "{id} (accelerator {accel:?}, {os:?}) must be handled by exactly one of the UI ({in_ui}) or Rust ({native})"

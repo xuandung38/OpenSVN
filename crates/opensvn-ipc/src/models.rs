@@ -297,6 +297,45 @@ pub struct RepoEntry {
     pub lock: Option<LockInfo>,
 }
 
+/// How a node differs in a comparison (`svn diff --summarize`), from the left side (the working
+/// copy or its URL) to the right side (the other location).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum CompareChange {
+    /// Only on the right side.
+    Added,
+    /// Only on the left side.
+    Deleted,
+    /// On both sides, with different text.
+    Modified,
+    /// On both sides, same text: only properties differ (`props_changed`).
+    Normal,
+}
+
+/// One node that differs between the two sides of a comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareEntry {
+    /// Path below the compared folders, `/`-separated; the empty path is the folder itself.
+    pub path: String,
+    pub kind: EntryKind,
+    pub change: CompareChange,
+    /// Regular properties differ.
+    pub props_changed: bool,
+}
+
+/// Result of `compare_summarize`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareSummary {
+    /// Revision the left side was read at; `None` when it is the working copy itself.
+    pub left_rev: Option<Rev>,
+    /// Revision the right side was read at.
+    pub right_rev: Rev,
+    /// Sorted by path; a node replaced by one of another kind has two entries.
+    pub entries: Vec<CompareEntry>,
+}
+
 /// One directory listing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -805,6 +844,11 @@ pub enum ResolveChoice {
     Theirs,
     Working,
     Base,
+    /// Tree conflict "local moved away, incoming edit" (svn's `mine-conflict`): the incoming
+    /// changes are applied to the move destination. `Working` keeps the destination as it is
+    /// and turns the move into a copy.
+    #[serde(rename = "mineConflict")]
+    MineConflict,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]

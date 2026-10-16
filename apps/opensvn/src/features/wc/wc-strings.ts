@@ -149,8 +149,6 @@ export const wcStrings = defineStrings({
     viewShowIgnored: "Show ignored files",
     viewGroupChangelist: "Group by changelist",
     viewTree: "Show as tree",
-    viewOn: "{name}: on",
-    viewOff: "{name}: off",
     folderRow: "Folder {path}, {count} file(s)",
     // Help menu
     docsFailed: "Could not open the documentation: {message}",
@@ -290,8 +288,6 @@ export const wcStrings = defineStrings({
     viewShowIgnored: "Hiện file bị ignore",
     viewGroupChangelist: "Nhóm theo changelist",
     viewTree: "Hiện dạng cây thư mục",
-    viewOn: "{name}: bật",
-    viewOff: "{name}: tắt",
     folderRow: "Thư mục {path}, {count} file",
     docsFailed: "Không mở được tài liệu: {message}",
     logsFailed: "Không mở được thư mục log: {message}",

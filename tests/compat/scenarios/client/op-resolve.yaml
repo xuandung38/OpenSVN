@@ -21,5 +21,5 @@ steps:
   - { on: svn15, wc: o, svn: [update, --accept, postpone] }
   - { on: svn15, wc: o, svn: [resolve, --accept, theirs-full, docs/index.md] }
 compare:
-  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
-  - { left: s, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e, right: o, checks: [tree, status, info, wcdb] }
+  - { left: s, right: o, checks: [tree, status, info, wcdb] }

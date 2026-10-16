@@ -216,7 +216,7 @@ test("a working copy left by an unfinished checkout offers Continue checkout or 
   expect(calls("update")).toBe(0);
 });
 
-test("an interrupted update says so; Update to latest instead runs a plain update to HEAD", async () => {
+test("an interrupted update says so; Update to latest instead updates to HEAD with the recorded choices", async () => {
   markMockWcIncomplete("wc-docs", 1200, false);
   const { list } = await openPicker();
   const docs2 = within(list).getByRole("option", { name: /design-docs/ });
@@ -227,11 +227,8 @@ test("an interrupted update says so; Update to latest instead runs a plain updat
   const menu2 = await screen.findByRole("menu", { name: "Actions for design-docs" });
   expect(within(menu2).getByRole("menuitem", { name: "Continue update" })).toBeTruthy();
   await user().click(within(menu2).getByRole("menuitem", { name: "Update to latest instead" }));
-  await waitFor(() =>
-    expect(lastCall("update")?.args).toEqual([
-      { wcId: "wc-docs", paths: null, rev: null, depth: null },
-    ]),
-  );
+  // The backend reads the journals (externals choice of a checkout, URL of a switch), as Continue.
+  await waitFor(() => expect(lastCall("wcUpdateLatest")?.args).toEqual(["wc-docs"]));
 });
 
 test("a missing working copy offers Locate…, which re-grants through the native dialog", async () => {

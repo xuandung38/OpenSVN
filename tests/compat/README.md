@@ -195,9 +195,11 @@ cargo test -p opensvn --features real-engine,engine-conformance --test compat_tw
 - `compat_two_way` runs each scenario of `scenarios/client/` once per server (names suffixed
   `-svn14` / `-svn15`); `OPENSVN_COMPAT_SERVERS=svn15` and `OPENSVN_COMPAT_ONLY=op-lock,op-commit`
   narrow it. Work dirs: `target/compat/work-engine/`.
-- A comparison may list `ignore: [dav_cache]`: svn's ra_serf caches
-  `svn:wc:ra_dav:version-url` in `NODES.dav_cache`, the engine leaves it empty (svn asks the
-  server when it is empty). Nothing else is masked beyond the normalisations above.
+- `NODES.dav_cache` is compared: svn's ra_serf caches `svn:wc:ra_dav:version-url` (a file's
+  `D:checked-in` href) there, and the engine fills it the same way (dropped by commit, by
+  cleanup and, for the whole target, by a switch). A comparison of working copies that took
+  different paths may still list `ignore: [dav_cache]`. Nothing else is masked beyond the
+  normalisations above.
 
 ## Capturing new fixtures
 

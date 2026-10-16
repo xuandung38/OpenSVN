@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PASSWORD, sleep, USER } from "./harness.mjs";
+import { PASSWORD, rssByKind, sleep, USER } from "./harness.mjs";
 
 export const ARTIFACTS = process.env.OPENSVN_E2E_ARTIFACTS ?? join(process.cwd(), "e2e-artifacts");
 
@@ -286,6 +286,11 @@ export class MemorySampler {
     const m = this.app.treeMemory();
     if (!m) return null;
     this.samples.push({ t: Date.now(), phase: this.phase, ...m });
+    // What the app process holds at its peak (heap, renderer buffers, code).
+    if (m.appRssKb > this.peak.appRssKb) {
+      this.peak.appByKind = rssByKind(m.appPid) ?? this.peak.appByKind;
+      this.peak.appPhase = this.phase;
+    }
     for (const k of ["rssKb", "pssKb", "appRssKb", "pids"])
       this.peak[k] = Math.max(this.peak[k], m[k]);
     const p = this.phasePeaks.get(this.phase) ?? { rssKb: 0, pssKb: 0, appRssKb: 0 };

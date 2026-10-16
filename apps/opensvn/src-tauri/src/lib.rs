@@ -30,6 +30,7 @@ mod path_grants;
 mod preview;
 mod programs;
 pub mod settings;
+mod startup_env;
 mod status;
 mod updater;
 mod wake;
@@ -159,6 +160,7 @@ fn engine_data_dir(base: std::path::PathBuf, kind: EngineKind) -> std::path::Pat
 /// background.
 fn build_state<R: tauri::Runtime>(
     app: &tauri::App<R>,
+    menu: Arc<menu::TauriMenu<R>>,
 ) -> Result<(AppState, EngineKind), Box<dyn std::error::Error>> {
     let choice = choose_engine(
         std::env::var(ENGINE_ENV).ok().as_deref(),
@@ -191,7 +193,7 @@ fn build_state<R: tauri::Runtime>(
         status_timing: status::StatusTiming::default(),
         path_picker: Arc::new(path_grants::NativePathPicker),
         opener: Arc::new(os_integration::SystemOpener),
-        menu: Arc::new(menu::TauriMenu::new(app.handle().clone())),
+        menu,
         updates: Arc::new(updater::TauriUpdater::new(app.handle().clone())),
         // OS credential store only; refuses to save when none is reachable (no fallback).
         secrets: updater::os_secret_store(),
@@ -224,12 +226,29 @@ fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
     tauri::generate_context!()
 }
 
+/// `appearance.hardwareAcceleration` as stored in the `app.sqlite` the app is about to open,
+/// read before anything starts (see [`startup_env`]). `None` when nothing is stored or the
+/// database cannot be read: the setting then has its default.
+#[cfg(target_os = "linux")]
+fn stored_hardware_acceleration(identifier: &str) -> Option<bool> {
+    let choice = choose_engine(
+        std::env::var(ENGINE_ENV).ok().as_deref(),
+        !cfg!(debug_assertions),
+    )
+    .ok()?;
+    let dir = engine_data_dir(db::current_data_dir(identifier).ok()?, choice.kind);
+    db::stored_setting(&dir, "appearance.hardwareAcceleration")?.as_bool()
+}
+
 /// Starts the Tauri application.
 pub fn run() {
+    let context = app_context::<tauri::Wry>();
+    // First, while the process has a single thread: may replace it with itself (Linux).
+    #[cfg(target_os = "linux")]
+    startup_env::relaunch_if_needed(|| stored_hardware_acceleration(&context.config().identifier));
     #[cfg(feature = "failpoints")]
     crash_hook::install();
     let builder = builder::<tauri::Wry>();
-    let context = app_context::<tauri::Wry>();
     // The updater plugin fails to start without its `plugins.updater` config (public key and
     // endpoints), so it is registered only when the config has one.
     let has_updater = context.config().plugins.0.contains_key("updater");
@@ -259,10 +278,11 @@ pub fn run() {
         .setup(move |app| {
             builder.mount_events(app);
             // A missing menu bar must not stop the app; the shortcuts work without it.
-            if let Err(e) = menu::install(app, true) {
+            let menu = Arc::new(menu::TauriMenu::new(app.handle().clone()));
+            if let Err(e) = menu::install(app, &menu, true) {
                 tracing::warn!(error = %e, "menu bar could not be installed");
             }
-            let (state, kind) = build_state(app)?;
+            let (state, kind) = build_state(app, menu)?;
             app.manage(state);
             tauri::async_runtime::spawn(finish_startup(app.handle().clone(), kind));
             Ok(())

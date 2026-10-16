@@ -1,6 +1,7 @@
 import { act, configure, screen, waitFor, within } from "@testing-library/react";
 import { beforeAll, beforeEach, expect, test, vi } from "vitest";
 import { AppShell } from "../../app/app-shell";
+import type { FileStatus } from "../../ipc/bindings";
 import {
   mockAdapter,
   mockCalls,
@@ -12,6 +13,7 @@ import {
 import { mockWorkingCopies } from "../../ipc/mock/data";
 import { resetWcMock } from "../../ipc/mock/wc-mock-commands";
 import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../test-utils";
+import { ConflictResolver } from "./conflicts/conflict-resolver";
 import { WcLockDialog } from "./dialogs/lock-dialogs";
 import { WcSessionProvider } from "./wc-session";
 import { WelcomeScreen } from "./welcome/welcome-screen";
@@ -312,6 +314,50 @@ test("conflicts: banner opens the resolver; text conflict resolves with theirs, 
   expect(within(dlg).getByRole("radio", { name: /^Keep my local state/ })).toBeTruthy();
   expect(within(dlg).getByRole("radio", { name: /^Take the incoming state/ })).toBeTruthy();
   expect(within(dlg).queryByRole("radio", { name: /^Base/ })).toBeNull();
+});
+
+test("conflicts: an item moved away offers to update the move destination or keep it", async () => {
+  const moved: FileStatus = {
+    path: "src/engine/old-mixer.ts",
+    kind: "file",
+    text: "deleted",
+    props: "none",
+    treeConflict: true,
+    movedFrom: null,
+    movedTo: "src/audio/mixer.ts",
+    changelist: null,
+    lock: null,
+    needsLock: false,
+    remote: null,
+    binary: false,
+    size: null,
+  };
+  renderApp(
+    <WcSessionProvider wc={mockWorkingCopies[0] ?? null} files={[moved]}>
+      <ConflictResolver initialPath={moved.path} onClose={() => {}} />
+    </WcSessionProvider>,
+  );
+  const dlg = await dialog("Conflicts (1)");
+  expect(
+    within(dlg).getByText(
+      "You moved this item to src/audio/mixer.ts, and the incoming update changed it.",
+    ),
+  ).toBeTruthy();
+  expect(within(dlg).queryByRole("radio", { name: /^Take the incoming state/ })).toBeNull();
+  expect(
+    within(dlg).getByRole("radio", { name: /^Keep src\/audio\/mixer\.ts as it is/ }),
+  ).toBeTruthy();
+  await user().click(
+    within(dlg).getByRole("radio", {
+      name: /^Apply the incoming changes to src\/audio\/mixer\.ts/,
+    }),
+  );
+  await user().click(within(dlg).getByRole("button", { name: "Resolve" }));
+  await waitFor(() => expect(lastCall("resolve")).toBeTruthy());
+  expect(lastCall("resolve")?.args[0]).toMatchObject({
+    path: "src/engine/old-mixer.ts",
+    choice: "mineConflict",
+  });
 });
 
 test("lock: a lock held by someone else can only be stolen after an explicit confirmation", async () => {
