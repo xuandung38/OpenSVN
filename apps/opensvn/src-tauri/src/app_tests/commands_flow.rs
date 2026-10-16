@@ -454,14 +454,57 @@ async fn opening_recovers_dead_owner_locks_and_only_reports_foreign_ones() {
                 None
             }
         })
-        .expect("needs-cleanup banner");
-    assert_eq!(banner.kind, opensvn_ipc::BannerKind::NeedsCleanup);
+        .expect("wc-busy banner");
+    assert_eq!(banner.kind, opensvn_ipc::BannerKind::WcBusy);
     assert_eq!(banner.data, vec!["docs"]);
+    assert!(
+        !f.events.all().iter().any(
+            |r| matches!(r, Recorded::Banner(b) if b.kind == opensvn_ipc::BannerKind::NeedsCleanup)
+        ),
+        "a lock another program holds is reported once, as busy"
+    );
 
     // app start runs the same recovery for every registered working copy
     let before = f.events.all().len();
     f.state().recover_all().await;
     assert!(f.events.all().len() > before);
+}
+
+#[tokio::test]
+async fn cleanup_removes_another_programs_lock_only_when_asked() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    let root = crate::engine::fake::demo_wc_root();
+    f.engine.simulate_foreign_lock(&root, "").unwrap();
+    commands::wc_open(f.state(), wc.id.clone()).await.unwrap();
+    let busy = |events: &[Recorded]| {
+        events
+            .iter()
+            .filter(
+                |r| matches!(r, Recorded::Banner(b) if b.kind == opensvn_ipc::BannerKind::WcBusy),
+            )
+            .count()
+    };
+    assert_eq!(busy(&f.events.all()), 1);
+
+    let request = |break_foreign_locks| opensvn_ipc::CleanupRequest {
+        wc_id: wc.id.clone(),
+        remove_unversioned: None,
+        remove_ignored: None,
+        vacuum_pristines: None,
+        break_foreign_locks,
+    };
+    for flag in [None, Some(false)] {
+        let h = commands::cleanup(f.state(), request(flag)).await.unwrap();
+        let err = f.wait_op(&h).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::WcBusy, "{flag:?}");
+    }
+    let h = commands::cleanup(f.state(), request(Some(true)))
+        .await
+        .unwrap();
+    f.wait_op(&h).await.unwrap();
+    commands::wc_open(f.state(), wc.id.clone()).await.unwrap();
+    assert_eq!(busy(&f.events.all()), 1, "no lock left to report");
 }
 
 #[tokio::test]
@@ -576,9 +619,15 @@ async fn a_switch_at_the_same_revision_announces_the_new_location() {
     );
 
     let url = wc.url.replace("/trunk", "/branches/feature-x");
-    let handle = commands::switch(f.state(), wc.id.clone(), url.clone(), Some(wc.base_rev))
-        .await
-        .unwrap();
+    let handle = commands::switch(
+        f.state(),
+        wc.id.clone(),
+        url.clone(),
+        Some(wc.base_rev),
+        false,
+    )
+    .await
+    .unwrap();
     let OpResult::NewRev { new_rev } = f.wait_op(&handle).await.unwrap() else {
         panic!("switch result is a revision");
     };
@@ -653,6 +702,7 @@ async fn cleanup_and_update_checks_are_refused_while_our_operation_holds_the_wc(
         remove_unversioned: None,
         remove_ignored: None,
         vacuum_pristines: None,
+        break_foreign_locks: None,
     };
     let err = commands::cleanup(f.state(), request()).await.unwrap_err();
     assert_eq!(err.code, ErrorCode::WcBusy);

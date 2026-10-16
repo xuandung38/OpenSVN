@@ -63,6 +63,11 @@ pub enum ErrorCode {
     /// refusals, e.g. E155038 "can't revert without reverting children"). The message explains
     /// what the user has to change first.
     WcInvalidOperation,
+    /// Two locations share no history, so an operation that needs related nodes refuses them:
+    /// a switch to a URL with no common ancestor (Subversion error 195012,
+    /// `SVN_ERR_CLIENT_UNRELATED_RESOURCES`). Nothing was changed; the user can ask for the
+    /// operation again with the ancestry check turned off.
+    UnrelatedResources,
     /// Path does not exist.
     PathNotFound,
     /// Path failed safety validation (traversal, reserved name, symlink).

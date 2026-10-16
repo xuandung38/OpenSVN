@@ -64,6 +64,7 @@ export function SwitchDialog({ onClose }: { onClose: () => void }) {
   const { wc } = useWcSession();
   const [url, setUrl] = useState(wc?.url ?? "");
   const [revText, setRevText] = useState("");
+  const [ignoreAncestry, setIgnoreAncestry] = useState(false);
   const rev = parseRevision(revText);
   const root = wc?.repoRootUrl ?? "";
   const trimmed = url.trim().replace(/\/+$/, "");
@@ -85,7 +86,7 @@ export function SwitchDialog({ onClose }: { onClose: () => void }) {
       onClose={onClose}
       onSubmit={async () => {
         if (!wc || rev === "invalid") return;
-        const h = await unwrap(ipc().commands.switch(wc.id, trimmed, rev));
+        const h = await unwrap(ipc().commands.switch(wc.id, trimmed, rev, ignoreAncestry));
         toast.show(t("opStarted", { title: h.title }));
         onClose();
       }}
@@ -115,12 +116,38 @@ export function SwitchDialog({ onClose }: { onClose: () => void }) {
         />
       </label>
       <span className="text-[12px] text-muted-text">{d("switchBody")}</span>
+      <label className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={ignoreAncestry}
+          onChange={(e) => setIgnoreAncestry(e.target.checked)}
+          aria-describedby="switch-ignore-ancestry-hint"
+          className="accent-[var(--accent)]"
+        />
+        {d("switchIgnoreAncestry")}
+      </label>
+      {ignoreAncestry ? (
+        <WarnBox>
+          <span id="switch-ignore-ancestry-hint">{d("switchIgnoreAncestryHint")}</span>
+        </WarnBox>
+      ) : null}
     </ActionDialog>
   );
 }
 
-/** Cleanup: finish interrupted operations, optionally remove unversioned/ignored files. */
-export function CleanupDialog({ onClose }: { onClose: () => void }) {
+/**
+ * Cleanup: finish interrupted operations, optionally remove unversioned/ignored files, and, only
+ * after an explicit confirmation tick, remove the lock another program left behind (the engine
+ * still refuses while it can see that program running, and never deletes files for it).
+ */
+export function CleanupDialog({
+  foreignLock = false,
+  onClose,
+}: {
+  /** Opened because another program holds the lock: say so above the options. */
+  foreignLock?: boolean;
+  onClose: () => void;
+}) {
   const d = useT(dialogStrings);
   const t = useT(wcStrings);
   const toast = useToast();
@@ -128,6 +155,8 @@ export function CleanupDialog({ onClose }: { onClose: () => void }) {
   const [removeUnversioned, setRemoveUnversioned] = useState(false);
   const [removeIgnored, setRemoveIgnored] = useState(false);
   const [vacuum, setVacuum] = useState(false);
+  const [breakLock, setBreakLock] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
   const opts = [
     [removeUnversioned, setRemoveUnversioned, "cleanupRemoveUnversioned"],
     [removeIgnored, setRemoveIgnored, "cleanupRemoveIgnored"],
@@ -138,7 +167,8 @@ export function CleanupDialog({ onClose }: { onClose: () => void }) {
     <ActionDialog
       title={d("cleanupTitle")}
       submitLabel={d("cleanupAction")}
-      canSubmit={wc !== null}
+      danger={breakLock}
+      canSubmit={wc !== null && (!breakLock || confirmed)}
       onClose={onClose}
       onSubmit={async () => {
         if (!wc) return;
@@ -148,6 +178,7 @@ export function CleanupDialog({ onClose }: { onClose: () => void }) {
             removeUnversioned,
             removeIgnored,
             vacuumPristines: vacuum,
+            breakForeignLocks: breakLock && confirmed,
           }),
         );
         toast.show(t("opStarted", { title: h.title }));
@@ -155,6 +186,7 @@ export function CleanupDialog({ onClose }: { onClose: () => void }) {
       }}
     >
       <p className="m-0">{d("cleanupBody")}</p>
+      {foreignLock && <WarnBox>{d("cleanupBreakLockBusy")}</WarnBox>}
       {opts.map(([on, set, key]) => (
         <label key={key} className="flex items-center gap-2">
           <input
@@ -166,6 +198,32 @@ export function CleanupDialog({ onClose }: { onClose: () => void }) {
           {d(key)}
         </label>
       ))}
+      <label className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={breakLock}
+          onChange={(e) => {
+            setBreakLock(e.target.checked);
+            setConfirmed(false);
+          }}
+          className="accent-[var(--accent)]"
+        />
+        {d("cleanupBreakLock")}
+      </label>
+      {breakLock && (
+        <WarnBox>
+          <p className="m-0">{d("cleanupBreakLockWarn")}</p>
+          <label className="mt-1.5 flex items-center gap-2 font-semibold">
+            <input
+              type="checkbox"
+              checked={confirmed}
+              onChange={(e) => setConfirmed(e.target.checked)}
+              className="accent-[var(--accent)]"
+            />
+            {d("cleanupBreakLockConfirm")}
+          </label>
+        </WarnBox>
+      )}
     </ActionDialog>
   );
 }

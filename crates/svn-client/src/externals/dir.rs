@@ -118,6 +118,8 @@ pub(super) async fn ensure(
                 url,
                 Some(rev),
                 Depth::Unknown,
+                // Like svn: an external may be re-pointed anywhere in its repository.
+                true,
                 job.cancel,
             )
             .await?;

@@ -90,7 +90,8 @@ pub(crate) fn build_real_engine(
 }
 
 /// Points the engine at svn's per-user configuration directory while `wc.readSubversionConfig`
-/// is on (built-in defaults while it is off), now and after every change of the setting. The
+/// is on (built-in defaults while it is off), and replaces its `global-ignores` with
+/// `wc.globalIgnores` while that is not empty, now and after every change of either setting. The
 /// follower holds only a weak reference to the engine: it stops when the settings service is
 /// dropped, or at the first settings change after the engine was dropped (until then it just
 /// waits, holding nothing but the settings receiver).
@@ -99,24 +100,46 @@ fn follow_subversion_config_setting(
     engine: &Arc<crate::engine::real::RealEngine>,
     settings: &SettingsService,
 ) {
-    fn apply(engine: &crate::engine::real::RealEngine, read: bool) {
-        engine.set_subversion_config_dir(if read {
+    fn key(s: &opensvn_ipc::Settings) -> (bool, String) {
+        (s.wc_read_subversion_config, s.wc_global_ignores.clone())
+    }
+    fn apply(engine: &crate::engine::real::RealEngine, (read, ignores): &(bool, String)) {
+        engine.set_subversion_config_dir(if *read {
             crate::engine::real::default_subversion_config_dir()
         } else {
             None
         });
+        let patterns: Vec<String> = ignores.split_whitespace().map(str::to_owned).collect();
+        engine.set_global_ignores((!patterns.is_empty()).then_some(patterns));
     }
     let mut rx = settings.subscribe();
-    let mut current = rx.borrow_and_update().wc_read_subversion_config;
-    apply(engine, current);
+    let mut current = key(&rx.borrow_and_update());
+    apply(engine, &current);
     let weak = Arc::downgrade(engine);
     tauri::async_runtime::spawn(async move {
         while rx.changed().await.is_ok() {
-            let read = rx.borrow_and_update().wc_read_subversion_config;
+            let next = key(&rx.borrow_and_update());
             let Some(engine) = weak.upgrade() else { break };
-            if read != current {
-                current = read;
-                apply(&engine, read);
+            if next != current {
+                current = next;
+                apply(&engine, &current);
+            }
+        }
+    });
+}
+
+/// Applies `general.logLevel` to the global log subscriber now and after every change. Stops when
+/// the settings service is dropped.
+fn follow_log_level_setting(settings: &SettingsService) {
+    let mut rx = settings.subscribe();
+    let mut current = rx.borrow_and_update().general_log_level;
+    crate::logging::set_level(current);
+    tauri::async_runtime::spawn(async move {
+        while rx.changed().await.is_ok() {
+            let next = rx.borrow_and_update().general_log_level;
+            if next != current {
+                current = next;
+                crate::logging::set_level(next);
             }
         }
     });
@@ -209,6 +232,7 @@ impl AppState {
             db.clone(),
             system_locale().as_deref(),
         )?);
+        follow_log_level_setting(&settings);
         let auth = Arc::new(AuthBroker::new(
             Arc::clone(&deps.events),
             db.clone(),
@@ -398,9 +422,10 @@ impl AppState {
         }
     }
 
-    /// Opens a working copy (engine recovery included). Locks that need the user (foreign or
-    /// unknown owner) are announced as a `needs-cleanup` banner so the UI can offer "Run cleanup";
-    /// they are never taken over automatically.
+    /// Opens a working copy (engine recovery included). A lock row another program still holds
+    /// is announced as a `wc-busy` banner, anything else that needs the user (an unknown owner,
+    /// unfinished work) as `needs-cleanup`, so the UI can offer "Run cleanup"; neither is ever
+    /// taken over automatically.
     pub async fn open_wc(&self, id: &WcId) -> Result<opensvn_ipc::WorkingCopy, AppError> {
         let (wc, report) = self.wcs.open(id).await?;
         if !report.recovered.is_empty() {
@@ -412,12 +437,28 @@ impl AppState {
         if let Some(op) = &ours {
             tracing::info!(wc = %id.0, op = %op.title, "working copy locked by a running operation");
         }
-        if !report.needs_user_action.is_empty() && ours.is_none() {
-            self.events.banner(&opensvn_ipc::Banner {
-                wc_id: id.clone(),
-                kind: opensvn_ipc::BannerKind::NeedsCleanup,
-                data: report.needs_user_action,
-            });
+        if ours.is_none() {
+            // Another program's lock still in place: "in use by another program", with cleanup
+            // offering to remove that lock. Anything else left for the user: "needs cleanup".
+            let rest: Vec<String> = report
+                .needs_user_action
+                .into_iter()
+                .filter(|d| !report.foreign_locks.contains(d))
+                .collect();
+            if !report.foreign_locks.is_empty() {
+                self.events.banner(&opensvn_ipc::Banner {
+                    wc_id: id.clone(),
+                    kind: opensvn_ipc::BannerKind::WcBusy,
+                    data: report.foreign_locks,
+                });
+            }
+            if !rest.is_empty() {
+                self.events.banner(&opensvn_ipc::Banner {
+                    wc_id: id.clone(),
+                    kind: opensvn_ipc::BannerKind::NeedsCleanup,
+                    data: rest,
+                });
+            }
         }
         Ok(wc)
     }

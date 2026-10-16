@@ -274,6 +274,7 @@ Undo `Mod+Z` · Redo `Mod+Shift+Z` · Cut · Copy · Paste · Select all `Mod+A`
 | Hide whitespace changes | `Mod+Alt+W` |
 | Show unversioned files · Show ignored files | |
 | Group by changelist · Show as tree | |
+| (4 mục trên bật/tắt danh sách Changes, nhớ theo người dùng; cũng có trong nút "Tùy chọn hiển thị" của danh sách. File ignored hiện glyph `I`, không tick để commit được) | |
 | Theme ▸ System · Light · Dark | |
 | Zoom in · Zoom out · Actual size | `Mod+=` · `Mod+-` · `Mod+0` |
 | Toggle full screen | `F11` / `Ctrl+Cmd+F` |
@@ -298,6 +299,7 @@ Undo `Mod+Z` · Redo `Mod+Shift+Z` · Cut · Copy · Paste · Select all `Mod+A`
 ### 8.6 Branch (repo có layout) / Location (không có layout)
 - **Branch:** Switch branch… `Mod+B` · New branch… `Mod+Shift+N` · New tag… `Mod+Shift+T` · Merge into current branch… `Mod+Shift+M` (P6) · Compare with branch… · Show branch on server (Browse) · Set up branch layout…
 - **Location:** Switch to another folder… `Mod+B` · Copy to new location… `Mod+Shift+N` · Compare with another folder… · Show on server (Browse) · Set up branch layout…
+- **Compare with branch / another folder:** so sánh URL của WC với một branch/tag hoặc URL thư mục bất kỳ trong cùng repo, cả hai ở HEAD (không tính thay đổi local). Mỗi lần một thư mục: mục chỉ có ở một bên, mục đã đổi (khác last-changed revision hoặc kích thước; bản copy giữ nguyên revision của nguồn cho node chưa sửa), mục không đổi ẩn mặc định. Mở thư mục đã đổi để đi sâu; bấm file đã đổi để xem diff hai bên.
 
 ### 8.7 Selection (áp dụng file/node đang chọn — giống context menu §6.1)
 Discard changes… · Lock… `Mod+L` · Unlock · Add to changelist ▸ · Ignore ▸ · Resolve ▸ · Show log `Mod+Shift+L` · Blame `Mod+Shift+B` · Rename/Move… · Delete · Properties…

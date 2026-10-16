@@ -8,7 +8,8 @@
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
-paths=(fixtures tests/compat/scenarios)
+# crates/svn-protocol/tests/data*: the recorded protocol goldens (one directory per server version).
+paths=(fixtures tests/compat/scenarios crates/svn-protocol/tests/data crates/svn-protocol/tests/data-1.15)
 
 # URLs on stdin, one per line; prints the host of each URL that is not allowed. The host ends at
 # the first `/`, `\`, `?` or `#` (WHATWG parsers treat `\` as `/` in http(s) URLs), so a
@@ -78,7 +79,7 @@ status=0
 # Any URL host that is not on the allowlist. XML namespace names (DAV/svn/XML Schema) are URIs,
 # not hosts anything connects to, so they are dropped first.
 bad_urls=$(grep -RIEhoi --exclude='check-no-real-hosts.sh' 'https?://[^[:space:]"'"'"')>]+' "${paths[@]}" 2>/dev/null \
-  | grep -Evi '^http://(subversion\.tigris\.org/xmlns/|apache\.org/dav/(props|propset)/|www\.w3\.org/)' \
+  | grep -Evi '^http://(subversion\.tigris\.org/xmlns/|apache\.org/dav/(props|propset|xmlns)\b|www\.w3\.org/)' \
   | disallowed_hosts | sort -u || true)
 if [ -n "$bad_urls" ]; then
   echo "non-allowlisted hosts in fixtures/scenarios:" >&2

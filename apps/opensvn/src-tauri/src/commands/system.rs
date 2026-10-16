@@ -229,6 +229,14 @@ pub async fn certs_remove(state: State<'_, AppState>, key: TrustedCertKey) -> Re
     .await
 }
 
+/// Empties the disposable cache (`cache.sqlite`: status snapshots). Working copies, settings,
+/// accounts and trusted certificates are not touched; the next scan rebuilds what was removed.
+#[tauri::command]
+#[specta::specta]
+pub async fn cache_clear(state: State<'_, AppState>) -> Result<(), AppError> {
+    guard(async { state.status.clear_cache() }).await
+}
+
 /// Shows a working copy item in the file manager. `path` is relative to the working copy root;
 /// an empty path reveals the root folder itself. Items reached through a symbolic link are
 /// refused, so the file manager never opens a folder outside the working copy.
@@ -304,6 +312,21 @@ pub async fn diagnostics_preview(
             logs_dir: Some(state.data_dir.join("logs")),
         };
         Ok(state.diagnostics.preview(&inputs, options))
+    })
+    .await
+}
+
+/// Shows the app's logs folder in the file manager (Help > Show logs folder). The path is the app's
+/// own data folder; nothing in it comes from the UI.
+#[tauri::command]
+#[specta::specta]
+pub async fn logs_reveal(state: State<'_, AppState>) -> Result<(), AppError> {
+    guard(async {
+        let target =
+            crate::logging::logs_reveal_target(&state.data_dir.join("logs")).map_err(|e| {
+                AppError::internal("Could not open the logs folder.").with_detail(e.to_string())
+            })?;
+        state.opener.reveal(&target)
     })
     .await
 }

@@ -149,4 +149,37 @@ mod real {
         let engine = build_real_engine(&services).unwrap();
         assert_eq!(engine.subversion_config_dir(), None);
     }
+
+    #[tokio::test]
+    async fn global_ignores_setting_replaces_the_configured_list_while_not_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let services = services(dir.path());
+        set_read_config(&services, false);
+        let engine = build_real_engine(&services).unwrap();
+        let built_in = svn_client::local::AddConfig::default().global_ignores;
+        assert_eq!(engine.effective_global_ignores(), built_in);
+
+        let set = |v: &str| {
+            let patch: SettingsPatch =
+                serde_json::from_value(serde_json::json!({ "wc.globalIgnores": v })).unwrap();
+            services.settings.apply_patch(&patch).unwrap();
+        };
+        let wait = |expected: Vec<String>| {
+            let engine = engine.clone();
+            async move {
+                for _ in 0..400 {
+                    if engine.effective_global_ignores() == expected {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                assert_eq!(engine.effective_global_ignores(), expected);
+            }
+        };
+        set("*.tmp\n  build ");
+        wait(vec!["*.tmp".into(), "build".into()]).await;
+        // Blank again: back to the configured (here built-in) list.
+        set("  ");
+        wait(built_in).await;
+    }
 }

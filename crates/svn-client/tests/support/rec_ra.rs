@@ -398,6 +398,14 @@ impl RaSession for RecRa {
         let mut s = RecRa::new(self.inner.at(url)?);
         s.log = Arc::clone(&self.log);
         s.reports = Arc::clone(&self.reports);
+        // A server that always cuts at the same point does so at every URL.
+        *s.update_break_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = self
+            .update_break_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         Ok(Box::new(s))
     }
     async fn ensure_authenticated(&self, cancel: &CancelToken) -> Result<()> {
@@ -518,6 +526,18 @@ impl RaSession for RecRa {
     ) -> Result<()> {
         self.inner
             .file_revs(path, start, end, handler, cancel)
+            .await
+    }
+    async fn get_location_segments(
+        &self,
+        path: &RelPath,
+        peg: Option<Revnum>,
+        start: Option<Revnum>,
+        end: Option<Revnum>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<svn_ra_api::LocationSegment>> {
+        self.inner
+            .get_location_segments(path, peg, start, end, cancel)
             .await
     }
     async fn do_update(

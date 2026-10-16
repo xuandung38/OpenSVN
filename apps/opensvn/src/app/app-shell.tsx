@@ -29,6 +29,7 @@ import { ShortcutsDialog } from "../features/wc/shortcuts-dialog";
 import { useOpNotifications } from "../features/wc/use-op-notifications";
 import { useWcActions } from "../features/wc/use-wc-actions";
 import { useWcShortcuts } from "../features/wc/use-wc-shortcuts";
+import { useViewPrefs } from "../features/wc/view-prefs";
 import { WcBanners } from "../features/wc/wc-banners";
 import { changedFiles, wcPathUrl } from "../features/wc/wc-model";
 import { useWcSession, type WcLinks, WcSessionProvider } from "../features/wc/wc-session";
@@ -40,7 +41,13 @@ import {
 } from "../features/wc/welcome/welcome-screen";
 import type { FileStatus, WorkingCopy } from "../ipc/bindings";
 import { ipc, unwrap } from "../ipc/client";
-import { useOperations, useStatus, useWcEntries, useWorkingCopies } from "../ipc/queries";
+import {
+  useOperations,
+  useSettings,
+  useStatus,
+  useWcEntries,
+  useWorkingCopies,
+} from "../ipc/queries";
 import { useT } from "../lib/i18n/i18n";
 import { applyTheme, readTheme, type ThemeChoice } from "../lib/theme";
 import { DemoEngineBanner } from "./demo-engine-banner";
@@ -63,7 +70,11 @@ export function AppShell() {
     setClosed(false);
     setWcId(id);
   }, []);
-  // Until the user picks one, the most recently opened working copy is current.
+  // Until the user picks one, the most recently opened working copy is current, unless
+  // `general.openLastWc` is off (then none is, as after File > Close working copy). Nothing is
+  // opened before the settings are known, so an unwanted working copy never flashes up.
+  const settings = useSettings();
+  const openLast = settings.isError ? true : settings.data?.["general.openLastWc"];
   const lastOpened = useMemo(
     () =>
       [...(entries.data ?? [])]
@@ -71,10 +82,12 @@ export function AppShell() {
         .sort((a, b) => (b.lastOpenedAt ?? "").localeCompare(a.lastOpenedAt ?? ""))[0]?.id,
     [entries.data],
   );
-  const current = closed
-    ? null
-    : (wcs.data?.find((w) => w.id === (wcId ?? lastOpened)) ?? wcs.data?.[0] ?? null);
-  const status = useStatus(current?.id ?? null);
+  const current =
+    closed || (wcId === null && openLast !== true)
+      ? null
+      : (wcs.data?.find((w) => w.id === (wcId ?? lastOpened)) ?? wcs.data?.[0] ?? null);
+  const { showIgnored } = useViewPrefs();
+  const status = useStatus(current?.id ?? null, showIgnored);
   const [view, setView] = useState<View>("changes");
   const links = useRemoteLinks(setView);
 

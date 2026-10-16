@@ -11,10 +11,12 @@ import { useOperationOutcome } from "../../../ipc/queries";
 import { useT } from "../../../lib/i18n/i18n";
 import { matchShortcut } from "../shortcuts";
 import { useWcActions } from "../use-wc-actions";
+import { useViewPrefs } from "../view-prefs";
 import {
-  changedFiles,
   checkCommit,
+  isTickable,
   joinMessage,
+  listedFiles,
   loadMessageHistory,
   pushMessageHistory,
   SUMMARY_SOFT_LIMIT,
@@ -46,9 +48,12 @@ export function CommitBox() {
   const sent = useRef("");
   const outcome = useOperationOutcome(opId);
 
+  const prefs = useViewPrefs();
+  // Only rows the list shows can be committed: a ticked unversioned file that View > Show
+  // unversioned files then hid is not added behind the user's back.
   const selected = useMemo(
-    () => changedFiles(files).filter((f) => checked.has(f.path)),
-    [files, checked],
+    () => listedFiles(files, prefs).filter((f) => isTickable(f) && checked.has(f.path)),
+    [files, checked, prefs],
   );
   const check = useMemo(() => checkCommit(selected), [selected]);
   const onTag = wc?.branch?.kind === "tag";

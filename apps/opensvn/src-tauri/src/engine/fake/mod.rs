@@ -24,8 +24,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use opensvn_ipc::{
     BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
-    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, Layout, LogGetRequest, LogPage,
-    RepoInfo, RepoListing, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
+    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, ItemProps, Layout, LogGetRequest,
+    LogPage, RepoInfo, RepoListing, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
 };
 use svn_ra_api::RaSession;
 use svn_ra_api::fake::FakeRaSession;
@@ -202,6 +202,7 @@ impl EngineFacade for FakeEngine {
                 recovery: RecoveryReport {
                     recovered,
                     needs_user_action: wc.foreign_locks.clone(),
+                    foreign_locks: wc.foreign_locks.clone(),
                 },
             })
         })
@@ -276,6 +277,15 @@ impl EngineFacade for FakeEngine {
         self.do_resolve(&wc.root, req)
     }
 
+    async fn props_get(
+        &self,
+        wc: &WcRef,
+        paths: &[String],
+        _ctx: &OpContext,
+    ) -> EngineResult<Vec<ItemProps>> {
+        self.do_props_get(&wc.root, paths)
+    }
+
     async fn props_set(
         &self,
         wc: &WcRef,
@@ -304,9 +314,10 @@ impl EngineFacade for FakeEngine {
         wc: &WcRef,
         url: &str,
         rev: Option<Rev>,
+        ignore_ancestry: bool,
         ctx: &OpContext,
     ) -> EngineResult<Rev> {
-        self.do_switch(wc, url, rev, ctx).await
+        self.do_switch(wc, url, rev, ignore_ancestry, ctx).await
     }
 
     async fn commit(&self, wc: &WcRef, req: &CommitRequest, ctx: &OpContext) -> EngineResult<Rev> {

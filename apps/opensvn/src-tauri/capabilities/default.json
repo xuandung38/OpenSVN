@@ -53,9 +53,11 @@
     "allow-menu-set-layout",
     "allow-certs-list",
     "allow-certs-remove",
+    "allow-cache-clear",
     "allow-reveal-in-os",
     "allow-open-external",
     "allow-diagnostics-export",
+    "allow-logs-reveal",
     "allow-wc-list",
     "allow-wc-add-existing",
     "allow-wc-remove",
@@ -88,6 +90,7 @@
     "allow-set-depth",
     "allow-upgrade-format",
     "allow-resolve",
+    "allow-props-get",
     "allow-props-set"
   ]
 }

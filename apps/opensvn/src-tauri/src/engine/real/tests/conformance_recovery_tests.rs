@@ -100,6 +100,14 @@ impl EngineFacade for ClientCheckout {
     async fn resolve(&self, wc: &WcRef, req: &ResolveRequest, ctx: &OpContext) -> EngineResult<()> {
         self.0.engine.resolve(wc, req, ctx).await
     }
+    async fn props_get(
+        &self,
+        wc: &WcRef,
+        paths: &[String],
+        ctx: &OpContext,
+    ) -> EngineResult<Vec<opensvn_ipc::ItemProps>> {
+        self.0.engine.props_get(wc, paths, ctx).await
+    }
     async fn props_set(
         &self,
         wc: &WcRef,
@@ -140,9 +148,13 @@ impl EngineFacade for ClientCheckout {
         wc: &WcRef,
         url: &str,
         rev: Option<Rev>,
+        ignore_ancestry: bool,
         ctx: &OpContext,
     ) -> EngineResult<Rev> {
-        self.0.engine.switch(wc, url, rev, ctx).await
+        self.0
+            .engine
+            .switch(wc, url, rev, ignore_ancestry, ctx)
+            .await
     }
     async fn commit(&self, wc: &WcRef, req: &CommitRequest, ctx: &OpContext) -> EngineResult<Rev> {
         self.0.engine.commit(wc, req, ctx).await

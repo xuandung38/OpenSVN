@@ -7,7 +7,9 @@
 //!   back, "Continue checkout" finishes it (and the checkout dialog offers it for the folder);
 //! - the app is killed mid-checkout; after a restart the working copy is listed as an
 //!   interrupted checkout, its stale lock is ours and is cleaned without asking, and Continue
-//!   finishes it.
+//!   finishes it;
+//! - a switch whose answer is always cut at the same point gives up half-way; once the
+//!   connection works, "Continue switch" finishes the switch (never a plain update).
 //!
 //! Each result is compared with `svn checkout -r R` of svn 1.15 (`OPENSVN_SVN_BIN`): working
 //! files, NODES rows and `svn status`.
@@ -176,6 +178,17 @@ impl Proxy {
             .local_addr()
             .unwrap()
             .port();
+        Self::start_on(s, port, args, log)
+    }
+
+    /// [`Self::start`] on `port` (a working copy made through an earlier proxy keeps its URL);
+    /// waits until the port is free again.
+    fn start_on(s: &Server, port: u16, args: &[&str], log: PathBuf) -> Self {
+        let started = Instant::now();
+        while std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+            assert!(started.elapsed() < Duration::from_secs(10), "port {port}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
         let certs = s.ca.parent().unwrap();
         let url = url::Url::parse(&s.base).unwrap();
         let upstream = format!(
@@ -707,4 +720,136 @@ async fn killed_mid_checkout_then_continued_after_a_restart() {
     assert_eq!(resume.rev.0, 1);
     assert!(!app.listed(&wc).await.incomplete);
     assert_matches_svn_checkout(&repo, &wc, 1, tmp.path());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh"]
+async fn a_switch_cut_for_good_is_finished_by_continue_switch() {
+    let Some(s) = server() else {
+        eprintln!("SKIPPED: OPENSVN_COMPAT_LOCAL_URL is not set");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    // r1: d000 and d001, 50 files each; r2: a file bigger than the cut offset in d001.
+    let repo = Repo::new(&s, "switch", 100, 4_000);
+    let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+    let noise: Vec<u8> = (0..(2 << 20))
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        })
+        .collect();
+    let (rp, props) = (
+        "K 10\nsvn:author\nV 5\nalice\nK 7\nsvn:log\nV 3\nbig\nPROPS-END\n",
+        "PROPS-END\n",
+    );
+    let mut dump = format!(
+        "SVN-fs-dump-format-version: 2\n\nRevision-number: 2\nProp-content-length: {0}\n\
+         Content-length: {0}\n\n{rp}\nNode-path: d001/zz-big.bin\nNode-kind: file\n\
+         Node-action: add\nProp-content-length: {1}\nText-content-length: {2}\n\
+         Content-length: {3}\n\n{props}",
+        rp.len(),
+        props.len(),
+        noise.len(),
+        props.len() + noise.len()
+    )
+    .into_bytes();
+    dump.extend_from_slice(&noise);
+    dump.extend_from_slice(b"\n\n");
+    let mut c = Command::new(&s.svnadmin);
+    c.args(["load", "-q"]).arg(&repo.dir);
+    run(c, Some(&dump));
+
+    let plain = Proxy::start(&s, &[], tmp.path().join("proxy-0.log"));
+    let port = plain.port;
+    let app = App::new(&s, &tmp.path().join("data"), 10, 10);
+    let parent = tmp.path().join("work");
+    std::fs::create_dir_all(&parent).unwrap();
+    let base = plain.url(&s, &repo);
+    let h = app
+        .checkout(&format!("{base}/d000"), &parent, "wc")
+        .await
+        .unwrap();
+    app.wait_op(&h, Duration::from_secs(300)).await.unwrap();
+    let wc = parent.join("wc");
+    std::fs::write(wc.join("notes.txt"), "unversioned\n").unwrap();
+    let listed = app.listed(&wc).await;
+    drop(plain);
+
+    let cutting = Proxy::start_on(
+        &s,
+        port,
+        &[
+            "--truncate-every",
+            "1",
+            "--truncate-at",
+            "262144",
+            "--truncate-method",
+            "REPORT,GET",
+        ],
+        tmp.path().join("proxy-1.log"),
+    );
+    let h = crate::commands::switch(
+        app.state(),
+        listed.id.clone(),
+        format!("{base}/d001"),
+        None,
+        // d000 and d001 share no history (two folders of one revision).
+        true,
+    )
+    .await
+    .unwrap();
+    let err = app
+        .wait_op(&h, Duration::from_secs(300))
+        .await
+        .expect_err("a switch that never gets past the cut");
+    assert!(cutting.log().contains("truncated a"), "{err:?}");
+    drop(cutting);
+    let listed = app.listed(&wc).await;
+    assert!(
+        listed.incomplete,
+        "the half-switched working copy can be continued"
+    );
+    assert_eq!(
+        app.state()
+            .db
+            .switch_journal_get(&listed.root_path)
+            .unwrap(),
+        Some((format!("{base}/d001"), true))
+    );
+    assert_eq!(app.cleanup_banners(), 0);
+
+    let _plain = Proxy::start_on(&s, port, &[], tmp.path().join("proxy-2.log"));
+    let h = crate::commands::wc_continue(app.state(), listed.id.clone())
+        .await
+        .unwrap();
+    assert!(h.title.starts_with("Continue switch"), "{}", h.title);
+    let r = app.wait_op(&h, Duration::from_secs(300)).await.unwrap();
+    assert_eq!(new_rev(&r), 2);
+    let listed = app.listed(&wc).await;
+    assert!(!listed.incomplete && listed.resume.is_none());
+    assert!(
+        app.state()
+            .db
+            .switch_journal_get(&listed.root_path)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        std::fs::read_to_string(wc.join("notes.txt")).unwrap(),
+        "unversioned\n"
+    );
+    std::fs::remove_file(wc.join("notes.txt")).unwrap();
+    // Exactly what `svn checkout -r 2` of d001 gives: files, NODES rows, `svn status`.
+    let theirs = tmp.path().join("svn-d001");
+    let mut c = oracle().svn();
+    c.args(["checkout", "-q", "-r", "2"])
+        .arg(format!("{}/d001", repo.file_url()))
+        .arg(&theirs);
+    run(c, None);
+    assert_eq!(tree(&wc), tree(&theirs), "working files differ");
+    assert_eq!(nodes(&wc), nodes(&theirs), "NODES rows differ");
+    assert_eq!(svn_status(&wc), "");
 }

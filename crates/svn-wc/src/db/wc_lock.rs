@@ -23,6 +23,18 @@
 //! explicit [`WcDb::wc_lock_steal`] or by the user's `svn cleanup`. Nothing else ever deletes a
 //! row that has no record or marker, in particular rows of unversioned directories.
 //!
+//! # A lock broken while we hold it
+//! `svn cleanup` breaks every lock by design (`break_locks`), runs our work queue, vacuums
+//! unreferenced pristines and empties `.svn/tmp`, our marker included. A long operation (an
+//! update drive) therefore calls [`WcTxn::verify_wc_lock`](super::WcTxn::verify_wc_lock) in
+//! each write transaction: the row must still be there with our levels **and** our marker must
+//! still exist. When either is gone the lock is *lost*: the transaction fails with
+//! [`ErrorCode::WcBusy`], the handle stops claiming the lock and [`WcDb::wc_lock_release`]
+//! later leaves whatever row is there alone (it may be the lock of the client that cleaned up).
+//! Between svn's vacuum and its removal of `.svn/tmp` the row (svn's own, identical to ours)
+//! and our marker both exist, so this check cannot see that window; the pristine check of
+//! [`WcTxn::record_pristine`](super::WcTxn::record_pristine) covers what the vacuum did there.
+//!
 //! Residual risk: TortoiseSVN "Break write locks" uses the same `svn_wc_cleanup4`, so it should
 //! also clear `.svn/tmp`; that is unverified on Windows and tracked as a follow-up for the
 //! integration phase. Run `wc_cleanup_locks` when a working copy is opened (see
@@ -55,6 +67,14 @@ pub const ENGINE_TMP_PREFIXES: &[&str] = &[
     "marker-",
     "external-",
 ];
+
+/// Marker files of the locks this handle holds, and the locks it lost (see the module
+/// documentation).
+#[derive(Debug, Default)]
+pub(super) struct HeldMarkers {
+    paths: std::collections::BTreeMap<RelPath, PathBuf>,
+    lost: BTreeSet<RelPath>,
+}
 
 /// Who owns the locks this process takes.
 #[derive(Clone)]
@@ -191,6 +211,12 @@ impl WcDb {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn held_markers(&self) -> MutexGuard<'_, HeldMarkers> {
+        self.lock_markers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn gate(&self) -> MutexGuard<'_, ()> {
         self.lock_gate
             .lock()
@@ -303,28 +329,92 @@ impl WcDb {
             dir: dir.as_str().to_owned(),
             levels,
         };
-        if let Err(e) = self.write_marker(&marker) {
-            let _ = self.with_write(|tx| delete_row(tx, self.wc_id, dir).map(|_| ()));
-            let _ = owner.store.forget(&root, dir);
-            return Err(e);
+        let marker_path = match self.write_marker(&marker) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = self.with_write(|tx| delete_row(tx, self.wc_id, dir).map(|_| ()));
+                let _ = owner.store.forget(&root, dir);
+                return Err(e);
+            }
+        };
+        {
+            let mut held = self.held_markers();
+            held.paths.insert(dir.clone(), marker_path);
+            held.lost.remove(dir);
         }
         self.owned().insert(dir.clone(), levels);
         Ok(())
+    }
+
+    /// Checks, inside the caller's write transaction `conn`, that every lock this handle holds
+    /// is still ours: its row exists with our levels and our marker file is still there. Fails
+    /// with [`ErrorCode::WcBusy`] ("cleaned up by another client") when one was broken; the
+    /// lock is then forgotten (see the module documentation), so nothing more may be written.
+    pub(super) fn wc_lock_verify_in(&self, conn: &Connection) -> Result<()> {
+        let held: Vec<(RelPath, i32)> = self.owned().iter().map(|(d, l)| (d.clone(), *l)).collect();
+        for (dir, levels) in held {
+            let row: Option<i64> = conn
+                .query_row(
+                    "SELECT locked_levels FROM wc_lock WHERE wc_id = ?1 AND local_dir_relpath = ?2",
+                    params![self.wc_id, dir.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(sql_err)?;
+            let marker = self.held_markers().paths.get(&dir).cloned();
+            let marker_there = marker.as_deref().is_none_or(is_regular_file);
+            if row == Some(i64::from(levels)) && marker_there {
+                continue;
+            }
+            self.lose_lock(&dir);
+            return Err(lock_lost());
+        }
+        Ok(())
+    }
+
+    /// Stops claiming the lock on `dir`, which another client broke: no row is touched (the
+    /// row there now, if any, is not ours), our marker and ownership record go.
+    fn lose_lock(&self, dir: &RelPath) {
+        self.owned().remove(dir);
+        let marker = {
+            let mut held = self.held_markers();
+            held.lost.insert(dir.clone());
+            held.paths.remove(dir)
+        };
+        if let Some(path) = marker {
+            let _ = std::fs::remove_file(path);
+        }
+        if let (Ok(owner), Ok(root)) = (self.owner(), self.canonical_root()) {
+            let _ = owner.store.forget(&root, dir);
+        }
     }
 
     /// Releases a lock obtained through this handle.
     pub fn wc_lock_release(&self, dir: &RelPath) -> Result<()> {
         let owner = self.owner()?;
         let _gate = self.gate();
+        if self.held_markers().lost.remove(dir) {
+            // Broken by another client (and forgotten) while we held it: the row is not ours.
+            return Ok(());
+        }
         if !self.owned().contains_key(dir) {
             return Err(SvnError::new(
                 ErrorCode::Internal,
                 format!("working copy not locked at '{dir}'"),
             ));
         }
+        let marker = self.held_markers().paths.get(dir).cloned();
+        if marker.as_deref().is_some_and(|p| !is_regular_file(p)) {
+            // `svn cleanup` removed our marker with `.svn/tmp`, so it broke our lock: whatever
+            // row is there now belongs to that client (or nobody) and stays.
+            self.lose_lock(dir);
+            self.held_markers().lost.remove(dir);
+            return Ok(());
+        }
         // The lock stays ours until the row is really gone, so a failed delete can be retried.
         self.with_write(|tx| delete_row(tx, self.wc_id, dir).map(|_| ()))?;
         self.owned().remove(dir);
+        self.held_markers().paths.remove(dir);
         owner.store.forget(&self.canonical_root()?, dir)?;
         self.remove_markers_for(dir);
         Ok(())
@@ -433,8 +523,97 @@ impl WcDb {
         let _gate = self.gate();
         let removed = self.with_write(|tx| delete_row(tx, self.wc_id, dir))?;
         self.owned().remove(dir);
+        {
+            let mut held = self.held_markers();
+            held.paths.remove(dir);
+            held.lost.remove(dir);
+        }
         owner.store.forget(&self.canonical_root()?, dir)?;
         self.remove_markers_for(dir);
+        Ok(removed)
+    }
+
+    /// Removes the lock rows another program left (svn, TortoiseSVN, a crashed process), on the
+    /// user's explicit confirmation ("remove another program's lock" in cleanup). Returns the
+    /// directories whose row was removed, sorted.
+    ///
+    /// Never removes a lock of this application that may still be in use: rows held by this
+    /// handle are skipped, and the call fails with [`ErrorCode::WcBusy`] (removing nothing) when a
+    /// marker names this process or the ownership store reports another live (or possibly live)
+    /// process of this application for one of the rows. Only lock rows, their ownership records
+    /// and markers are touched; no file of the working copy is.
+    pub fn wc_break_foreign_locks(&self) -> Result<Vec<RelPath>> {
+        let owner = self.owner()?;
+        let root = self.canonical_root()?;
+        let _gate = self.gate();
+        let ours: BTreeSet<RelPath> = self.owned().keys().cloned().collect();
+        let rows: Vec<(String, i32)> = self.with_read(|c| {
+            let mut stmt = c
+                .prepare("SELECT local_dir_relpath, locked_levels FROM wc_lock WHERE wc_id = ?1")
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map([self.wc_id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(sql_err)?
+                .collect::<std::result::Result<Vec<(String, i32)>, _>>()
+                .map_err(sql_err)?;
+            Ok(rows)
+        })?;
+        let mut foreign: Vec<(RelPath, i32)> = Vec::new();
+        for (dir, levels) in rows {
+            let dir = RelPath::new(&dir)?;
+            if !ours.contains(&dir) {
+                foreign.push((dir, levels));
+            }
+        }
+        if foreign.is_empty() {
+            return Ok(Vec::new());
+        }
+        let markers = self.markers()?;
+        if let Some((dir, _)) = foreign.iter().find(|(dir, _)| {
+            markers.iter().any(|(_, m)| {
+                m.dir == dir.as_str() && m.pid == owner.pid && m.boot_id == owner.boot_id
+            })
+        }) {
+            return Err(busy(format!(
+                "'{dir}' is locked by an operation of this application that is still running"
+            )));
+        }
+        // Claiming the ownership record fails while another live instance of this application
+        // owns the directory; a dead owner's record is replaced. Claims are undone on failure.
+        let mut claimed: Vec<&RelPath> = Vec::new();
+        for (dir, _) in &foreign {
+            if let Err(e) = owner.store.record(&root, dir, owner.pid, &owner.boot_id) {
+                for d in claimed {
+                    let _ = owner.store.forget(&root, d);
+                }
+                return Err(e);
+            }
+            claimed.push(dir);
+        }
+        let removed = self.with_write(|tx| {
+            let mut removed = Vec::new();
+            for (dir, levels) in &foreign {
+                let n = tx
+                    .execute(
+                        "DELETE FROM wc_lock WHERE wc_id = ?1 AND local_dir_relpath = ?2 \
+                         AND locked_levels = ?3",
+                        params![self.wc_id, dir.as_str(), levels],
+                    )
+                    .map_err(sql_err)?;
+                if n > 0 {
+                    removed.push(dir.clone());
+                }
+            }
+            Ok(removed)
+        });
+        for (dir, _) in &foreign {
+            owner.store.forget(&root, dir)?;
+        }
+        let mut removed = removed?;
+        for dir in &removed {
+            self.remove_markers_for(dir);
+        }
+        removed.sort();
         Ok(removed)
     }
 
@@ -517,6 +696,19 @@ impl WcDb {
         report.needs_user_action.sort();
         Ok(report)
     }
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
+}
+
+/// The error of a write that finds the lock it relies on broken by another client.
+fn lock_lost() -> SvnError {
+    SvnError::new(
+        ErrorCode::WcBusy,
+        "working copy was cleaned up by another client during the update; nothing more was \
+         written. Run the update again to finish it",
+    )
 }
 
 /// Adds the cleanup hint users need when a lock blocks them.

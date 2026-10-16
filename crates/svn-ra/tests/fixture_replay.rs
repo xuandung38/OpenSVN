@@ -1,6 +1,6 @@
-//! Replays the recorded svn <-> mod_dav_svn sessions in `fixtures/protocol/<session>/` through
-//! the real transport against a scripted HTTPS fake server, and parses every answer with
-//! svn-protocol. Proves the captures are replayable and that transport + parsers accept what a
+//! Replays the recorded svn <-> mod_dav_svn sessions in `fixtures/protocol/<session>/` (mod_dav_svn
+//! 1.14.3) and `fixtures/protocol-1.15/<session>/` (mod_dav_svn 1.15.0) through the real transport
+//! against a scripted HTTPS fake server, and parses every answer with svn-protocol. Proves the captures are replayable and that transport + parsers accept what a
 //! real Apache/mod_dav_svn server sends for checkout, update, log and commit.
 //!
 //! The fake server emulates Basic auth itself (401 exchanges in a transcript are not replayed:
@@ -72,12 +72,19 @@ struct Exchange {
     resp: Message,
 }
 
-fn protocol_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/protocol")
+/// Recording sets under `fixtures/`, one per server version, with the same sessions.
+const RECORDINGS: [&str; 2] = ["protocol", "protocol-1.15"];
+
+fn protocol_dir(set: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures")
+        .join(set)
 }
 
-fn load(session: &str) -> Vec<Exchange> {
-    let dir = protocol_dir().join(session);
+/// Loads `fixtures/<set>/<session>`; `session` is `<set>/<session>` in messages.
+fn load(set: &str, name: &str) -> Vec<Exchange> {
+    let dir = protocol_dir(set).join(name);
+    let session = format!("{set}/{name}");
     let mut out = Vec::new();
     for n in 1.. {
         let req = dir.join(format!("{n:03}-request.http"));
@@ -130,8 +137,8 @@ struct Replay {
     challenge: Option<Message>,
 }
 
-async fn start(session: &str) -> (TlsServer, Arc<Replay>, TestCa) {
-    let all = load(session);
+async fn start(set: &str, session: &str) -> (TlsServer, Arc<Replay>, TestCa) {
+    let all = load(set, session);
     let challenge = all.iter().find(|e| e.status == 401).map(|e| e.resp.clone());
     let exchanges: Vec<Exchange> = all.into_iter().filter(|e| e.status != 401).collect();
     let replay = Arc::new(Replay {
@@ -200,9 +207,10 @@ fn root_element(body: &[u8]) -> Option<String> {
     Some(name.rsplit(':').next().unwrap_or(&name).to_owned())
 }
 
-/// Replays `session`; returns how many exchanges each parser checked.
-async fn replay(session: &str) -> Vec<(String, usize)> {
-    let (server, replay, ca) = start(session).await;
+/// Replays `fixtures/<set>/<name>`; returns how many exchanges each parser checked.
+async fn replay(set: &str, name: &str) -> Vec<(String, usize)> {
+    let session = format!("{set}/{name}");
+    let (server, replay, ca) = start(set, name).await;
     let prompter = ScriptedPrompter::with_credentials("tester", "tester-pass");
     let transport = common::transport_trusting(&ca, prompter, |_| {});
     let session_url = RepoUrl::parse(server.url("/svn/basic").as_str()).unwrap();
@@ -310,63 +318,78 @@ fn count(checked: &[(String, usize)], what: &str) -> usize {
 
 #[tokio::test]
 async fn checkout_send_all_replays_and_parses() {
-    let c = replay("checkout").await;
-    assert!(
-        count(&c, "options") >= 1 && count(&c, "update-report") >= 1,
-        "{c:?}"
-    );
+    for set in RECORDINGS {
+        let c = replay(set, "checkout").await;
+        assert!(
+            count(&c, "options") >= 1 && count(&c, "update-report") >= 1,
+            "{set}: {c:?}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn checkout_skelta_replays_and_parses() {
-    let c = replay("checkout-skelta").await;
-    assert!(
-        count(&c, "update-report") >= 1 && count(&c, "GET 200") >= 10,
-        "{c:?}"
-    );
+    for set in RECORDINGS {
+        let c = replay(set, "checkout-skelta").await;
+        assert!(
+            count(&c, "update-report") >= 1 && count(&c, "GET 200") >= 10,
+            "{set}: {c:?}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn update_replays_and_parses() {
-    let c = replay("update").await;
-    assert!(count(&c, "update-report") >= 1, "{c:?}");
+    for set in RECORDINGS {
+        let c = replay(set, "update").await;
+        assert!(count(&c, "update-report") >= 1, "{set}: {c:?}");
+    }
 }
 
 #[tokio::test]
 async fn log_replays_and_parses() {
-    let c = replay("log").await;
-    assert_eq!(count(&c, "log-report"), 2, "{c:?}");
+    for set in RECORDINGS {
+        let c = replay(set, "log").await;
+        assert_eq!(count(&c, "log-report"), 2, "{set}: {c:?}");
+    }
 }
 
 #[tokio::test]
 async fn commit_replays_and_parses() {
-    let c = replay("commit").await;
-    assert_eq!(count(&c, "create-txn"), 1, "{c:?}");
-    assert_eq!(count(&c, "merge"), 1, "{c:?}");
-    assert!(count(&c, "PUT 201") + count(&c, "PUT 204") >= 2, "{c:?}");
-    assert_eq!(count(&c, "DELETE 204"), 1, "{c:?}");
+    for set in RECORDINGS {
+        let c = replay(set, "commit").await;
+        assert_eq!(count(&c, "create-txn"), 1, "{set}: {c:?}");
+        assert_eq!(count(&c, "merge"), 1, "{set}: {c:?}");
+        assert!(
+            count(&c, "PUT 201") + count(&c, "PUT 204") >= 2,
+            "{set}: {c:?}"
+        );
+        assert_eq!(count(&c, "DELETE 204"), 1, "{set}: {c:?}");
+    }
 }
 
 /// The transcripts carry no credentials and only the synthetic host.
 #[test]
 fn transcripts_are_anonymised() {
-    for session in ["checkout", "checkout-skelta", "update", "log", "commit"] {
-        for e in load(session) {
+    for (set, session) in RECORDINGS.iter().flat_map(|set| {
+        ["checkout", "checkout-skelta", "update", "log", "commit"].map(|s| (*set, s))
+    }) {
+        for e in load(set, session) {
             assert!(
                 e.req.header("Authorization").is_none(),
-                "{session} #{}",
+                "{set}/{session} #{}",
                 e.n
             );
             assert_eq!(
                 e.req.header("Host"),
                 Some("svn.test.local"),
-                "{session} #{}",
+                "{set}/{session} #{}",
                 e.n
             );
             for m in [&e.req, &e.resp] {
                 let text = String::from_utf8_lossy(&m.body);
-                assert!(!text.contains("127.0.0.1"), "{session} #{}", e.n);
-                assert!(!text.contains("tester-pass"), "{session} #{}", e.n);
+                assert!(!text.contains("127.0.0.1"), "{set}/{session} #{}", e.n);
+                assert!(!text.contains("tester-pass"), "{set}/{session} #{}", e.n);
             }
         }
     }

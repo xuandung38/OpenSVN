@@ -243,6 +243,7 @@ test("branch picker lists the other branches and tags and switches on click", as
     wc.id,
     `${MOCK_REPO_ROOT}/branches/feature-x`,
     null,
+    false,
   ]);
 });
 

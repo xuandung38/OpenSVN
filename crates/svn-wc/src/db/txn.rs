@@ -26,6 +26,7 @@ use crate::workqueue::Unsettled;
 pub struct WcTxn<'a> {
     conn: &'a Connection,
     wc_id: i64,
+    db: &'a WcDb,
 }
 
 fn to_i64(v: u64) -> Result<i64> {
@@ -40,6 +41,7 @@ impl WcDb {
             f(&WcTxn {
                 conn: tx,
                 wc_id: self.wc_id,
+                db: self,
             })
         })
     }
@@ -52,6 +54,15 @@ impl WcTxn<'_> {
 
     pub(super) fn wc_id(&self) -> i64 {
         self.wc_id
+    }
+
+    /// Fails with [`ErrorCode::WcBusy`] when another client (`svn cleanup`) broke a working copy
+    /// lock this handle holds: its WC_LOCK row is gone (or has other levels) or its marker in
+    /// `.svn/tmp` is. The lock is then forgotten and its release leaves the row alone. A long
+    /// operation that relies on its lock calls this first in every transaction, so nothing is
+    /// written once the lock is gone.
+    pub fn verify_wc_lock(&self) -> Result<()> {
+        self.db.wc_lock_verify_in(self.conn)
     }
 
     // ---- reads inside the transaction ----------------------------------------------------
@@ -173,15 +184,49 @@ impl WcTxn<'_> {
         let Some(node) = self.read_base(root)? else {
             return Ok(());
         };
-        self.bump_node(node, to_i64(rev)?, depth, skipped, true, false)
+        self.bump_node(node, to_i64(rev)?, depth, skipped, None, true, false)
     }
 
+    /// [`WcTxn::bump_revisions_post_update`] after a switch of `root` to `new_repos_relpath`:
+    /// every node it bumps also gets the repository path below `new_repos_relpath` that its
+    /// place in the tree gives it, like svn's `bump_node_revision` with a new repository path.
+    /// Nodes the drive did not open (nothing changed between the old and the new location) are
+    /// moved here; so are the ones a resumed drive left at their old location because they had
+    /// no change to receive. The `skipped` subtrees and file externals keep their location.
+    pub fn bump_revisions_post_switch(
+        &self,
+        root: &RelPath,
+        rev: u64,
+        depth: Depth,
+        skipped: &[RelPath],
+        new_repos_relpath: &str,
+    ) -> Result<()> {
+        let depth = match depth {
+            Depth::Unknown | Depth::Exclude => Depth::Infinity,
+            d => d,
+        };
+        let Some(node) = self.read_base(root)? else {
+            return Ok(());
+        };
+        self.bump_node(
+            node,
+            to_i64(rev)?,
+            depth,
+            skipped,
+            Some(new_repos_relpath),
+            true,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn bump_node(
         &self,
         node: Node,
         rev: i64,
         depth: Depth,
         skipped: &[RelPath],
+        repos_relpath: Option<&str>,
         is_root: bool,
         skip_when_dir: bool,
     ) -> Result<()> {
@@ -212,6 +257,17 @@ impl WcTxn<'_> {
             )
             .map_err(sql_err)?;
         }
+        if let Some(repos) = repos_relpath
+            && node.repos_relpath.as_deref() != Some(repos)
+        {
+            super::connection::cached_exec(
+                self.conn,
+                "UPDATE nodes SET repos_path = ?3 WHERE wc_id = ?1 AND local_relpath = ?2 \
+                     AND op_depth = 0",
+                params![self.wc_id, path.as_str(), repos],
+            )
+            .map_err(sql_err)?;
+        }
         if depth == Depth::Empty
             || node.kind != NodeKind::Dir
             || matches!(
@@ -228,7 +284,23 @@ impl WcTxn<'_> {
         };
         // One query per directory; each child's row comes with it.
         for child in nodes::base_children(self.conn, self.wc_id, path)? {
-            self.bump_node(child, rev, below, skipped, false, depth == Depth::Files)?;
+            let child_repos = repos_relpath.map(|r| {
+                let name = child.relpath.file_name().unwrap_or("");
+                if r.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{r}/{name}")
+                }
+            });
+            self.bump_node(
+                child,
+                rev,
+                below,
+                skipped,
+                child_repos.as_deref(),
+                false,
+                depth == Depth::Files,
+            )?;
         }
         Ok(())
     }
@@ -763,7 +835,28 @@ impl WcTxn<'_> {
     /// its refcount) is left alone, like [`PristineIndex::record`](crate::pristine::PristineIndex::record).
     /// Also records a text staged with [`crate::pristine::PristineBatch`]. Must run before the
     /// NODES row that references the text is written, so the refcount trigger counts it.
+    ///
+    /// Also checks that the stored file exists: an existing row may be unreferenced, and
+    /// `svn cleanup` in another process vacuums such rows with their files. Within this write
+    /// transaction nobody can remove it any more (svn removes the file inside its own write
+    /// transaction, and only while the row is unreferenced), so the check holds until commit.
+    /// A missing file fails the transaction (see [`Self::record_pristine_or_restore`]).
     pub fn record_pristine(&self, record: &PristineRecord) -> Result<()> {
+        self.record_pristine_or_restore(record, None)
+    }
+
+    /// [`Self::record_pristine`] that restores a missing stored file from `spare`, a file
+    /// holding exactly the text of `record` (the copy [`Placement::AlreadyStored`] hands back);
+    /// see [`crate::pristine::ensure_stored`]. Without a usable spare the transaction fails with
+    /// [`ErrorCode::WcBusy`], nothing of it is written, and the node is fetched again by the
+    /// next update.
+    ///
+    /// [`Placement::AlreadyStored`]: crate::pristine::Placement::AlreadyStored
+    pub fn record_pristine_or_restore(
+        &self,
+        record: &PristineRecord,
+        spare: Option<&std::path::Path>,
+    ) -> Result<()> {
         let size = i64::try_from(record.size)
             .map_err(|_| SvnError::new(ErrorCode::Internal, "pristine size out of range"))?;
         super::connection::cached_exec(
@@ -777,6 +870,19 @@ impl WcTxn<'_> {
             ],
         )
         .map_err(sql_err)?;
-        Ok(())
+        let adm = self.db.wcroot().join(super::ADM_DIR);
+        match crate::pristine::ensure_stored(&adm, record, spare) {
+            Ok(_) => Ok(()),
+            Err(crate::pristine::PristineError::NotInstalled(sha1)) => Err(SvnError::new(
+                ErrorCode::WcBusy,
+                format!(
+                    "working copy was cleaned up by another client during the update or commit: \
+                     pristine text {} was removed; nothing more was written. Run the operation \
+                     again to finish it",
+                    sha1.to_hex()
+                ),
+            )),
+            Err(e) => Err(e.into()),
+        }
     }
 }
