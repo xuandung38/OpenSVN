@@ -69,7 +69,7 @@ enum TextMerge {
 impl UpdateEditor {
     pub(super) fn finish_file(
         &mut self,
-        f: FileState,
+        mut f: FileState,
         text_checksum: Option<Checksum>,
     ) -> Result<()> {
         let mut new_text = f.text.lock().unwrap_or_else(PoisonError::into_inner).take();
@@ -161,6 +161,18 @@ impl UpdateEditor {
                 )
             }
         };
+        // A file an interrupted update installed just before it stopped (see
+        // `FileState::maybe_interrupted_install`) is adopted as that update would have recorded
+        // it; anything else in the way stays an unversioned obstruction.
+        let mut adopted_stat = None;
+        if f.maybe_interrupted_install
+            && let Some(sha) = new_sha
+            && let Some(stat) = interrupted_install(&db, &wc, sha, &pm.new_pristine)?
+        {
+            f.tree_conflict = None;
+            f.adopt_existing = true;
+            adopted_stat = Some(stat);
+        }
         let old_checksum = old.as_ref().and_then(|b| b.checksum.clone());
         let text_changed = new_pristine.is_some() && new_checksum != old_checksum;
 
@@ -204,6 +216,16 @@ impl UpdateEditor {
             if f.adopt_existing && disk_exists {
                 action = UpdateAction::Existed;
                 keep_fileinfo = false;
+                if adopted_stat.is_some() {
+                    // The interrupted client set the flags before the rename; set them again
+                    // in case it stopped first.
+                    work.push(
+                        WorkItem::SyncFileFlags {
+                            relpath: rel_str.clone(),
+                        }
+                        .to_skel(),
+                    );
+                }
             } else if self.s.clean && self.below_working_layer(&db, &wc)? {
                 // A clean update adds without looking at wc.db (see `UpdateSetup::clean`), so a
                 // working layer of the user may lie over the new BASE node: a local add of the
@@ -327,13 +349,14 @@ impl UpdateEditor {
         }
 
         // 4. One transaction.
-        let (keep_size, keep_mtime) =
-            if keep_fileinfo && !keep_working_tree && !text_changed && working_file_untouched {
-                old.as_ref()
-                    .map_or((None, None), |b| (b.translated_size, b.last_mod_time))
-            } else {
-                (None, None)
-            };
+        let (keep_size, keep_mtime) = if let Some(stat) = adopted_stat {
+            stat
+        } else if keep_fileinfo && !keep_working_tree && !text_changed && working_file_untouched {
+            old.as_ref()
+                .map_or((None, None), |b| (b.translated_size, b.last_mod_time))
+        } else {
+            (None, None)
+        };
         let node = BaseNode {
             kind: NodeKind::File,
             presence: Presence::Normal,
@@ -639,6 +662,41 @@ fn install_merged(rel: &str, tmp: &tempfile::TempPath, _conflicted: bool) -> Res
         .to_skel(),
         WorkItem::FileRemove { relpath: src }.to_skel(),
     ])
+}
+
+/// When the unversioned file at `wc` is the incoming file (same kind, and the same text in
+/// repository-normal form under the incoming properties), the `(translated_size, last_mod_time)`
+/// to record for it: taken before its text is read, so a later change shows in the next status
+/// (no size for a symlink, which status always compares). `None` when it is anything else.
+fn interrupted_install(
+    db: &WcDb,
+    wc: &RelPath,
+    sha: Sha1Digest,
+    props: &Props,
+) -> Result<Option<(Option<i64>, Option<i64>)>> {
+    let path = crate::wc::abs_path(db, wc)?;
+    let Ok(md) = fs::symlink_metadata(&path) else {
+        return Ok(None);
+    };
+    let info = inspect::translate_info(props);
+    let file_type = md.file_type();
+    let kind_matches = if file_type.is_symlink() {
+        info.special
+    } else {
+        // A special file is a regular file holding `link <target>` where symlinks are missing.
+        file_type.is_file() && (cfg!(not(unix)) || !info.special)
+    };
+    // A file that cannot be read is left to the obstruction rule, which never reads it.
+    if !kind_matches || inspect::normalized_sha1(&path, &info).ok() != Some(sha.0) {
+        return Ok(None);
+    }
+    if file_type.is_symlink() {
+        return Ok(Some((None, None)));
+    }
+    Ok(Some((
+        i64::try_from(md.len()).ok(),
+        Some(inspect::mtime_micros(&md)),
+    )))
 }
 
 /// Work items that rename a file prepared by [`UpdateEditor::working_text`] into place and record
