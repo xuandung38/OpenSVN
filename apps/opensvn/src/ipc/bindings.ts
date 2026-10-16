@@ -195,17 +195,30 @@ export const commands = {
 	updaterTokenSet: (token: SecretText) => typedError<null, AppError>(__TAURI_INVOKE("updater_token_set", { token })),
 	/**  Removes the stored update token. */
 	updaterTokenClear: () => typedError<null, AppError>(__TAURI_INVOKE("updater_token_clear")),
-	/**  Whether an update token is stored (the value itself is never readable). */
-	updaterTokenStatus: () => typedError<boolean, AppError>(__TAURI_INVOKE("updater_token_status")),
-	/**  Looks for a newer app version. User initiated; there is no background check. */
-	updateCheck: () => typedError<{
-	/**  Version string. */
-	version: string,
-	/**  Release notes, if any. */
-	notes: string | null,
-} | null, AppError>(__TAURI_INVOKE("update_check")),
-	/**  Installs the update found by `update_check` and restarts the app. */
+	/**
+	 *  Whether an update token is stored, and whether the release API refused it at the last check.
+	 *  The value itself is never readable.
+	 */
+	updaterTokenStatus: () => typedError<TokenStatus, AppError>(__TAURI_INVOKE("updater_token_status")),
+	/**
+	 *  Looks for a newer app version. Started by the UI (Settings, the menu, or the daily check after
+	 *  start). Without an updater configuration in this build or without a stored token, it returns
+	 *  `notConfigured` and sends no request.
+	 */
+	updateCheck: () => typedError<UpdateCheck, AppError>(__TAURI_INVOKE("update_check")),
+	/**
+	 *  Downloads and installs the update found by `update_check`, announcing progress as
+	 *  `app://update-progress`. It does not restart: the UI asks, then calls `update_restart` (on
+	 *  Windows the installer may close the app itself).
+	 */
 	updateInstall: () => typedError<null, AppError>(__TAURI_INVOKE("update_install")),
+	/**
+	 *  Restarts the app so an installed update takes effect. Refused unless `update_install`
+	 *  succeeded in this session.
+	 */
+	updateRestart: () => typedError<null, AppError>(__TAURI_INVOKE("update_restart")),
+	/**  Version of the running app. */
+	appVersion: () => typedError<string, AppError>(__TAURI_INVOKE("app_version")),
 	/**
 	 *  Builds the diagnostics bundle in memory and returns every file's text for review. Nothing is
 	 *  written yet.
@@ -243,6 +256,7 @@ export const commands = {
 
 /** Events */
 export const events = {
+	appUpdateProgress: makeEvent<AppUpdateProgress>("app://update-progress"),
 	authPrompt: makeEvent<AuthPromptEvent>("auth://prompt"),
 	fsDropped: makeEvent<FsDropped>("fs://dropped"),
 	opFailed: makeEvent<OpFailedEvent>("op://failed"),
@@ -308,6 +322,8 @@ export type AppError = {
 	 */
 	incompleteCheckout?: IncompleteCheckout | null,
 };
+
+export type AppUpdateProgress = UpdateProgress;
 
 /**  Authentication scheme the server offers. */
 export type AuthMethodKind = "basic" | 
@@ -819,6 +835,13 @@ export type NodeStatus = "normal" | "modified" | "added" | "deleted" | "replaced
  */
 "incomplete";
 
+/**  Why a check sent no request. */
+export type NotConfiguredReason = 
+/**  This build has no (valid) updater configuration, for example a development build. */
+"build" | 
+/**  No read token is stored. */
+"token";
+
 /**  Office document families the diff knows. */
 export type OfficeKind = "word" | "excel";
 
@@ -1124,6 +1147,11 @@ export type Settings = {
 	"general.openLastWc": boolean,
 	/**  Log level of the app's own modules; other libraries stay at `info` at most. */
 	"general.logLevel": LogLevel,
+	/**
+	 *  Check for a newer app version once a day at most after start, when an update token is
+	 *  stored. The result is a toast; nothing is installed without the user.
+	 */
+	"updates.autoCheck": boolean,
 	"appearance.theme": Theme,
 	/**  Base UI font size in pixels. Range: `SETTING_RANGES`. */
 	"appearance.fontSize": number,
@@ -1201,6 +1229,11 @@ export type SettingsPatch_Deserialize = {
 	"general.openLastWc"?: boolean | null,
 	/**  Log level of the app's own modules; other libraries stay at `info` at most. */
 	"general.logLevel"?: LogLevel | null,
+	/**
+	 *  Check for a newer app version once a day at most after start, when an update token is
+	 *  stored. The result is a toast; nothing is installed without the user.
+	 */
+	"updates.autoCheck"?: boolean | null,
 	"appearance.theme"?: Theme | null,
 	/**  Base UI font size in pixels. Range: `SETTING_RANGES`. */
 	"appearance.fontSize"?: number | null,
@@ -1255,6 +1288,11 @@ export type SettingsPatch_Serialize = {
 	"general.openLastWc"?: boolean | null,
 	/**  Log level of the app's own modules; other libraries stay at `info` at most. */
 	"general.logLevel"?: LogLevel | null,
+	/**
+	 *  Check for a newer app version once a day at most after start, when an update token is
+	 *  stored. The result is a toast; nothing is installed without the user.
+	 */
+	"updates.autoCheck"?: boolean | null,
 	"appearance.theme"?: Theme | null,
 	/**  Base UI font size in pixels. Range: `SETTING_RANGES`. */
 	"appearance.fontSize"?: number | null,
@@ -1328,6 +1366,18 @@ export type TextSide = {
 
 export type Theme = "system" | "light" | "dark";
 
+/**  State of the stored update token. The value itself is never readable. */
+export type TokenStatus = 
+/**  No token is stored. */
+"missing" | 
+/**  A token is stored and was not refused. */
+"stored" | 
+/**
+ *  A token is stored but the release API refused it at the last check (wrong, expired or
+ *  without access to the releases repository).
+ */
+"rejected";
+
 /**  A certificate the user chose to trust permanently (Settings > Certificates). */
 export type TrustedCert = {
 	host: string,
@@ -1350,12 +1400,27 @@ export type UnlockRequest = {
 	breakLock: boolean | null,
 };
 
-/**  A newer version found by a check. */
-export type UpdateInfo = {
-	/**  Version string. */
-	version: string,
-	/**  Release notes, if any. */
-	notes: string | null,
+/**  Result of `update_check`. */
+export type UpdateCheck = 
+/**  The running version is the newest. */
+{ kind: "upToDate" } | 
+/**  A newer version can be installed with `update_install`. */
+{ kind: "available"; 
+/**  Version string. */
+version: string; 
+/**  Release notes, if any. */
+notes: string | null } | 
+/**  Nothing was asked: updates cannot run yet. */
+{ kind: "notConfigured"; 
+/**  What is missing. */
+reason: NotConfiguredReason };
+
+/**  Download progress of `update_install` (`app://update-progress`). */
+export type UpdateProgress = {
+	/**  Bytes downloaded so far. */
+	downloaded: Size,
+	/**  Size of the download, when the server announced it. */
+	total: Size | null,
 };
 
 export type UpdateRequest = {

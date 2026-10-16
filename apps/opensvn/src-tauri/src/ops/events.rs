@@ -6,9 +6,11 @@ use opensvn_ipc::{
 };
 use tauri_specta::Event;
 
+use crate::updater::UpdateProgress;
+
 use crate::events::{
-    AuthPromptEvent, FsDropped, OpFailedEvent, OpFinishedEvent, OpProgress, OpStarted, WcBanner,
-    WcIncoming, WcRevisionChanged, WcStatusChanged,
+    AppUpdateProgress, AuthPromptEvent, FsDropped, OpFailedEvent, OpFinishedEvent, OpProgress,
+    OpStarted, WcBanner, WcIncoming, WcRevisionChanged, WcStatusChanged,
 };
 
 /// Everything the backend pushes to the UI. Implementations must not block.
@@ -33,6 +35,8 @@ pub trait AppEvents: Send + Sync + 'static {
     fn auth_prompt(&self, prompt: &AuthPrompt);
     /// `fs://dropped`
     fn dropped(&self, dropped: &DroppedPaths);
+    /// `app://update-progress` (already throttled by the caller).
+    fn update_progress(&self, progress: &UpdateProgress);
 }
 
 /// Emits events to the WebView through Tauri.
@@ -86,6 +90,9 @@ impl<R: tauri::Runtime> AppEvents for TauriEvents<R> {
     fn auth_prompt(&self, p: &AuthPrompt) {
         emit!(self, AuthPromptEvent, p, "auth://prompt");
     }
+    fn update_progress(&self, p: &UpdateProgress) {
+        emit!(self, AppUpdateProgress, p, "app://update-progress");
+    }
 }
 
 /// One recorded event.
@@ -102,6 +109,7 @@ pub enum Recorded {
     Banner(Banner),
     Dropped(DroppedPaths),
     Auth(AuthPrompt),
+    UpdateProgress(UpdateProgress),
 }
 
 /// Collects events for assertions in tests.
@@ -143,6 +151,7 @@ impl RecordingEvents {
                 Recorded::Banner(b) => format!("banner:{}", b.wc_id.0),
                 Recorded::Dropped(d) => format!("dropped:{}", d.grants.len()),
                 Recorded::Auth(p) => format!("auth:{}", p.request_id),
+                Recorded::UpdateProgress(p) => format!("update-progress:{}", p.downloaded.0),
             })
             .collect()
     }
@@ -193,5 +202,8 @@ impl AppEvents for RecordingEvents {
     }
     fn auth_prompt(&self, p: &AuthPrompt) {
         self.push(Recorded::Auth(p.clone()));
+    }
+    fn update_progress(&self, p: &UpdateProgress) {
+        self.push(Recorded::UpdateProgress(*p));
     }
 }

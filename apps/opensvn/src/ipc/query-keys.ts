@@ -30,4 +30,6 @@ export const queryKeys = {
   opOutcomes: ["op-outcomes"] as const,
   settings: ["settings"] as const,
   engineCapabilities: ["engine-capabilities"] as const,
+  updaterToken: ["updater-token"] as const,
+  appVersion: ["app-version"] as const,
 };

@@ -204,3 +204,14 @@ fn authorization_header_is_sensitive_and_absent_without_a_token() {
     let bad = SecretString::from("a\nb".to_owned());
     assert!(request_headers(Some(&bad)).is_err());
 }
+
+#[test]
+fn a_refused_release_request_reads_as_forbidden_so_the_token_can_be_marked() {
+    // GitHub answers 401 (bad token) or 404 (private repository the token cannot see); the plugin
+    // reports both as `ReleaseNotFound`.
+    let e = check_error(tauri_plugin_updater::Error::ReleaseNotFound);
+    assert_eq!(e.code, opensvn_ipc::ErrorCode::Forbidden);
+    assert!(!e.retryable);
+    let other = check_error(tauri_plugin_updater::Error::UnsupportedOs);
+    assert_eq!(other.code, opensvn_ipc::ErrorCode::Internal);
+}

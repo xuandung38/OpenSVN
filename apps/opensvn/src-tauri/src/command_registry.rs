@@ -82,6 +82,8 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             updater_token_status,
             update_check,
             update_install,
+            update_restart,
+            app_version,
             diagnostics_preview,
             menu_set_layout,
             certs_list,
@@ -105,5 +107,6 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             WcBanner,
             AuthPromptEvent,
             FsDropped,
+            AppUpdateProgress,
         ])
 }

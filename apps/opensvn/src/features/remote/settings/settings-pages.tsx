@@ -28,7 +28,7 @@ export interface PageProps {
   set: (patch: Draft) => void;
 }
 
-function Field({
+export function Field({
   label,
   error,
   hint,
@@ -56,7 +56,7 @@ function Field({
   );
 }
 
-function Check({
+export function Check({
   label,
   checked,
   onChange,
@@ -137,7 +137,7 @@ function NumberField({
  * Two-step action without a nested modal: the first click shows the question with Confirm and
  * Cancel next to it (focus moves to Confirm), the second runs the action.
  */
-function ConfirmAction({
+export function ConfirmAction({
   label,
   ariaLabel,
   question,

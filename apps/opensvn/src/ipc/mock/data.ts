@@ -115,6 +115,7 @@ export const mockSettings: Settings = {
   "general.checkIntervalMin": 5,
   "general.language": "vi",
   "general.openLastWc": true,
+  "updates.autoCheck": true,
   "general.logLevel": "info",
   "appearance.theme": "system",
   "appearance.fontSize": 13,

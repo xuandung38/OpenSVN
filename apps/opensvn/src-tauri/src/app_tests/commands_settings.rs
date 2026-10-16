@@ -298,8 +298,12 @@ async fn logs_reveal_shows_the_app_logs_folder_only() {
 
 #[tokio::test]
 async fn updater_token_is_write_only_and_only_sent_to_the_update_check() {
+    use crate::updater::{NotConfiguredReason, TokenStatus, UpdateCheck};
     let f = Fixture::new(Duration::ZERO).await;
-    assert!(!commands::updater_token_status(f.state()).await.unwrap());
+    assert_eq!(
+        commands::updater_token_status(f.state()).await.unwrap(),
+        TokenStatus::Missing
+    );
     for bad in ["", "   ", "line\nbreak", &"x".repeat(600)] {
         assert!(
             commands::updater_token_set(f.state(), bad.to_owned().into())
@@ -311,7 +315,10 @@ async fn updater_token_is_write_only_and_only_sent_to_the_update_check() {
     commands::updater_token_set(f.state(), " ghp_secret123 ".to_owned().into())
         .await
         .unwrap();
-    assert!(commands::updater_token_status(f.state()).await.unwrap());
+    assert_eq!(
+        commands::updater_token_status(f.state()).await.unwrap(),
+        TokenStatus::Stored
+    );
     // the token is not part of the settings the UI can read
     let settings =
         serde_json::to_string(&commands::settings_get(f.state()).await.unwrap()).unwrap();
@@ -319,30 +326,158 @@ async fn updater_token_is_write_only_and_only_sent_to_the_update_check() {
 
     *f.updates.available.lock().unwrap() = Some(crate::updater::UpdateInfo {
         version: "1.2.3".into(),
-        notes: None,
+        notes: Some("Fixes".into()),
     });
-    let found = commands::update_check(f.state()).await.unwrap().unwrap();
-    assert_eq!(found.version, "1.2.3");
+    let found = commands::update_check(f.state()).await.unwrap();
+    assert_eq!(
+        found,
+        UpdateCheck::Available {
+            version: "1.2.3".into(),
+            notes: Some("Fixes".into())
+        }
+    );
     assert_eq!(
         f.updates.tokens.lock().unwrap().clone(),
         vec![Some("ghp_secret123".to_owned())]
     );
+    let json = serde_json::to_value(&found).unwrap();
+    assert_eq!(json["kind"], "available");
 
+    // Without a token: "not configured", and no request at all.
     commands::updater_token_clear(f.state()).await.unwrap();
-    assert!(!commands::updater_token_status(f.state()).await.unwrap());
-    commands::update_check(f.state()).await.unwrap();
-    assert_eq!(f.updates.tokens.lock().unwrap().last().unwrap(), &None);
+    assert_eq!(
+        commands::updater_token_status(f.state()).await.unwrap(),
+        TokenStatus::Missing
+    );
+    assert_eq!(
+        commands::update_check(f.state()).await.unwrap(),
+        UpdateCheck::NotConfigured {
+            reason: NotConfiguredReason::Token
+        }
+    );
+    assert_eq!(f.updates.tokens.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn install_requires_a_prior_check() {
+async fn a_build_without_updater_config_never_sends_a_request() {
+    use crate::updater::{NotConfiguredReason, UpdateCheck};
+    let f = Fixture::new(Duration::ZERO).await;
+    commands::updater_token_set(f.state(), "ghp_x".to_owned().into())
+        .await
+        .unwrap();
+    f.updates
+        .configured
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        commands::update_check(f.state()).await.unwrap(),
+        UpdateCheck::NotConfigured {
+            reason: NotConfiguredReason::Build
+        }
+    );
+    assert!(f.updates.tokens.lock().unwrap().is_empty());
+    assert_eq!(commands::app_version(f.state()).await.unwrap(), "0.1.0");
+}
+
+#[tokio::test]
+async fn a_refused_token_reads_as_rejected_until_it_changes_or_a_check_succeeds() {
+    use crate::updater::{TokenStatus, UpdateCheck};
+    let f = Fixture::new(Duration::ZERO).await;
+    let status = || async { commands::updater_token_status(f.state()).await.unwrap() };
+    let forbidden = || opensvn_ipc::AppError {
+        code: opensvn_ipc::ErrorCode::Forbidden,
+        ..opensvn_ipc::AppError::internal("refused")
+    };
+    commands::updater_token_set(f.state(), "ghp_old".to_owned().into())
+        .await
+        .unwrap();
+
+    *f.updates.fail_next.lock().unwrap() = Some(forbidden());
+    let err = commands::update_check(f.state()).await.unwrap_err();
+    assert_eq!(err.code, opensvn_ipc::ErrorCode::Forbidden);
+    assert_eq!(status().await, TokenStatus::Rejected);
+
+    // Another failure (offline) does not mark the token.
+    commands::updater_token_set(f.state(), "ghp_new".to_owned().into())
+        .await
+        .unwrap();
+    assert_eq!(status().await, TokenStatus::Stored);
+    *f.updates.fail_next.lock().unwrap() = Some(opensvn_ipc::AppError {
+        code: opensvn_ipc::ErrorCode::Network,
+        ..opensvn_ipc::AppError::internal("offline")
+    });
+    commands::update_check(f.state()).await.unwrap_err();
+    assert_eq!(status().await, TokenStatus::Stored);
+
+    *f.updates.fail_next.lock().unwrap() = Some(forbidden());
+    commands::update_check(f.state()).await.unwrap_err();
+    assert_eq!(status().await, TokenStatus::Rejected);
+    assert_eq!(
+        commands::update_check(f.state()).await.unwrap(),
+        UpdateCheck::UpToDate
+    );
+    assert_eq!(status().await, TokenStatus::Stored);
+
+    *f.updates.fail_next.lock().unwrap() = Some(forbidden());
+    commands::update_check(f.state()).await.unwrap_err();
+    commands::updater_token_clear(f.state()).await.unwrap();
+    assert_eq!(status().await, TokenStatus::Missing);
+}
+
+#[tokio::test]
+async fn install_requires_a_prior_check_reports_progress_and_gates_the_restart() {
+    use crate::ops::events::Recorded;
     let f = Fixture::new(Duration::ZERO).await;
     assert!(commands::update_install(f.state()).await.is_err());
+    // No restart before an install succeeded.
+    assert!(commands::update_restart(f.state()).await.is_err());
+    assert_eq!(
+        f.updates
+            .restarts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+
     *f.updates.available.lock().unwrap() = Some(crate::updater::UpdateInfo {
         version: "2.0.0".into(),
         notes: None,
     });
+    // The token was cleared after the check: refused, nothing downloaded.
+    assert!(commands::update_install(f.state()).await.is_err());
+    assert!(
+        !f.events
+            .all()
+            .iter()
+            .any(|r| matches!(r, Recorded::UpdateProgress(_)))
+    );
+    commands::updater_token_set(f.state(), "ghp_x".to_owned().into())
+        .await
+        .unwrap();
     commands::update_install(f.state()).await.unwrap();
+    let progress: Vec<u64> = f
+        .events
+        .all()
+        .into_iter()
+        .filter_map(|r| match r {
+            Recorded::UpdateProgress(p) => Some(p.downloaded.0),
+            _ => None,
+        })
+        .collect();
+    // Throttled: the first chunk, then the complete one (the middle one comes too soon).
+    assert_eq!(progress, [100, 300]);
+    assert_eq!(
+        f.updates
+            .restarts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "installing never restarts by itself"
+    );
+    commands::update_restart(f.state()).await.unwrap();
+    assert_eq!(
+        f.updates
+            .restarts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
 }
 
 #[tokio::test]

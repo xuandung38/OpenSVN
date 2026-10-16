@@ -169,6 +169,9 @@ settings_structs! {
         general_open_last_wc: bool = "general.openLastWc",
         /// Log level of the app's own modules; other libraries stay at `info` at most.
         general_log_level: LogLevel = "general.logLevel",
+        /// Check for a newer app version once a day at most after start, when an update token is
+        /// stored. The result is a toast; nothing is installed without the user.
+        updates_auto_check: bool = "updates.autoCheck",
         appearance_theme: Theme = "appearance.theme",
         /// Base UI font size in pixels. Range: `SETTING_RANGES`.
         appearance_font_size: u32 = "appearance.fontSize",

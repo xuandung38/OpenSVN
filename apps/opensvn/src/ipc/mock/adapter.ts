@@ -16,8 +16,10 @@ import {
   SETTING_RANGES,
   type Settings,
   type SettingsPatch_Deserialize,
+  type TokenStatus,
   type TrustedCertKey,
   type UnlockRequest,
+  type UpdateCheck,
 } from "../bindings";
 import { isValidEventName } from "../events";
 import { mockSettings, mockTrustedCerts } from "./data";
@@ -90,6 +92,61 @@ const serverListError = () =>
       repositories: MOCK_SERVER_REPOS,
     } satisfies AppError,
   });
+
+/**
+ * Mock updater, like the backend: the token is write-only, a check without one (or in a build
+ * without updater config) sends nothing, a refusal marks the token rejected. `setMockUpdate`
+ * picks what the next checks find.
+ */
+interface MockUpdater {
+  token: boolean;
+  rejected: boolean;
+  buildConfigured: boolean;
+  /** What a check with a token finds; `forbidden`/`offline` fail like the backend. */
+  next: { version: string; notes: string | null } | null | "forbidden" | "offline";
+  /** Whether the install fails. */
+  installFails: boolean;
+  found: boolean;
+  installed: boolean;
+  /** Requests a check would have sent (tests assert none without a token). */
+  requests: number;
+  restarts: number;
+}
+const freshUpdater = (): MockUpdater => ({
+  token: false,
+  rejected: false,
+  buildConfigured: true,
+  next: null,
+  installFails: false,
+  found: false,
+  installed: false,
+  requests: 0,
+  restarts: 0,
+});
+export const mockUpdater: MockUpdater = freshUpdater();
+export function resetMockUpdater(over: Partial<MockUpdater> = {}): void {
+  Object.assign(mockUpdater, freshUpdater(), over);
+}
+// `?update=available` (dev/mock URL): a token is stored and a newer version waits, so the update
+// dialog's main state can be seen without clicking through Settings (`pnpm test:browser`).
+if (
+  typeof location !== "undefined" &&
+  new URLSearchParams(location.search).get("update") === "available"
+) {
+  resetMockUpdater({
+    token: true,
+    next: {
+      version: "0.2.0",
+      notes:
+        "## Features\n- Faster status on large working copies\n\n## Fixes\n- Switch keeps sparse folders",
+    },
+  });
+}
+/** Delay between simulated download chunks (tests shorten it). */
+let updateChunkMs = 150;
+export function setMockUpdateChunkMs(ms: number): void {
+  updateChunkMs = ms;
+}
 
 /** A setting the mock backend refuses on Save (a backend-only rule; tests). */
 let refusedSetting: string | null = null;
@@ -486,6 +543,64 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     return ok("/Users/dev/Downloads/opensvn-diagnostics.zip");
   },
   logsReveal: () => ok(null),
+  appVersion: () => ok("0.1.0"),
+  updaterTokenStatus: () =>
+    ok<TokenStatus>(!mockUpdater.token ? "missing" : mockUpdater.rejected ? "rejected" : "stored"),
+  updaterTokenSet: (token: string) => {
+    const v = token.trim();
+    // Same rule as the backend (`updater_token_set`).
+    if (v === "" || v.length > 512 || /\p{Cc}/u.test(v)) {
+      return errCode("invalid-argument", "The token is not valid.");
+    }
+    Object.assign(mockUpdater, { token: true, rejected: false });
+    return ok(null);
+  },
+  updaterTokenClear: () => {
+    Object.assign(mockUpdater, { token: false, rejected: false });
+    return ok(null);
+  },
+  updateCheck: () => {
+    if (!mockUpdater.buildConfigured) {
+      return ok<UpdateCheck>({ kind: "notConfigured", reason: "build" });
+    }
+    if (!mockUpdater.token) return ok<UpdateCheck>({ kind: "notConfigured", reason: "token" });
+    mockUpdater.requests++;
+    const next = mockUpdater.next;
+    if (next === "forbidden") {
+      mockUpdater.rejected = true;
+      return errCode(
+        "forbidden",
+        "The release server refused the update token, or has no release yet.",
+      );
+    }
+    if (next === "offline") {
+      return errCode("network", "The release server could not be reached.");
+    }
+    mockUpdater.rejected = false;
+    mockUpdater.found = next !== null;
+    return ok<UpdateCheck>(next ? { kind: "available", ...next } : { kind: "upToDate" });
+  },
+  // Downloads in four chunks (`app://update-progress`), then succeeds without restarting.
+  updateInstall: async () => {
+    if (!mockUpdater.found) return errCode("invalid-argument", "Check for updates first.");
+    const total = 4_000_000;
+    for (let done = 1_000_000; done <= total; done += 1_000_000) {
+      await new Promise((r) => setTimeout(r, updateChunkMs));
+      mockEmit("app://update-progress", { downloaded: done, total });
+      if (mockUpdater.installFails && done >= total / 2) {
+        return errCode("internal", "The update check failed.", "connection reset");
+      }
+    }
+    mockUpdater.installed = true;
+    return { status: "ok" as const, data: null };
+  },
+  updateRestart: () => {
+    if (!mockUpdater.installed) {
+      return errCode("invalid-argument", "No update has been installed yet.");
+    }
+    mockUpdater.restarts++;
+    return ok(null);
+  },
 };
 
 // Commands are looked up lazily; anything not mocked resolves to a typed AppError instead of throwing.
