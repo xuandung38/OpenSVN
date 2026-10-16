@@ -184,15 +184,49 @@ impl WcTxn<'_> {
         let Some(node) = self.read_base(root)? else {
             return Ok(());
         };
-        self.bump_node(node, to_i64(rev)?, depth, skipped, true, false)
+        self.bump_node(node, to_i64(rev)?, depth, skipped, None, true, false)
     }
 
+    /// [`WcTxn::bump_revisions_post_update`] after a switch of `root` to `new_repos_relpath`:
+    /// every node it bumps also gets the repository path below `new_repos_relpath` that its
+    /// place in the tree gives it, like svn's `bump_node_revision` with a new repository path.
+    /// Nodes the drive did not open (nothing changed between the old and the new location) are
+    /// moved here; so are the ones a resumed drive left at their old location because they had
+    /// no change to receive. The `skipped` subtrees and file externals keep their location.
+    pub fn bump_revisions_post_switch(
+        &self,
+        root: &RelPath,
+        rev: u64,
+        depth: Depth,
+        skipped: &[RelPath],
+        new_repos_relpath: &str,
+    ) -> Result<()> {
+        let depth = match depth {
+            Depth::Unknown | Depth::Exclude => Depth::Infinity,
+            d => d,
+        };
+        let Some(node) = self.read_base(root)? else {
+            return Ok(());
+        };
+        self.bump_node(
+            node,
+            to_i64(rev)?,
+            depth,
+            skipped,
+            Some(new_repos_relpath),
+            true,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn bump_node(
         &self,
         node: Node,
         rev: i64,
         depth: Depth,
         skipped: &[RelPath],
+        repos_relpath: Option<&str>,
         is_root: bool,
         skip_when_dir: bool,
     ) -> Result<()> {
@@ -223,6 +257,17 @@ impl WcTxn<'_> {
             )
             .map_err(sql_err)?;
         }
+        if let Some(repos) = repos_relpath
+            && node.repos_relpath.as_deref() != Some(repos)
+        {
+            super::connection::cached_exec(
+                self.conn,
+                "UPDATE nodes SET repos_path = ?3 WHERE wc_id = ?1 AND local_relpath = ?2 \
+                     AND op_depth = 0",
+                params![self.wc_id, path.as_str(), repos],
+            )
+            .map_err(sql_err)?;
+        }
         if depth == Depth::Empty
             || node.kind != NodeKind::Dir
             || matches!(
@@ -239,7 +284,23 @@ impl WcTxn<'_> {
         };
         // One query per directory; each child's row comes with it.
         for child in nodes::base_children(self.conn, self.wc_id, path)? {
-            self.bump_node(child, rev, below, skipped, false, depth == Depth::Files)?;
+            let child_repos = repos_relpath.map(|r| {
+                let name = child.relpath.file_name().unwrap_or("");
+                if r.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{r}/{name}")
+                }
+            });
+            self.bump_node(
+                child,
+                rev,
+                below,
+                skipped,
+                child_repos.as_deref(),
+                false,
+                depth == Depth::Files,
+            )?;
         }
         Ok(())
     }
