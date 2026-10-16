@@ -5,6 +5,7 @@ import {
   type CopyLocationRequest,
   type DiagnosticsOptions,
   type EngineCapabilities,
+  type Layout,
   type LockRequest,
   type LogGetRequest,
   type OperationHandle,
@@ -46,6 +47,12 @@ const listeners = new Map<string, Set<Handler>>();
 export function mockEmit(name: string, payload: unknown = null): void {
   if (!isValidEventName(name)) throw new Error(`mock: illegal event name ${name}`);
   for (const h of listeners.get(name) ?? []) h(payload);
+}
+
+/** Layouts stored with `layoutSet`, by repository UUID (`resetMockLayouts` empties it). */
+const mockLayouts = new Map<string, Layout>();
+export function resetMockLayouts(): void {
+  mockLayouts.clear();
 }
 
 const ok = <T>(data: T) => Promise.resolve({ status: "ok" as const, data });
@@ -330,7 +337,22 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     ok(simulateOp("remote-edit", req.message || "Remote edit", null)),
   copyLocation: (req: CopyLocationRequest) =>
     ok(simulateOp("remote-edit", `Copy to ${req.toUrl}`, null)),
-  layoutGet: () => ok({ mode: "auto" as const }),
+  layoutGet: (repoUuid: string) => ok(mockLayouts.get(repoUuid) ?? { mode: "auto" as const }),
+  layoutSet: (repoUuid: string, layout: Layout) => {
+    mockLayouts.set(repoUuid, layout);
+    return ok(null);
+  },
+  layoutDetect: () =>
+    ok({
+      found: true,
+      layout: {
+        mode: "custom" as const,
+        trunk: "/trunk",
+        branches: ["/branches"],
+        tags: ["/tags"],
+      },
+      current: null,
+    }),
   branchesList: () => ok(mockBranches),
   accountsList: () =>
     ok([

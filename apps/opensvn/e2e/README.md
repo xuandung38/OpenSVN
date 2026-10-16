@@ -43,6 +43,29 @@ server certificate and key of `scripts/test-env/visualsvn-like.sh` (next to
 `OPENSVN_COMPAT_LOCAL_CA`, or in `OPENSVN_E2E_PROXY_CERTS`); run it after the same build with
 `xvfb-run -a node --test-timeout=600000 e2e/resume.test.mjs`.
 
+### Reliability: crash, memory, soak (#20, #21)
+
+They share `reliability.mjs`. Each one starts a private D-Bus session with an unlocked
+gnome-keyring (`dbus-launch`, `gnome-keyring-daemon`; Debian/Ubuntu: `dbus-x11 gnome-keyring`) so
+the app keeps the password across a relaunch, as on a desktop. The server must be your own Apache
+(`OPENSVN_COMPAT_LOCAL_*`, e.g. `scripts/test-env/visualsvn-like.sh up` with
+`OPENSVN_COMPAT_LOCAL_URL=https://svn.opensvn.test:18443/svn-basic`): the memory tests write the
+large repository straight into `OPENSVN_COMPAT_LOCAL_REPOS`. `OPENSVN_SVN_BIN` picks the oracle
+client (svn 1.15).
+
+| Test | Command | What |
+|---|---|---|
+| `crash.test.mjs` | `pnpm e2e:crash` (debug build, `--features failpoints`) | commit and update on the real app, SIGKILL of the app's whole process group at a random moment (`OPENSVN_CRASH_SEED`) or when a failpoint is reached; relaunch on the same profile: no "Working copy is locked"/"Run cleanup" banner, `svn status` clean or only the local edits, the commit landed at most once, the update finishes and merges |
+| `rss.test.mjs` | `pnpm e2e:rss` (release build) | 100k-file working copy: checkout, status (cold reopen), refresh, a 5k-file watcher burst, History, update of 20 revisions; peak RSS of the app process tree < 400 MB |
+| `soak.test.mjs` | `pnpm e2e:soak` (release build) | watcher and poller on a 50k-file working copy, edits every 15 s, a commit elsewhere every minute, an update every 2 minutes, for `OPENSVN_SOAK_MINUTES` (10 nightly, 120 weekly); no RSS creep |
+
+The failpoint build arms `OPENSVN_CRASH_FAILPOINT=<name>[:<hit>]` at start-up
+(`src-tauri/src/crash_hook.rs`, `failpoints` builds only): at that hit the app writes
+`OPENSVN_CRASH_MARKER` and stops there until it is killed. `OPENSVN_CRASH_ITERS` sets the kills
+per operation (default 4), `OPENSVN_CRASH_PLAN=<failpoint>:<hit>` replays one failpoint case. A
+markdown report lands in `e2e-artifacts/` (`crash-report.md`, `rss-report.md`, `soak-report.md`).
+`OPENSVN_SOAK_APP_ENV="MALLOC_ARENA_MAX=2"` (or an `LD_PRELOAD` of jemalloc) compares allocators.
+
 Every test gets a fresh scratch repository (`e2e-<test>-<pid>-<n>`) and a fresh app profile
 (`HOME`, `XDG_*_HOME` in a temp dir), so tests never share state. On failure a screenshot, the
 window text and the driver log land in `e2e-artifacts/` (`OPENSVN_E2E_ARTIFACTS`).

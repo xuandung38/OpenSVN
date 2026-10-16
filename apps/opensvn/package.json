@@ -16,6 +16,9 @@
     "lint:safety": "node scripts/lint-safety.mjs",
     "e2e": "sh e2e/run.sh",
     "e2e:hostile": "OPENSVN_E2E_FILE=e2e/hostile.test.mjs sh e2e/run.sh",
+    "e2e:crash": "OPENSVN_E2E_FILE=e2e/crash.test.mjs OPENSVN_E2E_FEATURES=failpoints OPENSVN_E2E_TIMEOUT=900000 sh e2e/run.sh",
+    "e2e:rss": "OPENSVN_E2E_FILE=e2e/rss.test.mjs OPENSVN_E2E_RELEASE=1 OPENSVN_E2E_TIMEOUT=7200000 sh e2e/run.sh",
+    "e2e:soak": "OPENSVN_E2E_FILE=e2e/soak.test.mjs OPENSVN_E2E_RELEASE=1 OPENSVN_E2E_TIMEOUT=10800000 sh e2e/run.sh",
     "test:browser": "node scripts/browser-check.mjs",
     "perf:spike": "tauri dev --config perf-tauri.conf.json"
   },

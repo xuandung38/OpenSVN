@@ -6,15 +6,10 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tauri::Manager;
-use tauri::test::{INVOKE_KEY, MockRuntime, get_ipc_response};
-use tauri::webview::InvokeRequest;
-use tauri::{
-    WebviewWindowBuilder,
-    ipc::{CallbackFn, InvokeBody},
-};
+use tauri::WebviewWindowBuilder;
 
-use super::fixture::Fixture;
-use crate::{COMMAND_NAMES, builder};
+use super::fixture::{Fixture, invoke, ipc_app};
+use crate::COMMAND_NAMES;
 
 const CONF: &str = include_str!("../../tauri.conf.json");
 const CAPABILITY: &str = include_str!("../../capabilities/default.json");
@@ -176,57 +171,6 @@ fn no_general_purpose_plugins_are_linked() {
     ] {
         assert!(!CARGO.contains(plugin), "{plugin} must not be a dependency");
     }
-}
-
-/// App with the real ACL (from `capabilities/` and the generated permissions) and a `main` window.
-fn ipc_app(f: &Fixture) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRuntime>) {
-    let reg = builder::<MockRuntime>();
-    let app = tauri::test::mock_builder()
-        .plugin(tauri_plugin_opener::init())
-        .invoke_handler(reg.invoke_handler())
-        .build(crate::app_context())
-        .unwrap();
-    let state = crate::app_state::AppState::build(crate::app_state::AppDeps {
-        data_dir: tempfile::tempdir().unwrap().keep(),
-        engine: crate::app_state::EngineSource::Ready(f.engine.clone()),
-        credentials: std::sync::Arc::new(secure_store::MemoryStore::new()),
-        events: std::sync::Arc::new(crate::ops::events::RecordingEvents::default()),
-        picker: f.picker.clone(),
-        status_timing: crate::status::StatusTiming::default(),
-        path_picker: f.paths.clone(),
-        opener: f.opener.clone(),
-        notifier: f.notifier.clone(),
-        menu: f.menu.clone(),
-        updates: f.updates.clone(),
-        secrets: f.secrets.clone(),
-        launcher: f.launcher.clone(),
-    })
-    .unwrap();
-    app.manage(state);
-    let main = WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::App("index.html".into()))
-        .build()
-        .unwrap();
-    (app, main)
-}
-
-fn invoke(
-    window: &tauri::WebviewWindow<MockRuntime>,
-    cmd: &str,
-    body: Value,
-) -> Result<Value, Value> {
-    let res = get_ipc_response(
-        window,
-        InvokeRequest {
-            cmd: cmd.into(),
-            callback: CallbackFn(0),
-            error: CallbackFn(1),
-            url: "tauri://localhost".parse().unwrap(),
-            body: InvokeBody::Json(body),
-            headers: Default::default(),
-            invoke_key: INVOKE_KEY.to_string(),
-        },
-    );
-    res.map(|b| b.deserialize::<Value>().unwrap())
 }
 
 #[tokio::test]

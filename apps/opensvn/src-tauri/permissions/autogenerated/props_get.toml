@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-props-get"
+description = "Enables the props_get command without any pre-configured scope."
+commands.allow = ["props_get"]
+
+[[permission]]
+identifier = "deny-props-get"
+description = "Denies the props_get command without any pre-configured scope."
+commands.deny = ["props_get"]

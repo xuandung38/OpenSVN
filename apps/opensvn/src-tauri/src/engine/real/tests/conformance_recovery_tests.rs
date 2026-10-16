@@ -100,6 +100,14 @@ impl EngineFacade for ClientCheckout {
     async fn resolve(&self, wc: &WcRef, req: &ResolveRequest, ctx: &OpContext) -> EngineResult<()> {
         self.0.engine.resolve(wc, req, ctx).await
     }
+    async fn props_get(
+        &self,
+        wc: &WcRef,
+        paths: &[String],
+        ctx: &OpContext,
+    ) -> EngineResult<Vec<opensvn_ipc::ItemProps>> {
+        self.0.engine.props_get(wc, paths, ctx).await
+    }
     async fn props_set(
         &self,
         wc: &WcRef,

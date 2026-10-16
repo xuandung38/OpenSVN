@@ -76,5 +76,6 @@ pub const COMMAND_NAMES: &[&str] = &[
     "set_depth",
     "upgrade_format",
     "resolve",
+    "props_get",
     "props_set",
 ];

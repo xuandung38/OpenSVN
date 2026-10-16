@@ -533,6 +533,90 @@ impl WcDb {
         Ok(removed)
     }
 
+    /// Removes the lock rows another program left (svn, TortoiseSVN, a crashed process), on the
+    /// user's explicit confirmation ("remove another program's lock" in cleanup). Returns the
+    /// directories whose row was removed, sorted.
+    ///
+    /// Never removes a lock of this application that may still be in use: rows held by this
+    /// handle are skipped, and the call fails with [`ErrorCode::WcBusy`] (removing nothing) when a
+    /// marker names this process or the ownership store reports another live (or possibly live)
+    /// process of this application for one of the rows. Only lock rows, their ownership records
+    /// and markers are touched; no file of the working copy is.
+    pub fn wc_break_foreign_locks(&self) -> Result<Vec<RelPath>> {
+        let owner = self.owner()?;
+        let root = self.canonical_root()?;
+        let _gate = self.gate();
+        let ours: BTreeSet<RelPath> = self.owned().keys().cloned().collect();
+        let rows: Vec<(String, i32)> = self.with_read(|c| {
+            let mut stmt = c
+                .prepare("SELECT local_dir_relpath, locked_levels FROM wc_lock WHERE wc_id = ?1")
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map([self.wc_id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(sql_err)?
+                .collect::<std::result::Result<Vec<(String, i32)>, _>>()
+                .map_err(sql_err)?;
+            Ok(rows)
+        })?;
+        let mut foreign: Vec<(RelPath, i32)> = Vec::new();
+        for (dir, levels) in rows {
+            let dir = RelPath::new(&dir)?;
+            if !ours.contains(&dir) {
+                foreign.push((dir, levels));
+            }
+        }
+        if foreign.is_empty() {
+            return Ok(Vec::new());
+        }
+        let markers = self.markers()?;
+        if let Some((dir, _)) = foreign.iter().find(|(dir, _)| {
+            markers.iter().any(|(_, m)| {
+                m.dir == dir.as_str() && m.pid == owner.pid && m.boot_id == owner.boot_id
+            })
+        }) {
+            return Err(busy(format!(
+                "'{dir}' is locked by an operation of this application that is still running"
+            )));
+        }
+        // Claiming the ownership record fails while another live instance of this application
+        // owns the directory; a dead owner's record is replaced. Claims are undone on failure.
+        let mut claimed: Vec<&RelPath> = Vec::new();
+        for (dir, _) in &foreign {
+            if let Err(e) = owner.store.record(&root, dir, owner.pid, &owner.boot_id) {
+                for d in claimed {
+                    let _ = owner.store.forget(&root, d);
+                }
+                return Err(e);
+            }
+            claimed.push(dir);
+        }
+        let removed = self.with_write(|tx| {
+            let mut removed = Vec::new();
+            for (dir, levels) in &foreign {
+                let n = tx
+                    .execute(
+                        "DELETE FROM wc_lock WHERE wc_id = ?1 AND local_dir_relpath = ?2 \
+                         AND locked_levels = ?3",
+                        params![self.wc_id, dir.as_str(), levels],
+                    )
+                    .map_err(sql_err)?;
+                if n > 0 {
+                    removed.push(dir.clone());
+                }
+            }
+            Ok(removed)
+        });
+        for (dir, _) in &foreign {
+            owner.store.forget(&root, dir)?;
+        }
+        let mut removed = removed?;
+        for dir in &removed {
+            self.remove_markers_for(dir);
+        }
+        removed.sort();
+        Ok(removed)
+    }
+
     /// Recovers locks of dead application processes. A row is removed only when the ownership
     /// store reports its owner dead **and** a matching marker file proves the row is the one we
     /// left; markers whose row is gone are swept. Everything else (live owners, foreign rows,

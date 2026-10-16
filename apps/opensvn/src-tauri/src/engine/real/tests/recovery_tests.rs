@@ -124,6 +124,11 @@ async fn dead_owner_record_without_marker_keeps_the_row() {
     assert!(opened.recovery.recovered.is_empty());
     assert_eq!(opened.recovery.needs_user_action, vec!["src".to_owned()]);
     assert_eq!(
+        opened.recovery.foreign_locks,
+        vec!["src".to_owned()],
+        "the row is still in place: another program may hold it"
+    );
+    assert_eq!(
         count_rows(&root, "wc_lock"),
         1,
         "never deleted without a marker"
@@ -145,6 +150,7 @@ async fn a_foreign_lock_is_reported_and_never_stolen() {
     let opened = f.engine.open_wc(&root, &ctx()).await.unwrap();
     assert!(opened.recovery.recovered.is_empty());
     assert_eq!(opened.recovery.needs_user_action, vec!["src".to_owned()]);
+    assert_eq!(opened.recovery.foreign_locks, vec!["src".to_owned()]);
     assert_eq!(count_rows(&root, "wc_lock"), 1, "never stolen");
 }
 
