@@ -16,6 +16,7 @@
     "lint:safety": "node scripts/lint-safety.mjs",
     "e2e": "sh e2e/run.sh",
     "e2e:hostile": "OPENSVN_E2E_FILE=e2e/hostile.test.mjs sh e2e/run.sh",
+    "test:browser": "node scripts/browser-check.mjs",
     "perf:spike": "tauri dev --config perf-tauri.conf.json"
   },
   "dependencies": {
@@ -47,6 +48,7 @@
     "@vitejs/plugin-react": "6.1.2",
     "axe-core": "4.13.0",
     "jsdom": "27.4.0",
+    "playwright-core": "1.56.1",
     "tailwindcss": "4.3.3",
     "typescript": "7.0.2",
     "vite": "8.3.4",

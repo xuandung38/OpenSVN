@@ -1,6 +1,7 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { type KeyboardEvent, type ReactNode, type Ref, useId, useState } from "react";
+import { type KeyboardEvent, type ReactNode, type Ref, useEffect, useId, useState } from "react";
 import { cn } from "../../lib/cn";
+import { useRowHeight } from "../../lib/ui-prefs";
 
 export interface RowContext {
   /** Stable DOM id; the listbox points `aria-activedescendant` at it. */
@@ -22,7 +23,7 @@ export interface RowContext {
  */
 export function VirtualList({
   count,
-  rowHeight,
+  rowHeight: baseRowHeight,
   renderRow,
   label,
   className,
@@ -32,6 +33,7 @@ export function VirtualList({
   onActiveChange,
 }: {
   count: number;
+  /** Height at the default font size and density; scaled by the appearance settings. */
   rowHeight: number;
   renderRow: (index: number, ctx: RowContext) => ReactNode;
   label: string;
@@ -45,6 +47,7 @@ export function VirtualList({
   /** Keyboard moved the active row (used to prefetch the next page near the end). */
   onActiveChange?: (index: number) => void;
 }) {
+  const rowHeight = useRowHeight(baseRowHeight);
   const [parent, setParent] = useState<HTMLDivElement | null>(null);
   const [active, setActive] = useState(0);
   const baseId = useId();
@@ -56,6 +59,10 @@ export function VirtualList({
     estimateSize: () => rowHeight,
     overscan: 12,
   });
+  // Font size or density changed: drop the sizes measured with the old height.
+  useEffect(() => {
+    if (rowHeight > 0) virt.measure();
+  }, [rowHeight, virt]);
 
   const move = (next: number) => {
     const i = Math.max(0, Math.min(count - 1, next));

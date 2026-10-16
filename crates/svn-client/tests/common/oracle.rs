@@ -150,14 +150,12 @@ fn parse_props(body: &[u8]) -> Vec<(String, Option<Vec<u8>>)> {
     out
 }
 
-/// Parses `svnadmin dump` output (format 2, no deltas) into per-revision fake changes. A copy
-/// (`Node-copyfrom-path`) becomes a [`FakeChange::Copy`], so the fake keeps its history, followed
-/// by the text and property changes the dump records on top of the source.
+/// Parses `svnadmin dump` output (format 2, no deltas) into per-revision fake changes.
+/// Copies keep their history (`FakeChange::Copy`); the properties of copied children are known
+/// only as far as the latest revision tells.
 pub fn parse_dump(data: &[u8]) -> Vec<Vec<FakeChange>> {
     let mut revs: Vec<Vec<FakeChange>> = Vec::new();
     let mut known_props: HashMap<String, BTreeMap<String, Vec<u8>>> = HashMap::new();
-    // Properties of every node after each revision (index = revision number), for copies.
-    let mut props_at: Vec<HashMap<String, BTreeMap<String, Vec<u8>>>> = vec![HashMap::new()];
     let mut pos = 0;
     while pos < data.len() {
         // Header block.
@@ -180,11 +178,9 @@ pub fn parse_dump(data: &[u8]) -> Vec<Vec<FakeChange>> {
         let body = &data[pos..pos + clen];
         pos += clen;
         if get("Revision-number").is_some() {
-            if get("Revision-number").as_deref() != Some("0") {
-                if !revs.is_empty() {
-                    props_at.push(known_props.clone());
-                }
-                revs.push(Vec::new());
+            revs.push(Vec::new());
+            if get("Revision-number").as_deref() == Some("0") {
+                revs.pop();
             }
             continue;
         }
@@ -203,31 +199,32 @@ pub fn parse_dump(data: &[u8]) -> Vec<Vec<FakeChange>> {
             cur.push(FakeChange::Delete(rp(&path)));
             known_props.retain(|k, _| k != &path && !k.starts_with(&format!("{path}/")));
         }
-        let copied = get("Node-copyfrom-path").map(|from| {
-            let rev: usize = get("Node-copyfrom-rev")
-                .expect("copyfrom rev")
-                .parse()
-                .expect("rev");
+        if let Some(from) = get("Node-copyfrom-path") {
+            let rev = get("Node-copyfrom-rev").expect("copyfrom-rev");
             cur.push(FakeChange::Copy {
                 from: rp(&from),
-                rev: svn_types::Revnum(rev as u64),
+                rev: svn_types::Revnum(rev.parse().expect("copyfrom-rev")),
                 to: rp(&path),
             });
-            let below = format!("{from}/");
-            for (k, v) in &props_at[rev] {
-                let target = if *k == from {
-                    path.clone()
-                } else if let Some(rest) = k.strip_prefix(&below) {
-                    format!("{path}/{rest}")
-                } else {
-                    continue;
-                };
-                known_props.insert(target, v.clone());
-            }
-        });
-        let kind = get("Node-kind")
-            .or_else(|| copied.map(|()| "copy".to_owned()))
-            .expect("kind");
+            let copied: Vec<(String, BTreeMap<String, Vec<u8>>)> = known_props
+                .iter()
+                .filter_map(|(k, v)| {
+                    let rest = if *k == from {
+                        ""
+                    } else {
+                        k.strip_prefix(&format!("{from}/"))?
+                    };
+                    let to = if rest.is_empty() {
+                        path.clone()
+                    } else {
+                        format!("{path}/{rest}")
+                    };
+                    Some((to, v.clone()))
+                })
+                .collect();
+            known_props.extend(copied);
+        }
+        let kind = get("Node-kind").expect("kind");
         let plen: usize = get("Prop-content-length").map_or(0, |v| v.parse().expect("plen"));
         let tlen: Option<usize> = get("Text-content-length").map(|v| v.parse().expect("tlen"));
         let props_body = &body[..plen];
@@ -240,14 +237,19 @@ pub fn parse_dump(data: &[u8]) -> Vec<Vec<FakeChange>> {
                 }
             }
         }
-        if kind == "dir" {
-            if copied.is_none() {
-                cur.push(FakeChange::PutDir(rp(&path)));
+        if get("Node-copyfrom-path").is_some() {
+            // The copy brought the node; only a changed text is sent.
+            if let Some(t) = text.filter(|_| kind == "file") {
+                cur.push(FakeChange::PutFile(rp(&path), t));
             }
+        } else if kind == "dir" {
+            cur.push(FakeChange::PutDir(rp(&path)));
         } else if let Some(t) = text {
             cur.push(FakeChange::PutFile(rp(&path), t));
         }
-        if plen > 0 || (copied.is_none() && (action == "add" || action == "replace")) {
+        if plen > 0
+            || ((action == "add" || action == "replace") && get("Node-copyfrom-path").is_none())
+        {
             let old = known_props.get(&path).cloned().unwrap_or_default();
             if plen > 0 {
                 for (k, v) in &new_props {

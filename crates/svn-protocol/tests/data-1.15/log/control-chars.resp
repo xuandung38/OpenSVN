@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:log-report xmlns:S="svn:" xmlns:D="DAV:">
+<S:log-item>
+<S:modified-path node-kind="file" text-mods="true" prop-mods="false">/trunk/src/deep/c.cfg</S:modified-path>
+<D:version-name>12</D:version-name>
+<D:comment encoding="base64">ZXNjIBtbMW1ib2xkG1swbSBtZXNzYWdlCg==
+</D:comment>
+<D:creator-displayname>alice</D:creator-displayname>
+<S:date>2026-10-15T15:13:10.795558Z</S:date>
+</S:log-item>
+</S:log-report>

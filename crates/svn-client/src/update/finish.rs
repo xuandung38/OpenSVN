@@ -301,14 +301,21 @@ impl UpdateEditor {
         let rev = self.rev()?;
         let db = self.s.db.clone();
         let target = self.target_wc.clone();
-        // A switch moves every node it bumps below the new location, excluded ones included
-        // (svn's `bump_node_revision`); nodes outside the depth keep their old path.
-        let switch_relpath = self.s.switch_relpath.clone();
+        let switch_to = self.s.switch_relpath.clone();
         let skipped = self.skipped.clone();
         let depth = self.s.depth;
         let sticky = self.s.sticky_depth;
         db.with_txn(|t| {
-            t.bump_revisions_post_update(&target, rev, depth, &skipped, switch_relpath.as_deref())?;
+            t.verify_wc_lock()?;
+            // A switch moves only the nodes it bumps (within the depth, outside the skipped
+            // subtrees, excluded ones included), like svn's `bump_node_revision`: nodes outside
+            // the depth keep their old location.
+            match &switch_to {
+                Some(new) => {
+                    t.bump_revisions_post_switch(&target, rev, depth, &skipped, new)?;
+                }
+                None => t.bump_revisions_post_update(&target, rev, depth, &skipped)?,
+            }
             if sticky {
                 // Directories the server had nothing to send for were never opened; they get
                 // their new depth here (svn's server opens them on a depth upgrade).

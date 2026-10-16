@@ -7,6 +7,7 @@ use svn_types::{
     Checksum, DirId, ErrorCode, FileId, PropChange, RelPath, RepoUrl, Result, Revnum, SvnError,
 };
 
+use super::repo::Tree;
 use crate::commit::{CommitEditor, CommitInfo, ReplayableSource};
 
 /// `base/rel`.
@@ -18,6 +19,29 @@ pub(super) fn join(base: &RelPath, rel: &RelPath) -> Result<RelPath> {
     } else {
         RelPath::new(&format!("{base}/{rel}"))
     }
+}
+
+/// `path` relative to `base`; `path` must be at or below `base`.
+fn strip(path: &RelPath, base: &RelPath) -> Result<RelPath> {
+    if !path.starts_with(base) {
+        return Err(SvnError::new(
+            ErrorCode::Internal,
+            format!("{path} is not below {base}"),
+        ));
+    }
+    let rest = path.as_str().get(base.as_str().len()..).unwrap_or("");
+    RelPath::new(rest.trim_start_matches('/'))
+}
+
+/// The part of `tree` at or below `base`, with paths relative to `base`.
+pub(super) fn subtree(tree: &Tree, base: &RelPath) -> Result<Tree> {
+    if base.is_root() {
+        return Ok(tree.clone());
+    }
+    tree.iter()
+        .filter(|(k, _)| k.starts_with(base))
+        .map(|(k, n)| Ok((strip(k, base)?, n.clone())))
+        .collect()
 }
 
 fn decode(seg: &str) -> Result<String> {

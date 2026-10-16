@@ -242,6 +242,25 @@ impl PristineError {
     }
 }
 
+/// What [`PristineStore::place`] did with the file it was handed.
+#[derive(Debug)]
+pub enum Placement {
+    /// The file was moved into the store.
+    Placed,
+    /// The store already held the text; the file is handed back untouched. A caller that
+    /// keeps it until its transaction commits can restore the stored text from it, should
+    /// another client remove that text in between (see
+    /// [`crate::db::WcTxn::record_pristine_or_restore`]). Dropping it removes the file.
+    AlreadyStored(tempfile::TempPath),
+}
+
+impl Placement {
+    /// True when the file was moved into the store.
+    pub fn is_placed(&self) -> bool {
+        matches!(self, Self::Placed)
+    }
+}
+
 /// Whether the store may be modified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PristineMode {
@@ -329,7 +348,8 @@ impl<I: PristineIndex> PristineStore<I> {
     }
 
     /// Moves an already hashed text file into the store **without recording its row**, and
-    /// returns whether the store already held the text (the file is then dropped).
+    /// returns whether it did, or whether the store already held the text (the file is then
+    /// handed back, see [`Placement::AlreadyStored`]).
     ///
     /// For callers that computed `record` while writing `file` (the update editor hashes the
     /// delta result as it applies it), so the text is neither copied nor hashed again. The caller
@@ -349,6 +369,11 @@ impl<I: PristineIndex> PristineStore<I> {
     /// orphan left by an earlier, interrupted run (no row, not in the set) is replaced, since it
     /// may be partial. A text with a committed row is never touched either.
     ///
+    /// A committed row may be unreferenced (refcount 0): `svn cleanup` in another process can
+    /// then remove row and file before the caller's transaction references the text. The
+    /// caller records the row with [`crate::db::WcTxn::record_pristine_or_restore`], which
+    /// checks for the file inside that transaction.
+    ///
     /// Requires the WC write lock; see the module documentation.
     pub fn place(
         &mut self,
@@ -356,16 +381,15 @@ impl<I: PristineIndex> PristineStore<I> {
         record: &PristineRecord,
         sync: bool,
         uncommitted: &mut HashSet<Sha1Digest>,
-    ) -> Result<bool, PristineError> {
+    ) -> Result<Placement, PristineError> {
         self.require_writable()?;
         match self.index.lookup(&record.sha1)? {
-            Some(row) if row.hydrated => return Ok(true),
+            Some(row) if row.hydrated => return Ok(Placement::AlreadyStored(file)),
             Some(_) => return Err(PristineError::RehydrateUnsupported(record.sha1)),
             None => {}
         }
         if uncommitted.contains(&record.sha1) && self.path_of(&record.sha1).is_file() {
-            // `file` is removed when the guard drops.
-            return Ok(true);
+            return Ok(Placement::AlreadyStored(file));
         }
         if sync {
             fs::OpenOptions::new()
@@ -396,7 +420,7 @@ impl<I: PristineIndex> PristineStore<I> {
             sync_dir(parent)?;
         }
         uncommitted.insert(record.sha1);
-        Ok(false)
+        Ok(Placement::Placed)
     }
 
     /// A writer that puts many texts into this store without recording their rows, for a
@@ -501,6 +525,49 @@ impl<I: PristineIndex> PristineStore<I> {
         }
         Ok(removed)
     }
+}
+
+/// Makes sure the text of `record` is in the store below `adm_dir`, for a transaction about to
+/// reference it. Returns `Ok(false)` when the file was there, `Ok(true)` when it was missing and
+/// was restored from `spare` (a file holding exactly that text, hashed when it was written;
+/// synced, renamed into place, made read-only, directory synced, so it is durable before the
+/// transaction commits), and [`PristineError::NotInstalled`] when it is missing and no spare
+/// is left. Never removes anything.
+pub(crate) fn ensure_stored(
+    adm_dir: &Path,
+    record: &PristineRecord,
+    spare: Option<&Path>,
+) -> Result<bool, PristineError> {
+    let dest = text_path(adm_dir, &record.sha1);
+    if fs::symlink_metadata(&dest).is_ok_and(|m| m.file_type().is_file()) {
+        return Ok(false);
+    }
+    let Some(src) = spare.filter(|p| fs::symlink_metadata(p).is_ok_and(|m| m.is_file())) else {
+        return Err(PristineError::NotInstalled(record.sha1));
+    };
+    let file = File::open(src).map_err(PristineError::io("open", src))?;
+    let len = file
+        .metadata()
+        .map_err(PristineError::io("stat", src))?
+        .len();
+    if len != record.size {
+        return Err(PristineError::ChecksumMismatch {
+            expected: format!("{} bytes", record.size),
+            actual: format!("{len} bytes"),
+        });
+    }
+    file.sync_all().map_err(PristineError::io("sync", src))?;
+    drop(file);
+    let parent = dest.parent().unwrap_or(adm_dir);
+    fs::create_dir_all(parent).map_err(PristineError::io("create directory", parent))?;
+    rename_replacing(src, &dest)?;
+    let mut perms = fs::metadata(&dest)
+        .map_err(PristineError::io("stat", &dest))?
+        .permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&dest, perms).map_err(PristineError::io("set permissions of", &dest))?;
+    sync_dir(parent)?;
+    Ok(true)
 }
 
 /// Where the text with checksum `sha1` lives below the administrative directory `adm_dir`.

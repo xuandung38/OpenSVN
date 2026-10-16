@@ -1,0 +1,10 @@
+REPORT /svn/basic/!svn/rvr/10/trunk HTTP/1.1
+Host: svn.test.local
+User-Agent: SVN/1.15.0 (x86_64-pc-linux-gnu) serf/1.3.10
+Content-Type: text/xml
+DAV: http://subversion.tigris.org/xmlns/dav/svn/depth
+DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo
+DAV: http://subversion.tigris.org/xmlns/dav/svn/log-revprops
+Content-Length: 222
+
+<S:log-report xmlns:S="svn:"><S:start-revision>10</S:start-revision><S:end-revision>0</S:end-revision><S:limit>5</S:limit><S:discover-changed-paths/><S:all-revprops/><S:path></S:path><S:encode-binary-props/></S:log-report>

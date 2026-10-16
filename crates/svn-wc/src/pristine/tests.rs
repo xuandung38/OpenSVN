@@ -483,7 +483,11 @@ fn place_never_replaces_a_text_placed_but_not_committed() {
     let (_d, mut st) = store();
     let mut uncommitted = HashSet::new();
     let (first, rec) = placed_text(&st, b"same text\n");
-    assert!(!st.place(first, &rec, false, &mut uncommitted).unwrap());
+    assert!(
+        st.place(first, &rec, false, &mut uncommitted)
+            .unwrap()
+            .is_placed()
+    );
     assert!(uncommitted.contains(&rec.sha1));
     let dest = st.path_of(&rec.sha1);
     let (ino, mtime) = (
@@ -495,16 +499,26 @@ fn place_never_replaces_a_text_placed_but_not_committed() {
     // the stored file stays the one the earlier barrier covers; the new copy is dropped.
     let (second, again) = placed_text(&st, b"same text\n");
     let second_path = second.to_path_buf();
-    assert!(st.place(second, &again, false, &mut uncommitted).unwrap());
+    let Placement::AlreadyStored(spare) =
+        st.place(second, &again, false, &mut uncommitted).unwrap()
+    else {
+        panic!("placed over an uncommitted text");
+    };
     assert_eq!(inode(&dest), ino, "renamed over an uncommitted text");
     assert_eq!(std::fs::metadata(&dest).unwrap().modified().unwrap(), mtime);
+    assert!(second_path.exists(), "the copy is handed back");
+    drop(spare);
     assert!(!second_path.exists(), "the dropped copy is removed");
     assert_eq!(std::fs::read(&dest).unwrap(), b"same text\n");
 
     // Committed: the row answers first and nothing is renamed either.
     st.index.record(&rec).unwrap();
     let (third, again) = placed_text(&st, b"same text\n");
-    assert!(st.place(third, &again, false, &mut uncommitted).unwrap());
+    assert!(
+        !st.place(third, &again, false, &mut uncommitted)
+            .unwrap()
+            .is_placed()
+    );
     assert_eq!(inode(&dest), ino);
 }
 
@@ -518,13 +532,21 @@ fn place_replaces_an_orphan_of_an_earlier_run() {
     std::fs::write(&dest, b"hel").unwrap(); // partial leftover: no row, not placed by this drive
     let ino = inode(&dest);
     let mut uncommitted = HashSet::new();
-    assert!(!st.place(file, &rec, false, &mut uncommitted).unwrap());
+    assert!(
+        st.place(file, &rec, false, &mut uncommitted)
+            .unwrap()
+            .is_placed()
+    );
     assert_ne!(inode(&dest), ino);
     assert_eq!(std::fs::read(&dest).unwrap(), b"hello\n");
 
     // A text in the set whose file has gone missing is placed again.
     std::fs::remove_file(&dest).unwrap();
     let (file, rec) = placed_text(&st, b"hello\n");
-    assert!(!st.place(file, &rec, false, &mut uncommitted).unwrap());
+    assert!(
+        st.place(file, &rec, false, &mut uncommitted)
+            .unwrap()
+            .is_placed()
+    );
     assert_eq!(std::fs::read(&dest).unwrap(), b"hello\n");
 }

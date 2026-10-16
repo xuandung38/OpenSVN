@@ -144,6 +144,10 @@ test("diff: text opens the editor, unified toggles, binary / too complex / too l
   expect(screen.getByTestId("editor").getAttribute("data-mode")).toBe("unified");
 
   await user().click(await option(/hero-diffuse\.png/));
+  expect(await screen.findByRole("group", { name: "Image comparison" })).toBeTruthy();
+  expect(screen.queryByTestId("editor")).toBeNull();
+
+  await user().click(await option(/crate\.fbx/));
   expect(await screen.findByText("Binary file")).toBeTruthy();
   expect(screen.queryByTestId("editor")).toBeNull();
 

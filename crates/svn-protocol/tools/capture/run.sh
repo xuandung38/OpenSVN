@@ -1,20 +1,87 @@
 #!/usr/bin/env bash
 # Records raw svn <-> mod_dav_svn traffic into $OUT/<step>.jsonl via proxy.py.
-# Requires: docker, svn client, python3. Usage: ./run.sh OUT_DIR
+# Requires: svn client, python3, and either docker (default) or a native Apache 2.4.
+# Usage: ./run.sh OUT_DIR
+#
+# Native server instead of docker, e.g. mod_dav_svn 1.15.0 from docker/nix/subversion-1.15.nix:
+#   CAPTURE_HTTPD=/path/to/httpd             Apache 2.4 binary
+#   CAPTURE_HTTPD_MODULES=/path/to/modules   directory holding mod_dav.so, mod_auth_basic.so, ...
+#   CAPTURE_SVN_MODULES=/path/to/modules     directory holding mod_dav_svn.so
+# svnadmin and htpasswd on PATH are used for the server side, so put that server's first.
 set -euo pipefail
-export LC_ALL=en_US.UTF-8
+# Unicode file names need a UTF-8 locale; C.UTF-8 where en_US.UTF-8 is not installed.
+if locale -a 2>/dev/null | grep -qi "^en_US.utf-\?8$"; then export LC_ALL=en_US.UTF-8; else export LC_ALL=C.UTF-8; fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${1:?out dir}"; mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
-WORK="$(mktemp -d)"; trap 'kill ${PROXY:-} 2>/dev/null || true; docker rm -f opensvn-capture >/dev/null 2>&1 || true' EXIT
-docker image inspect opensvn-capture >/dev/null 2>&1 || docker build -q -t opensvn-capture "$HERE" >/dev/null
-docker rm -f opensvn-capture >/dev/null 2>&1 || true
-docker run -d --name opensvn-capture -p 127.0.0.1:18080:80 opensvn-capture >/dev/null
-sleep 3
-docker exec opensvn-capture htpasswd -b /repos/htpasswd bob hunter2 >/dev/null
-docker exec opensvn-capture sh -c 'echo "#!/bin/sh
+WORK="$(mktemp -d)"; chmod 755 "$WORK"
+cleanup() {
+  kill ${PROXY:-} 2>/dev/null || true
+  if [ -n "${CAPTURE_HTTPD:-}" ]; then
+    [ -f "$WORK/srv/httpd.pid" ] && kill "$(cat "$WORK/srv/httpd.pid")" 2>/dev/null || true
+  else
+    docker rm -f opensvn-capture >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+if [ -n "${CAPTURE_HTTPD:-}" ]; then
+  # The same server as Dockerfile + dav_svn.conf + entrypoint.sh, run on the host.
+  S="$WORK/srv"; mkdir -p "$S/repos" "$S/logs"
+  svnadmin create "$S/repos/repo"
+  printf '#!/bin/sh\nexit 0\n' > "$S/repos/repo/hooks/pre-revprop-change"
+  chmod +x "$S/repos/repo/hooks/pre-revprop-change"
+  htpasswd -bc "$S/repos/htpasswd" alice secret 2>/dev/null
+  htpasswd -b "$S/repos/htpasswd" bob hunter2 2>/dev/null
+  M="${CAPTURE_HTTPD_MODULES:?}"; SM="${CAPTURE_SVN_MODULES:?}"
+  user_conf=""
+  if [ "$(id -u)" = 0 ]; then
+    chown -R nobody "$S/repos"
+    user_conf="User nobody
+Group $(id -gn nobody)"
+  fi
+  cat > "$S/httpd.conf" <<EOF
+ServerRoot "$S"
+ServerName svn.test.local
+Listen 127.0.0.1:18080
+PidFile "$S/httpd.pid"
+ErrorLog "$S/logs/error.log"
+LoadModule mpm_event_module $M/mod_mpm_event.so
+LoadModule unixd_module $M/mod_unixd.so
+LoadModule authn_core_module $M/mod_authn_core.so
+LoadModule authz_core_module $M/mod_authz_core.so
+LoadModule authn_file_module $M/mod_authn_file.so
+LoadModule authz_user_module $M/mod_authz_user.so
+LoadModule auth_basic_module $M/mod_auth_basic.so
+LoadModule dav_module $M/mod_dav.so
+LoadModule dav_svn_module $SM/mod_dav_svn.so
+LoadModule authz_svn_module $SM/mod_authz_svn.so
+$user_conf
+<Location /svn/repo>
+  DAV svn
+  SVNPath "$S/repos/repo"
+  SVNAllowBulkUpdates Prefer
+  AuthType Basic
+  AuthName "OpenSVN Capture"
+  AuthUserFile "$S/repos/htpasswd"
+  Require valid-user
+</Location>
+EOF
+  "$CAPTURE_HTTPD" -f "$S/httpd.conf" -k start
+  for _ in $(seq 50); do [ -s "$S/httpd.pid" ] && break; sleep 0.1; done
+  [ -s "$S/httpd.pid" ] || { cat "$S/logs/error.log" >&2; exit 1; }
+  "$CAPTURE_HTTPD" -v | head -1 > "$OUT/server-version.txt"
+  svnadmin --version | head -1 >> "$OUT/server-version.txt"
+else
+  docker image inspect opensvn-capture >/dev/null 2>&1 || docker build -q -t opensvn-capture "$HERE" >/dev/null
+  docker rm -f opensvn-capture >/dev/null 2>&1 || true
+  docker run -d --name opensvn-capture -p 127.0.0.1:18080:80 opensvn-capture >/dev/null
+  sleep 3
+  docker exec opensvn-capture htpasswd -b /repos/htpasswd bob hunter2 >/dev/null
+  docker exec opensvn-capture sh -c 'echo "#!/bin/sh
 exit 0" > /repos/repo/hooks/pre-revprop-change && chmod +x /repos/repo/hooks/pre-revprop-change'
-docker exec opensvn-capture apache2ctl -v | head -1 > "$OUT/server-version.txt"
-docker exec opensvn-capture svnadmin --version | head -1 >> "$OUT/server-version.txt"
+  docker exec opensvn-capture apache2ctl -v | head -1 > "$OUT/server-version.txt"
+  docker exec opensvn-capture svnadmin --version | head -1 >> "$OUT/server-version.txt"
+fi
+svn --version | head -1 > "$OUT/client-version.txt"
 python3 "$HERE/proxy.py" 18081 18080 "$WORK/cur.jsonl" & PROXY=$!
 sleep 1
 U=http://127.0.0.1:18081/svn/repo
@@ -122,7 +189,8 @@ step update-sparse svn "${A[@]}" update --set-depth infinity "$SW/fresh"
 # (svn refuses control characters in lock comments, so locks cannot be recorded that way.)
 printf 'esc \033[1mbold\033[0m message\n' > "$WORK/esc-msg.txt"
 CC="$WORK/cc"; svn "${A[@]}" checkout -q $U/trunk "$CC"
-echo esc >> "$CC/src/b.txt"
+# src/b.txt is gone since commit-full and a.txt is locked by the mixed WC: edit an unlocked file.
+echo esc >> "$CC/src/deep/c.cfg"
 step commit-control-chars svn "${A[@]}" commit -q -F "$WORK/esc-msg.txt" "$CC"
 step log-control-chars svn "${A[@]}" log --xml -v -l 1 $U/trunk
 echo "done"; ls "$OUT"

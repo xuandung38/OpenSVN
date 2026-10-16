@@ -21,7 +21,7 @@ use svn_types::{
 use tokio::io::AsyncWrite;
 
 use super::update::RaWire;
-use super::{commit, file_revs, locks, log, read, update};
+use super::{commit, file_revs, history, locks, log, read, update};
 use crate::transport::HttpTransport;
 
 /// Repository session over Subversion's HTTP protocol v2 (mod_dav_svn 1.8 and newer).
@@ -230,15 +230,6 @@ impl RaSession for HttpRaSession {
         log::log(&self.wire, req, on_entry, cancel).await
     }
 
-    async fn location_segments(
-        &self,
-        repos_path: &RelPath,
-        peg: Revnum,
-        cancel: &CancelToken,
-    ) -> Result<Vec<LocationSegment>> {
-        super::history::location_segments(&self.wire, repos_path, peg, cancel).await
-    }
-
     async fn get_locks(
         &self,
         path: &RelPath,
@@ -278,6 +269,17 @@ impl RaSession for HttpRaSession {
         cancel: &CancelToken,
     ) -> Result<()> {
         file_revs::file_revs(&self.wire, path, start, end, handler, cancel).await
+    }
+
+    async fn get_location_segments(
+        &self,
+        path: &RelPath,
+        peg: Option<Revnum>,
+        start: Option<Revnum>,
+        end: Option<Revnum>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<LocationSegment>> {
+        history::location_segments(&self.wire, path, peg, start, end, cancel).await
     }
 
     async fn do_update(

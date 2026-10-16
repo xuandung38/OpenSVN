@@ -472,16 +472,6 @@ impl RaSession for FakeRaSession {
         Ok(())
     }
 
-    async fn location_segments(
-        &self,
-        repos_path: &RelPath,
-        peg: Revnum,
-        cancel: &CancelToken,
-    ) -> Result<Vec<LocationSegment>> {
-        cancel.check()?;
-        self.guard().location_segments(repos_path, peg)
-    }
-
     async fn get_locks(
         &self,
         path: &RelPath,
@@ -637,6 +627,18 @@ impl RaSession for FakeRaSession {
             }
         }
         Ok(())
+    }
+
+    async fn get_location_segments(
+        &self,
+        path: &RelPath,
+        peg: Option<Revnum>,
+        start: Option<Revnum>,
+        end: Option<Revnum>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<LocationSegment>> {
+        cancel.check()?;
+        self.guard().location_segments(path, peg, start, end)
     }
 
     async fn do_update(

@@ -6,6 +6,7 @@ import { createEventBus, type EventBus } from "../ipc/events";
 import { useSettings } from "../ipc/queries";
 import { detectLang, I18nProvider } from "../lib/i18n/i18n";
 import { applyTheme, readTheme } from "../lib/theme";
+import { UiPrefsProvider } from "../lib/ui-prefs";
 
 export function createQueryClient(): QueryClient {
   return new QueryClient({
@@ -22,14 +23,19 @@ export function useEventBus(): EventBus {
   return bus;
 }
 
-/** UI language: the saved setting once loaded, otherwise the OS locale. */
+/** UI language: the saved setting once loaded, otherwise the OS locale. Also applies font size,
+ * density and tab width. */
 function SettingsI18n({ children }: { children: ReactNode }) {
   const { data } = useSettings();
   const lang = data?.["general.language"] ?? detectLang(navigator.language);
   useEffect(() => {
     document.documentElement.lang = lang;
   }, [lang]);
-  return <I18nProvider lang={lang}>{children}</I18nProvider>;
+  return (
+    <I18nProvider lang={lang}>
+      <UiPrefsProvider settings={data}>{children}</UiPrefsProvider>
+    </I18nProvider>
+  );
 }
 
 /** App-wide providers: theme bootstrap, TanStack Query, backend event bus -> cache, toasts. */

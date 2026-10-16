@@ -26,7 +26,7 @@ fn all_codes() -> Vec<SvnErrorCode> {
         RepositoryMoved,
         PristineNotHydrated,
         WcInvalidOperation,
-        NoCommonAncestry,
+        UnrelatedResources,
         PathNotFound,
         UnsafePath,
         DiskFull,
@@ -45,7 +45,7 @@ fn all_codes() -> Vec<SvnErrorCode> {
             Network | Timeout | AuthRequired | NegotiateFailed | Forbidden | TlsUntrusted
             | OutOfDate | LockedByOther | LockTokenInvalid | WcBusy | WcNeedsCleanup
             | WcFormatUnsupported | NotAWorkingCopy | ConflictBlocksCommit | HookFailed
-            | RepositoryMoved | PristineNotHydrated | WcInvalidOperation | NoCommonAncestry
+            | RepositoryMoved | PristineNotHydrated | WcInvalidOperation | UnrelatedResources
             | PathNotFound | UnsafePath | DiskFull | PermissionDenied | FileInUse | Cancelled
             | CommitOutcomeUnknown | WriteOutcomeUnknown | LimitExceeded | Corrupt
             | ProtocolViolation | ServerUnsupported | Internal => v.push(c),

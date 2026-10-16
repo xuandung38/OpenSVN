@@ -152,7 +152,7 @@ impl Engine {
             &RepoUrl::parse(target)?,
             None,
             Depth::Unknown,
-            // The branch is a copy of the switched directory: the ancestry check passes.
+            // The branch is a copy of the folder: the ancestry check passes, as for `svn switch`.
             false,
             &CancelToken::new(),
         )

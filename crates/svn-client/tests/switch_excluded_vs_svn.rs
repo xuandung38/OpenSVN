@@ -21,8 +21,8 @@ async fn switch_keeps_an_excluded_child() {
     write(&seed.join("A/Y/y"), "y\n");
     repo.svn(&seed, &["add", "-q", "A"]);
     repo.svn(&seed, &["commit", "-q", "-m", "r1"]);
-    // B: the same tree, added on its own (the fake session replays no copies; svn switches with
-    // --ignore-ancestry, as the engine's drive does here).
+    // B: the same tree, added on its own: it shares no history with A, so both clients switch
+    // with --ignore-ancestry.
     write(&seed.join("B/f"), "f\n");
     write(&seed.join("B/X/x"), "x\n");
     write(&seed.join("B/Y/y"), "y\n");
@@ -75,7 +75,6 @@ async fn switch_keeps_an_excluded_child() {
             &b,
             Some(Revnum(rev)),
             Depth::Unknown,
-            // B has no copy history in the fake: like svn's --ignore-ancestry above.
             true,
             &cancel,
         )

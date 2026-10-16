@@ -277,6 +277,26 @@ async fn diagnostics_preview_then_export_through_a_native_save_dialog() {
 }
 
 #[tokio::test]
+async fn logs_reveal_shows_the_app_logs_folder_only() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let logs = f.state().data_dir.join("logs");
+    // Nothing logged yet: the folder is created and shown itself.
+    commands::logs_reveal(f.state()).await.unwrap();
+    assert!(logs.is_dir());
+    std::fs::write(logs.join(crate::logging::LOG_FILE), b"line\n").unwrap();
+    // Then the current log is selected inside it.
+    commands::logs_reveal(f.state()).await.unwrap();
+    let calls = f.opener.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls,
+        [
+            format!("reveal {}", logs.display()),
+            format!("reveal {}", logs.join(crate::logging::LOG_FILE).display()),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn updater_token_is_write_only_and_only_sent_to_the_update_check() {
     let f = Fixture::new(Duration::ZERO).await;
     assert!(!commands::updater_token_status(f.state()).await.unwrap());
@@ -408,4 +428,47 @@ async fn diff_external_needs_a_configured_tool_and_launches_it_on_read_only_copi
     .unwrap_err();
     assert_eq!(err.code, opensvn_ipc::ErrorCode::InvalidArgument);
     assert_eq!(f.launcher.launched.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn clear_cache_drops_status_snapshots_and_keeps_settings_and_certificates() {
+    use opensvn_ipc::{FileKind, FileStatus, NodeStatus, PropStatus, WcId};
+    let f = Fixture::new(Duration::ZERO).await;
+    let status = &f.state().status;
+    // The publisher's own `cache.sqlite`, opened a second time to seed a snapshot.
+    let cache = crate::db::CacheDb::open(&f.state().data_dir).unwrap();
+    let wc = WcId("w1".into());
+    let row = FileStatus {
+        path: "a.txt".into(),
+        kind: FileKind::File,
+        text: NodeStatus::Modified,
+        props: PropStatus::None,
+        tree_conflict: false,
+        moved_from: None,
+        moved_to: None,
+        changelist: None,
+        lock: None,
+        needs_lock: false,
+        remote: None,
+        binary: false,
+        size: None,
+    };
+    cache.status_snapshot_replace(&wc, &[row]).unwrap();
+    assert!(status.cached(&wc).unwrap().is_some());
+    f.state()
+        .db
+        .cert_trust("svn.test.local", 8443, &"ab".repeat(32), "CN=svn", "")
+        .unwrap();
+    commands::settings_set(
+        f.state(),
+        patch(serde_json::json!({"diff.tabWidth": 8})).into(),
+    )
+    .await
+    .unwrap();
+
+    commands::cache_clear(f.state()).await.unwrap();
+
+    assert!(status.cached(&wc).unwrap().is_none());
+    assert_eq!(commands::certs_list(f.state()).await.unwrap().len(), 1);
+    assert_eq!(f.state().settings.get().diff_tab_width, 8);
 }

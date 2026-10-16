@@ -335,11 +335,9 @@ pub trait EngineFacade: Send + Sync {
     /// on them fail at once (as a broken connection, which a checkout or update resumes) and
     /// idle connections are dropped. The default does nothing.
     fn system_woke(&self) {}
-    /// Switches to `url`; returns the revision reached.
-    ///
-    /// Like `svn switch`, a `url` that shares no history with the working copy (not a branch or
-    /// tag of its line of development) is refused with `ErrorCode::NoCommonAncestry` before
-    /// anything changes, unless `ignore_ancestry` is set (`--ignore-ancestry`).
+    /// Switches to `url`; returns the revision reached. Unless `ignore_ancestry`, a `url` that
+    /// shares no history with the working copy is refused with `UnrelatedResources` (svn
+    /// E195012) and nothing changes.
     async fn switch(
         &self,
         wc: &WcRef,

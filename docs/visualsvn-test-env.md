@@ -156,6 +156,50 @@ that commit nothing new, and an update must finish it once the connection works 
 asserts the number of cuts, so run it against the server directly, not through another faulty
 proxy.
 
+### The whole suite through the proxy, with explicit expectations
+
+Run `real_engine_dav` through the proxy in each fault mode with the faults and the proxy log
+named, one test at a time (the proxy's cut counter is shared by all connections, so parallel
+tests would make the cut pattern random):
+
+```sh
+D=/tmp/opensvn-visualsvn F="--reset-after 2 --idle-reset 2"
+python3 scripts/test-env/flaky-tls-proxy.py --listen 18461 --upstream svn.opensvn.test:18443 \
+  --cert $D/certs/server.crt --key $D/certs/server.key --ca $D/certs/ca.crt \
+  --log-requests $F 2>/tmp/proxy.log &
+OPENSVN_COMPAT_FAULTS="$F" OPENSVN_COMPAT_PROXY_LOG=/tmp/proxy.log \
+OPENSVN_COMPAT_LOCAL_URL=https://svn.opensvn.test:18461/svn-basic \
+  cargo test -p opensvn --features real-engine,engine-conformance --test real_engine_dav \
+  -- --ignored --test-threads=1
+```
+
+Modes used for the PR tables: `--reset-after 2`, `--idle-reset 2`, both, `--stale-after 2`,
+`--truncate-every 2 --truncate-at 1024 --truncate-method REPORT,GET`.
+
+- Reads must succeed: they are sent again on a fresh connection, and checkout, update, switch
+  and the streamed reads resume.
+- A write is never sent twice (#166). When the proxy breaks a connection under a write, the
+  write fails with an unknown outcome or the connection failure. `write_op!`
+  (`engine/conformance.rs`) then checks with the proxy log that a write really met the fault,
+  that no write request line repeats, and with `svnadmin lstxns` that no transaction is left.
+  The scenario then ends ("ends as designed" in the output), because repeating the write would
+  meet the same fault (`--reset-after 2` resets the third request of every connection, and a
+  commit sends more writes than that over one connection). The rest of the scenario is covered
+  by the direct run.
+- The tests that start their own proxy skip themselves when `OPENSVN_COMPAT_FAULTS` is set.
+
+### A switch cut off mid-answer
+
+`switch_cut_mid_answer_resumes_until_done` cuts every `REPORT` answer after 128 KiB. Each
+resumed drive gets further, and the switch finishes with every node below the branch and the
+local edits kept. `switch_cut_at_the_same_offset_is_finished_by_the_same_switch` always cuts
+inside a 2 MiB file. The switch gives up after two resumes that commit nothing new and leaves
+the working copy half-switched but consistent (the root at the branch, `incomplete`). The same
+switch finishes it once the connection works. In the app, `dav_resume`'s
+`a_switch_cut_for_good_is_finished_by_continue_switch` does the same through the commands
+("Continue switch", from the `switch_journal` table) and compares the result with
+`svn checkout` of the branch.
+
 ### Network outage during a checkout (`dav_resume`)
 
 `apps/opensvn/src-tauri/src/app_tests/dav_resume.rs` drives the whole app (commands, operation

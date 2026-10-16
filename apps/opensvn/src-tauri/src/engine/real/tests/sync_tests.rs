@@ -277,8 +277,8 @@ async fn switch_moves_the_working_copy_within_the_repository_only() {
         .await
         .unwrap();
 
-    // The branch was seeded on its own, not copied from trunk: without ignoring ancestry the
-    // switch is refused before anything changes, as `svn switch` refuses it.
+    // The branch was added on its own, not copied from trunk: it shares no history with the
+    // working copy, so a switch is refused (svn E195012) and changes nothing...
     let err =
         s.f.engine
             .switch(
@@ -290,9 +290,12 @@ async fn switch_moves_the_working_copy_within_the_repository_only() {
             )
             .await
             .unwrap_err();
-    assert_eq!(err.code, ErrorCode::NoCommonAncestry, "{err}");
+    assert_eq!(err.code, ErrorCode::UnrelatedResources, "{err}");
     assert_eq!(err.svn_code, Some(195_012), "{err}");
     assert_eq!(read(&wc.join("README.md")), "hello\n");
+    let info = s.f.engine.wc_info(&wc, &ctx()).await.unwrap();
+    assert_eq!(info.url, format!("{URL}/trunk"));
+    // ...unless the ancestry check is turned off.
     let rev =
         s.f.engine
             .switch(
@@ -343,7 +346,7 @@ async fn switch_moves_the_working_copy_within_the_repository_only() {
     ] {
         let err =
             s.f.engine
-                .switch(&wc_ref(&wc), other, None, true, &ctx())
+                .switch(&wc_ref(&wc), other, None, false, &ctx())
                 .await
                 .unwrap_err();
         assert_eq!(err.code, ErrorCode::WcInvalidOperation, "{other}: {err}");
@@ -836,14 +839,6 @@ impl RaSession for GatedSession {
     ) -> Result<(), SvnError> {
         self.inner.log(req, on_entry, cancel).await
     }
-    async fn location_segments(
-        &self,
-        repos_path: &RelPath,
-        peg: Revnum,
-        cancel: &CancelToken,
-    ) -> Result<Vec<svn_ra_api::LocationSegment>, SvnError> {
-        self.inner.location_segments(repos_path, peg, cancel).await
-    }
     async fn get_locks(
         &self,
         path: &RelPath,
@@ -883,6 +878,18 @@ impl RaSession for GatedSession {
     ) -> Result<(), SvnError> {
         self.inner
             .file_revs(path, start, end, handler, cancel)
+            .await
+    }
+    async fn get_location_segments(
+        &self,
+        path: &RelPath,
+        peg: Option<Revnum>,
+        start: Option<Revnum>,
+        end: Option<Revnum>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<svn_ra_api::LocationSegment>, SvnError> {
+        self.inner
+            .get_location_segments(path, peg, start, end, cancel)
             .await
     }
     async fn do_update(

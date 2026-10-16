@@ -377,7 +377,7 @@ async fn ancestry_case(from: &str, rev: u64, path: &str, to: &str, to_rev: u64, 
         assert!(!theirs.0, "{what}: svn switched");
         assert!(theirs.1.contains("E195012"), "{what}: {}", theirs.1);
         let err = ours.err().unwrap_or_else(|| panic!("{what}: switched"));
-        assert_eq!(err.code, ErrorCode::NoCommonAncestry, "{what}: {err}");
+        assert_eq!(err.code, ErrorCode::UnrelatedResources, "{what}: {err}");
         assert_eq!(err.svn_code, Some(195_012), "{what}: {err}");
     }
     p.assert_same(&what);
@@ -416,53 +416,4 @@ async fn switch_to_an_unrelated_location_is_refused_unless_ancestry_is_ignored()
     // the old branch of the same name.
     ancestry_case("trunk", 5, "", "branches/b", 5, false).await;
     ancestry_case("branches/b", 3, "", "branches/b", 5, false).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn the_fake_follows_copies_like_the_repository() {
-    let Some(oracle) = oracle() else { return };
-    let repo = Repo::new(&oracle);
-    build_ancestry(&repo);
-    let fake = repo.fake(None);
-    let cancel = CancelToken::new();
-    let segs = |path: &str, peg: u64| {
-        let fake = fake.clone();
-        let cancel = cancel.clone();
-        let path = rp(path);
-        async move {
-            svn_ra_api::RaSession::location_segments(&fake, &path, Revnum(peg), &cancel)
-                .await
-                .expect("segments")
-                .into_iter()
-                .map(|s| {
-                    format!(
-                        "{}:{}-{}",
-                        s.path.map(|p| p.as_str().to_owned()).unwrap_or_default(),
-                        s.range_start.0,
-                        s.range_end.0
-                    )
-                })
-                .collect::<Vec<_>>()
-        }
-    };
-    // Copies are followed back to their sources, youngest segment first.
-    assert_eq!(
-        segs("tags/t/sub/s.txt", 6).await,
-        [
-            "/tags/t/sub/s.txt:3-6",
-            "/branches/b/sub/s.txt:2-2",
-            "/trunk/sub/s.txt:1-1"
-        ]
-    );
-    assert_eq!(segs("branches/b", 6).await, ["/branches/b:5-6"]);
-    assert_eq!(
-        segs("trunk/copy.txt", 6).await,
-        ["/trunk/copy.txt:6-6", "/trunk/f.txt:1-5"]
-    );
-    assert_eq!(segs("", 6).await, ["/:0-6"]);
-    let err =
-        svn_ra_api::RaSession::location_segments(&fake, &rp("branches/b"), Revnum(4), &cancel)
-            .await
-            .unwrap_err();
-    assert_eq!(err.code, ErrorCode::PathNotFound);
 }

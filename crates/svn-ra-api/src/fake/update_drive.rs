@@ -19,7 +19,7 @@ fn lock_state(state: &Mutex<RepoState>) -> std::sync::MutexGuard<'_, RepoState> 
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-pub(super) fn url_to_rel(root: &svn_types::RepoUrl, url: &svn_types::RepoUrl) -> Result<RelPath> {
+fn url_to_rel(root: &svn_types::RepoUrl, url: &svn_types::RepoUrl) -> Result<RelPath> {
     let base = root.as_url().path().trim_end_matches('/');
     let full = url.as_url().path();
     let rest = full.strip_prefix(base).ok_or_else(|| {
@@ -49,34 +49,45 @@ pub(super) async fn drive_update(
         repos_root,
         session_rel,
     } = at;
-    let mut reporter = CollectingReporter {
-        entries: Vec::new(),
-        repos_root: repos_root.clone(),
-    };
+    let mut reporter = CollectingReporter::default();
     report(&mut reporter)?;
+    // Like svn_repos: a switch reads a linked path from its link (an update would follow the
+    // link in the target as well; the fake does not model that and treats links as set_path).
+    if matches!(req.mode, UpdateMode::Switch(_)) {
+        for e in &mut reporter.entries {
+            if let Some(url) = &e.link_url {
+                e.link = Some(url_to_rel(repos_root, url)?);
+            }
+        }
+    }
 
     let tree_target = match &req.mode {
         UpdateMode::Switch(url) => url_to_rel(repos_root, url)?,
         _ => super::prefixed::join(session_rel, &req.target)?,
     };
-    let (target_rev, target_tree, base_trees) = {
+    let (target_rev, target_tree, base_trees, full_trees) = {
         let st = lock_state(state);
         let (rev, rv) = st.revision(req.revision)?;
         let mut bases: HashMap<Revnum, Tree> = HashMap::new();
+        let mut full: HashMap<Revnum, Tree> = HashMap::new();
+        let linked = reporter.entries.iter().any(|e| e.link.is_some());
         // `start_empty` entries too: the reported path itself exists at its revision.
         for e in reporter.entries.iter().filter(|e| !e.deleted) {
             let (r, brv) = st.revision(Some(e.rev))?;
-            // Whole trees: a linked entry is read at its own location (`PlanInput::source`).
-            bases.entry(r).or_insert_with(|| brv.tree.clone());
+            // Report paths are session-relative: so are the base trees.
+            bases.insert(r, super::prefixed::subtree(&brv.tree, session_rel)?);
+            if linked {
+                full.insert(r, brv.tree.clone());
+            }
         }
-        (rev, rv.tree.clone(), bases)
+        (rev, rv.tree.clone(), bases, full)
     };
     let input = PlanInput {
         target_rev,
         target_tree: &target_tree,
         base_trees: &base_trees,
+        full_trees: &full_trees,
         entries: &reporter.entries,
-        session_rel: session_rel.clone(),
         anchor_target: req.target.clone(),
         tree_target,
         send_text: req.mode != UpdateMode::Status,

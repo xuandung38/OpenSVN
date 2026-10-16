@@ -4,11 +4,16 @@ use std::path::Path;
 use std::sync::Arc;
 
 use svn_ra_api::RaSession;
-use svn_types::{CancelToken, Depth, ErrorCode, RepoUrl, Result, Revnum, SvnError};
+use svn_types::{CancelToken, Depth, ErrorCode, RelPath, RepoUrl, Result, Revnum, SvnError};
+use svn_wc::db::Presence;
 
+use crate::ancestry::{Location, youngest_common_ancestor};
 use crate::ctx::{ClientCtx, UpdateSummary};
-use crate::update::{UpdateKind, UpdateParams, drive_update};
+use crate::update::{UpdateKind, UpdateParams, drive_update, repos_relpath_of};
 use crate::wc;
+
+/// Subversion's `SVN_ERR_CLIENT_UNRELATED_RESOURCES`.
+pub const SVN_ERR_CLIENT_UNRELATED_RESOURCES: u32 = 195_012;
 
 /// Resolves `path` like svn does (lexically, see [`wc::open_target`]): a target that is deleted
 /// or missing on disk can still be updated.
@@ -84,12 +89,14 @@ pub async fn update(
     with_externals(ctx, &db, &rel, depth, summary, cancel).await
 }
 
-/// Re-points the working copy item at `path` to `url` (same repository) at `revision`.
+/// Re-points the working copy item at `path` to `url` (same repository) at `revision` (HEAD
+/// when `None`).
 ///
-/// Like `svn switch`, the target must share history with `url` (one is a branch or tag of the
-/// other's line of development): otherwise the switch is refused with
-/// [`ErrorCode::NoCommonAncestry`] before anything changes, unless `ignore_ancestry` is set
-/// (`--ignore-ancestry`), which also lets the server treat unrelated nodes as the same.
+/// Like `svn switch`, a target that shares no history with the item's BASE location is refused
+/// with [`ErrorCode::UnrelatedResources`] (svn code 195012) before anything changes: the server
+/// would replace the item with the unrelated tree, turning local changes into tree conflicts.
+/// `ignore_ancestry` (`svn switch --ignore-ancestry`) skips that check; externals use it, as
+/// svn does when it re-points an external.
 #[allow(clippy::too_many_arguments)]
 pub async fn switch(
     ctx: &ClientCtx,
@@ -103,17 +110,16 @@ pub async fn switch(
 ) -> Result<UpdateSummary> {
     let (db, rel) = open(ctx, path).await?;
     refuse_file_external(&db, &rel)?;
-    let target = switch_target(session, url)?;
     let revision = if ignore_ancestry {
         revision
     } else {
+        // The check and the drive look at the same revision, even when a commit lands between.
         session.ensure_authenticated(cancel).await?;
-        // svn resolves HEAD first and compares the histories at that revision.
         let rev = match revision {
             Some(r) => r,
             None => session.youngest_rev(cancel).await?,
         };
-        check_ancestry(session, &db, &rel, path, url, &target, rev, cancel).await?;
+        check_ancestry(session, &db, &rel, path, url, rev, cancel).await?;
         Some(rev)
     };
     let summary = drive_update(
@@ -135,63 +141,47 @@ pub async fn switch(
     with_externals(ctx, &db, &rel, depth, summary, cancel).await
 }
 
-/// Repository path of the switch URL; a URL of another repository is refused like svn does
-/// (`SVN_ERR_WC_INVALID_SWITCH`).
-fn switch_target(session: &dyn RaSession, url: &RepoUrl) -> Result<svn_types::RelPath> {
-    let not_same = || {
-        SvnError::new(
-            ErrorCode::WcInvalidOperation,
-            format!(
-                "'{url}' is not in the same repository as the working copy ('{}')",
-                session.repos_root()
-            ),
-        )
-        .with_svn_code(155_025)
-    };
-    let rel = crate::update::repos_relpath_of(session.repos_root(), url).map_err(|_| not_same())?;
-    svn_types::RelPath::new(&rel).map_err(|_| not_same())
-}
-
-/// svn's ancestry check: the BASE of the target and `url@rev` must have a common ancestor.
-#[allow(clippy::too_many_arguments)]
+/// Refuses `url`@`rev` unless it shares history with the BASE location of `rel`
+/// (`svn_client__switch_internal`). An item without a BASE location (not in the repository)
+/// shares nothing.
 async fn check_ancestry(
     session: &dyn RaSession,
     db: &svn_wc::db::WcDb,
-    rel: &svn_types::RelPath,
+    rel: &RelPath,
     path: &Path,
     url: &RepoUrl,
-    target: &svn_types::RelPath,
     rev: Revnum,
     cancel: &CancelToken,
 ) -> Result<()> {
     let base = db
         .read_base(rel)?
-        .filter(|n| n.presence.is_present())
+        .filter(|n| matches!(n.presence, Presence::Normal | Presence::Incomplete))
         .and_then(|n| Some((n.repos_relpath?, n.revision?)));
     let related = match base {
-        Some((repos, base_rev)) => {
-            let repos = svn_types::RelPath::new(&repos)?;
-            svn_ra_api::have_common_ancestor(
-                session,
-                (target, rev),
-                (&repos, Revnum(base_rev)),
-                cancel,
-            )
-            .await?
-        }
         None => false,
+        Some((relpath, base_rev)) => {
+            let target = Location {
+                relpath: RelPath::new(&repos_relpath_of(session.repos_root(), url)?)?,
+                rev,
+            };
+            let here = Location {
+                relpath: RelPath::new(&relpath)?,
+                rev: Revnum(base_rev),
+            };
+            youngest_common_ancestor(session, &target, &here, cancel)
+                .await?
+                .is_some()
+        }
     };
     if related {
         return Ok(());
     }
     Err(SvnError::new(
-        ErrorCode::NoCommonAncestry,
+        ErrorCode::UnrelatedResources,
         format!(
-            "'{}' does not share common version control ancestry with '{url}': it is not a \
-             branch or tag of the same line of development. Switch to a branch or tag copied \
-             from it, or switch with ancestry ignored",
+            "'{url}' shares no common ancestry with '{}'",
             path.display()
         ),
     )
-    .with_svn_code(195_012))
+    .with_svn_code(SVN_ERR_CLIENT_UNRELATED_RESOURCES))
 }

@@ -26,6 +26,7 @@ use crate::workqueue::Unsettled;
 pub struct WcTxn<'a> {
     conn: &'a Connection,
     wc_id: i64,
+    db: &'a WcDb,
 }
 
 fn to_i64(v: u64) -> Result<i64> {
@@ -40,6 +41,7 @@ impl WcDb {
             f(&WcTxn {
                 conn: tx,
                 wc_id: self.wc_id,
+                db: self,
             })
         })
     }
@@ -52,6 +54,15 @@ impl WcTxn<'_> {
 
     pub(super) fn wc_id(&self) -> i64 {
         self.wc_id
+    }
+
+    /// Fails with [`ErrorCode::WcBusy`] when another client (`svn cleanup`) broke a working copy
+    /// lock this handle holds: its WC_LOCK row is gone (or has other levels) or its marker in
+    /// `.svn/tmp` is. The lock is then forgotten and its release leaves the row alone. A long
+    /// operation that relies on its lock calls this first in every transaction, so nothing is
+    /// written once the lock is gone.
+    pub fn verify_wc_lock(&self) -> Result<()> {
+        self.db.wc_lock_verify_in(self.conn)
     }
 
     // ---- reads inside the transaction ----------------------------------------------------
@@ -150,28 +161,21 @@ impl WcTxn<'_> {
 
     /// [`WcTxn::bump_revisions_post_update`] at depth infinity.
     pub fn bump_revisions(&self, root: &RelPath, rev: u64, skipped: &[RelPath]) -> Result<()> {
-        self.bump_revisions_post_update(root, rev, Depth::Infinity, skipped, None)
+        self.bump_revisions_post_update(root, rev, Depth::Infinity, skipped)
     }
 
-    /// Moves the BASE tree at `root` to `rev` after an update or switch drive, like svn's
+    /// Moves the BASE tree at `root` to `rev` after an update drive, like svn's
     /// `bump_revisions_post_update`: nodes within `depth` of `root` get the new revision, except
     /// the `skipped` subtrees (tree conflicts), which keep theirs. Below the root, a
     /// `not-present` node that the drive did not re-add is gone at `rev` and its row is removed,
     /// as is a `server-excluded` node at another revision. The root itself keeps such a row (an
-    /// update target deleted on the server stays a `not-present` marker), and a root that is
-    /// `excluded`, `server-excluded` or `not-present` is left as it is.
-    ///
-    /// `switch_relpath` (a switch) is the new repository path of `root`: every node bumped also
-    /// gets the path below it, `excluded` nodes included, so an excluded child stays excluded at
-    /// its new location. Nodes outside `depth` and the `skipped` subtrees keep their old path,
-    /// as svn leaves them.
+    /// update target deleted on the server stays a `not-present` marker).
     pub fn bump_revisions_post_update(
         &self,
         root: &RelPath,
         rev: u64,
         depth: Depth,
         skipped: &[RelPath],
-        switch_relpath: Option<&str>,
     ) -> Result<()> {
         let depth = match depth {
             Depth::Unknown | Depth::Exclude => Depth::Infinity,
@@ -180,30 +184,54 @@ impl WcTxn<'_> {
         let Some(node) = self.read_base(root)? else {
             return Ok(());
         };
-        if matches!(
-            node.presence,
-            Presence::Excluded | Presence::ServerExcluded | Presence::NotPresent
-        ) {
-            return Ok(());
-        }
-        let bump = Bump {
-            rev: to_i64(rev)?,
-            skipped,
-        };
-        self.bump_node(&bump, node, switch_relpath, depth, true, false)
+        self.bump_node(node, to_i64(rev)?, depth, skipped, None, true, false)
     }
 
+    /// [`WcTxn::bump_revisions_post_update`] after a switch of `root` to `new_repos_relpath`:
+    /// every node it bumps also gets the repository path below `new_repos_relpath` that its
+    /// place in the tree gives it, like svn's `bump_node_revision` with a new repository path.
+    /// Nodes the drive did not open (nothing changed between the old and the new location) are
+    /// moved here; so are the ones a resumed drive left at their old location because they had
+    /// no change to receive. The `skipped` subtrees and file externals keep their location.
+    pub fn bump_revisions_post_switch(
+        &self,
+        root: &RelPath,
+        rev: u64,
+        depth: Depth,
+        skipped: &[RelPath],
+        new_repos_relpath: &str,
+    ) -> Result<()> {
+        let depth = match depth {
+            Depth::Unknown | Depth::Exclude => Depth::Infinity,
+            d => d,
+        };
+        let Some(node) = self.read_base(root)? else {
+            return Ok(());
+        };
+        self.bump_node(
+            node,
+            to_i64(rev)?,
+            depth,
+            skipped,
+            Some(new_repos_relpath),
+            true,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn bump_node(
         &self,
-        b: &Bump<'_>,
         node: Node,
-        new_repos: Option<&str>,
+        rev: i64,
         depth: Depth,
+        skipped: &[RelPath],
+        repos_relpath: Option<&str>,
         is_root: bool,
         skip_when_dir: bool,
     ) -> Result<()> {
         let path = &node.relpath;
-        if b.skipped.contains(path) {
+        if skipped.contains(path) {
             return Ok(());
         }
         if skip_when_dir && node.kind == NodeKind::Dir {
@@ -216,27 +244,27 @@ impl WcTxn<'_> {
         let old_rev = node.revision.and_then(|r| i64::try_from(r).ok());
         if !is_root
             && (node.presence == Presence::NotPresent
-                || (node.presence == Presence::ServerExcluded && old_rev != Some(b.rev)))
+                || (node.presence == Presence::ServerExcluded && old_rev != Some(rev)))
         {
             return ops::base_remove(self.conn, self.wc_id, path);
         }
-        if old_rev.is_some() && old_rev != Some(b.rev) {
+        if old_rev.is_some() && old_rev != Some(rev) {
             super::connection::cached_exec(
                 self.conn,
                 "UPDATE nodes SET revision = ?3 WHERE wc_id = ?1 AND local_relpath = ?2 \
                      AND op_depth = 0",
-                params![self.wc_id, path.as_str(), b.rev],
+                params![self.wc_id, path.as_str(), rev],
             )
             .map_err(sql_err)?;
         }
-        if let Some(new) = new_repos
-            && node.repos_relpath.as_deref() != Some(new)
+        if let Some(repos) = repos_relpath
+            && node.repos_relpath.as_deref() != Some(repos)
         {
             super::connection::cached_exec(
                 self.conn,
                 "UPDATE nodes SET repos_path = ?3 WHERE wc_id = ?1 AND local_relpath = ?2 \
                      AND op_depth = 0",
-                params![self.wc_id, path.as_str(), new],
+                params![self.wc_id, path.as_str(), repos],
             )
             .map_err(sql_err)?;
         }
@@ -256,19 +284,20 @@ impl WcTxn<'_> {
         };
         // One query per directory; each child's row comes with it.
         for child in nodes::base_children(self.conn, self.wc_id, path)? {
-            let child_repos = new_repos.map(|p| {
+            let child_repos = repos_relpath.map(|r| {
                 let name = child.relpath.file_name().unwrap_or("");
-                if p.is_empty() {
+                if r.is_empty() {
                     name.to_owned()
                 } else {
-                    format!("{p}/{name}")
+                    format!("{r}/{name}")
                 }
             });
             self.bump_node(
-                b,
                 child,
-                child_repos.as_deref(),
+                rev,
                 below,
+                skipped,
+                child_repos.as_deref(),
                 false,
                 depth == Depth::Files,
             )?;
@@ -806,7 +835,28 @@ impl WcTxn<'_> {
     /// its refcount) is left alone, like [`PristineIndex::record`](crate::pristine::PristineIndex::record).
     /// Also records a text staged with [`crate::pristine::PristineBatch`]. Must run before the
     /// NODES row that references the text is written, so the refcount trigger counts it.
+    ///
+    /// Also checks that the stored file exists: an existing row may be unreferenced, and
+    /// `svn cleanup` in another process vacuums such rows with their files. Within this write
+    /// transaction nobody can remove it any more (svn removes the file inside its own write
+    /// transaction, and only while the row is unreferenced), so the check holds until commit.
+    /// A missing file fails the transaction (see [`Self::record_pristine_or_restore`]).
     pub fn record_pristine(&self, record: &PristineRecord) -> Result<()> {
+        self.record_pristine_or_restore(record, None)
+    }
+
+    /// [`Self::record_pristine`] that restores a missing stored file from `spare`, a file
+    /// holding exactly the text of `record` (the copy [`Placement::AlreadyStored`] hands back);
+    /// see [`crate::pristine::ensure_stored`]. Without a usable spare the transaction fails with
+    /// [`ErrorCode::WcBusy`], nothing of it is written, and the node is fetched again by the
+    /// next update.
+    ///
+    /// [`Placement::AlreadyStored`]: crate::pristine::Placement::AlreadyStored
+    pub fn record_pristine_or_restore(
+        &self,
+        record: &PristineRecord,
+        spare: Option<&std::path::Path>,
+    ) -> Result<()> {
         let size = i64::try_from(record.size)
             .map_err(|_| SvnError::new(ErrorCode::Internal, "pristine size out of range"))?;
         super::connection::cached_exec(
@@ -820,12 +870,19 @@ impl WcTxn<'_> {
             ],
         )
         .map_err(sql_err)?;
-        Ok(())
+        let adm = self.db.wcroot().join(super::ADM_DIR);
+        match crate::pristine::ensure_stored(&adm, record, spare) {
+            Ok(_) => Ok(()),
+            Err(crate::pristine::PristineError::NotInstalled(sha1)) => Err(SvnError::new(
+                ErrorCode::WcBusy,
+                format!(
+                    "working copy was cleaned up by another client during the update or commit: \
+                     pristine text {} was removed; nothing more was written. Run the operation \
+                     again to finish it",
+                    sha1.to_hex()
+                ),
+            )),
+            Err(e) => Err(e.into()),
+        }
     }
-}
-
-/// What [`WcTxn::bump_revisions_post_update`] applies to every node it visits.
-struct Bump<'a> {
-    rev: i64,
-    skipped: &'a [RelPath],
 }

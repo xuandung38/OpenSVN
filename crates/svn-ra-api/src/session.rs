@@ -92,18 +92,19 @@ pub struct LogRequest {
     pub strict_node_history: bool,
 }
 
-/// One piece of a node's location history, as reported by `location_segments` (svn's
-/// `svn_location_segment_t`): the node had `path` in every revision of
+/// One stretch of a node's history, as reported by
+/// [`RaSession::get_location_segments`]: the node lived at `path` in every revision of
 /// `range_start..=range_end`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocationSegment {
-    /// Oldest revision of the range.
+    /// Oldest revision of the stretch.
     pub range_start: Revnum,
-    /// Youngest revision of the range.
+    /// Youngest revision of the stretch.
     pub range_end: Revnum,
-    /// Absolute repository path, display only; `None` for a gap in the history (the node did
-    /// not exist, or the path is not readable).
-    pub path: Option<RepoDisplayPath>,
+    /// Repository-relative path of the node in these revisions; `None` for a gap, revisions in
+    /// which the node's history does not exist (between a copy and the revision it was copied
+    /// from).
+    pub path: Option<RelPath>,
 }
 
 /// One revision of a file as reported by `file_revs`.
@@ -254,20 +255,6 @@ pub trait RaSession: Send + Sync {
         break_lock: bool,
         cancel: &CancelToken,
     ) -> Result<()>;
-    /// Location history of the node at `repos_path` in revision `peg`, from `peg` back to its
-    /// origin, youngest segment first (svn's `get_location_segments` with the default range).
-    ///
-    /// Unlike the other paths of this trait, `repos_path` is relative to the **repository
-    /// root**, not to the session URL: the history of a location outside the session (the
-    /// working copy's own URL when switching away from it) is asked without reparenting.
-    /// `PathNotFound` when the node does not exist in `peg`.
-    async fn location_segments(
-        &self,
-        repos_path: &RelPath,
-        peg: Revnum,
-        cancel: &CancelToken,
-    ) -> Result<Vec<LocationSegment>>;
-
     /// Reports the revisions of a file in `start..=end` that changed its text.
     ///
     /// Revisions that changed only the file's properties are **not** passed to `handler`
@@ -283,6 +270,24 @@ pub trait RaSession: Send + Sync {
         handler: &mut dyn FileRevHandler,
         cancel: &CancelToken,
     ) -> Result<()>;
+
+    /// History of the node at `path`@`peg` (`None` = HEAD) as location segments, youngest
+    /// first, like `svn_ra_get_location_segments`: the node at `path` and, through every copy,
+    /// the nodes it was copied from. Only the revisions in `end..=start` are reported (`start`
+    /// defaults to `peg`, `end` to 0); a segment that reaches beyond them is cropped.
+    ///
+    /// Unlike the other methods `path` is relative to the **repository root**, not to the
+    /// session URL: svn traces another location by reparenting its session, this traces any
+    /// location of the repository through the session it has. A node that does not exist at
+    /// `peg` fails with `PathNotFound`.
+    async fn get_location_segments(
+        &self,
+        path: &RelPath,
+        peg: Option<Revnum>,
+        start: Option<Revnum>,
+        end: Option<Revnum>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<LocationSegment>>;
 
     /// Update, switch or status: `report` builds the report, then the RA layer drives `editor`
     /// through an [`EditorWorker`](crate::EditorWorker) (editor runs on a blocking thread).

@@ -118,7 +118,7 @@ pub(super) async fn ensure(
                 url,
                 Some(rev),
                 Depth::Unknown,
-                // Like svn's `switch_dir_external`: an external may point anywhere.
+                // Like svn: an external may be re-pointed anywhere in its repository.
                 true,
                 job.cancel,
             )

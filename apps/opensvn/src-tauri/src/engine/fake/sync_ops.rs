@@ -272,12 +272,14 @@ impl FakeEngine {
         self.apply_snapshot(wc, snap, &scope, ctx).await.map(Rev)
     }
 
+    /// Switches the fake working copy. Its copies keep no history, so `ignore_ancestry` is
+    /// accepted but there is no ancestry to check: every location of the repository is taken.
     pub(super) async fn do_switch(
         &self,
         wc: &WcRef,
         url: &str,
         rev: Option<Rev>,
-        ignore_ancestry: bool,
+        _ignore_ancestry: bool,
         ctx: &OpContext,
     ) -> Result<Rev, SvnError> {
         let info = self.with_wc(&wc.root, |w| Ok(w.info()))?;
@@ -289,28 +291,6 @@ impl FakeEngine {
             ));
         }
         session.ensure_authenticated(&ctx.cancel).await?;
-        if !ignore_ancestry {
-            // The same check as the real engine (svn-client's `switch`).
-            let rev = match rev {
-                Some(r) => Revnum(r.0),
-                None => session.youngest_rev(&ctx.cancel).await?,
-            };
-            let current = RelPath::new(info.path_in_repo.trim_start_matches('/'))?;
-            let related = svn_ra_api::have_common_ancestor(
-                &session,
-                (&base, rev),
-                (&current, Revnum(info.base_rev.0)),
-                &ctx.cancel,
-            )
-            .await?;
-            if !related {
-                return Err(SvnError::new(
-                    ErrorCode::NoCommonAncestry,
-                    format!("'{url}' shares no common ancestry with the working copy"),
-                )
-                .with_svn_code(195_012));
-            }
-        }
         let snap = self
             .snapshot(&session, &base, rev.map(|r| Revnum(r.0)), ctx)
             .await?;
