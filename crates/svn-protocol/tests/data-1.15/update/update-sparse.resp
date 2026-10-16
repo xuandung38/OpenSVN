@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:update-report xmlns:S="svn:" xmlns:V="http://subversion.tigris.org/xmlns/dav/" xmlns:D="DAV:" send-all="true" inline-props="true">
+<S:target-revision rev="11"/>
+<S:open-directory rev="11">
+<S:open-directory name="fresh" rev="11">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/10/trunk/fresh</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">10</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-15T15:13:06.854042Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">e23e297c-c8aa-11f1-b558-3de6f34b8b80</S:set-prop>
+<S:add-file name="empty.txt" sha1-checksum="da39a3ee5e6b4b0d3255bfef95601890afd80709">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/10/trunk/fresh/empty.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">10</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-15T15:13:06.854042Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">e23e297c-c8aa-11f1-b558-3de6f34b8b80</S:set-prop>
+<S:txdelta>U1ZOAA==</S:txdelta><S:prop><V:md5-checksum>d41d8cd98f00b204e9800998ecf8427e</V:md5-checksum></S:prop></S:add-file>
+<S:add-file name="f.txt" sha1-checksum="ca02969e73890f8ea6d6ec35dca6c1c2a56c6554">
+<D:checked-in><D:href>/svn/repo/!svn/rvr/10/trunk/fresh/f.txt</D:href></D:checked-in>
+<S:set-prop name="svn:entry:committed-rev">10</S:set-prop>
+<S:set-prop name="svn:entry:committed-date">2026-10-15T15:13:06.854042Z</S:set-prop>
+<S:set-prop name="svn:entry:last-author">alice</S:set-prop>
+<S:set-prop name="svn:entry:uuid">e23e297c-c8aa-11f1-b558-3de6f34b8b80</S:set-prop>
+<S:txdelta>U1ZOAAAABgEGhmZyZXNoCg==</S:txdelta><S:prop><V:md5-checksum>a00afb7c433b1a8fab592af77ed20eef</V:md5-checksum></S:prop></S:add-file>
+</S:open-directory>
+</S:open-directory>
+</S:update-report>

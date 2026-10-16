@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:get-locks-report xmlns:S="svn:" xmlns:D="DAV:">
+<S:lock>
+<S:path>/trunk/a.txt</S:path>
+<S:token>opaquelocktoken:e6be2740-c8aa-11f1-ba9e-99a3a6ea0664</S:token>
+<S:creationdate>2026-10-15T15:12:56.641875Z</S:creationdate>
+<S:owner >alice</S:owner>
+<S:comment >locking &lt;it&gt;</S:comment>
+</S:lock>
+</S:get-locks-report>

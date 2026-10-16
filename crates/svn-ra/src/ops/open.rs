@@ -11,8 +11,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use svn_protocol::options_request;
 use svn_ra_api::{
-    CommitEditor, CommitObserver, FileMeta, FileRevHandler, LogRequest, RaSession, ReportFn,
-    TxnAbort, UpdateRequest,
+    CommitEditor, CommitObserver, DirListing, FileMeta, FileRevHandler, LocationSegment,
+    LogRequest, RaSession, ReportFn, TxnAbort, UpdateRequest,
 };
 use svn_types::{
     CancelToken, DeltaEditor, Depth, DirEntry, ErrorCode, LockInfo, LogEntry, NodeKind, PropChange,
@@ -21,7 +21,7 @@ use svn_types::{
 use tokio::io::AsyncWrite;
 
 use super::update::RaWire;
-use super::{commit, file_revs, locks, log, read, update};
+use super::{commit, file_revs, history, locks, log, read, update};
 use crate::transport::HttpTransport;
 
 /// Repository session over Subversion's HTTP protocol v2 (mod_dav_svn 1.8 and newer).
@@ -123,6 +123,9 @@ impl RaSession for HttpRaSession {
         &self.uuid
     }
 
+    fn reparented(&self, url: &RepoUrl) -> Result<Box<dyn RaSession>> {
+        Ok(Box::new(self.reparent(url)?))
+    }
     fn session_url(&self) -> &RepoUrl {
         self.wire.session_url()
     }
@@ -193,6 +196,18 @@ impl RaSession for HttpRaSession {
         depth: Depth,
         cancel: &CancelToken,
     ) -> Result<Vec<DirEntry>> {
+        Ok(read::list(&self.wire, path, rev, depth, cancel)
+            .await?
+            .entries)
+    }
+
+    async fn list_counted(
+        &self,
+        path: &RelPath,
+        rev: Option<Revnum>,
+        depth: Depth,
+        cancel: &CancelToken,
+    ) -> Result<DirListing> {
         read::list(&self.wire, path, rev, depth, cancel).await
     }
 
@@ -254,6 +269,17 @@ impl RaSession for HttpRaSession {
         cancel: &CancelToken,
     ) -> Result<()> {
         file_revs::file_revs(&self.wire, path, start, end, handler, cancel).await
+    }
+
+    async fn get_location_segments(
+        &self,
+        path: &RelPath,
+        peg: Option<Revnum>,
+        start: Option<Revnum>,
+        end: Option<Revnum>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<LocationSegment>> {
+        history::location_segments(&self.wire, path, peg, start, end, cancel).await
     }
 
     async fn do_update(

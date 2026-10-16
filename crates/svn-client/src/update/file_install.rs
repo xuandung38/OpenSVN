@@ -12,7 +12,7 @@ use svn_wc::conflicts::markers::{
 };
 use svn_wc::conflicts::{PropConflict, TextConflict, TreeReason};
 use svn_wc::db::{BaseNode, Node, Presence, Props, WcDb};
-use svn_wc::pristine::{Md5Digest, PristineRecord, Sha1Digest};
+use svn_wc::pristine::{Md5Digest, Placement, PristineRecord, Sha1Digest};
 use svn_wc::skel::Skel;
 use svn_wc::workqueue::WorkItem;
 
@@ -123,6 +123,10 @@ impl UpdateEditor {
         // moves into the store as it is. Its row is recorded with the node (see `super::batch`);
         // without a per-file sync, the batch syncs the filesystem before it commits.
         let mut new_pristine: Option<PristineRecord> = None;
+        // The new text when the store already held it: until the batch commits, another
+        // client's `svn cleanup` may vacuum an unreferenced stored copy, which the transaction
+        // then restores from this one (see `WcTxn::record_pristine_or_restore`).
+        let mut spare: Option<tempfile::TempPath> = None;
         let (new_checksum, new_sha) = match new_text.take() {
             Some(nt) => {
                 let record = PristineRecord {
@@ -132,11 +136,18 @@ impl UpdateEditor {
                     hydrated: true,
                 };
                 let synced = !self.batched;
-                let stored =
-                    db.pristine_store()
-                        .place(nt.path, &record, synced, &mut self.placed)?;
-                if !stored {
-                    self.batch.placed_text(record.size, synced);
+                match db
+                    .pristine_store()
+                    .place(nt.path, &record, synced, &mut self.placed)?
+                {
+                    Placement::Placed => self.batch.placed_text(record.size, synced),
+                    Placement::AlreadyStored(copy) => {
+                        // Held in `.svn/tmp` until the batch commits: counted, so a batch of
+                        // many such texts flushes before they fill the disk. Not synced here;
+                        // a restore syncs it.
+                        self.batch.placed_text(record.size, true);
+                        spare = Some(copy);
+                    }
                 }
                 let sha = record.sha1;
                 new_pristine = Some(record);
@@ -409,7 +420,7 @@ impl UpdateEditor {
             &wc,
             Box::new(move |t| {
                 if let Some(record) = &new_pristine {
-                    t.record_pristine(record)?;
+                    t.record_pristine_or_restore(record, spare.as_deref())?;
                 }
                 t.base_add(&path, &node)?;
                 if let Some(ext) = &file_external {

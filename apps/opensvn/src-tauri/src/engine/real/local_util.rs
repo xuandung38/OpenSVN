@@ -37,31 +37,56 @@ const ADM_DIR: &str = ".svn";
 /// `None` (the default) uses svn's built-in defaults, as `svn --config-dir` pointing at an empty
 /// directory would. The app points it at [`default_subversion_config_dir`] while the
 /// `wc.readSubversionConfig` setting is on.
+///
+/// The `wc.globalIgnores` setting, when not empty, replaces the `global-ignores` read from there.
 #[derive(Debug, Default)]
-pub struct SvnConfigSource(RwLock<Option<PathBuf>>);
+pub struct SvnConfigSource {
+    dir: RwLock<Option<PathBuf>>,
+    global_ignores: RwLock<Option<Vec<String>>>,
+}
 
 impl SvnConfigSource {
     /// Reads the configuration from `dir/config` from now on (`None`: built-in defaults).
     pub fn set_dir(&self, dir: Option<PathBuf>) {
-        *self.0.write().unwrap_or_else(PoisonError::into_inner) = dir;
+        *self.dir.write().unwrap_or_else(PoisonError::into_inner) = dir;
     }
 
     /// Directory currently configured.
     pub fn dir(&self) -> Option<PathBuf> {
-        self.0
+        self.dir
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
 
+    /// Uses these `global-ignores` patterns instead of the configured ones from now on (`None`:
+    /// the configuration's own list or svn's built-in one).
+    pub fn set_global_ignores(&self, patterns: Option<Vec<String>>) {
+        *self
+            .global_ignores
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = patterns;
+    }
+
     /// The `add` configuration: parsed from `config` in the configured directory, or the
-    /// built-in defaults when no directory is configured or the file cannot be read.
+    /// built-in defaults when no directory is configured or the file cannot be read; its
+    /// `global_ignores` replaced by [`Self::set_global_ignores`] when set.
     pub fn add_config(&self) -> AddConfig {
-        self.dir()
+        let mut config = self
+            .dir()
             .and_then(|d| fs::read_to_string(d.join("config")).ok())
             .map_or_else(AddConfig::default, |text| {
                 AddConfig::from_config_text(&text)
-            })
+            });
+        if let Some(patterns) = self
+            .global_ignores
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        {
+            config.global_ignores = patterns;
+        }
+        config
     }
 }
 

@@ -16,9 +16,12 @@ open recovers. Linux only.
     one unversioned file. Used by `update` and `cleanup`: "mid-update with local edits".
   - `tpl-r2`: at HEAD, local edits, a binary rewritten locally, an added folder and deleted files.
     Used by `commit` and `revert`.
+  - r2 also branches `d0` to `d0-branch` (a copy of `d0@1`): every file gets a line-5 change and
+    r2's last-line change, and the branch has one file of its own. `switch` switches `d0` of
+    `tpl-r1` to the branch, so the local edits merge and one file conflicts.
 - **`crash-worker`** (`src/bin/crash-worker.rs`): a separate process that runs one operation
   through the real engine (`svn-ra` HTTP + `svn-client` + `svn-wc`), exactly as the app wires it.
-  Ops: `checkout`, `update`, `commit`, `revert`, `cleanup`, and `recover`. `recover` is what the app
+  Ops: `checkout`, `update`, `switch`, `commit`, `revert`, `cleanup`, and `recover`. `recover` is what the app
   runs when it opens a working copy: release stale locks of dead processes, run the unfinished work
   queue, settle commit journals. The lock owner registry is a file with the app's liveness rules
   (pid + `/proc` start time + boot id), so a later process can tell that a killed one is dead.
@@ -29,7 +32,8 @@ Every case uses its own copy of the repository and of the template:
    - `tests/sigkill.rs`: at a uniformly random moment of the operation's measured duration (x1.1,
      so some runs complete);
    - `tests/failpoints.rs` (feature `failpoints`): at hit *k* of a named failpoint of `svn-wc` /
-     `svn-client`. The worker arms the `fail` crate with a callback that sends itself `SIGKILL`.
+     `svn-client`. Every failpoint gets `CRASH_FP_ITERS` kills, spread over the operations that
+     reach it. The worker arms the `fail` crate with a callback that sends itself `SIGKILL`.
      First, an uninterrupted run counts the hits. Then the worker is killed at the first hit, the
      last hit and random hits in between. Examples: `commit.after_merge_before_finalize` is
      "after MERGE"; `update.after_txn_before_queue` #k is "mid-update with local edits" after k
@@ -70,7 +74,7 @@ cargo test -p opensvn-crash --features failpoints --test failpoints -- --ignored
 | Variable | Default | Meaning |
 |---|---|---|
 | `CRASH_RANDOM_ITERS` | 6 | random kills per operation |
-| `CRASH_FP_ITERS` | 3 | kills per reachable (operation, failpoint) |
+| `CRASH_FP_ITERS` | 50 | kills per reachable failpoint, spread over the operations that reach it |
 | `CRASH_FILES` | 200 | text files in the fixture |
 | `CRASH_SEED` | clock | replay a run (printed at start and in the report) |
 | `CRASH_REPORT_DIR` | `target/crash-report` | markdown reports (`sigkill.md`, `failpoints.md`) |
@@ -85,10 +89,63 @@ The crate's `failpoints` feature is off by default. Turning it on enables `svn-c
 and keeping it off means `cargo test --workspace` never compiles the engine with failpoints through
 feature unification.
 
+### Switch
+
+`switch` cases check, between recovery and completion, that every file of `d0` is either on the
+branch (with its local edit merged) or still at r1, as its BASE row says, and that nothing
+outside `d0` moved. After the user re-runs the switch, the working copy must equal what svn's own
+`svn switch` makes of the same template: same files (a conflicted file must hold both sides),
+same `svn status`, and `svn diff` never removes a branch or server line.
+
+### Recovery needs no manual step
+
+Recovery (`crash-worker recover`, what the app runs when it opens a working copy) must leave no
+lock row, work item or unsettled commit journal for the user. There is one exception, by design
+of `svn-wc` `wc_lock.rs`: the WC_LOCK row is committed before its ownership record and marker are
+written, so that a crash never makes a foreign lock look like ours. A kill in that window leaves
+a lock row nobody can prove is ours, and the user has to run `svn cleanup`. The suite allows it
+only for a random SIGKILL or a kill at `wc.txn.after_commit` (any hit: for `continue` the lock
+is not the first transaction) that left no lock marker in `.svn/tmp`, counts it in the "manual
+cleanup" column, and fails any other case that needs it.
+
+## Concurrency: engine and svn on one working copy
+
+`tests/concurrency.rs` (svn 1.15 required) pairs an engine operation with an svn command on one
+working copy at the same time: update vs status, status vs update, update vs update, commit vs
+cleanup, cleanup vs commit, commit vs commit, update vs commit, commit vs update, commit vs status,
+cleanup vs update. Each side may only fail because of the other's lock: the engine with
+`ErrorCode::WcBusy` (any other code fails, and an untyped "locked"/"busy" error is named as such),
+svn with E155004, E200033 or E155037 (svn looks for queued work before it reads the lock rows,
+so a writer holding the lock with work queued reads as "previous operation has not finished").
+Afterwards `wc.db` is intact and quiescent, both statuses agree, every edit is in the
+repository and the working copy equals a fresh checkout. `locks_are_honoured_both_ways` holds the
+engine's lock while svn writes (E155004 each time; `svn status` works) and puts svn's lock row in
+`wc.db` while the engine writes (`WcBusy`, nothing changes; status works).
+
+`svn cleanup` always breaks locks (`cleanup-cmd.c`: `break_locks = TRUE`). Against an engine
+update it can vacuum pristines the update installed but has not referenced yet, and the
+update's next transaction then references a missing pristine. That pairing is the separate,
+ignored `engine_update_vs_svn_cleanup` test until the engine closes the window.
+
+```sh
+cargo test -p opensvn-crash --test concurrency -- --ignored --nocapture --skip engine_update_vs_svn_cleanup
+```
+
+## Soak
+
+`tests/soak.rs`: one engine process runs update, status, commit, status and `log -l 100 -v` in a
+loop while svn commits as another user, for 2 hours (`soak_2h`) or 2 minutes (`soak_short`), and
+the RSS at the end must be less than 10% above the RSS after the warm-up (the first 10% of the
+run). Every text keeps its size from cycle to cycle, so only memory the engine keeps can grow.
+`SOAK_SECS` overrides the duration.
+
+```sh
+cargo test --release -p opensvn-crash --test soak -- --ignored --nocapture soak_2h
+```
+
 ## Known limits
 
-- svn 1.14.3 (Ubuntu 24.04 package) is the oracle and the server. The 1.15.0 builds live in the
-  Docker compat images (`docker/`), and this suite does not use them yet.
-- The "real app" variant (tauri-driver) and the concurrency suite (engine and svn CLI on one
-  working copy) are not part of this crate yet.
-- `switch` is not exercised.
+- The nightly workflow uses svn 1.14.3 (Ubuntu 24.04 package) as oracle and server; the
+  concurrency suite needs svn 1.15 and runs locally (`OPENSVN_SVN_BIN`, `OPENSVN_APACHE_BIN`,
+  `OPENSVN_APACHE_MODULES` point at a 1.15 build, for instance one built with nix).
+- The "real app" variant (tauri-driver) is not part of this crate yet.

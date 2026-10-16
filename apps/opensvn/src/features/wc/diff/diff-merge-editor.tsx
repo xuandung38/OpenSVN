@@ -2,6 +2,7 @@ import { MergeView, unifiedMergeView } from "@codemirror/merge";
 import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { useEffect, useRef } from "react";
+import { useUiPrefs } from "../../../lib/ui-prefs";
 
 const THEME = EditorView.theme({
   "&": { height: "100%", fontFamily: "var(--f-mono)", fontSize: "12px", color: "var(--fg)" },
@@ -35,6 +36,7 @@ export function DiffMergeEditor({
   label: string;
 }) {
   const host = useRef<HTMLDivElement>(null);
+  const { tabWidth } = useUiPrefs();
 
   useEffect(() => {
     const parent = host.current;
@@ -42,6 +44,7 @@ export function DiffMergeEditor({
     const base: Extension[] = [
       THEME,
       EditorState.readOnly.of(true),
+      EditorState.tabSize.of(tabWidth),
       EditorView.contentAttributes.of({ "aria-label": label, "aria-readonly": "true" }),
     ];
     if (mode === "split") {
@@ -72,7 +75,7 @@ export function DiffMergeEditor({
       }),
     });
     return () => view.destroy();
-  }, [left, right, mode, label]);
+  }, [left, right, mode, label, tabWidth]);
 
   return <div ref={host} className="h-full min-h-0 overflow-hidden" />;
 }
