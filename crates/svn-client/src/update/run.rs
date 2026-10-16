@@ -555,15 +555,38 @@ pub async fn drive_update(
         .unwrap_or_else(PoisonError::into_inner)
         .revision;
     if !params.sticky_depth
-        && matches!(params.kind, UpdateKind::Update)
         && let Some(rev) = reached
     {
         // The update itself succeeded; markers it cannot record leave the working copy as it
-        // was before this was implemented, so only cancellation is reported.
-        if let Err(e) =
-            record_unseen_children(session, &db, &target_wc, &target, params.depth, rev, cancel)
+        // was before this was implemented, so only cancellation is reported. A switch lists the
+        // target at its new location, through a session there (svn's switch editor fetches the
+        // entries of the switch URL the same way).
+        let narrow = matches!(
+            params.depth,
+            Depth::Empty | Depth::Files | Depth::Immediates
+        );
+        let listed = match &params.kind {
+            UpdateKind::Switch(url) if narrow => {
+                session.reparented(url).map(|s| (Some(s), RelPath::root()))
+            }
+            _ => Ok((None, target.clone())),
+        };
+        let result = match listed {
+            Ok((at, dir)) => {
+                record_unseen_children(
+                    at.as_deref().unwrap_or(session),
+                    &db,
+                    &target_wc,
+                    &dir,
+                    params.depth,
+                    rev,
+                    cancel,
+                )
                 .await
-        {
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = result {
             if e.code == ErrorCode::Cancelled {
                 return Err(e);
             }

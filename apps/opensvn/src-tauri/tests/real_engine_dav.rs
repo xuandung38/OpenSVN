@@ -2403,6 +2403,8 @@ async fn switch_setup(
         .collect();
     dirs.sort();
     dirs.dedup();
+    // The branch itself exists (the copy above); files may go straight into it.
+    dirs.retain(|d| d != "branches/sw");
     let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
     h.scratch.load(&add_dump(&dirs, &files));
     let healthy = FlakyProxy::start(base, &[], h.scratch_dir().join("proxy-0.log"))?;
@@ -2889,6 +2891,322 @@ async fn switching_the_parent_of_a_switched_folder_matches_svn() {
             );
         }
         assert_eq!(rows, base_rows(&theirs), "server {version}");
+    }
+    assert_no_prompt();
+}
+
+// ---- update of a working copy with a switched subtree ----
+
+/// An update of a working copy whose `src` is switched to a branch takes `src` from the branch
+/// (the reporter sends it with `link_path`, and mod_dav_svn follows the link in the target as
+/// svn_repos does): the branch's edit arrives, trunk's does not. The same sequence on the fake
+/// session is `crates/svn-client/tests/update_switched_subtree_vs_svn.rs`; here the rows are
+/// compared with svn 1.15's own update of the same repository (over `file://`).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn update_of_a_switched_folder_takes_it_from_its_branch_like_svn() {
+    use opensvn_lib::engine::real::SessionConnector as _;
+    for (version, host) in servers() {
+        eprintln!("server {version}");
+        let h = harness(&host, "update-switched");
+        let url = h.repo_url();
+        let e = h.engine();
+        // r2: the branch.
+        opensvn_lib::write_op!(
+            &h,
+            e.copy_location(
+                &CopyLocationRequest {
+                    from_url: format!("{url}/trunk"),
+                    from_rev: None,
+                    to_url: format!("{url}/branches/b"),
+                    message: "Branch".into(),
+                    switch_wc_id: None,
+                    from_wc: None,
+                },
+                None,
+                &ctx(),
+            )
+        )
+        .expect("branch");
+        let wc = checkout_trunk(&h, "switched").await;
+        let cancel = svn_types::CancelToken::new();
+        let session = connector()
+            .connect_with(
+                &svn_types::RepoUrl::parse(&format!("{url}/trunk/src")).unwrap(),
+                &opensvn_lib::engine::real::ConnectOptions::at_url(&ctx()),
+                &cancel,
+            )
+            .await
+            .expect("session");
+        let client = svn_client::ClientCtx::new(LockOwner {
+            store: h.store.clone() as Arc<dyn LockOwnershipStore>,
+            pid: std::process::id(),
+            boot_id: THIS_BOOT.to_owned(),
+        });
+        svn_client::switch(
+            &client,
+            session.as_ref(),
+            &wc.root.join("src"),
+            &svn_types::RepoUrl::parse(&format!("{url}/branches/b/src")).unwrap(),
+            None,
+            svn_types::Depth::Unknown,
+            false,
+            &cancel,
+        )
+        .await
+        .expect("switch src");
+        // r3: an edit of `src/main.rs` on the branch; r4: another one on trunk.
+        let commit_in = |at: &'static str, text: &'static str, name: &'static str| {
+            let h = &h;
+            async move {
+                let plan = CheckoutPlan {
+                    url: format!("{}/{at}", h.repo_url()),
+                    path: h.work_dir().join(name),
+                    rev: None,
+                    depth: Depth::Infinity,
+                    sparse: None,
+                    format: WcFormat::V31,
+                    store_pristine: true,
+                    ignore_externals: false,
+                };
+                let info = h.engine.checkout(&plan, &ctx()).await.expect("checkout");
+                let other = WcRef {
+                    id: WcId(name.to_owned()),
+                    root: PathBuf::from(info.root_path),
+                };
+                h.write_file(&other.root, "src/main.rs", text).unwrap();
+                let mark = h.write_mark();
+                match h
+                    .engine
+                    .commit(
+                        &other,
+                        &CommitRequest {
+                            wc_id: other.id.clone(),
+                            paths: vec!["src/main.rs".into()],
+                            message: "Edit".into(),
+                            keep_locks: false,
+                            auto_add_remove: false,
+                        },
+                        &ctx(),
+                    )
+                    .await
+                {
+                    Ok(rev) => Some(rev),
+                    Err(e) if conformance::broken_write_ends_scenario(h, mark, &e) => None,
+                    Err(e) => panic!("commit: {e:?}"),
+                }
+            }
+        };
+        if commit_in("branches/b", "fn main() { branch() }\n", "branch-edit")
+            .await
+            .is_none()
+        {
+            continue;
+        }
+        let Some(head) = commit_in("trunk", "fn main() { trunk() }\n", "trunk-edit").await else {
+            continue;
+        };
+        let reached = e
+            .update(
+                &wc,
+                &UpdateRequest {
+                    wc_id: wc.id.clone(),
+                    paths: None,
+                    rev: None,
+                    depth: None,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("update");
+        assert_eq!(reached, head);
+        assert_eq!(
+            std::fs::read_to_string(wc.root.join("src/main.rs")).unwrap(),
+            "fn main() { branch() }\n"
+        );
+        let rows = nodes_rows(&wc.root)
+            .into_iter()
+            .map(|r| r.rsplitn(2, '|').nth(1).unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            rows.iter()
+                .any(|r| r.starts_with("src/main.rs|0|normal|file|")
+                    && r.contains("branches/b/src/main.rs")),
+            "{rows:#?}"
+        );
+
+        let (Host::Local { repos, .. }, Some(oracle)) = (
+            &host,
+            opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15)
+                .ok()
+                .flatten(),
+        ) else {
+            eprintln!("no local repository or svn 1.15: the svn comparison is skipped");
+            continue;
+        };
+        let file_url = opensvn_svn_oracle::Oracle::file_url(&repos.join(&h.scratch.name));
+        let theirs = h.tmp.path().join("svn-wc");
+        let t = theirs.to_str().unwrap();
+        let src = format!("{t}/src");
+        for args in [
+            vec!["checkout", "-q", &format!("{file_url}/trunk@2")[..], t],
+            vec![
+                "switch",
+                "-q",
+                &format!("{file_url}/branches/b/src@2")[..],
+                &src[..],
+            ],
+            vec!["update", "-q", t],
+        ] {
+            let out = oracle.svn().args(&args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "svn {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        // Authors differ (svn over file:// commits as the local user): compared without them.
+        let theirs_rows = nodes_rows(&theirs)
+            .into_iter()
+            .map(|r| r.rsplitn(2, '|').nth(1).unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, theirs_rows, "server {version}");
+    }
+    assert_no_prompt();
+}
+
+// ---- a switch with a narrow depth, cut and resumed ----
+
+/// A switch with `--depth files` and `--depth immediates` through a proxy that cuts every
+/// `REPORT` answer after 64 KiB: the drive breaks inside the files of the target, is resumed at
+/// the switched target (the folders it has not finished reported with `link_path`), and ends
+/// with the BASE rows svn 1.15's own switch at that depth leaves on the same repository (over
+/// `file://`): nodes within the depth at the branch, the folders' content outside the depth
+/// where it was.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
+async fn switch_with_a_narrow_depth_cut_mid_answer_matches_svn() {
+    use opensvn_lib::engine::real::SessionConnector as _;
+    const FILES: usize = 24;
+    const SIZE: usize = 8192;
+    if behind_a_faulty_proxy() {
+        eprintln!("SKIPPED: starts its own flaky proxy, so it runs against the server directly");
+        return;
+    }
+    let Some((_, host @ Host::Local { .. })) = servers().into_iter().next() else {
+        eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
+        return;
+    };
+    let Host::Local { base, repos } = &host else {
+        unreachable!()
+    };
+    let Some(oracle) =
+        opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15).unwrap()
+    else {
+        return;
+    };
+    for (depth, word) in [
+        (svn_types::Depth::Files, "files"),
+        (svn_types::Depth::Immediates, "immediates"),
+    ] {
+        let mut files = Vec::new();
+        for f in 0..FILES {
+            files.push((format!("branches/sw/top{f:02}.bin"), noise(SIZE)));
+        }
+        files.push(("branches/sw/deep/deep.bin".to_owned(), noise(SIZE)));
+        let Some((h, wc, port)) =
+            switch_setup(&host, base, &format!("switchdepth-{word}"), files).await
+        else {
+            eprintln!("SKIPPED: no server certificate next to the CA for the flaky proxy");
+            return;
+        };
+        let cutting = proxy_on(
+            base,
+            port,
+            &[
+                "--truncate-every",
+                "1",
+                "--truncate-at",
+                "65536",
+                "--truncate-method",
+                "REPORT",
+            ],
+            h.scratch_dir().join("proxy-1.log"),
+        );
+        let at = |rel: &str| {
+            svn_types::RepoUrl::parse(&format!("{}/{}/{rel}", cutting.url(base), h.scratch.name))
+                .unwrap()
+        };
+        let cancel = svn_types::CancelToken::new();
+        let session = connector()
+            .connect_with(
+                &at("trunk"),
+                &opensvn_lib::engine::real::ConnectOptions::at_url(&ctx()),
+                &cancel,
+            )
+            .await
+            .expect("session");
+        let client = svn_client::ClientCtx::new(LockOwner {
+            store: h.store.clone() as Arc<dyn LockOwnershipStore>,
+            pid: std::process::id(),
+            boot_id: THIS_BOOT.to_owned(),
+        });
+        let sum = svn_client::switch(
+            &client,
+            session.as_ref(),
+            &wc.root,
+            &at("branches/sw"),
+            None,
+            depth,
+            false,
+            &cancel,
+        )
+        .await
+        .unwrap_or_else(|err| {
+            panic!(
+                "--depth {word}: {err:?}\n{}",
+                std::fs::read_to_string(&cutting.log).unwrap_or_default()
+            )
+        });
+        assert!(
+            cutting.cuts() >= 2,
+            "--depth {word}: {}",
+            std::fs::read_to_string(&cutting.log).unwrap_or_default()
+        );
+        let reached = sum.revision.expect("revision").0;
+        let rows = base_rows(&wc.root);
+
+        let file_url = opensvn_svn_oracle::Oracle::file_url(&repos.join(&h.scratch.name));
+        let theirs = h.tmp.path().join("svn-wc");
+        let t = theirs.to_str().unwrap();
+        for args in [
+            vec![
+                "checkout",
+                "-q",
+                &format!("{file_url}/trunk@{reached}")[..],
+                t,
+            ],
+            vec![
+                "switch",
+                "-q",
+                "--depth",
+                word,
+                &format!("{file_url}/branches/sw@{reached}")[..],
+                t,
+            ],
+        ] {
+            let out = oracle.svn().args(&args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "svn {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        assert_eq!(rows, base_rows(&theirs), "--depth {word}");
+        assert_eq!(
+            std::fs::read_to_string(wc.root.join("README.md")).unwrap(),
+            "local edit\n"
+        );
     }
     assert_no_prompt();
 }
