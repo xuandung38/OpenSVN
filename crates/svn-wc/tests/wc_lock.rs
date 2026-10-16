@@ -895,6 +895,67 @@ fn a_lock_broken_by_another_client_is_detected_and_its_new_row_left_alone() {
     );
 }
 
+/// A failure of an operation whose lock `svn cleanup` broke (a temp file in the emptied
+/// `.svn/tmp` that vanished) is reported as the lost lock; while the lock is still ours, or for a
+/// cancellation, the error passes unchanged.
+#[test]
+fn a_failure_after_the_lock_was_broken_is_reported_as_the_lost_lock() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = wc(tmp.path());
+    let store = Arc::new(MemoryLockOwnership::for_current_process("boot"));
+    db.set_lock_owner(owner(&store, 1));
+    let root = RelPath::root();
+    db.wc_lock_obtain(&root, -1, ObtainMode::Normal)
+        .expect("lock");
+    let vanished = || {
+        svn_types::SvnError::new(
+            ErrorCode::PathNotFound,
+            "cannot create temp file in '.svn/tmp'",
+        )
+    };
+
+    // Still ours: unchanged.
+    let err = db.wc_lock_explain_failure(&root, vanished());
+    assert_eq!(err.code, ErrorCode::PathNotFound, "{err}");
+
+    // svn cleanup: `.svn/tmp` emptied, row deleted and taken again by svn.
+    let tmp_dir = tmp.path().join(".svn/tmp");
+    for e in std::fs::read_dir(&tmp_dir).expect("tmp").flatten() {
+        std::fs::remove_file(e.path()).expect("rm");
+    }
+    db.with_write(|tx| {
+        tx.execute("DELETE FROM wc_lock", []).map_err(sql_err)?;
+        tx.execute(
+            "INSERT INTO wc_lock (wc_id, local_dir_relpath, locked_levels) VALUES (1, '', -1)",
+            [],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    })
+    .expect("svn takes it");
+
+    let cancelled = svn_types::SvnError::new(ErrorCode::Cancelled, "cancelled");
+    assert_eq!(
+        db.wc_lock_explain_failure(&root, cancelled).code,
+        ErrorCode::Cancelled
+    );
+    let err = db.wc_lock_explain_failure(&root, vanished());
+    assert_eq!(err.code, ErrorCode::WcBusy, "{err}");
+    assert!(
+        err.message.contains("cleaned up by another client"),
+        "{err}"
+    );
+    // The lock is forgotten: the same answer again, and the release leaves svn's row alone.
+    let again = db.wc_lock_explain_failure(&root, vanished());
+    assert_eq!(again.code, ErrorCode::WcBusy, "{again}");
+    db.wc_lock_release(&root).expect("release is quiet");
+    assert_eq!(
+        db.wc_lock_held(&root).expect("held"),
+        LockState::HeldByOther,
+        "svn's row stays"
+    );
+}
+
 /// The race against the real `svn cleanup`: we hold the lock and have reused an unreferenced
 /// pristine row ("already stored", the update's `place`), the NODES transaction is still to
 /// come. svn breaks our lock, vacuums the row with its file and empties `.svn/tmp` (our kept

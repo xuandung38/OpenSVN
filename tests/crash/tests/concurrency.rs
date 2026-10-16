@@ -26,8 +26,9 @@
 //! while svn's lock row is in `wc.db`, every writing engine operation fails with `WcBusy`,
 //! changes nothing, and the engine's status works.
 //!
-//! One pairing is kept apart because it is known to lose data: an engine update against
-//! `svn cleanup` (see [`engine_update_vs_svn_cleanup`]).
+//! An engine update against `svn cleanup` has its own test with stricter checks (see
+//! [`engine_update_vs_svn_cleanup`]): the update stops only with the typed "cleaned up by another
+//! client" error, never on a vanished file, and no pristine is ever missing.
 //!
 //! `cargo test -p opensvn-crash --test concurrency -- --ignored --nocapture`
 //! Knobs: `CONC_ROUNDS` (operations per side and scenario, default 12), `CONC_FILES` (default
@@ -80,6 +81,10 @@ struct Tally {
     out_of_date: usize,
     /// Failed because `svn cleanup` broke the lock and removed the temporary files in use.
     broken: usize,
+    /// Engine operations that stopped with the typed "cleaned up by another client" error:
+    /// `svn cleanup` broke their lock (or vacuumed a text they had placed) and they wrote nothing
+    /// more.
+    cleaned: usize,
     failures: Vec<String>,
     /// `(file, line)` appended before a commit (whether or not that commit went through).
     edits: Vec<(String, String)>,
@@ -97,20 +102,29 @@ fn append(wc: &Path, rel: &str, line: &str) {
     std::fs::write(&p, t).expect("write");
 }
 
-/// Sorts an engine result into the tally. Busy must be typed.
-fn engine_outcome(
-    t: &mut Tally,
-    what: &str,
-    r: std::result::Result<(), SvnError>,
-    commits: bool,
-    against_cleanup: bool,
-) {
+/// The error of an engine write whose lock `svn cleanup` broke (`wc_lock.rs`, `txn.rs` in
+/// svn-wc).
+fn cleaned_up(e: &SvnError) -> bool {
+    e.code == ErrorCode::WcBusy && e.to_string().contains("cleaned up by another client")
+}
+
+/// Sorts an engine result into the tally. Busy must be typed. Against `svn cleanup`, an update
+/// may only stop with [`cleaned_up`]; other operations may also fail on the temporary files the
+/// cleanup removed.
+fn engine_outcome(t: &mut Tally, op: Op, r: std::result::Result<(), SvnError>, against: Op) {
+    let what = op.name();
+    let against_cleanup = against == Op::Cleanup;
     match r {
         Ok(()) => t.ok += 1,
+        Err(e) if cleaned_up(&e) && against_cleanup => t.cleaned += 1,
+        Err(e) if cleaned_up(&e) => t
+            .failures
+            .push(format!("engine {what}: {e} (no client ran cleanup)")),
         Err(e) if e.code == ErrorCode::WcBusy => t.busy += 1,
-        Err(e) if commits && e.code == ErrorCode::OutOfDate => t.out_of_date += 1,
+        Err(e) if op == Op::Commit && e.code == ErrorCode::OutOfDate => t.out_of_date += 1,
         Err(e)
             if against_cleanup
+                && op != Op::Update
                 && e.code == ErrorCode::PathNotFound
                 && (e.to_string().contains(".svn/tmp")
                     || e.to_string().contains(".svn/pristine")) =>
@@ -138,7 +152,9 @@ fn svn_outcome(t: &mut Tally, what: &str, out: &std::process::Output, commits: b
     } else if err.contains("E155004") || err.contains("E200033") || err.contains("E155037") {
         t.busy += 1;
     } else if what == "cleanup"
-        && (err.contains("E000002") || err.contains("E000039"))
+        // Gone (E000002), not empty (E000039), or created again by the engine between svn's
+        // removal and re-creation of `.svn/tmp` (E000017).
+        && ["E000002", "E000039", "E000017"].iter().any(|c| err.contains(c))
         && err.contains(".svn/tmp")
     {
         t.broken += 1;
@@ -259,7 +275,6 @@ fn run_engine(
     let engine = Engine::new(state).unwrap();
     let mut t = Tally::default();
     let (op, toggle) = (s.engine, s.toggle);
-    let commits = op == Op::Commit;
     start.wait();
     for k in 0..rounds {
         let r = match op {
@@ -279,7 +294,7 @@ fn run_engine(
             }
             Op::Cleanup => engine.cleanup(wc).map(|_| ()),
         };
-        engine_outcome(&mut t, op.name(), r, commits, s.svn == Op::Cleanup);
+        engine_outcome(&mut t, op, r, s.svn);
     }
     t
 }
@@ -451,16 +466,16 @@ fn engine_and_svn_on_one_working_copy() {
     run_scenarios(&fx, &scenarios, "concurrency");
 }
 
-/// Known to fail (kept out of the suite above so that it stays strict): `svn cleanup` breaks
-/// the engine's lock in the middle of an update, runs the update's queued work itself and
-/// vacuums the pristine texts no NODES row references yet, among them those the update has just
-/// installed for rows it commits next. The update's next transaction then references a pristine
-/// that is gone (`wc.db` integrity check: "pristine ... referenced by NODES is missing"). svn
-/// against svn on the same machine (30 rounds of `svn update` with a concurrent
-/// `svn cleanup`) shows no such loss: svn's update keeps the database busy, so the cleanup
-/// mostly fails with `E200033` before it vacuums.
+/// `svn cleanup` breaks the engine's lock in the middle of an update (`break_locks = TRUE`), runs
+/// the update's queued work itself, vacuums the pristine texts no NODES row references yet and
+/// empties `.svn/tmp`. Every update transaction first checks that its lock row and marker are
+/// still its own, and re-checks (or restores) each pristine it references inside the
+/// transaction (#180). So the update either finishes, finds the working copy busy, or stops with
+/// the typed "cleaned up by another client" error having written nothing more; it never fails on
+/// a vanished temporary file. Afterwards no NODES row references a missing pristine, and a later
+/// update finishes the interrupted one (`check_after`).
 #[test]
-#[ignore = "known: svn cleanup breaks the engine's lock and vacuums the pristines of a running update"]
+#[ignore = "needs apache2 + mod_dav_svn and svn 1.15"]
 fn engine_update_vs_svn_cleanup() {
     let Some(fx) = Fixture::new() else { return };
     let scenarios = [Scenario {
@@ -474,7 +489,7 @@ fn engine_update_vs_svn_cleanup() {
 fn run_scenarios(fx: &Fixture, scenarios: &[Scenario], report: &str) {
     let rounds = env_count("CONC_ROUNDS", 12);
     let mut md = format!(
-        "# Engine and svn {} on one working copy\n\n{} files, {rounds} operations per side and scenario. Outcomes: ok / busy (typed) / out of date / broken by `svn cleanup`.\n\n| engine | svn | engine | svn | problems |\n|---|---|---|---|---:|\n",
+        "# Engine and svn {} on one working copy\n\n{} files, {rounds} operations per side and scenario. Outcomes: ok / busy (typed) / out of date / broken by `svn cleanup` / stopped as \"cleaned up by another client\" (engine only).\n\n| engine | svn | engine | svn | svn cleanup rerun | problems |\n|---|---|---|---|---:|---:|\n",
         {
             let (x, y, z) = fx.svn.version();
             format!("{x}.{y}.{z}")
@@ -510,6 +525,20 @@ fn run_scenarios(fx: &Fixture, scenarios: &[Scenario], report: &str) {
             .chain(theirs.failures.iter())
             .cloned()
             .collect();
+        // A failed `svn cleanup` (counted as broken) exits without releasing the lock it took:
+        // `cleanup_internal` (libsvn_wc/cleanup.c) releases it only on success, and svn then
+        // asks for another cleanup. Run it, as svn's user would. A row left together with an
+        // engine lock marker would be the engine's, and is a problem.
+        let mut svn_relocks = 0;
+        if theirs.broken > 0 && verify::lock_rows(&wc).unwrap_or(0) > 0 {
+            if engine_markers(&wc) > 0 {
+                problems.push("a lock row and the engine's lock marker are left".into());
+            } else if let Err(e) = fx.svn.run_in(&wc, &["cleanup"]) {
+                problems.push(format!("svn cleanup after a failed svn cleanup: {e}"));
+            } else {
+                svn_relocks += 1;
+            }
+        }
         let edits: Vec<(String, String)> = ours
             .edits
             .iter()
@@ -521,24 +550,28 @@ fn run_scenarios(fx: &Fixture, scenarios: &[Scenario], report: &str) {
             problems.push("neither side ever succeeded".into());
         }
         eprintln!(
-            "{name}: engine {}/{}/{} svn {}/{}/{} problems {}",
+            "{name}: engine {}/{}/{}/{}/{} svn {}/{}/{}/{} svn cleanup rerun {svn_relocks} problems {}",
             ours.ok,
             ours.busy,
             ours.out_of_date,
+            ours.broken,
+            ours.cleaned,
             theirs.ok,
             theirs.busy,
             theirs.out_of_date,
+            theirs.broken,
             problems.len()
         );
         let _ = writeln!(
             md,
-            "| {} | {} | {} / {} / {} / {} | {} / {} / {} / {} | {} |",
+            "| {} | {} | {} / {} / {} / {} / {} | {} / {} / {} / {} | {svn_relocks} | {} |",
             s.engine.name(),
             s.svn.name(),
             ours.ok,
             ours.busy,
             ours.out_of_date,
             ours.broken,
+            ours.cleaned,
             theirs.ok,
             theirs.busy,
             theirs.out_of_date,
@@ -568,6 +601,15 @@ fn run_scenarios(fx: &Fixture, scenarios: &[Scenario], report: &str) {
         all_problems.len(),
         path.display()
     );
+}
+
+/// Lock markers of the engine (`opensvn-lock-*`) in `.svn/tmp`.
+fn engine_markers(wc: &Path) -> usize {
+    std::fs::read_dir(wc.join(".svn/tmp")).map_or(0, |rd| {
+        rd.flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("opensvn-lock-"))
+            .count()
+    })
 }
 
 /// Engine and svn status as `path -> columns`, plus the files on disk.

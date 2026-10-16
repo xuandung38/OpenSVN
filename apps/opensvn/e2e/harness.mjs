@@ -270,7 +270,7 @@ export class App {
       rssKb += statusKb(pid, "VmRSS");
       pssKb += rollupKb(pid, "Pss");
     }
-    return { pids: pids.length, rssKb, pssKb, appRssKb: statusKb(root, "VmRSS") };
+    return { pids: pids.length, rssKb, pssKb, appRssKb: statusKb(root, "VmRSS"), appPid: root };
   }
 
   /** Ends the driver's process group: SIGTERM, then SIGKILL. */
@@ -433,6 +433,36 @@ function descendants(root) {
       out.push(c);
       queue.push(c);
     }
+  }
+  return out;
+}
+
+/**
+ * Resident memory of one process by kind of mapping, in kB: `heap` (the brk heap and anonymous
+ * mappings: malloc arenas, thread stacks, JS of a web process), `gpu` (`/dev/dri`, memfd and
+ * shared memory: buffers of the renderer), `code` (shared libraries and the binary) and `other`.
+ */
+export function rssByKind(pid) {
+  const out = { heap: 0, gpu: 0, code: 0, other: 0 };
+  let text;
+  try {
+    text = readFileSync(`/proc/${pid}/smaps`, "utf8");
+  } catch {
+    return null;
+  }
+  let kind = "other";
+  for (const line of text.split("\n")) {
+    const head = line.match(/^[0-9a-f]+-[0-9a-f]+ \S+ \S+ \S+ \S+\s*(.*)$/);
+    if (head) {
+      const name = head[1];
+      if (name === "" || name === "[heap]" || name.startsWith("[stack")) kind = "heap";
+      else if (/^\/dev\/dri|^\/memfd:|^\/dev\/shm|^\/SYSV/.test(name)) kind = "gpu";
+      else if (/\.so(\.|$)|^\//.test(name)) kind = "code";
+      else kind = "other";
+      continue;
+    }
+    const rss = line.match(/^Rss:\s+(\d+) kB/);
+    if (rss) out[kind] += Number(rss[1]);
   }
   return out;
 }

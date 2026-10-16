@@ -172,11 +172,13 @@ impl UpdateEditor {
             action,
         };
         self.s.ctx.notify(&ev);
-        self.out
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .events
-            .push(ev);
+        if self.s.ctx.keep_events {
+            self.out
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .events
+                .push(ev);
+        }
     }
 
     /// Hands the database side of a prepared node at `path` to the batch; flushes when the

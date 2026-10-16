@@ -125,13 +125,16 @@ repository and the working copy equals a fresh checkout. `locks_are_honoured_bot
 engine's lock while svn writes (E155004 each time; `svn status` works) and puts svn's lock row in
 `wc.db` while the engine writes (`WcBusy`, nothing changes; status works).
 
-`svn cleanup` always breaks locks (`cleanup-cmd.c`: `break_locks = TRUE`). Against an engine
-update it can vacuum pristines the update installed but has not referenced yet, and the
-update's next transaction then references a missing pristine. That pairing is the separate,
-ignored `engine_update_vs_svn_cleanup` test until the engine closes the window.
+`svn cleanup` always breaks locks (`cleanup-cmd.c`: `break_locks = TRUE`), runs the queued work,
+vacuums unreferenced pristines and empties `.svn/tmp`. `engine_update_vs_svn_cleanup` runs an
+engine update (alternately to r1 and HEAD) against a loop of `svn cleanup` with stricter checks:
+the update finishes, finds the working copy busy, or stops with the typed "working copy was
+cleaned up by another client" error (`WcBusy`) having written nothing more. It never fails on a
+vanished temporary file. Afterwards no NODES row references a missing pristine and a later update
+finishes the interrupted one. The report counts the stopped updates in its fifth engine column.
 
 ```sh
-cargo test -p opensvn-crash --test concurrency -- --ignored --nocapture --skip engine_update_vs_svn_cleanup
+cargo test -p opensvn-crash --test concurrency -- --ignored --nocapture
 ```
 
 ## Soak

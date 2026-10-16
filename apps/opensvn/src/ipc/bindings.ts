@@ -1162,6 +1162,12 @@ export type Settings = {
 	/**  Base UI font size in pixels. Range: `SETTING_RANGES`. */
 	"appearance.fontSize": number,
 	"appearance.density": Density,
+	/**
+	 *  Linux: the window's web view may composite with the GPU (WebKit's default). Off paints
+	 *  in software: less memory where there is no GPU driver (llvmpipe), more CPU when large
+	 *  areas repaint. Applies at the next start; `OPENSVN_HARDWARE_ACCELERATION` overrides it.
+	 */
+	"appearance.hardwareAcceleration": boolean,
 	"diff.mode": DiffMode,
 	"diff.ignoreWhitespace": boolean,
 	/**  Columns per tab in diff, blame and file views. Range: `SETTING_RANGES`. */
@@ -1238,6 +1244,12 @@ export type SettingsPatch_Deserialize = {
 	/**  Base UI font size in pixels. Range: `SETTING_RANGES`. */
 	"appearance.fontSize"?: number | null,
 	"appearance.density"?: Density | null,
+	/**
+	 *  Linux: the window's web view may composite with the GPU (WebKit's default). Off paints
+	 *  in software: less memory where there is no GPU driver (llvmpipe), more CPU when large
+	 *  areas repaint. Applies at the next start; `OPENSVN_HARDWARE_ACCELERATION` overrides it.
+	 */
+	"appearance.hardwareAcceleration"?: boolean | null,
 	"diff.mode"?: DiffMode | null,
 	"diff.ignoreWhitespace"?: boolean | null,
 	/**  Columns per tab in diff, blame and file views. Range: `SETTING_RANGES`. */
@@ -1291,6 +1303,12 @@ export type SettingsPatch_Serialize = {
 	/**  Base UI font size in pixels. Range: `SETTING_RANGES`. */
 	"appearance.fontSize"?: number | null,
 	"appearance.density"?: Density | null,
+	/**
+	 *  Linux: the window's web view may composite with the GPU (WebKit's default). Off paints
+	 *  in software: less memory where there is no GPU driver (llvmpipe), more CPU when large
+	 *  areas repaint. Applies at the next start; `OPENSVN_HARDWARE_ACCELERATION` overrides it.
+	 */
+	"appearance.hardwareAcceleration"?: boolean | null,
 	"diff.mode"?: DiffMode | null,
 	"diff.ignoreWhitespace"?: boolean | null,
 	/**  Columns per tab in diff, blame and file views. Range: `SETTING_RANGES`. */
