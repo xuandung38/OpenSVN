@@ -201,6 +201,8 @@ impl RealEngine {
     ) -> svn_client::ClientCtx {
         let mut client = self.client_ctx(ctx);
         client.progress = Some(client_progress(&ctx.progress, phase));
+        // The app follows the progress sink only: no list of every notification is kept.
+        client.keep_events = false;
         client.network_wait = self.network_wait(ctx, phase);
         if !ignore_externals {
             client.externals = Some(Arc::new(ConnectorOpener {

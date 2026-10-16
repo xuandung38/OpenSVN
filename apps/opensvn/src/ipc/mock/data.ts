@@ -119,6 +119,7 @@ export const mockSettings: Settings = {
   "appearance.theme": "system",
   "appearance.fontSize": 13,
   "appearance.density": "comfortable",
+  "appearance.hardwareAcceleration": true,
   "diff.mode": "split",
   "diff.ignoreWhitespace": false,
   "diff.tabWidth": 4,

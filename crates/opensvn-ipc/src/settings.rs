@@ -173,6 +173,10 @@ settings_structs! {
         /// Base UI font size in pixels. Range: `SETTING_RANGES`.
         appearance_font_size: u32 = "appearance.fontSize",
         appearance_density: Density = "appearance.density",
+        /// Linux: the window's web view may composite with the GPU (WebKit's default). Off paints
+        /// in software: less memory where there is no GPU driver (llvmpipe), more CPU when large
+        /// areas repaint. Applies at the next start; `OPENSVN_HARDWARE_ACCELERATION` overrides it.
+        appearance_hardware_acceleration: bool = "appearance.hardwareAcceleration",
         diff_mode: DiffMode = "diff.mode",
         diff_ignore_whitespace: bool = "diff.ignoreWhitespace",
         /// Columns per tab in diff, blame and file views. Range: `SETTING_RANGES`.

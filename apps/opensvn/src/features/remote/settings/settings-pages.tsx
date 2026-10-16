@@ -484,6 +484,12 @@ export function AppearancePage({ settings, draft, errors, set }: PageProps) {
           { value: "compact", label: t("densityCompact") },
         ]}
       />
+      <Check
+        label={t("hardwareAcceleration")}
+        checked={settingValue(settings, draft, "appearance.hardwareAcceleration")}
+        onChange={(v) => set({ "appearance.hardwareAcceleration": v })}
+      />
+      <span className="text-[11px] text-muted-text">{t("hardwareAccelerationHint")}</span>
     </div>
   );
 }

@@ -29,6 +29,7 @@ mod os_integration;
 mod path_grants;
 mod preview;
 mod programs;
+mod renderer;
 pub mod settings;
 mod status;
 mod updater;
@@ -263,6 +264,7 @@ pub fn run() {
                 tracing::warn!(error = %e, "menu bar could not be installed");
             }
             let (state, kind) = build_state(app)?;
+            renderer::apply(app, state.settings.get().appearance_hardware_acceleration);
             app.manage(state);
             tauri::async_runtime::spawn(finish_startup(app.handle().clone(), kind));
             Ok(())

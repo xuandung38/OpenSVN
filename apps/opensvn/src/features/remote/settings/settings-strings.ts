@@ -76,6 +76,9 @@ export const settingsStrings = defineStrings({
     density: "Density",
     densityComfortable: "Comfortable",
     densityCompact: "Compact",
+    hardwareAcceleration: "Use hardware acceleration",
+    hardwareAccelerationHint:
+      "Linux only, applies the next time OpenSVN starts. Turn it off on a machine without a working GPU driver (virtual machine, remote desktop) to save about 160 MB of memory, or when the window stays blank. Scrolling long lists then uses more CPU.",
     tabWidth: "Tab width (columns, {min}–{max})",
     mergeTool: "External merge tool",
     editor: "Editor",
@@ -180,6 +183,9 @@ export const settingsStrings = defineStrings({
     density: "Mật độ hiển thị",
     densityComfortable: "Thoáng",
     densityCompact: "Gọn",
+    hardwareAcceleration: "Dùng tăng tốc phần cứng",
+    hardwareAccelerationHint:
+      "Chỉ áp dụng trên Linux, có hiệu lực từ lần mở OpenSVN tiếp theo. Tắt đi trên máy không có driver GPU dùng được (máy ảo, remote desktop) để tiết kiệm khoảng 160 MB bộ nhớ, hoặc khi cửa sổ trắng trơn. Khi đó cuộn danh sách dài tốn CPU hơn.",
     tabWidth: "Độ rộng tab (cột, {min}–{max})",
     mergeTool: "Công cụ merge ngoài",
     editor: "Trình soạn thảo",
