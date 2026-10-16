@@ -17,6 +17,7 @@ Chứng minh tiêu chí MVP về **toàn vẹn dữ liệu, tương thích, bả
 ## Requirements
 - **Crash suite** (2 cơ chế):
   - **Failpoint có tên** (crate `fail`, bật bằng feature `failpoints` trong 07/10/11): `net.update.mid_stream`, `wc.txn.before_commit`, `wc.txn.after_commit`, `wq.mid_item`, `wq.rename`, `pristine.install.before_rename`, `commit.after_txn_created`, `commit.after_merge_before_finalize`, `update.after_merge3_before_txn`. Báo cáo **độ phủ theo failpoint** mỗi đêm.
+    - `net.update.mid_stream` nằm trong `svn-ra` (feature `failpoints`), sau mỗi chunk của stream REPORT khi checkout/update: crash suite kill tiến trình tại đó, test khác thấy lỗi "server đóng kết nối". Đã có trong `FAILPOINTS` của `tests/crash/src/harness.rs`.
   - **SIGKILL ngẫu nhiên từ ngoài** (thời gian ngẫu nhiên) trong checkout/update (có/không sửa local)/commit/revert/switch.
   - Sau mỗi lần: mở lại (recovery P15/svn-client) → kiểm `svn status`/`svn diff` (svn 1.15.0 thật): 0 hỏng WC, 0 mất thay đổi local, **0 revert ngầm thay đổi server** (diff không chứa đảo ngược commit người khác).
   - Biến thể chạy qua **app thật** (tauri-driver, Linux) cho luồng commit/update.

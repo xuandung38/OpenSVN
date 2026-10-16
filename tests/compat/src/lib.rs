@@ -8,6 +8,7 @@
 //! `cargo xtask compat up && cargo xtask compat fixtures && cargo test -p opensvn-compat -- --ignored`.
 
 pub mod compare;
+pub mod local;
 pub mod runner;
 pub mod scenario;
 pub mod skel;
@@ -59,7 +60,13 @@ mod scenario_files {
             &repo_root().join("tests/compat/scenarios/harness"),
             &mut files,
         )?;
-        assert!(!files.is_empty());
+        let harness = files.len();
+        // Engine scenarios (run by apps/opensvn/src-tauri/tests/compat_two_way.rs).
+        yaml_files(
+            &repo_root().join("tests/compat/scenarios/client"),
+            &mut files,
+        )?;
+        assert!(harness > 0 && files.len() > harness);
         for path in &files {
             Scenario::load(path)?;
         }

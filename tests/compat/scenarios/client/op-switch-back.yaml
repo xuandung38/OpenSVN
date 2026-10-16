@@ -1,0 +1,13 @@
+# The engine switches a working copy svn switched to the branch back to trunk, and the reverse.
+name: op-switch-back
+repo: basic
+steps:
+  - { on: svn15, wc: s, svn: [checkout, "{url}/branches/feature-x", "."] }
+  - { on: engine, wc: e, svn: [checkout, "{url}/branches/feature-x", "."] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/branches/feature-x", "."] }
+  - { on: engine, wc: s, svn: [switch, "{url}/trunk"] }
+  - { on: svn14, wc: e, svn: [switch, "{url}/trunk", "."] }
+  - { on: svn15, wc: o, svn: [switch, "{url}/trunk", "."] }
+compare:
+  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: s, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }

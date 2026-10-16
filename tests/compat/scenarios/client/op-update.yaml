@@ -1,0 +1,16 @@
+# Update from r4 to HEAD: svn updates the engine's checkout, the engine updates svn's.
+name: op-update
+repo: basic
+steps:
+  - { on: engine, wc: e, svn: [checkout, "{url}/trunk", ".", -r, "4"] }
+  - { on: svn15, wc: s, svn: [checkout, "{url}/trunk", ".", -r, "4"] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/trunk", ".", -r, "4"] }
+  - { on: svn14, wc: e, svn: [update, -r, "7"] }
+  - { on: engine, wc: s, svn: [update, -r, "7"] }
+  - { on: svn15, wc: o, svn: [update, -r, "7"] }
+  - { on: engine, wc: e, svn: [update] }
+  - { on: svn14, wc: s, svn: [update] }
+  - { on: svn15, wc: o, svn: [update] }
+compare:
+  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: s, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }

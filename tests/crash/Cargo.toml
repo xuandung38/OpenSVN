@@ -14,7 +14,7 @@ workspace = true
 # Named failpoints of svn-wc/svn-client, turned into a SIGKILL of the worker process. Off by default
 # so that `cargo test --workspace` does not compile the engine with failpoints through feature
 # unification; the nightly suite runs `cargo test -p opensvn-crash --features failpoints`.
-failpoints = ["dep:fail", "svn-client/failpoints"]
+failpoints = ["dep:fail", "svn-client/failpoints", "svn-ra/failpoints"]
 
 [dependencies]
 svn-types.workspace = true

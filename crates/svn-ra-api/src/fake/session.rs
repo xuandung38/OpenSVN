@@ -22,8 +22,8 @@ use crate::auth::{
 };
 use crate::commit::{CommitEditor, CommitObserver};
 use crate::session::{
-    FileMeta, FileRev, FileRevHandler, LocationSegment, LogRequest, RaSession, ReportFn, TxnAbort,
-    UpdateRequest,
+    FileMeta, FileRev, FileRevHandler, InheritedItem, LocationSegment, LogRequest, RaSession,
+    ReportFn, TxnAbort, UpdateRequest,
 };
 
 /// Credentials the fake server accepts.
@@ -576,6 +576,38 @@ impl RaSession for FakeRaSession {
         }
         st.locks.remove(path);
         Ok(())
+    }
+
+    async fn inherited_props(
+        &self,
+        repos_relpath: &RelPath,
+        rev: Revnum,
+        cancel: &CancelToken,
+    ) -> Result<Vec<InheritedItem>> {
+        cancel.check()?;
+        let st = self.guard();
+        let (_, revision) = st.revision(Some(rev))?;
+        let mut parents = Vec::new();
+        let mut at = repos_relpath.parent();
+        while let Some(p) = at {
+            at = p.parent();
+            parents.push(p);
+        }
+        Ok(parents
+            .into_iter()
+            .rev()
+            .filter_map(|p| {
+                let node = revision.tree.get(&p).filter(|n| !n.props.is_empty())?;
+                Some(InheritedItem {
+                    repos_relpath: p.as_str().to_owned(),
+                    props: node
+                        .props
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_vec()))
+                        .collect(),
+                })
+            })
+            .collect())
     }
 
     async fn file_revs(

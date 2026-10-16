@@ -1,7 +1,7 @@
 //! Compatibility with svn 1.15: the same history and the same operations, run once by the real
 //! svn and once by this client (history replayed into the fake session from `svnadmin dump`),
 //! must leave identical working copies: files, NODES rows, ACTUAL rows and `svn status` output.
-//! Skipped when no svn 1.15 is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
+//! Skipped when no svn 1.14 or newer is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod common;

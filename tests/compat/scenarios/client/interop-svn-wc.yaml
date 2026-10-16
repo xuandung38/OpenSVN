@@ -1,0 +1,57 @@
+# DAV interop, svn -> engine: svn 1.15 and svn 1.14 make working copies with local changes; the
+# engine updates them (incoming changes merged under the local ones) and commits them. Compared
+# with working copies svn took through the same steps.
+name: interop-svn-wc
+repo: basic
+fresh_repo: true
+steps:
+  - { on: svn15, wc: s, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: o, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn14, wc: s14, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn14, wc: o14, svn: [checkout, "{url}/trunk", "."] }
+  # Someone else commits: an edit, an addition and a property.
+  - { on: svn15, wc: w, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn15, wc: w, sh: "printf 'incoming\\n' >> README.txt && printf 'in\\n' > incoming.txt" }
+  - { on: svn15, wc: w, svn: [add, incoming.txt] }
+  - { on: svn15, wc: w, svn: [propset, custom:in, "1", src] }
+  - { on: svn15, wc: w, svn: [commit, -m, "incoming change"] }
+  # svn 1.15 changes s and o the same way.
+  - { on: svn15, wc: s, sh: "printf 'local\\n' >> docs/index.md && printf 'mine\\n' > mine.txt" }
+  - { on: svn15, wc: o, sh: "printf 'local\\n' >> docs/index.md && printf 'mine\\n' > mine.txt" }
+  - { on: svn15, wc: s, svn: [add, mine.txt] }
+  - { on: svn15, wc: o, svn: [add, mine.txt] }
+  - { on: svn15, wc: s, svn: [move, data/blob.bin, data/moved.bin] }
+  - { on: svn15, wc: o, svn: [move, data/blob.bin, data/moved.bin] }
+  - { on: svn15, wc: s, svn: [delete, mixed-eol.txt] }
+  - { on: svn15, wc: o, svn: [delete, mixed-eol.txt] }
+  # The engine updates svn's working copy; svn updates the oracle.
+  - { on: engine, wc: s, svn: [update] }
+  - { on: svn15, wc: o, svn: [update] }
+  - { on: svn15, wc: s-updated, sh: "cp -a ../s/. ." }
+  - { on: svn15, wc: o-updated, sh: "cp -a ../o/. ." }
+  # The engine commits it; svn 1.15 reads and updates it afterwards.
+  - { on: engine, wc: s, svn: [commit, -m, "the engine commits svn 1.15's working copy"] }
+  - { on: svn15, wc: s, svn: [status] }
+  - { on: svn15, wc: s, svn: [update] }
+  # The same with the working copy svn 1.14 made (other files, so nothing conflicts).
+  - { on: svn14, wc: s14, sh: "printf 'local14\\n' >> src/app-copy.c" }
+  - { on: svn14, wc: o14, sh: "printf 'local14\\n' >> src/app-copy.c" }
+  - { on: svn14, wc: s14, svn: [propset, custom:by, svn14, keywords.txt] }
+  - { on: svn14, wc: o14, svn: [propset, custom:by, svn14, keywords.txt] }
+  - { on: engine, wc: s14, svn: [update, -r, "12"] }
+  - { on: svn14, wc: o14, svn: [update, -r, "12"] }
+  - { on: svn14, wc: s14-updated, sh: "cp -a ../s14/. ." }
+  - { on: svn14, wc: o14-updated, sh: "cp -a ../o14/. ." }
+  - { on: engine, wc: s14, svn: [update] }
+  - { on: engine, wc: s14, svn: [commit, -m, "the engine commits svn 1.14's working copy"] }
+  - { on: svn14, wc: s14, svn: [status] }
+  - { on: svn14, wc: s14, svn: [update] }
+  - { on: svn14, wc: s14, svn: [cleanup] }
+  - { on: svn15, wc: s, svn: [update] }
+  - { on: svn15, wc: f, svn: [checkout, "{url}/trunk", "."] }
+  - { on: svn14, wc: f14, svn: [checkout, "{url}/trunk", "."] }
+compare:
+  - { left: s-updated, right: o-updated, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: s14-updated, right: o14-updated, checks: [tree, status, info, wcdb], reader: svn14, ignore: [dav_cache] }
+  - { left: s, right: f, checks: [tree, status, info] }
+  - { left: s14, right: f14, checks: [tree, status, info], reader: svn14 }

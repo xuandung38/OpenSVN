@@ -8,6 +8,7 @@ pub mod blame;
 pub mod commit;
 pub mod file_revs;
 pub(crate) mod history;
+pub mod iprops;
 pub mod locks;
 pub mod log;
 pub mod open;

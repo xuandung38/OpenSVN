@@ -1,7 +1,7 @@
 //! `svn update --set-depth` against svn 1.15: the same repository history (replayed into the
 //! fake session) and the same local changes, then `svn update --set-depth` on one checkout and
 //! `svn_client::set_depth` on the other. Files, NODES and ACTUAL rows and `svn status` must be
-//! identical. Skipped when no svn 1.15 is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
+//! identical. Skipped when no svn 1.14 or newer is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod common;

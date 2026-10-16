@@ -13,6 +13,7 @@ workspace = true
 svn-types.workspace = true
 svn-ra-api.workspace = true
 svn-protocol.workspace = true
+fail = { workspace = true, optional = true }
 svn-delta.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
@@ -50,6 +51,9 @@ default = []
 # Kerberos single sign-on on macOS/Linux through the system GSSAPI library. Off by default so the
 # Linux CI builds without krb5 development packages. Windows always uses SSPI.
 negotiate-gssapi = ["dep:libgssapi"]
+# Crash-injection point `net.update.mid_stream` (`fail::fail_point!`) in the update REPORT
+# stream; enabled only by tests and the crash suite, never in a release build.
+failpoints = ["dep:fail", "fail/failpoints"]
 
 [dev-dependencies]
 svn-ra-api = { workspace = true, features = ["fake"] }

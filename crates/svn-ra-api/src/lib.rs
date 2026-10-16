@@ -21,6 +21,6 @@ pub use auth::{
 pub use commit::{CommitEditor, CommitInfo, CommitObserver, ReplayableSource};
 pub use editor_worker::{DEFAULT_COMMAND_CAPACITY, EditorHandle, EditorWorker, WindowSender};
 pub use session::{
-    DirListing, FileMeta, FileRev, FileRevHandler, LocationSegment, LogRequest, RaSession,
-    ReportFn, TxnAbort, UpdateMode, UpdateRequest,
+    DirListing, FileMeta, FileRev, FileRevHandler, InheritedItem, LocationSegment, LogRequest,
+    RaSession, ReportFn, TxnAbort, UpdateMode, UpdateRequest,
 };
