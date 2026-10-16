@@ -7,6 +7,7 @@ import type {
   AppError,
   CheckoutRequest,
   CommitRequest,
+  CompareRequest,
   DiffGetRequest,
   DiffTarget,
   FileStatus,
@@ -28,6 +29,7 @@ import type {
   WcEntry,
   WorkingCopy,
 } from "../bindings";
+import { mockCompareSummary } from "./compare-mock";
 import { MOCK_WC_ID, mockSettings, mockWorkingCopies } from "./data";
 import { MOCK_REPO_ROOT, MOCK_YOUNGEST, mockRevDiff } from "./remote-data";
 import { freshMainStatus, mockWcDiff } from "./wc-mock-fixtures";
@@ -641,6 +643,26 @@ export function wcMockCommands(deps: MockDeps) {
         wcId,
         () => {
           patchWc(wcId, { baseRev: target, incomplete: false, resume: null });
+          deps.emit("wc://revision-changed", { wcId, baseRev: target, revRange: null });
+        },
+        { kind: "newRev", newRev: target },
+      );
+    },
+    compareSummarize: (req: CompareRequest) => {
+      const wc = wcOf(req.wcId);
+      if (!wc) return fail("not-a-working-copy", "Unknown working copy");
+      const summary = mockCompareSummary(req, wc, statusOf(req.wcId));
+      return typeof summary === "string" ? fail("wc-invalid-operation", summary) : ok(summary);
+    },
+    wcUpdateLatest: (wcId: string) => {
+      const wc = wcOf(wcId);
+      const target = state.youngest;
+      return op(
+        "update",
+        `Update ${wc?.name ?? wcId}`,
+        wcId,
+        () => {
+          patchWc(wcId, { baseRev: target, incoming: 0, incomplete: false, resume: null });
           deps.emit("wc://revision-changed", { wcId, baseRev: target, revRange: null });
         },
         { kind: "newRev", newRev: target },

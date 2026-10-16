@@ -251,10 +251,53 @@ pub async fn wc_continue(
                 forget_switch(&db, &row.root_path);
                 return Ok(OpResult::NewRev { new_rev });
             }
-            let new_rev = engine.resume(&wc, rev, ignore_externals, &ctx).await?;
+            let new_rev = engine
+                .resume(&wc, Some(rev), ignore_externals, &ctx)
+                .await?;
             forget_journal(&db, &info.root_path);
             forget_journal(&db, &row.root_path);
             Ok(OpResult::NewRev { new_rev })
+        })
+    })
+    .await
+}
+
+/// "Update to latest instead" for an incomplete working copy: updates the whole working copy to
+/// HEAD with the choices of the interrupted operation, as [`wc_continue`] does at its revision.
+/// A checkout keeps its externals choice (the journal), a switch goes on to its URL; anything
+/// else is a plain update to HEAD. The journals are cleared once it succeeds.
+#[tauri::command]
+#[specta::specta]
+pub async fn wc_update_latest(
+    state: State<'_, AppState>,
+    wc_id: WcId,
+) -> Result<OperationHandle, AppError> {
+    guard(async {
+        let row = state.wcs.resolve(&wc_id)?.row;
+        let journal = state.db.checkout_journal_get(&row.root_path)?;
+        let switch_to = state.db.switch_journal_get(&row.root_path)?;
+        let (kind, title) = if switch_to.is_some() {
+            (OperationKind::Switch, format!("Switch {}", row.name))
+        } else {
+            (OperationKind::Update, format!("Update {}", row.name))
+        };
+        let ignore_externals = journal.as_ref().is_some_and(|j| j.ignore_externals);
+        let (db, wcs) = (state.db.clone(), std::sync::Arc::clone(&state.wcs));
+        state.start_wc_op(kind, &wc_id, title, {
+            let wc_id = wc_id.clone();
+            move |engine, wc, ctx| async move {
+                let new_rev = if let Some((url, ignore_ancestry)) = switch_to {
+                    engine
+                        .switch(&wc, &url, None, ignore_ancestry, &ctx)
+                        .await?
+                } else {
+                    engine.resume(&wc, None, ignore_externals, &ctx).await?
+                };
+                forget_switch(&db, &row.root_path);
+                forget_journal(&db, &row.root_path);
+                wcs.set_incoming(&wc_id, 0);
+                Ok(OpResult::NewRev { new_rev })
+            }
         })
     })
     .await

@@ -1,4 +1,4 @@
-import type { RepoEntry } from "../../../ipc/bindings";
+import type { CompareEntry, RepoEntry } from "../../../ipc/bindings";
 
 /** How one entry of a folder differs between the current location (left) and the other (right). */
 export type CompareState = "same" | "changed" | "onlyLeft" | "onlyRight" | "kindChanged";
@@ -54,4 +54,34 @@ export function isCompareTarget(url: string, root: string, self: string): boolea
     (u === r || u.startsWith(`${r}/`)) &&
     u !== self.replace(/\/+$/, "")
   );
+}
+
+/** A revision field: `null` is HEAD; `undefined` means the text is not a revision number. */
+export function parseRevision(text: string): number | null | undefined {
+  const t = text.trim();
+  if (t === "" || /^head$/i.test(t)) return null;
+  if (!/^r?\d{1,10}$/i.test(t)) return undefined;
+  const n = Number(t.replace(/^r/i, ""));
+  return Number.isSafeInteger(n) && n <= 0xffff_ffff ? n : undefined;
+}
+
+/** Label key of a summary entry's difference. */
+export function summaryState(
+  e: Pick<CompareEntry, "change" | "propsChanged">,
+): "stateAdded" | "stateDeleted" | "stateModified" | "stateModifiedProps" | "stateProps" {
+  switch (e.change) {
+    case "added":
+      return "stateAdded";
+    case "deleted":
+      return "stateDeleted";
+    case "modified":
+      return e.propsChanged ? "stateModifiedProps" : "stateModified";
+    case "normal":
+      return "stateProps";
+  }
+}
+
+/** Whether a summary entry has a text diff to show (a file whose text differs or exists on one side). */
+export function hasTextDiff(e: Pick<CompareEntry, "kind" | "change">): boolean {
+  return e.kind === "file" && e.change !== "normal";
 }

@@ -25,21 +25,24 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use opensvn_ipc::{
-    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
-    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, ItemProps, Layout, LogGetRequest,
-    LogPage, RepoInfo, RepoListing, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
+    BlameLine, BranchNode, CleanupRequest, CommitRequest, CompareSummary, CopyLocationRequest,
+    Depth, EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, ItemProps, Layout,
+    LogGetRequest, LogPage, RepoInfo, RepoListing, ResolveRequest, Rev, RevertRequest, TextSide,
+    UpdateRequest,
 };
 use svn_ra_api::RaSession;
 use svn_types::{CancelToken, ErrorCode, LockOwnershipStore, RelPath, RepoUrl, SvnError};
 
 use super::context::OpContext;
 use super::facade::{
-    CheckoutPlan, DiffOptions, EngineFacade, EngineResult, ExportedSides, LockScope, LogScope,
-    RemoteEditPlan, RemoteScan, RepoLocation, SideFiles, StatusQuery, WcInfo, WcOpened, WcRef,
+    CheckoutPlan, CompareLeft, DiffOptions, EngineFacade, EngineResult, ExportedSides, LockScope,
+    LogScope, RemoteEditPlan, RemoteScan, RepoLocation, SideFiles, StatusQuery, WcInfo, WcOpened,
+    WcRef,
 };
 
 mod blame;
 mod commit;
+mod compare;
 mod connector;
 mod layout;
 mod local;
@@ -456,14 +459,14 @@ impl EngineFacade for RealEngine {
     async fn resume(
         &self,
         wc: &WcRef,
-        rev: Rev,
+        rev: Option<Rev>,
         ignore_externals: bool,
         ctx: &OpContext,
     ) -> EngineResult<Rev> {
         let req = UpdateRequest {
             wc_id: wc.id.clone(),
             paths: None,
-            rev: Some(rev),
+            rev,
             depth: None,
         };
         self.do_update(wc, &req, ignore_externals, ctx).await
@@ -597,6 +600,17 @@ impl EngineFacade for RealEngine {
         ctx: &OpContext,
     ) -> EngineResult<FileDiff> {
         self.do_diff_rev(url, from, to, opts, ctx).await
+    }
+
+    async fn compare_summarize(
+        &self,
+        left: CompareLeft<'_>,
+        right_url: &str,
+        right_rev: Option<Rev>,
+        ctx: &OpContext,
+    ) -> EngineResult<CompareSummary> {
+        self.do_compare_summarize(left, right_url, right_rev, ctx)
+            .await
     }
 
     async fn export_rev_sides(

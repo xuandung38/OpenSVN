@@ -160,6 +160,7 @@ fn engine_data_dir(base: std::path::PathBuf, kind: EngineKind) -> std::path::Pat
 /// background.
 fn build_state<R: tauri::Runtime>(
     app: &tauri::App<R>,
+    menu: Arc<menu::TauriMenu<R>>,
 ) -> Result<(AppState, EngineKind), Box<dyn std::error::Error>> {
     let choice = choose_engine(
         std::env::var(ENGINE_ENV).ok().as_deref(),
@@ -192,7 +193,7 @@ fn build_state<R: tauri::Runtime>(
         status_timing: status::StatusTiming::default(),
         path_picker: Arc::new(path_grants::NativePathPicker),
         opener: Arc::new(os_integration::SystemOpener),
-        menu: Arc::new(menu::TauriMenu::new(app.handle().clone())),
+        menu,
         updates: Arc::new(updater::TauriUpdater::new(app.handle().clone())),
         // OS credential store only; refuses to save when none is reachable (no fallback).
         secrets: updater::os_secret_store(),
@@ -277,10 +278,11 @@ pub fn run() {
         .setup(move |app| {
             builder.mount_events(app);
             // A missing menu bar must not stop the app; the shortcuts work without it.
-            if let Err(e) = menu::install(app, true) {
+            let menu = Arc::new(menu::TauriMenu::new(app.handle().clone()));
+            if let Err(e) = menu::install(app, &menu, true) {
                 tracing::warn!(error = %e, "menu bar could not be installed");
             }
-            let (state, kind) = build_state(app)?;
+            let (state, kind) = build_state(app, menu)?;
             app.manage(state);
             tauri::async_runtime::spawn(finish_startup(app.handle().clone(), kind));
             Ok(())
