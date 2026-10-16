@@ -387,6 +387,23 @@ test("appearance: font size is range-checked and density is saved", async () => 
   });
 });
 
+test("appearance: hardware acceleration can be turned off", async () => {
+  mockCalls.length = 0;
+  const { dialog, save } = await openOn("Appearance");
+  const box = (await within(dialog).findByLabelText(
+    "Use hardware acceleration",
+  )) as HTMLInputElement;
+  expect(box.checked).toBe(true);
+  expect(within(dialog).getByText(/applies the next time OpenSVN starts/)).toBeTruthy();
+  await user().click(box);
+  await user().click(save);
+  await waitFor(() => expect(mockCalls.some((c) => c.name === "settingsSet")).toBe(true));
+  expect(mockCalls.find((c) => c.name === "settingsSet")?.args[0]).toEqual({
+    "appearance.hardwareAcceleration": false,
+  });
+  await mockAdapter.commands.settingsSet({ "appearance.hardwareAcceleration": true });
+});
+
 test("diff: tab width is range-checked", async () => {
   const { dialog, save } = await openOn("Diff & Merge");
   const tab = (await within(dialog).findByLabelText(

@@ -43,6 +43,7 @@ impl ProgramLauncher for NativeLauncher {
         } else {
             Command::new(program)
         };
+        crate::startup_env::scrub(&mut cmd);
         cmd.args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
