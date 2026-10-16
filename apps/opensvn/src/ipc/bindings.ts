@@ -85,6 +85,13 @@ export const commands = {
 	 *  to. Fails when nothing is incomplete.
 	 */
 	wcContinue: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("wc_continue", { wcId })),
+	/**
+	 *  "Update to latest instead" for an incomplete working copy: updates the whole working copy to
+	 *  HEAD with the choices of the interrupted operation, as [`wc_continue`] does at its revision.
+	 *  A checkout keeps its externals choice (the journal), a switch goes on to its URL; anything
+	 *  else is a plain update to HEAD. The journals are cleared once it succeeds.
+	 */
+	wcUpdateLatest: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("wc_update_latest", { wcId })),
 	switch: (wcId: WcId, url: string, rev: number | null, ignoreAncestry: boolean) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("switch", { wcId, url, rev, ignoreAncestry })),
 	commit: (request: CommitRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("commit", { request })),
 	revert: (request: RevertRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("revert", { request })),
@@ -134,6 +141,12 @@ export const commands = {
 	repoResolveUrl: (url: string) => typedError<ResolvedRepoUrl, AppError>(__TAURI_INVOKE("repo_resolve_url", { url })),
 	repoList: (url: string, rev: number | null) => typedError<RepoListing, AppError>(__TAURI_INVOKE("repo_list", { url, rev })),
 	repoCat: (url: string, rev: number | null) => typedError<TextSide, AppError>(__TAURI_INVOKE("repo_cat", { url, rev })),
+	/**
+	 *  Compare with branch / another folder: what differs between the working copy's location (at
+	 *  `left_rev`, or the working copy itself with its local changes) and another folder of the same
+	 *  repository at `right_rev`, like `svn diff --summarize`. Read-only.
+	 */
+	compareSummarize: (request: CompareRequest) => typedError<CompareSummary, AppError>(__TAURI_INVOKE("compare_summarize", { request })),
 	repoSave: (url: string, rev: number | null, grant: PathGrantId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("repo_save", { url, rev, grant })),
 	logGet: (request: LogGetRequest) => typedError<LogPage, AppError>(__TAURI_INVOKE("log_get", { request })),
 	/**  Result arrives as `op://finished` with a blame payload. */
@@ -226,6 +239,8 @@ export const commands = {
 	diagnosticsPreview: (options: DiagnosticsOptions) => typedError<DiagnosticsPreview, AppError>(__TAURI_INVOKE("diagnostics_preview", { options })),
 	/**  Switches the native menu between the Branch and the Location variant. */
 	menuSetLayout: (hasLayout: boolean) => typedError<null, AppError>(__TAURI_INVOKE("menu_set_layout", { hasLayout })),
+	/**  Sets the check marks of the View toggles in the native menu to the UI's state. */
+	menuSetView: (view: MenuViewState) => typedError<null, AppError>(__TAURI_INVOKE("menu_set_view", { view })),
 	certsList: () => typedError<TrustedCert[], AppError>(__TAURI_INVOKE("certs_list")),
 	/**  Stops trusting a certificate; the next connection asks again. */
 	certsRemove: (key: TrustedCertKey) => typedError<null, AppError>(__TAURI_INVOKE("certs_remove", { key })),
@@ -481,6 +496,62 @@ export type CommitRequest = {
 	keepLocks: boolean,
 	/**  Always true in the MVP: unversioned/missing selected paths are added/removed automatically. */
 	autoAddRemove: boolean,
+};
+
+/**
+ *  How a node differs in a comparison (`svn diff --summarize`), from the left side (the working
+ *  copy or its URL) to the right side (the other location).
+ */
+export type CompareChange = 
+/**  Only on the right side. */
+"added" | 
+/**  Only on the left side. */
+"deleted" | 
+/**  On both sides, with different text. */
+"modified" | 
+/**  On both sides, same text: only properties differ (`props_changed`). */
+"normal";
+
+/**  One node that differs between the two sides of a comparison. */
+export type CompareEntry = {
+	/**  Path below the compared folders, `/`-separated; the empty path is the folder itself. */
+	path: string,
+	kind: EntryKind,
+	change: CompareChange,
+	/**  Regular properties differ. */
+	propsChanged: boolean,
+};
+
+/**
+ *  `compare_summarize`: the working copy's location (or the working copy itself) against
+ *  another folder of the same repository, like `svn diff --summarize`.
+ */
+export type CompareRequest = {
+	wcId: WcId,
+	/**
+	 *  The working copy's own URL at this revision (`None`: HEAD). Ignored with
+	 *  `include_local`.
+	 */
+	leftRev: Rev | null,
+	/**
+	 *  Compare the working copy itself, local changes included (`svn diff --old=WC`), instead
+	 *  of its URL.
+	 */
+	includeLocal: boolean,
+	/**  The other folder; must be in the working copy's repository. */
+	rightUrl: string,
+	/**  `None`: HEAD. */
+	rightRev: Rev | null,
+};
+
+/**  Result of `compare_summarize`. */
+export type CompareSummary = {
+	/**  Revision the left side was read at; `None` when it is the working copy itself. */
+	leftRev: Rev | null,
+	/**  Revision the right side was read at. */
+	rightRev: Rev,
+	/**  Sorted by path; a node replaced by one of another kind has two entries. */
+	entries: CompareEntry[],
 };
 
 /**  Timing of [`OpStage::WaitingForConnection`]. */
@@ -827,6 +898,18 @@ export type LogPage = {
 
 /**  Where a log query reads from. */
 export type LogTarget = { kind: "url"; url: string } | { kind: "wc"; wcId: WcId; path: string };
+
+/**
+ *  The check marks of View › Show unversioned files / Show ignored files / Group by changelist /
+ *  Show as tree in the native menu. The UI owns these choices (remembered per user) and sends
+ *  them with `menu_set_view` whenever one changes; the defaults are the UI's.
+ */
+export type MenuViewState = {
+	showUnversioned: boolean,
+	showIgnored: boolean,
+	groupByChangelist: boolean,
+	tree: boolean,
+};
 
 export type NodeStatus = "normal" | "modified" | "added" | "deleted" | "replaced" | "unversioned" | "missing" | "conflicted" | "ignored" | "obstructed" | "external" | 
 /**

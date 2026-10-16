@@ -10,8 +10,14 @@
 //! one of these: subscribed by the UI (`MENU_EVENTS` in `src/ipc/events.ts`) or native.
 //! Accelerators use `Mod` = Cmd on macOS and Ctrl elsewhere.
 
+use std::sync::Mutex;
+
+use opensvn_ipc::MenuViewState;
 use tauri::Emitter;
-use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem, Submenu, SubmenuBuilder};
+use tauri::menu::{
+    CheckMenuItem, CheckMenuItemBuilder, Menu, MenuItemBuilder, PredefinedMenuItem, Submenu,
+    SubmenuBuilder,
+};
 
 use crate::db::Os;
 
@@ -42,6 +48,12 @@ pub enum Entry {
         label: &'static str,
         accel: Option<&'static str>,
     },
+    /// A UI toggle with a check mark (`CheckMenuItem`): emits `menu://<id>` like an item; the
+    /// mark follows the UI's state ([`checked`], `menu_set_view`).
+    Check {
+        id: &'static str,
+        label: &'static str,
+    },
     /// A separator line.
     Separator,
     /// A native item.
@@ -55,6 +67,21 @@ pub enum Entry {
 
 fn item(id: &'static str, label: &'static str, accel: Option<&'static str>) -> Entry {
     Entry::Item { id, label, accel }
+}
+
+fn check(id: &'static str, label: &'static str) -> Entry {
+    Entry::Check { id, label }
+}
+
+/// The check mark of a [`Entry::Check`] item in `view`; `None` for any other id.
+pub fn checked(id: &str, view: &MenuViewState) -> Option<bool> {
+    match id {
+        "view.show-unversioned" => Some(view.show_unversioned),
+        "view.show-ignored" => Some(view.show_ignored),
+        "view.group-changelist" => Some(view.group_by_changelist),
+        "view.tree" => Some(view.tree),
+        _ => None,
+    }
 }
 
 fn sub(label: &'static str, entries: Vec<Entry>) -> Entry {
@@ -79,10 +106,10 @@ fn view_menu() -> Entry {
                 "Hide whitespace changes",
                 Some("Mod+Alt+W"),
             ),
-            item("view.show-unversioned", "Show unversioned files", None),
-            item("view.show-ignored", "Show ignored files", None),
-            item("view.group-changelist", "Group by changelist", None),
-            item("view.tree", "Show as tree", None),
+            check("view.show-unversioned", "Show unversioned files"),
+            check("view.show-ignored", "Show ignored files"),
+            check("view.group-changelist", "Group by changelist"),
+            check("view.tree", "Show as tree"),
             sub(
                 "Theme",
                 vec![
@@ -279,7 +306,7 @@ pub fn event_name(id: &str) -> String {
 
 fn has_item_id(entries: &[Entry], wanted: &str) -> bool {
     entries.iter().any(|e| match e {
-        Entry::Item { id, .. } => *id == wanted,
+        Entry::Item { id, .. } | Entry::Check { id, .. } => *id == wanted,
         Entry::Submenu { entries, .. } => has_item_id(entries, wanted),
         _ => false,
     })
@@ -382,10 +409,15 @@ fn predefined<R: tauri::Runtime, M: tauri::Manager<R>>(
     }
 }
 
+/// The check items of a built menu, to update their marks without rebuilding it.
+type Checks<R> = Vec<(&'static str, CheckMenuItem<R>)>;
+
 fn fill<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
     builder: SubmenuBuilder<'_, R, M>,
     entries: &[Entry],
+    view: &MenuViewState,
+    checks: &mut Checks<R>,
 ) -> tauri::Result<Submenu<R>> {
     let mut builder = builder;
     for e in entries {
@@ -399,8 +431,16 @@ fn fill<R: tauri::Runtime, M: tauri::Manager<R>>(
                 }
                 builder.item(&b.build(app)?)
             }
+            Entry::Check { id, label } => {
+                let c = CheckMenuItemBuilder::with_id(*id, *label)
+                    .checked(checked(id, view).unwrap_or(false))
+                    .build(app)?;
+                let b = builder.item(&c);
+                checks.push((id, c));
+                b
+            }
             Entry::Submenu { label, entries } => {
-                let inner = fill(app, SubmenuBuilder::new(app, *label), entries)?;
+                let inner = fill(app, SubmenuBuilder::new(app, *label), entries, view, checks)?;
                 builder.item(&inner)
             }
         };
@@ -408,29 +448,42 @@ fn fill<R: tauri::Runtime, M: tauri::Manager<R>>(
     builder.build()
 }
 
-/// Builds the native menu bar.
-pub fn build_menu<R: tauri::Runtime, M: tauri::Manager<R>>(
+/// Builds the native menu bar, with the check marks of `view`, and returns its check items.
+fn build_menu<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
     os: Os,
     has_layout: bool,
-) -> tauri::Result<Menu<R>> {
+    view: &MenuViewState,
+) -> tauri::Result<(Menu<R>, Checks<R>)> {
     let mut tops = Vec::new();
+    let mut checks = Vec::new();
     for e in menu_spec(os, has_layout) {
         if let Entry::Submenu { label, entries } = e {
-            tops.push(fill(app, SubmenuBuilder::new(app, label), &entries)?);
+            tops.push(fill(
+                app,
+                SubmenuBuilder::new(app, label),
+                &entries,
+                view,
+                &mut checks,
+            )?);
         }
     }
     let refs: Vec<&dyn tauri::menu::IsMenuItem<R>> = tops
         .iter()
         .map(|s| s as &dyn tauri::menu::IsMenuItem<R>)
         .collect();
-    Menu::with_items(app, &refs)
+    Ok((Menu::with_items(app, &refs)?, checks))
 }
 
-/// Installs the menu and forwards activations to the UI as `menu://<id>`.
-pub fn install<R: tauri::Runtime>(app: &tauri::App<R>, has_layout: bool) -> tauri::Result<()> {
-    let menu = build_menu(app, Os::current(), has_layout)?;
-    app.set_menu(menu)?;
+/// Installs the menu and forwards activations to the UI as `menu://<id>`. The View check items
+/// start at the UI defaults; the UI sends its stored choices once it has loaded
+/// ([`MenuControl::set_view`]).
+pub fn install<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+    menu: &TauriMenu<R>,
+    has_layout: bool,
+) -> tauri::Result<()> {
+    menu.install(has_layout)?;
     app.on_menu_event(|app, event| {
         if let Some(action) = native_action(&event.id().0) {
             run_native(app, action);
@@ -451,24 +504,78 @@ pub trait MenuControl: Send + Sync + 'static {
     /// Switches the Branch / Location variant (the UI calls this when the open working copy
     /// changes).
     fn set_layout_mode(&self, has_layout: bool) -> Result<(), opensvn_ipc::AppError>;
+    /// Sets the check marks of the View toggles to the UI's state (the UI calls this at start-up
+    /// and whenever one changes, from the menu, the Changes list or a shortcut).
+    fn set_view(&self, view: MenuViewState) -> Result<(), opensvn_ipc::AppError>;
+}
+
+/// What the installed menu shows: the check marks, and the check items of the installed menu
+/// (empty before [`TauriMenu::install`]).
+struct MenuShown<R: tauri::Runtime> {
+    view: MenuViewState,
+    checks: Checks<R>,
 }
 
 /// [`MenuControl`] over a Tauri app handle.
 pub struct TauriMenu<R: tauri::Runtime> {
     app: tauri::AppHandle<R>,
+    shown: Mutex<MenuShown<R>>,
 }
 
 impl<R: tauri::Runtime> TauriMenu<R> {
     /// Wraps an app handle.
     pub fn new(app: tauri::AppHandle<R>) -> Self {
-        Self { app }
+        Self {
+            app,
+            shown: Mutex::new(MenuShown {
+                view: MenuViewState::default(),
+                checks: Vec::new(),
+            }),
+        }
+    }
+
+    fn shown(&self) -> std::sync::MutexGuard<'_, MenuShown<R>> {
+        self.shown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Builds the menu for the current state with `has_layout` and makes it the app's menu.
+    fn install(&self, has_layout: bool) -> tauri::Result<()> {
+        let mut shown = self.shown();
+        let (menu, checks) = build_menu(&self.app, Os::current(), has_layout, &shown.view)?;
+        self.app.set_menu(menu)?;
+        shown.checks = checks;
+        Ok(())
+    }
+
+    /// The check marks of the installed menu, by item id.
+    #[cfg(test)]
+    pub fn check_marks(&self) -> Vec<(&'static str, bool)> {
+        self.shown()
+            .checks
+            .iter()
+            .map(|(id, c)| (*id, c.is_checked().unwrap_or(false)))
+            .collect()
     }
 }
 
 impl<R: tauri::Runtime> MenuControl for TauriMenu<R> {
     fn set_layout_mode(&self, has_layout: bool) -> Result<(), opensvn_ipc::AppError> {
-        let menu = build_menu(&self.app, Os::current(), has_layout).map_err(menu_error)?;
-        self.app.set_menu(menu).map(|_| ()).map_err(menu_error)
+        self.install(has_layout).map_err(menu_error)
+    }
+
+    fn set_view(&self, view: MenuViewState) -> Result<(), opensvn_ipc::AppError> {
+        let mut shown = self.shown();
+        shown.view = view;
+        // A click on a check item flips its mark natively before the UI hears of it; setting
+        // every mark from the UI's state keeps both in step either way.
+        for (id, c) in &shown.checks {
+            if let Some(on) = checked(id, &view) {
+                c.set_checked(on).map_err(menu_error)?;
+            }
+        }
+        Ok(())
     }
 }
 

@@ -5,9 +5,14 @@
 //     the shortcuts dialog, including `color-contrast` (jsdom cannot compute it);
 //   - checks that the image sliders move with the arrow keys (jsdom does not step range inputs);
 //   - runs axe-core on Settings › Updates and on the app update dialog (`?update=available`);
+//   - runs axe-core on Branch › Compare with branch (`?menu=branch/compare`): a bad revision, the
+//     summary at chosen revisions, a file diff and the working copy with local changes;
+//   - runs axe-core on the gallery, which shows the "connection lost" notice;
 //   - takes screenshots of those states and of `/__gallery` into `test-results/browser/`.
-// A browser that is not installed is skipped with a note (Playwright's WebKit needs
-// `playwright install webkit`); the run fails when no browser ran or axe finds a violation.
+// Both browsers run by default; one that is not installed is skipped with a note (Playwright's
+// WebKit needs `pnpm exec playwright-core install webkit`, and on Linux its system libraries:
+// `pnpm exec playwright-core install-deps webkit`). The run fails when no browser ran or axe finds
+// a violation.
 //
 // Options: `--browsers=chromium,webkit` (default both), `--keep-server` to leave Vite running.
 import { spawn } from "node:child_process";
@@ -104,6 +109,14 @@ const LABELS = {
     checkNow: "Check for updates",
     updateDialog: "App updates",
     install: "Install",
+    compareDialog: "Compare with branch",
+    branch: "Branch or tag",
+    rightRev: "Revision of the other folder",
+    rightNumber: "Revision of the other folder: revision number",
+    compare: "Compare",
+    local: "Include local changes (compare the working copy itself)",
+    table: /^Differences between/,
+    showDiff: "Show diff of src/engine/renderer.ts",
   },
   vi: {
     imageMode: "Cách so sánh ảnh",
@@ -117,6 +130,14 @@ const LABELS = {
     checkNow: "Kiểm tra cập nhật",
     updateDialog: "Cập nhật ứng dụng",
     install: "Cài bản cập nhật",
+    compareDialog: "So sánh với branch",
+    branch: "Branch hoặc tag",
+    rightRev: "Revision của thư mục bên kia",
+    rightNumber: "Revision của thư mục bên kia: số revision",
+    compare: "So sánh",
+    local: "Tính cả thay đổi local (so sánh chính working copy)",
+    table: /^Khác biệt giữa/,
+    showDiff: "Xem diff của src/engine/renderer.ts",
   },
 };
 
@@ -211,9 +232,36 @@ async function checkTheme(browser, browserName, theme, url) {
   failures += await axe(page, `${tag} update available`);
   await shot(page, `${tag}-update-available`);
 
-  // Component gallery.
+  // Branch › Compare with branch, opened like the native menu item would.
+  await page.goto(`${url}/?os=win&menu=branch/compare`);
+  const cmp = page.getByRole("dialog", { name: L.compareDialog });
+  await cmp.waitFor();
+  await cmp.getByRole("combobox", { name: L.branch }).selectOption({ label: "feature-x" });
+  await cmp.getByRole("combobox", { name: L.rightRev }).selectOption("rev");
+  const number = cmp.getByRole("textbox", { name: L.rightNumber });
+  await number.fill("x1");
+  await cmp.getByRole("alert").waitFor();
+  failures += await axe(page, `${tag} compare, bad revision`);
+  await shot(page, `${tag}-compare-bad-revision`);
+  await number.fill("48100");
+  await cmp.getByRole("button", { name: L.compare, exact: true }).click();
+  await cmp.getByRole("table", { name: L.table }).waitFor();
+  failures += await axe(page, `${tag} compare summary`);
+  await shot(page, `${tag}-compare-summary`);
+  await cmp.getByRole("button", { name: L.showDiff }).click();
+  await cmp.locator(".cm-editor, .cm-mergeView").first().waitFor();
+  failures += await axe(page, `${tag} compare file diff`);
+  await shot(page, `${tag}-compare-diff`);
+  await cmp.getByRole("checkbox", { name: L.local }).check();
+  await cmp.getByRole("button", { name: L.compare, exact: true }).click();
+  await cmp.getByRole("table", { name: L.table }).waitFor();
+  failures += await axe(page, `${tag} compare with local changes`);
+  await shot(page, `${tag}-compare-local`);
+
+  // Component gallery (the "connection lost" notice included).
   await page.goto(`${url}/__gallery`);
   await page.waitForLoadState("networkidle");
+  await page.getByTestId("connection-wait").first().waitFor();
   failures += await axe(page, `${tag} gallery`);
   await shot(page, `${tag}-gallery`);
 

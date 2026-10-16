@@ -41,6 +41,8 @@ struct FileState {
     delta: Option<(SvndiffDecoder, WindowSender)>,
     /// Download feeding this file (skeleton mode).
     download: Option<DownloadTask>,
+    /// The text change was announced to the editor (`announce_text`).
+    announced: bool,
 }
 
 struct Frame {
@@ -64,6 +66,9 @@ pub(super) struct EventBridge<'a> {
     scheduler: Option<FetchScheduler>,
     /// Status drives carry no text.
     send_text: bool,
+    /// Without text, still tell the editor that a file's text changed: `apply_textdelta`
+    /// closed at once with no window (diff drives).
+    announce_text: bool,
     stack: Vec<Frame>,
     pending: Vec<PendingClose>,
     root_closed: bool,
@@ -89,6 +94,7 @@ impl<'a> EventBridge<'a> {
             wire,
             scheduler,
             send_text,
+            announce_text: false,
             stack: Vec::new(),
             pending: Vec::new(),
             root_closed: false,
@@ -96,6 +102,33 @@ impl<'a> EventBridge<'a> {
             prefix: RelPath::root(),
             outer: Vec::new(),
         }
+    }
+
+    /// With `announce`, a drive without text still reports each text change (see the field).
+    pub(super) fn announcing_text(mut self, announce: bool) -> Self {
+        self.announce_text = announce;
+        self
+    }
+
+    /// Tells the editor that the text of the open file `path` changed, without contents.
+    async fn announce_text_change(
+        &mut self,
+        path: &RelPath,
+        base_checksum: Option<[u8; 16]>,
+    ) -> Result<()> {
+        if !self.announce_text {
+            return Ok(());
+        }
+        let editor = self.editor;
+        let file = self.top_file(path)?;
+        if file.announced {
+            return Ok(());
+        }
+        file.announced = true;
+        let sender = editor
+            .apply_textdelta(file.id, base_checksum.map(Checksum::Md5))
+            .await?;
+        sender.send(None).await
     }
 
     /// The server's edit is rooted at `prefix` below the session root.
@@ -271,7 +304,7 @@ impl<'a> EventBridge<'a> {
                 base_checksum,
             } => {
                 if !self.send_text {
-                    return Ok(());
+                    return self.announce_text_change(&path, base_checksum).await;
                 }
                 let editor = self.editor;
                 let file = self.top_file(&path)?;
@@ -326,6 +359,7 @@ impl<'a> EventBridge<'a> {
                 id,
                 delta: None,
                 download: None,
+                announced: false,
             }),
         });
     }
@@ -353,7 +387,7 @@ impl<'a> EventBridge<'a> {
         base_checksum: Option<[u8; 16]>,
     ) -> Result<()> {
         if !self.send_text {
-            return Ok(());
+            return self.announce_text_change(path, base_checksum).await;
         }
         let href = href.ok_or_else(|| corrupt(format!("no href to fetch {path} from")))?;
         // Like `fetch_props`: file text comes from a node of a revision root, never from any

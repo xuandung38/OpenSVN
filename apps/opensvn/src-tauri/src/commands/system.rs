@@ -288,6 +288,16 @@ pub async fn menu_set_layout(state: State<'_, AppState>, has_layout: bool) -> Re
     guard(async { state.menu.set_layout_mode(has_layout) }).await
 }
 
+/// Sets the check marks of the View toggles in the native menu to the UI's state.
+#[tauri::command]
+#[specta::specta]
+pub async fn menu_set_view(
+    state: State<'_, AppState>,
+    view: opensvn_ipc::MenuViewState,
+) -> Result<(), AppError> {
+    guard(async { state.menu.set_view(view) }).await
+}
+
 /// Builds the diagnostics bundle in memory and returns every file's text for review. Nothing is
 /// written yet.
 #[tauri::command]

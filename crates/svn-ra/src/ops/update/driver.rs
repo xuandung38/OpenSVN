@@ -159,8 +159,8 @@ fn request_options(wire: &RaWire, req: &UpdateRequest) -> Result<UpdateRequestOp
     opts.depth = req.depth;
     opts.ignore_ancestry = req.ignore_ancestry;
     opts.send_copyfrom_args = req.send_copyfrom;
-    opts.text_deltas = req.mode != UpdateMode::Status;
-    if let UpdateMode::Switch(url) = &req.mode {
+    opts.text_deltas = req.mode.sends_text();
+    if let Some(url) = req.mode.destination() {
         opts.dst = Some(wire.repo_path_of_url(url.as_url().as_str())?);
     }
     opts.update_target = name;
@@ -185,6 +185,8 @@ async fn drive(
     cancel.check()?;
     let opts = request_options(wire, &req)?;
     let send_text = opts.text_deltas;
+    // A diff drive tells the editor which files changed text, without their contents.
+    let announce_text = matches!(req.mode, UpdateMode::Diff(_));
     let skelta = matches!(opts.mode, WireMode::Skelta { .. });
     let builder = collect_report(wire, opts, req.target.clone(), report).await?;
     let request = builder.build(wire.urls())?;
@@ -192,6 +194,7 @@ async fn drive(
     let mut resp = resp;
     let scheduler = skelta.then(|| FetchScheduler::new(wire, cancel));
     let mut bridge = EventBridge::new(editor, wire, scheduler, send_text, cancel)
+        .announcing_text(announce_text)
         .rooted_at(split_target(&req.target).0);
     let mut parser = UpdateParser::new(wire.urls().clone());
     while let Some(chunk) = resp.chunk().await? {

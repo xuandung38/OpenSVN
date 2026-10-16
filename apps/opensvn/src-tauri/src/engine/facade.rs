@@ -16,10 +16,10 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use opensvn_ipc::{
-    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
-    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, ItemProps, Layout, LockConflict,
-    LogGetRequest, LogPage, RepoInfo, RepoListing, ResolveRequest, Rev, RevertRequest, TextSide,
-    UpdateRequest, WcFormat, WcId,
+    BlameLine, BranchNode, CleanupRequest, CommitRequest, CompareSummary, CopyLocationRequest,
+    Depth, EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, ItemProps, Layout,
+    LockConflict, LogGetRequest, LogPage, RepoInfo, RepoListing, ResolveRequest, Rev,
+    RevertRequest, TextSide, UpdateRequest, WcFormat, WcId,
 };
 use svn_types::SvnError;
 
@@ -341,12 +341,13 @@ pub trait EngineFacade: Send + Sync {
     /// Updates; returns the revision reached.
     async fn update(&self, wc: &WcRef, req: &UpdateRequest, ctx: &OpContext) -> EngineResult<Rev>;
     /// Finishes an interrupted checkout or update of the whole working copy at `rev`, the
-    /// revision it was reaching ([`WcInfo::resume_rev`]), with the recorded depths and with
-    /// externals unless `ignore_externals` (the choice of the interrupted checkout).
+    /// revision it was reaching ([`WcInfo::resume_rev`]), or at HEAD when `None` ("Update to
+    /// latest instead"), with the recorded depths and with externals unless `ignore_externals`
+    /// (the choice of the interrupted checkout).
     async fn resume(
         &self,
         wc: &WcRef,
-        rev: Rev,
+        rev: Option<Rev>,
         ignore_externals: bool,
         ctx: &OpContext,
     ) -> EngineResult<Rev> {
@@ -354,7 +355,7 @@ pub trait EngineFacade: Send + Sync {
         let req = UpdateRequest {
             wc_id: wc.id.clone(),
             paths: None,
-            rev: Some(rev),
+            rev,
             depth: None,
         };
         self.update(wc, &req, ctx).await
@@ -536,4 +537,35 @@ pub trait EngineFacade: Send + Sync {
         layout: &Layout,
         ctx: &OpContext,
     ) -> EngineResult<Vec<BranchNode>>;
+    /// What differs between `left` and the folder `right_url` at `right_rev` (`None`: HEAD) of
+    /// the same repository, like `svn diff --summarize` (ancestry ignored): "added" is only on
+    /// the right, "deleted" only on the left. Nothing is written.
+    async fn compare_summarize(
+        &self,
+        left: CompareLeft<'_>,
+        right_url: &str,
+        right_rev: Option<Rev>,
+        ctx: &OpContext,
+    ) -> EngineResult<CompareSummary> {
+        let _ = (left, right_url, right_rev);
+        ctx.check()?;
+        Err(SvnError::new(
+            svn_types::ErrorCode::ServerUnsupported,
+            "This engine cannot compare locations.",
+        ))
+    }
+}
+
+/// The left side of [`EngineFacade::compare_summarize`].
+#[derive(Debug, Clone, Copy)]
+pub enum CompareLeft<'a> {
+    /// A repository folder at a revision.
+    Url {
+        /// The folder.
+        url: &'a str,
+        /// `None`: HEAD.
+        rev: Option<Rev>,
+    },
+    /// A working copy as it is on disk, local changes included.
+    Wc(&'a WcRef),
 }

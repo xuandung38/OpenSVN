@@ -36,6 +36,8 @@ const LABELS = {
     url: "Repository URL",
     folder: "Folder name",
     checkout: "Checkout",
+    lost: "Connection lost",
+    reconnected: "Reconnected",
   },
   vi: {
     bannerTitle: "Checkout chưa hoàn tất",
@@ -43,6 +45,8 @@ const LABELS = {
     url: "URL repository",
     folder: "Tên thư mục",
     checkout: "Checkout",
+    lost: "Mất kết nối",
+    reconnected: "Đã kết nối lại",
   },
 } as const;
 
@@ -122,17 +126,24 @@ for (const lang of ["en", "vi"] as Lang[]) {
         },
         Date.now(),
       );
-      render(
-        <QueryClientProvider client={new QueryClient()}>
+      const qc = new QueryClient();
+      const ui = (o: typeof op) => (
+        <QueryClientProvider client={qc}>
           <I18nProvider lang={lang}>
             <ToastProvider>
-              <ActivityPanel ops={[op]} onCancel={() => {}} />
+              <ActivityPanel ops={[o]} onCancel={() => {}} />
             </ToastProvider>
           </I18nProvider>
-        </QueryClientProvider>,
+        </QueryClientProvider>
       );
+      const r = render(ui(op));
       await screen.findByTestId("connection-wait");
+      expect(screen.getByTestId("connection-wait-live").textContent).toBe(l.lost);
       await expectNoSeriousA11yViolations(`waiting for the connection (${lang})`);
+      r.rerender(ui({ ...op, progress: op.progress && { ...op.progress, stage: "fetching" } }));
+      expect(screen.queryByTestId("connection-wait")).toBeNull();
+      expect(screen.getByTestId("connection-wait-live").textContent).toBe(l.reconnected);
+      await expectNoSeriousA11yViolations(`reconnected (${lang})`);
     });
   });
 }

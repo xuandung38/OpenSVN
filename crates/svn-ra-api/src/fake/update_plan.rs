@@ -125,6 +125,8 @@ pub(super) enum Op {
     },
     FileProp(FileSlot, PropChange),
     Text(FileSlot, bytes::Bytes),
+    /// `apply_textdelta` closed at once with no window: the text changed, no contents.
+    TextChanged(FileSlot),
     CloseFile(FileSlot),
 }
 
@@ -143,6 +145,8 @@ pub(super) struct PlanInput<'a> {
     /// Where `anchor_target` lives in the target tree (differs for switch).
     pub tree_target: RelPath,
     pub send_text: bool,
+    /// Without text, still announce each text change (diff drives, see `UpdateMode::Diff`).
+    pub announce_text: bool,
     pub max_open_files: usize,
     /// Depth of the update request (`Unknown`: the depths the working copy reports).
     pub requested_depth: Depth,
@@ -599,6 +603,8 @@ impl Planner<'_> {
                     }
                     if text_changed && self.input.send_text {
                         self.ops.push(Op::Text(slot, content.clone()));
+                    } else if text_changed && self.input.announce_text {
+                        self.ops.push(Op::TextChanged(slot));
                     }
                     self.finish_file(slot, cp);
                     Ok(())
@@ -645,6 +651,8 @@ impl Planner<'_> {
                 }
                 if self.input.send_text {
                     self.ops.push(Op::Text(slot, content.clone()));
+                } else if self.input.announce_text {
+                    self.ops.push(Op::TextChanged(slot));
                 }
                 self.finish_file(slot, cp);
             }

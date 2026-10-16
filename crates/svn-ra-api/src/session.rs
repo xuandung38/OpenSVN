@@ -20,6 +20,27 @@ pub enum UpdateMode {
     Switch(RepoUrl),
     /// Compare only; the editor receives the changes without text deltas.
     Status,
+    /// Compare the reported tree with another URL (`svn_ra_do_diff3` without text deltas, as
+    /// `svn diff --summarize` needs): the server drives the changes from the reported tree to the
+    /// URL at the target revision, like a switch, but sends no file contents. A file whose text
+    /// differs still gets an `apply_textdelta`, closed at once with no window, so the editor can
+    /// tell a text change from a property change.
+    Diff(RepoUrl),
+}
+
+impl UpdateMode {
+    /// The URL the drive ends at, when it is not the reported one (switch and diff).
+    pub fn destination(&self) -> Option<&RepoUrl> {
+        match self {
+            Self::Switch(url) | Self::Diff(url) => Some(url),
+            Self::Update | Self::Status => None,
+        }
+    }
+
+    /// Whether the drive carries file contents (update and switch).
+    pub fn sends_text(&self) -> bool {
+        matches!(self, Self::Update | Self::Switch(_))
+    }
 }
 
 /// Parameters of a report-driven drive.

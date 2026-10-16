@@ -59,11 +59,13 @@ pub(super) async fn drive_update(
             e.link = Some(url_to_rel(repos_root, url)?);
         }
     }
-    let is_switch = matches!(req.mode, UpdateMode::Switch(_));
+    // svn_repos treats every report with a target path as a switch (`is_switch`), a diff
+    // against another URL included.
+    let is_switch = req.mode.destination().is_some();
 
-    let tree_target = match &req.mode {
-        UpdateMode::Switch(url) => url_to_rel(repos_root, url)?,
-        _ => super::prefixed::join(session_rel, &req.target)?,
+    let tree_target = match req.mode.destination() {
+        Some(url) => url_to_rel(repos_root, url)?,
+        None => super::prefixed::join(session_rel, &req.target)?,
     };
     let (target_rev, target_tree, base_trees, full_trees) = {
         let st = lock_state(state);
@@ -90,7 +92,8 @@ pub(super) async fn drive_update(
         entries: &reporter.entries,
         anchor_target: req.target.clone(),
         tree_target,
-        send_text: req.mode != UpdateMode::Status,
+        send_text: req.mode.sends_text(),
+        announce_text: matches!(req.mode, UpdateMode::Diff(_)),
         max_open_files,
         requested_depth: req.depth,
         is_switch,
@@ -172,6 +175,12 @@ async fn execute(h: &EditorHandle, ops: Vec<Op>, cancel: &CancelToken) -> Result
                 if !content.is_empty() {
                     sender.send(Some(TxDeltaWindow::full_text(content))).await?;
                 }
+                sender.send(None).await?;
+            }
+            Op::TextChanged(slot) => {
+                let sender = h
+                    .apply_textdelta(*files.get(&slot).ok_or_else(missing)?, None)
+                    .await?;
                 sender.send(None).await?;
             }
             Op::CloseFile(slot) => {
