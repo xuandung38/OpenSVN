@@ -259,26 +259,20 @@ Negative checks (one machine is enough):
 
 Record the OS versions, N-1, N and the results in the release issue.
 
-## Decision needed: bundle identifier
+## Bundle identifier (decided)
 
-The phase-14 plan names the bundle identifier `vn.opensvn.app`; the code ships
-`com.opensvn.desktop` (`tauri.conf.json`, `tauri.bundle.conf.json`, `db/data_dir.rs`). This
-branch keeps `com.opensvn.desktop`. Settle it **before the first public release**, because after
-it any change breaks installed clients:
+The owner confirmed `com.opensvn.desktop` on 2026-10-16 as the permanent release identifier
+(`tauri.conf.json`, `tauri.bundle.conf.json`, `db/data_dir.rs`). The phase-14 plan's
+`vn.opensvn.app` is superseded. Do not change it: after the first public release any change
+breaks installed clients.
 
-- **Updates.** The updater replaces the installed app in place, so N would start with a new
-  identity next to N-1's leftovers: macOS ties the designated requirement, notarization ticket,
-  Gatekeeper and privacy (TCC) approvals to the identifier, and Windows keeps the WebView2 profile
-  under `%LOCALAPPDATA%\<id>`. Every machine would behave like a fresh install that still has an
-  old one half-registered.
+- **Updates.** The updater replaces the installed app in place, so a new identifier would start
+  next to the old one's leftovers: macOS ties the designated requirement, notarization ticket,
+  Gatekeeper and privacy (TCC) approvals to it, and Windows keeps the WebView2 profile under
+  `%LOCALAPPDATA%\<id>`.
 - **Keychain and data.** The app data directory (`~/Library/Application Support/<id>`,
-  `%APPDATA%\<id>`, `~/.local/share/<id>`) is named after it, so the working copy list, settings
-  and trusted certificates would look empty. macOS keychain access is granted per signed
-  identifier, so saved passwords and the updater token would prompt again or be unreadable.
-
-Changing it later needs a migration release (copy the data directory, re-provision keychain
-entries) on every OS. Owner: confirm `com.opensvn.desktop` (no work) or switch now, before any
-user installs a published build.
+  `%APPDATA%\<id>`, `~/.local/share/<id>`) is named after it, and macOS keychain access is
+  granted per signed identifier, so saved passwords, settings and the updater token would be lost.
 
 ## Local checks (no credentials)
 
