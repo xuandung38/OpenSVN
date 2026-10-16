@@ -8,6 +8,7 @@ import {
   type Layout,
   type LockRequest,
   type LogGetRequest,
+  type MenuViewState,
   type OperationHandle,
   type OperationKind,
   type OpResult,
@@ -175,6 +176,11 @@ export function setMockProgressTotal(total: number | null): void {
 let engineCaps: EngineCapabilities = { externals: true, demo: false };
 export function setMockEngineCapabilities(caps: EngineCapabilities): void {
   engineCaps = caps;
+}
+/** The check marks the UI last sent to the native View menu (`menu_set_view`), `null` before. */
+let mockMenuView: MenuViewState | null = null;
+export function mockMenuViewState(): MenuViewState | null {
+  return mockMenuView;
 }
 /** Operations the user cancelled; their remaining timers do nothing. */
 const cancelled = new Set<string>();
@@ -543,6 +549,11 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     return ok("/Users/dev/Downloads/opensvn-diagnostics.zip");
   },
   logsReveal: () => ok(null),
+  menuSetLayout: (_hasLayout: boolean) => ok(null),
+  menuSetView: (view: MenuViewState) => {
+    mockMenuView = view;
+    return ok(null);
+  },
   appVersion: () => ok("0.1.0"),
   updaterTokenStatus: () =>
     ok<TokenStatus>(!mockUpdater.token ? "missing" : mockUpdater.rejected ? "rejected" : "stored"),
@@ -603,6 +614,9 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
   },
 };
 
+/** `?menu=` was acted on (once per page load). */
+let menuFromUrlSent = false;
+
 // Commands are looked up lazily; anything not mocked resolves to a typed AppError instead of throwing.
 // The Proxy cast is necessary because `Commands` has ~50 members and the mock covers only what the UI shell uses.
 const commandsProxy = new Proxy({} as Record<string, unknown>, {
@@ -626,6 +640,17 @@ export const mockAdapter: IpcAdapter = {
     const set = listeners.get(name) ?? new Set<Handler>();
     listeners.set(name, set);
     set.add(handler);
+    // `?menu=<id>` (dev/mock URL, e.g. `?menu=branch/compare`): the native menu item is
+    // activated once the UI listens for it, so `pnpm test:browser` can open what only the menu
+    // bar opens.
+    if (
+      typeof location !== "undefined" &&
+      !menuFromUrlSent &&
+      name === `menu://${new URLSearchParams(location.search).get("menu")}`
+    ) {
+      menuFromUrlSent = true;
+      setTimeout(() => mockEmit(name), 300);
+    }
     return () => {
       set.delete(handler);
     };

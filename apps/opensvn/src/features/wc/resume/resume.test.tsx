@@ -79,18 +79,16 @@ for (const lang of ["en", "vi"] as const) {
     expect(calls("update")).toBe(0);
   });
 
-  test(`${lang}: Update to latest instead runs a plain update`, async () => {
+  test(`${lang}: Update to latest instead keeps the choices of the interrupted checkout`, async () => {
     await mockAdapter.commands.settingsSet({ "general.language": lang });
     markMockWcIncomplete(MOCK_WC_ID, 1200);
     renderApp(<AppShell />);
     await screen.findByRole("option", { name: /renderer\.ts/ });
     const banner = (await screen.findByText(t.bannerTitle)).closest("[role=status]") as HTMLElement;
     await user().click(within(banner).getByRole("button", { name: t.latest }));
-    await waitFor(() =>
-      expect(lastCall("update")?.args).toEqual([
-        { wcId: MOCK_WC_ID, paths: null, rev: null, depth: null },
-      ]),
-    );
+    // Not a plain update: the backend reads the checkout journal (ignore-externals), as Continue.
+    await waitFor(() => expect(lastCall("wcUpdateLatest")?.args).toEqual([MOCK_WC_ID]));
+    expect(calls("update")).toBe(0);
     expect(calls("wcContinue")).toBe(0);
   });
 }

@@ -5,6 +5,7 @@
 //! [`EngineFacade`] with believable behavior: scheduling, conflicts on update, mixed revisions
 //! after commit, locks, the two cancellation point kinds and throttled-friendly progress.
 
+mod compare;
 #[cfg(test)]
 mod conformance_tests;
 mod local_ops;
@@ -24,9 +25,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use opensvn_ipc::{
-    BlameLine, BranchNode, CleanupRequest, CommitRequest, CopyLocationRequest, Depth,
-    EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, ItemProps, Layout, LogGetRequest,
-    LogPage, RepoInfo, RepoListing, ResolveRequest, Rev, RevertRequest, TextSide, UpdateRequest,
+    BlameLine, BranchNode, CleanupRequest, CommitRequest, CompareSummary, CopyLocationRequest,
+    Depth, EngineCapabilities, FileDiff, FileStatus, IgnoreAddRequest, ItemProps, Layout,
+    LogGetRequest, LogPage, RepoInfo, RepoListing, ResolveRequest, Rev, RevertRequest, TextSide,
+    UpdateRequest,
 };
 use svn_ra_api::RaSession;
 use svn_ra_api::fake::FakeRaSession;
@@ -35,9 +37,9 @@ use svn_types::{ErrorCode, RelPath, SvnError};
 use self::state::{FakeWc, Sched, rel};
 use super::context::OpContext;
 use super::facade::{
-    CheckoutPlan, DiffOptions, EngineFacade, EngineResult, ExportedSides, LockScope, LogScope,
-    RecoveryReport, RemoteEditPlan, RemoteScan, RepoLocation, SideFiles, StatusQuery, WcInfo,
-    WcOpened, WcRef,
+    CheckoutPlan, CompareLeft, DiffOptions, EngineFacade, EngineResult, ExportedSides, LockScope,
+    LogScope, RecoveryReport, RemoteEditPlan, RemoteScan, RepoLocation, SideFiles, StatusQuery,
+    WcInfo, WcOpened, WcRef,
 };
 
 pub use seed::{DEMO_REPO_URL, demo_repo, demo_wc_root};
@@ -50,6 +52,8 @@ pub struct FakeEngine {
     step_delay: Duration,
     /// Holds every log at the network step until released (tests of a slow server).
     log_gate: Mutex<Option<Arc<LogGate>>>,
+    /// Every [`EngineFacade::resume`]: the revision asked for and `ignore_externals`.
+    resumes: Mutex<Vec<(Option<Rev>, bool)>>,
 }
 
 /// A slow log server for tests: each log signals `started` and waits for a `release` permit.
@@ -68,6 +72,7 @@ impl FakeEngine {
             repos: Vec::new(),
             step_delay: Duration::ZERO,
             log_gate: Mutex::new(None),
+            resumes: Mutex::new(Vec::new()),
         }
     }
 
@@ -83,6 +88,14 @@ impl FakeEngine {
     pub fn with_step_delay(mut self, delay: Duration) -> Self {
         self.step_delay = delay;
         self
+    }
+
+    /// The [`EngineFacade::resume`] calls so far: revision (`None`: HEAD) and `ignore_externals`.
+    pub fn resumes(&self) -> Vec<(Option<Rev>, bool)> {
+        self.resumes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Holds every later log at its network step until the returned gate releases it.
@@ -372,6 +385,37 @@ impl EngineFacade for FakeEngine {
 
     async fn update(&self, wc: &WcRef, req: &UpdateRequest, ctx: &OpContext) -> EngineResult<Rev> {
         self.do_update(wc, req, ctx).await
+    }
+
+    async fn compare_summarize(
+        &self,
+        left: CompareLeft<'_>,
+        right_url: &str,
+        right_rev: Option<Rev>,
+        ctx: &OpContext,
+    ) -> EngineResult<CompareSummary> {
+        self.do_compare_summarize(left, right_url, right_rev, ctx)
+            .await
+    }
+
+    async fn resume(
+        &self,
+        wc: &WcRef,
+        rev: Option<Rev>,
+        ignore_externals: bool,
+        ctx: &OpContext,
+    ) -> EngineResult<Rev> {
+        self.resumes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((rev, ignore_externals));
+        let req = UpdateRequest {
+            wc_id: wc.id.clone(),
+            paths: None,
+            rev,
+            depth: None,
+        };
+        self.do_update(wc, &req, ctx).await
     }
 
     async fn switch(

@@ -127,13 +127,16 @@ export const MENU_ACTIONS: Readonly<Record<string, MenuAction>> = {
   "menu://help/report": "reportProblem",
 };
 
-/** View menu toggles: the pref each flips and its label in the confirmation toast. */
+/**
+ * View menu toggles and the pref each flips. They are check items in the native menu, whose marks
+ * follow the prefs (`useMenuViewSync`), so they need no other feedback.
+ */
 const VIEW_TOGGLES = {
-  toggleUnversioned: ["showUnversioned", "viewShowUnversioned"],
-  toggleIgnored: ["showIgnored", "viewShowIgnored"],
-  toggleGroupChangelist: ["groupByChangelist", "viewGroupChangelist"],
-  toggleTree: ["tree", "viewTree"],
-} as const satisfies Record<string, readonly [ViewPref, keyof (typeof wcStrings)["en"]]>;
+  toggleUnversioned: "showUnversioned",
+  toggleIgnored: "showIgnored",
+  toggleGroupChangelist: "groupByChangelist",
+  toggleTree: "tree",
+} as const satisfies Record<string, ViewPref>;
 
 /**
  * App-level keyboard shortcuts (doc 01 section 8) and every native-menu event. A key press and
@@ -348,13 +351,9 @@ export function useWcShortcuts(props: {
         case "toggleUnversioned":
         case "toggleIgnored":
         case "toggleGroupChangelist":
-        case "toggleTree": {
-          // Native menu items carry no check mark: the toast says what the toggle did.
-          const [pref, label] = VIEW_TOGGLES[id];
-          const on = toggleViewPref(pref);
-          toast.show(t(on ? "viewOn" : "viewOff", { name: t(label) }));
+        case "toggleTree":
+          toggleViewPref(VIEW_TOGGLES[id]);
           return true;
-        }
         case "compare":
           if (!wc) return false;
           s.openDialog({ kind: "compare" });

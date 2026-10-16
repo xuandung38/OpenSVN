@@ -23,6 +23,7 @@ import { UpdateDialog } from "../features/updates/update-dialog";
 import { WcSidebar } from "../features/wc/changes/wc-sidebar";
 import { WcDialogHost } from "../features/wc/dialogs/wc-dialog-host";
 import { DiffView } from "../features/wc/diff/diff-view";
+import { useMenuViewSync } from "../features/wc/menu-view-sync";
 import { RepoPicker } from "../features/wc/repos/repo-picker";
 import { repoStrings } from "../features/wc/repos/repo-strings";
 import { useOpenCheckedOut } from "../features/wc/repos/use-open-checked-out";
@@ -197,6 +198,7 @@ function ShellBody({
     openDialog({ kind: "lock", mode: "lock", paths: conflicts.map((c) => c.path), conflicts });
   });
   useOpenCheckedOut(onSelectWc);
+  useMenuViewSync();
   useWcShortcuts({
     onView,
     onToggleActivity: () => setShowActivity((v) => !v),

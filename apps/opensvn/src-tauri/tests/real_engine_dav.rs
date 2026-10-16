@@ -58,7 +58,7 @@ use opensvn_ipc::{
 };
 use opensvn_lib::engine::conformance::{self, Harness, PlantedOwner};
 use opensvn_lib::engine::real::{ClientRecovery, HttpConnector, RealEngine, RealEngineConfig};
-use opensvn_lib::engine::{CheckoutPlan, EngineFacade, OpContext, StatusQuery, WcRef};
+use opensvn_lib::engine::{CheckoutPlan, CompareLeft, EngineFacade, OpContext, StatusQuery, WcRef};
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject as _;
 use svn_ra::transport::{MemoryTrustStore, ProxyConfig};
@@ -2193,6 +2193,284 @@ fn svn_cli(oracle: &opensvn_svn_oracle::Oracle, cwd: &Path, args: &[&str]) {
         ))
         .args(args);
     run(c, None);
+}
+
+/// [`svn_cli`] that returns what svn printed.
+fn svn_cli_out(oracle: &opensvn_svn_oracle::Oracle, cwd: &Path, args: &[&str]) -> String {
+    let mut c = oracle.svn();
+    c.current_dir(cwd)
+        .args([
+            "--username",
+            "tester",
+            "--password",
+            "tester-pass",
+            "--no-auth-cache",
+            "--config-option",
+        ])
+        .arg(format!(
+            "servers:global:ssl-authority-files={}",
+            ca_path().display()
+        ))
+        .args(args);
+    let out = c.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{c:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// `(path, item, props, kind)` rows of `svn diff --summarize --xml`, relative to `base` (a URL,
+/// or `.` for a working copy), sorted; the root is left out when `skip_root`.
+fn summary_rows(xml: &str, base: &str, skip_root: bool) -> Vec<(String, String, String, String)> {
+    let attr = |tag: &str, name: &str| {
+        let key = format!("{name}=\"");
+        let start = tag.find(&key).unwrap() + key.len();
+        tag[start..start + tag[start..].find('"').unwrap()].to_owned()
+    };
+    let mut rows: Vec<_> = xml
+        .split("<path")
+        .skip(1)
+        .filter(|c| c.starts_with(char::is_whitespace))
+        .map(|chunk| {
+            let close = chunk.find('>').unwrap();
+            let (tag, text) = (
+                &chunk[..close],
+                &chunk[close + 1..chunk.find("</path>").unwrap()],
+            );
+            let path = if text == base || text == "." {
+                String::new()
+            } else {
+                text.strip_prefix(&format!("{base}/"))
+                    .unwrap_or(text)
+                    .to_owned()
+            };
+            (
+                path,
+                attr(tag, "item"),
+                attr(tag, "props"),
+                attr(tag, "kind"),
+            )
+        })
+        .filter(|r| !(skip_root && r.0.is_empty()))
+        .collect();
+    rows.sort();
+    rows
+}
+
+fn engine_rows(
+    s: &opensvn_ipc::CompareSummary,
+    skip_root: bool,
+) -> Vec<(String, String, String, String)> {
+    use opensvn_ipc::{CompareChange as C, EntryKind};
+    let mut rows: Vec<_> = s
+        .entries
+        .iter()
+        .map(|e| {
+            (
+                e.path.clone(),
+                match e.change {
+                    C::Added => "added",
+                    C::Deleted => "deleted",
+                    C::Modified => "modified",
+                    C::Normal => "none",
+                }
+                .to_owned(),
+                if e.props_changed { "modified" } else { "none" }.to_owned(),
+                if e.kind == EntryKind::Dir {
+                    "dir"
+                } else {
+                    "file"
+                }
+                .to_owned(),
+            )
+        })
+        .filter(|r| !(skip_root && r.0.is_empty()))
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// Compare with branch (#18 follow-up): the summary of two folders at chosen revisions over
+/// DAV, and of a working copy with local changes against a folder, is the one svn 1.15 prints
+/// for `svn diff --summarize` against the same server (text, file and folder properties, a
+/// deleted folder with what it held, an added folder, a move, a replaced file, nothing at all).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn compare_summary_matches_svn() {
+    let Some(oracle) =
+        opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15).unwrap()
+    else {
+        return;
+    };
+    if negotiate_mode() {
+        eprintln!("skipping: svn is given Basic credentials");
+        return;
+    }
+    for (version, host) in servers() {
+        eprintln!("compare_summary_matches_svn: server {version}");
+        let h = harness(&host, "compare-svn");
+        let url = h.repo_url();
+        let work = h.work_dir();
+        std::fs::create_dir_all(&work).unwrap();
+        // r2: more content on trunk; r3: the branch; r4: edits on trunk; r5: one on the branch.
+        svn_cli(
+            &oracle,
+            &work,
+            &["checkout", "-q", &format!("{url}/trunk"), "seed"],
+        );
+        let seed = work.join("seed");
+        for (p, text) in [
+            ("d/a", "a\n"),
+            ("d/sub/b", "b\n"),
+            ("e/c", "c\n"),
+            ("e/deep/f", "f\n"),
+            ("x", "x\n"),
+            ("y", "y\n"),
+            ("z", "z\n"),
+        ] {
+            h.write_file(&seed, p, text).unwrap();
+        }
+        svn_cli(&oracle, &seed, &["add", "-q", "d", "e", "x", "y", "z"]);
+        svn_cli(&oracle, &seed, &["commit", "-q", "-m", "r2"]);
+        svn_cli(
+            &oracle,
+            &work,
+            &[
+                "copy",
+                "-q",
+                "-m",
+                "r3",
+                &format!("{url}/trunk"),
+                &format!("{url}/branches/cmp"),
+            ],
+        );
+        svn_cli(&oracle, &seed, &["update", "-q"]);
+        h.write_file(&seed, "x", "x\nmore\n").unwrap();
+        svn_cli(&oracle, &seed, &["propset", "-q", "p", "v", "y"]);
+        svn_cli(&oracle, &seed, &["propset", "-q", "dp", "v", "d"]);
+        svn_cli(&oracle, &seed, &["rm", "-q", "e", "z"]);
+        h.write_file(&seed, "z", "zz\n").unwrap();
+        h.write_file(&seed, "n/m/g", "g\n").unwrap();
+        svn_cli(&oracle, &seed, &["add", "-q", "z", "n"]);
+        svn_cli(&oracle, &seed, &["mv", "-q", "d/a", "d/a2"]);
+        svn_cli(&oracle, &seed, &["commit", "-q", "-m", "r4"]);
+        svn_cli(
+            &oracle,
+            &work,
+            &["checkout", "-q", &format!("{url}/branches/cmp"), "br"],
+        );
+        h.write_file(&work.join("br"), "x", "x\nbranch\n").unwrap();
+        svn_cli(&oracle, &work.join("br"), &["commit", "-q", "-m", "r5"]);
+
+        let wc = checkout_trunk(&h, "ours").await;
+        // The last column: whether anything differs.
+        for (left, left_rev, right, right_rev, differs) in [
+            ("branches/cmp", 5, "trunk", None, true),
+            ("trunk", 5, "branches/cmp", None, true),
+            ("trunk", 2, "trunk", Some(4), true),
+            ("trunk", 4, "trunk", Some(3), true),
+            ("trunk", 2, "branches/cmp", Some(3), false),
+        ] {
+            let left_url = format!("{url}/{left}");
+            let right_arg = format!(
+                "{url}/{right}@{}",
+                right_rev.map_or("HEAD".to_owned(), |r: u64| r.to_string())
+            );
+            let theirs = summary_rows(
+                &svn_cli_out(
+                    &oracle,
+                    &work,
+                    &[
+                        "diff",
+                        "--summarize",
+                        "--xml",
+                        &format!("{left_url}@{left_rev}"),
+                        &right_arg,
+                    ],
+                ),
+                &left_url,
+                false,
+            );
+            let ours = h
+                .engine
+                .compare_summarize(
+                    CompareLeft::Url {
+                        url: &left_url,
+                        rev: Some(opensvn_ipc::Rev(left_rev)),
+                    },
+                    &format!("{url}/{right}"),
+                    right_rev.map(opensvn_ipc::Rev),
+                    &ctx(),
+                )
+                .await
+                .expect("compare");
+            assert_eq!(
+                engine_rows(&ours, false),
+                theirs,
+                "{version}: {left}@{left_rev} -> {right}@{right_rev:?}"
+            );
+            assert_eq!(ours.left_rev, Some(opensvn_ipc::Rev(left_rev)));
+            assert_eq!(
+                !theirs.is_empty(),
+                differs,
+                "{version}: {left}@{left_rev} -> {right}"
+            );
+        }
+
+        // A working copy with local changes, against the branch (svn: `--old=WC --new=URL`;
+        // the root left out, see `summarize_wc`).
+        svn_cli(
+            &oracle,
+            &work,
+            &["checkout", "-q", &format!("{url}/trunk"), "theirs"],
+        );
+        let theirs_wc = work.join("theirs");
+        for root in [&theirs_wc, &wc.root] {
+            h.write_file(root, "y", "y\nlocal\n").unwrap();
+            h.write_file(root, "q", "q\n").unwrap();
+        }
+        svn_cli(&oracle, &theirs_wc, &["add", "-q", "q"]);
+        svn_cli(&oracle, &theirs_wc, &["rm", "-q", "d/sub/b"]);
+        h.engine
+            .add_paths(&wc, &["q".to_owned()], &ctx())
+            .await
+            .expect("add");
+        h.engine
+            .delete_paths(&wc, &["d/sub/b".to_owned()], false, &ctx())
+            .await
+            .expect("delete");
+        let theirs = summary_rows(
+            &svn_cli_out(
+                &oracle,
+                &theirs_wc,
+                &[
+                    "diff",
+                    "--summarize",
+                    "--xml",
+                    "--old=.",
+                    &format!("--new={url}/branches/cmp"),
+                ],
+            ),
+            ".",
+            true,
+        );
+        let ours = h
+            .engine
+            .compare_summarize(
+                CompareLeft::Wc(&wc),
+                &format!("{url}/branches/cmp"),
+                None,
+                &ctx(),
+            )
+            .await
+            .expect("compare the working copy");
+        assert!(!theirs.is_empty());
+        assert_eq!(engine_rows(&ours, true), theirs, "{version}: working copy");
+        assert_eq!(ours.left_rev, None);
+    }
+    assert_no_prompt();
 }
 
 /// A checkout with a depth per folder through the real engine leaves the same wc.db as svn
