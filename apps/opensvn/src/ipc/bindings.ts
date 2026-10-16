@@ -209,6 +209,11 @@ export const commands = {
 	 *  returns the saved path, or `None` when the user cancels the dialog.
 	 */
 	diagnosticsExport: (token: string) => typedError<string | null, AppError>(__TAURI_INVOKE("diagnostics_export", { token })),
+	/**
+	 *  Shows the app's logs folder in the file manager (Help > Show logs folder). The path is the app's
+	 *  own data folder; nothing in it comes from the UI.
+	 */
+	logsReveal: () => typedError<null, AppError>(__TAURI_INVOKE("logs_reveal")),
 };
 
 /** Events */

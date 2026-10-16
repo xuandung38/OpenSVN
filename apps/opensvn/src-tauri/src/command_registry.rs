@@ -86,6 +86,7 @@ pub fn builder<R: tauri::Runtime>() -> Builder<R> {
             reveal_in_os,
             open_external,
             diagnostics_export,
+            logs_reveal,
         ])
         // Bounds of numeric settings, so the UI validates with the backend's own ranges.
         .constant("SETTING_RANGES", crate::settings::setting_ranges())
