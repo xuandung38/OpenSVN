@@ -275,7 +275,7 @@ build
     }
 
     #[test]
-    fn malformed_reports_are_corrupt() {
+    fn malformed_reports_are_protocol_violations() {
         for bad in [
             "<S:log-report xmlns:S=\"svn:\"></S:log-report>".to_owned(),
             format!(
@@ -295,7 +295,7 @@ build
             ),
         ] {
             let err = parse_inherited_props(bad.as_bytes()).expect_err(&bad);
-            assert_eq!(err.code, ErrorCode::Corrupt, "{bad}: {err}");
+            assert_eq!(err.code, ErrorCode::ProtocolViolation, "{bad}: {err}");
         }
     }
 }

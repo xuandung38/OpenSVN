@@ -119,7 +119,7 @@ async fn checkout_update_and_switch_cache_inherited_props_like_svn() {
         &target,
         None,
         Depth::Unknown,
-        false,
+        true,
         &cancel,
     )
     .await
