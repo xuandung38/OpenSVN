@@ -2308,6 +2308,13 @@ async fn compare_summary_matches_svn() {
         eprintln!("skipping: svn is given Basic credentials");
         return;
     }
+    // svn itself builds the history and answers through the same URL: a proxy that cuts
+    // answers fails svn (E120106), not the engine. The engine's retry of a cut comparison is
+    // covered by `summarize_reconnect` (svn-client).
+    if behind_a_faulty_proxy() {
+        eprintln!("skipping: svn cannot work through the faulty proxy");
+        return;
+    }
     for (version, host) in servers() {
         eprintln!("compare_summary_matches_svn: server {version}");
         let h = harness(&host, "compare-svn");
