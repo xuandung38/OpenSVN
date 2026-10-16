@@ -60,7 +60,10 @@ pub fn missing(
         None => stored_setting().unwrap_or(true),
     };
     if !accelerated {
-        for name in ["WEBKIT_DISABLE_DMABUF_RENDERER", "WEBKIT_DISABLE_COMPOSITING_MODE"] {
+        for name in [
+            "WEBKIT_DISABLE_DMABUF_RENDERER",
+            "WEBKIT_DISABLE_COMPOSITING_MODE",
+        ] {
             if get(name).is_none() {
                 add.push((name, "1"));
             }
@@ -139,9 +142,14 @@ mod tests {
     #[test]
     fn only_missing_variables_are_added_and_never_twice() {
         assert_eq!(missing(env(&[]), || None), [("MALLOC_ARENA_MAX", "2")]);
-        assert_eq!(missing(env(&[("MALLOC_ARENA_MAX", "8")]), || Some(true)), []);
         assert_eq!(
-            missing(env(&[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]), || Some(false)),
+            missing(env(&[("MALLOC_ARENA_MAX", "8")]), || Some(true)),
+            []
+        );
+        assert_eq!(
+            missing(env(&[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]), || Some(
+                false
+            )),
             [
                 ("MALLOC_ARENA_MAX", "2"),
                 ("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
@@ -153,9 +161,10 @@ mod tests {
 
     #[test]
     fn the_stored_setting_is_read_only_when_the_environment_does_not_decide() {
-        let off = missing(env(&[(HW_ACCEL_ENV, "0"), ("MALLOC_ARENA_MAX", "2")]), || {
-            panic!("setting read although the environment decides")
-        });
+        let off = missing(
+            env(&[(HW_ACCEL_ENV, "0"), ("MALLOC_ARENA_MAX", "2")]),
+            || panic!("setting read although the environment decides"),
+        );
         assert_eq!(
             off,
             [
@@ -163,9 +172,10 @@ mod tests {
                 ("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
             ]
         );
-        let on = missing(env(&[(HW_ACCEL_ENV, "yes"), ("MALLOC_ARENA_MAX", "2")]), || {
-            panic!("setting read although the environment decides")
-        });
+        let on = missing(
+            env(&[(HW_ACCEL_ENV, "yes"), ("MALLOC_ARENA_MAX", "2")]),
+            || panic!("setting read although the environment decides"),
+        );
         assert!(on.is_empty());
         let stored_off = missing(env(&[("MALLOC_ARENA_MAX", "2")]), || Some(false));
         assert_eq!(stored_off.len(), 2);

@@ -51,6 +51,28 @@ hoặc chạy không cần FUSE: `./OpenSVN_*.AppImage --appimage-extract-and-ru
   có thể tắt Negotiate trong phần cài đặt mạng nếu server không dùng.
 * Gặp lỗi: gửi kèm file log (app tự che mật khẩu, token, header nhạy cảm trước khi ghi).
 
+### Tăng tốc phần cứng (GPU) và bộ nhớ trên Linux
+
+Mặc định WebKitGTK dựng giao diện bằng GPU (renderer DMA-BUF). Settings → Appearance → "Use
+hardware acceleration" bật/tắt việc này, có hiệu lực từ lần mở app tiếp theo. Biến môi trường
+`OPENSVN_HARDWARE_ACCELERATION=0` (hoặc `1`) ghi đè setting. Tắt đi thì app đặt
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` và `WEBKIT_DISABLE_COMPOSITING_MODE=1`: WebKit vẽ bằng CPU, không
+dùng GL.
+
+| | Bật (mặc định) | Tắt |
+|---|---|---|
+| Máy có driver GPU | Cuộn và vẽ lại nhẹ CPU | Vẽ bằng CPU: cuộn danh sách dài tốn CPU hơn |
+| Máy không có driver GPU (máy ảo, remote desktop, Xvfb) | Mesa chạy llvmpipe: app và web process cùng nạp LLVM, giữ buffer GL phần mềm | Đo dưới Xvfb lúc mở app: RSS cả cây tiến trình 572 → 383 MB (`benches/results/2026-10-16-app-rss-linux.md`) |
+| Cửa sổ trắng trơn (thường gặp với NVIDIA trên Wayland) | | Cách khắc phục thường dùng |
+
+Cửa sổ trắng nên không mở được Settings thì chạy `OPENSVN_HARDWARE_ACCELERATION=0 opensvn` rồi tắt
+setting. Mặc định chưa đổi: cần số đo trên máy có GPU thật (#182).
+
+App cũng tự giới hạn arena của glibc (`MALLOC_ARENA_MAX=2`). glibc và WebKit chỉ đọc các biến này
+lúc process khởi động, nên khi thiếu, app tự chạy lại chính nó một lần với các biến đó (cùng PID,
+trước khi mở cửa sổ). Biến người dùng đã đặt thì giữ nguyên. Chương trình app mở cho người dùng
+(diff tool, editor, terminal, mở file bằng app mặc định) không nhận các biến app tự thêm.
+
 ## Windows và macOS (build từ workflow `release`)
 
 Workflow `.github/workflows/release.yml` build cả ba OS trên GitHub Actions. Hiện runner của repo
