@@ -36,6 +36,8 @@ pub struct WcRegistry {
     actors: Mutex<HashMap<String, Arc<WcActor>>>,
     live: Mutex<HashMap<String, Live>>,
     open: Mutex<std::collections::BTreeSet<String>>,
+    /// Last description read of each working copy, for when it is busy (see [`Self::describe`]).
+    described: Mutex<HashMap<String, WorkingCopy>>,
 }
 
 fn unknown_wc(id: &WcId) -> AppError {
@@ -66,6 +68,7 @@ impl WcRegistry {
             actors: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
             open: Mutex::new(std::collections::BTreeSet::new()),
+            described: Mutex::new(HashMap::new()),
         }
     }
 
@@ -161,7 +164,40 @@ impl WcRegistry {
         Some(ResumeInfo { rev, checkout })
     }
 
+    /// Description of the working copy of `row`. While a long write holds it (an update, the
+    /// recovery of a crashed commit at start-up), the reads give up as busy: the last description
+    /// read stands in, with the current name and live facts, so the working copy stays listed
+    /// instead of vanishing from the window (#20).
     async fn describe(&self, row: &WcRow) -> Result<WorkingCopy, AppError> {
+        match self.read_description(row).await {
+            Ok(wc) => {
+                self.described
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(row.id.clone(), wc.clone());
+                Ok(wc)
+            }
+            Err(e) if e.code == ErrorCode::WcBusy => {
+                let cached = self
+                    .described
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&row.id)
+                    .cloned();
+                let Some(mut wc) = cached else {
+                    return Err(e);
+                };
+                let live = self.live(&row.id);
+                wc.name = row.name.clone();
+                wc.incoming = live.incoming;
+                wc.last_checked_at = live.last_checked_at;
+                Ok(wc)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn read_description(&self, row: &WcRow) -> Result<WorkingCopy, AppError> {
         let info = self.info_of(row).await?;
         let branch = self.branch_of(&info.repo_uuid, &info.repo_root_url, &info.url);
         let live = self.live(&row.id);
@@ -353,6 +389,10 @@ impl WcRegistry {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id.0);
         self.live
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id.0);
+        self.described
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id.0);

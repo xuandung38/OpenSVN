@@ -516,8 +516,18 @@ impl AppState {
 
     pub async fn recover_all(&self) {
         for id in self.wcs.ids().unwrap_or_default() {
-            if let Err(e) = self.open_wc(&id).await {
-                tracing::warn!(wc = %id.0, code = ?e.code, "working copy recovery failed");
+            match self.open_wc(&id).await {
+                // The window lists the working copies while this runs. A read that met the
+                // recovery's write (a crashed commit settled over the network can hold it for
+                // seconds) left this one out of that list as busy: have the UI read it again.
+                Ok(wc) => self.events.revision_changed(&opensvn_ipc::RevisionChanged {
+                    wc_id: id,
+                    base_rev: wc.base_rev,
+                    rev_range: wc.rev_range,
+                }),
+                Err(e) => {
+                    tracing::warn!(wc = %id.0, code = ?e.code, "working copy recovery failed")
+                }
             }
         }
     }

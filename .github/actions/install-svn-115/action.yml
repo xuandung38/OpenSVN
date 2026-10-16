@@ -1,0 +1,34 @@
+name: Install Subversion 1.15
+description: >-
+  Builds Subversion 1.15.0 from the Apache source release (SHA-512 pinned, the same release and
+  checksum as the compat Docker images and docker/nix), caches it and puts it first on PATH.
+  Ubuntu 24.04 only; the distribution's mod_dav_svn (1.14.3) stays the server.
+runs:
+  using: composite
+  steps:
+    - name: Install Subversion build libraries
+      shell: bash
+      run: |
+        sudo apt-get install -y --no-install-recommends \
+          build-essential bzip2 libapr1-dev libaprutil1-dev libserf-dev libsqlite3-dev \
+          libexpat1-dev zlib1g-dev
+    - name: Cache Subversion 1.15.0
+      id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/svn-1.15.0
+        key: svn-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-1.15.0-6bb79686baab7176-v1
+    - name: Build Subversion 1.15.0 from the verified source tarball
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: >-
+        .github/scripts/build-svn-from-source.sh 1.15.0
+        6bb79686baab7176e9b6c519b23141f66694298c0759d1e12332fef329eaa632e4f2e65c75ae0cd05e48e16c23d7eda7c59b322bdf03707e1a46025673282ec2
+        "$HOME/svn-1.15.0"
+    - name: Put Subversion 1.15.0 first on PATH
+      shell: bash
+      run: |
+        echo "$HOME/svn-1.15.0/bin" >> "$GITHUB_PATH"
+        echo "OPENSVN_SVN_BIN=$HOME/svn-1.15.0/bin/svn" >> "$GITHUB_ENV"
+        echo "OPENSVN_SVNADMIN_BIN=$HOME/svn-1.15.0/bin/svnadmin" >> "$GITHUB_ENV"
+        "$HOME/svn-1.15.0/bin/svn" --version --quiet
