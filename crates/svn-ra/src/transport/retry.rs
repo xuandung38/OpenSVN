@@ -41,6 +41,15 @@ pub fn is_idempotent(method: &Method) -> bool {
     )
 }
 
+/// Writes that settle an operation (`MERGE` turns the commit transaction into a revision,
+/// `LOCK`/`UNLOCK` take effect at once): each goes out on a connection of its own, never on one
+/// that already carried requests, so no proxy limit or stale pooled connection can break it.
+/// Their outcome would otherwise be unknown, while a broken write before them leaves nothing
+/// behind.
+pub fn needs_new_connection(method: &Method) -> bool {
+    matches!(method.as_str(), "MERGE" | "LOCK" | "UNLOCK")
+}
+
 /// Statuses that signal a transient gateway problem worth retrying.
 pub(crate) fn is_transient_status(status: u16) -> bool {
     matches!(status, 502..=504)
