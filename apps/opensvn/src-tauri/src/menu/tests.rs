@@ -469,12 +469,8 @@ fn only_planned_items_are_not_yet_available() {
         [
             "app.check-app-updates",
             "wc.sparse",
-            "wc.properties",
-            "wc.layout",
             "wc.upgrade",
             "branch.merge",
-            "branch.layout",
-            "sel.properties",
         ]
     );
 }
