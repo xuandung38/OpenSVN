@@ -116,9 +116,7 @@ Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #
 
 ## 4. Đang làm (đừng nhận trùng)
 
-| PR / nhánh | Nội dung | Issue | Trạng thái |
-|---|---|---|---|
-| #202 `test/finish-21` | Phần code còn lại của #21: test cleanup race vào suite strict, RAM app trên Linux, cập nhật mục 3–5 | #21 | Draft |
+Hiện không có PR nào đang mở.
 
 Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: hiển thị %/ETA khi checkout, giữ nguyên byte đường dẫn (NFC/NFD), build Mac. Hỏi chủ repo trước khi làm những mảng này.
 
