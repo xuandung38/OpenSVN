@@ -712,12 +712,14 @@ async fn authz_denied_at_root_allowed_on_trunk() {
         "hello authz\n"
     );
 
+    let loc = e
+        .node_location(&b, "", &ctx())
+        .await
+        .expect("location of the working copy root");
+    assert_eq!(loc.repos_path, "trunk");
     let log = e
         .log(
-            &opensvn_lib::engine::LogScope::Wc {
-                wc: b.clone(),
-                path: String::new(),
-            },
+            &opensvn_lib::engine::LogScope::Repo(loc),
             &opensvn_ipc::LogGetRequest {
                 target: opensvn_ipc::LogTarget::Wc {
                     wc_id: b.id.clone(),

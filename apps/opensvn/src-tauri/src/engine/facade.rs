@@ -197,18 +197,26 @@ pub struct RemoteScan {
     pub latest_rev: Rev,
 }
 
-/// Where a log is read from.
+/// Repository location of a working copy node's BASE, as the working copy records it. A switched
+/// subtree carries its own location, so this is not always the working copy URL plus the path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoLocation {
+    /// Repository root URL.
+    pub repo_root: String,
+    /// Path of the node below the repository root (`""` for the root).
+    pub repos_path: String,
+}
+
+/// Where a log is read from. Neither variant touches a working copy: a log of a working copy
+/// node resolves the node with [`EngineFacade::node_location`] under the working copy's read
+/// path first, then reads the log over the network outside it, so a slow log never holds the
+/// working copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogScope {
     /// A repository URL.
     Url(String),
-    /// A path inside a working copy.
-    Wc {
-        /// Working copy.
-        wc: WcRef,
-        /// Relative path (`""` for the root).
-        path: String,
-    },
+    /// A node located by its repository root and path.
+    Repo(RepoLocation),
 }
 
 /// Which items a lock or unlock applies to.
@@ -234,6 +242,14 @@ pub trait EngineFacade: Send + Sync {
     // ---- working copy: reads
     /// Describes the working copy containing `root`; `NotAWorkingCopy` if there is none.
     async fn wc_info(&self, root: &Path, ctx: &OpContext) -> EngineResult<WcInfo>;
+    /// Repository location of the BASE of `path` (relative to the working copy root). Local
+    /// only; `PathNotFound` when the node has no BASE in the repository.
+    async fn node_location(
+        &self,
+        wc: &WcRef,
+        path: &str,
+        ctx: &OpContext,
+    ) -> EngineResult<RepoLocation>;
     /// Makes sure the server session of this working copy is authenticated, prompting the user
     /// through the auth prompter if needed. The app calls it BEFORE taking the working copy write
     /// path, so no prompt ever happens while a working copy lock is held.
