@@ -92,6 +92,7 @@ Build bộ cài:
 | Switch tự tải tiếp khi REPORT/GET bị cắt (neo lại tại thư mục đích, `link_path` cho phần chưa tới, cuối drive ghi lại `repos_relpath` cả cây như svn 1.15); switch dừng hẳn để lại WC nhất quán, "Tiếp tục switch" (bảng `switch_journal`) hoàn tất bằng chính switch đó. Parser chấp nhận `delete-entry rev="-1"` (switch giữa hai thư mục không cùng lịch sử). MERGE của remote edit/copy mất kết quả: xóa txn có kiểm tra, không để txn lại trên server. Suite DAV qua flaky proxy có kỳ vọng tường minh (`OPENSVN_COMPAT_FAULTS`, `write_op!`) | #193 |
 | Continue checkout do svn 1.15 bỏ dở: file svn đã đặt lên đĩa nhưng chưa kịp commit hàng BASE (bị kill giữa rename và commit) được nhận lại khi nội dung khớp, không còn tree-conflict và hàng `base-deleted`; file khác nội dung vẫn giữ nguyên làm vật cản | #172 (follow-up) |
 | History của working copy không giữ working copy suốt lời gọi mạng: `log_get` chỉ tra vị trí node (`EngineFacade::node_location`) dưới khóa đọc, rồi đọc log qua mạng ngoài actor (`LogScope::Repo`). Thao tác ghi xếp hàng trong lúc log chậm không còn bị chặn; subtree đã switch vẫn đọc log theo URL của node | #192 (follow-up) |
+| Recovery xóa txn của commit chưa gửi MERGE: server trả 5xx hoặc đứt kết nối thì thử lại tối đa 5 lần (200 ms, nhân đôi, hủy được); 404 coi như đã xóa; hết lượt thì giữ journal. `reconcile` (MERGE có thể đã gửi) vẫn chỉ gửi DELETE một lần | #197 |
 
 Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #144, #145, #146.
 

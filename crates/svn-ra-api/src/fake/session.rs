@@ -166,7 +166,17 @@ impl FakeRaSession {
     /// `DELETE`, such as svn 1.15's "Transaction cleanup failed"), without touching the
     /// transactions; `None` restores normal answers.
     pub fn fail_txn_deletes(&self, reason: Option<&str>) {
-        self.guard().txn_delete_fault = reason.map(str::to_owned);
+        let mut state = self.guard();
+        state.txn_delete_fault = reason.map(str::to_owned);
+        state.txn_delete_faults_left = None;
+    }
+
+    /// Like [`Self::fail_txn_deletes`], for the next `times` checked `DELETE`s only (a server
+    /// that is still busy with the transaction, then answers normally).
+    pub fn fail_txn_deletes_times(&self, reason: &str, times: u32) {
+        let mut state = self.guard();
+        state.txn_delete_fault = (times > 0).then(|| reason.to_owned());
+        state.txn_delete_faults_left = Some(times);
     }
 
     /// Names of commit transactions that are still open.
@@ -729,8 +739,14 @@ impl RaSession for FakeRaSession {
     async fn abort_txn_checked(&self, txn_name: &str, cancel: &CancelToken) -> Result<TxnAbort> {
         cancel.check()?;
         let mut state = self.guard();
-        if let Some(reason) = &state.txn_delete_fault {
-            return Ok(TxnAbort::Unknown(reason.clone()));
+        if let Some(reason) = state.txn_delete_fault.clone() {
+            if let Some(left) = state.txn_delete_faults_left.as_mut() {
+                *left = left.saturating_sub(1);
+                if *left == 0 {
+                    state.txn_delete_fault = None;
+                }
+            }
+            return Ok(TxnAbort::Unknown(reason));
         }
         Ok(if state.txns.remove(txn_name) {
             TxnAbort::Deleted
