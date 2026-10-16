@@ -709,6 +709,7 @@ pub async fn working_copy_metadata_operations(h: &dyn Harness) {
             remove_unversioned: Some(true),
             remove_ignored: Some(true),
             vacuum_pristines: Some(false),
+            break_foreign_locks: None,
         },
         &ctx(),
     )

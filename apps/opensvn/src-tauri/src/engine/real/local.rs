@@ -11,13 +11,14 @@
 //! with a user-facing error.
 
 use opensvn_ipc::{
-    CleanupRequest, IgnoreAddRequest, IgnoreScope, ResolveChoice, ResolveRequest, RevertRequest,
+    CleanupRequest, FileKind, IgnoreAddRequest, IgnoreScope, ItemProps, PropEntry, ResolveChoice,
+    ResolveRequest, RevertRequest,
 };
 use svn_client::local::{
     self as client_local, AddOptions, DeleteOptions, PropSetOptions, ResolveChoice as Accept,
     ResolveScope, RevertOptions,
 };
-use svn_types::{Depth, ErrorCode, RelPath, SvnError};
+use svn_types::{Depth, ErrorCode, NodeKind, RelPath, SvnError};
 use svn_wc::WcDb;
 
 use super::RealEngine;
@@ -44,6 +45,47 @@ fn check_changelist_name(name: Option<&str>) -> EngineResult<()> {
         return Err(local_util::invalid(format!(
             "invalid changelist name {n:?}"
         )));
+    }
+    Ok(())
+}
+
+/// Removes the working copy locks another program left, on the user's explicit confirmation
+/// (`CleanupRequest::break_foreign_locks`). Refused while another process can be seen with the
+/// working copy database open: svn keeps it open as long as it holds its lock, so that program
+/// may still be writing. Where that cannot be seen (not Linux), the confirmation alone decides.
+/// Locks of this app that may still be in use are never removed ([`WcDb::wc_break_foreign_locks`]),
+/// and no file is touched.
+fn break_foreign_locks_of(db: &WcDb) -> EngineResult<()> {
+    let wc_db = db.wcroot().join(".svn").join("wc.db");
+    if let Some(open) = crate::lock_ownership::other_processes_with_open(&wc_db)
+        && !open.is_empty()
+    {
+        let who: Vec<String> = open
+            .iter()
+            .map(|o| {
+                if o.name.is_empty() {
+                    format!("process {}", o.pid)
+                } else {
+                    format!("{} (process {})", o.name, o.pid)
+                }
+            })
+            .collect();
+        return Err(SvnError::new(
+            ErrorCode::WcBusy,
+            format!(
+                "the working copy is still in use by {}; close that program, then run cleanup \
+                 again",
+                who.join(", ")
+            ),
+        ));
+    }
+    let removed = db.wc_break_foreign_locks()?;
+    if !removed.is_empty() {
+        let dirs: Vec<&str> = removed.iter().map(RelPath::as_str).collect();
+        tracing::warn!(
+            ?dirs,
+            "removed working copy locks of another program on the user's confirmation"
+        );
     }
     Ok(())
 }
@@ -145,6 +187,51 @@ impl RealEngine {
             let (rel, _) = local_util::target_in(db, env, &path)?;
             client_local::resolve(db, &env.cancel, &rel, false, ResolveScope::ALL, accept)
                 .map(|_| ())
+        })
+        .await
+    }
+
+    pub(super) async fn do_props_get(
+        &self,
+        wc: &WcRef,
+        paths: &[String],
+        ctx: &OpContext,
+    ) -> EngineResult<Vec<ItemProps>> {
+        let paths = paths.to_vec();
+        self.with_local(wc, ctx, move |db, env| {
+            paths
+                .iter()
+                .map(|path| {
+                    let (rel, _) = local_util::target_in(db, env, path)?;
+                    let props = client_local::proplist(db, &rel)?;
+                    let kind = match db.read_node(&rel)?.map(|n| n.kind) {
+                        Some(NodeKind::Dir) => FileKind::Dir,
+                        Some(NodeKind::Symlink) => FileKind::Symlink,
+                        _ => FileKind::File,
+                    };
+                    let mut props: Vec<PropEntry> = props
+                        .into_iter()
+                        .map(|(name, value)| match String::from_utf8(value) {
+                            Ok(value) => PropEntry {
+                                name,
+                                value,
+                                binary: false,
+                            },
+                            Err(e) => PropEntry {
+                                name,
+                                value: String::from_utf8_lossy(e.as_bytes()).into_owned(),
+                                binary: true,
+                            },
+                        })
+                        .collect();
+                    props.sort_by(|a, b| a.name.cmp(&b.name));
+                    Ok(ItemProps {
+                        path: path.clone(),
+                        kind,
+                        props,
+                    })
+                })
+                .collect()
         })
         .await
     }
@@ -274,7 +361,11 @@ impl RealEngine {
     ) -> EngineResult<()> {
         let remove_unversioned = req.remove_unversioned.unwrap_or(false);
         let remove_ignored = req.remove_ignored.unwrap_or(false);
+        let break_foreign_locks = req.break_foreign_locks.unwrap_or(false);
         self.with_local(wc, ctx, move |db, env| {
+            if break_foreign_locks {
+                break_foreign_locks_of(db)?;
+            }
             // Unreferenced pristine texts are always removed, so `vacuum_pristines` needs no step.
             let report = client_local::cleanup(db, &env.cancel)?;
             if !report.locks.needs_user_action.is_empty() {

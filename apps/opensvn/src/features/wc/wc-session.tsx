@@ -18,7 +18,13 @@ export type WcDialog =
   | { kind: "changelist"; paths: string[] }
   | { kind: "update-rev" }
   | { kind: "switch" }
-  | { kind: "cleanup" }
+  | {
+      kind: "cleanup";
+      /** Opened from the "in use by another program" banner: the lock option is shown first. */
+      foreignLock?: boolean;
+    }
+  | { kind: "properties"; paths: string[] }
+  | { kind: "layout" }
   | { kind: "resolver"; path: string | null }
   | { kind: "compare" }
   | { kind: "report" }

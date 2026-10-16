@@ -40,6 +40,9 @@ export type MenuAction =
   | "delete"
   | "conflicts"
   | "showOnServer"
+  | "properties"
+  | "selProperties"
+  | "layout"
   | "themeSystem"
   | "themeLight"
   | "themeDark"
@@ -91,8 +94,8 @@ export const MENU_ACTIONS: Readonly<Record<string, MenuAction>> = {
   "menu://wc/discard-all": "discardAll",
   "menu://wc/sparse": "notYet",
   "menu://wc/cleanup": "cleanup",
-  "menu://wc/properties": "notYet",
-  "menu://wc/layout": "notYet",
+  "menu://wc/properties": "properties",
+  "menu://wc/layout": "layout",
   "menu://wc/upgrade": "notYet",
   "menu://wc/reveal": "reveal",
   "menu://wc/terminal": "terminal",
@@ -103,7 +106,7 @@ export const MENU_ACTIONS: Readonly<Record<string, MenuAction>> = {
   "menu://branch/merge": "notYet",
   "menu://branch/compare": "compare",
   "menu://branch/show-on-server": "showOnServer",
-  "menu://branch/layout": "notYet",
+  "menu://branch/layout": "layout",
   "menu://sel/discard": "discard",
   "menu://sel/lock": "lock",
   "menu://sel/unlock": "unlock",
@@ -114,7 +117,7 @@ export const MENU_ACTIONS: Readonly<Record<string, MenuAction>> = {
   "menu://sel/blame": "blame",
   "menu://sel/rename": "rename",
   "menu://sel/delete": "delete",
-  "menu://sel/properties": "notYet",
+  "menu://sel/properties": "selProperties",
   "menu://window/conflicts": "conflicts",
   "menu://help/docs": "docs",
   "menu://help/shortcuts": "showShortcuts",
@@ -194,6 +197,19 @@ export function useWcShortcuts(props: {
         case "cleanup":
           if (!wc) return false;
           s.openDialog({ kind: "cleanup" });
+          return true;
+        case "properties":
+          // The working copy itself (its root folder).
+          if (!wc) return false;
+          s.openDialog({ kind: "properties", paths: [""] });
+          return true;
+        case "selProperties":
+          if (!wc || !versioned) return false;
+          s.openDialog({ kind: "properties", paths: selPaths });
+          return true;
+        case "layout":
+          if (!wc) return false;
+          s.openDialog({ kind: "layout" });
           return true;
         case "conflicts":
           if (!wc) return false;
