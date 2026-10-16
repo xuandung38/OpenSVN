@@ -77,6 +77,12 @@ pub struct RepoState {
     /// Checked `DELETE`s left before `txn_delete_fault` clears itself; `None` keeps it until
     /// it is reset (see `FakeRaSession::fail_txn_deletes_times`).
     pub txn_delete_faults_left: Option<u32>,
+    /// Uploads (`apply_text`) left before one breaks off with a reset connection; `Some(0)`
+    /// breaks the next one (see `FakeRaSession::cut_upload`).
+    pub upload_cut: Option<u32>,
+    /// When set, `abort_edit` fails with this server error and keeps the transaction (see
+    /// `FakeRaSession::fail_aborts`).
+    pub abort_fault: Option<String>,
 }
 
 /// A `MERGE` whose answer is lost, injected with `FakeRaSession::fail_next_merge`. Either way
@@ -142,6 +148,8 @@ impl RepoState {
             merge_fault: None,
             txn_delete_fault: None,
             txn_delete_faults_left: None,
+            upload_cut: None,
+            abort_fault: None,
         }
     }
 

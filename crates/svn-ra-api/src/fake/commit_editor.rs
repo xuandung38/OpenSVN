@@ -360,6 +360,21 @@ impl CommitEditor for FakeCommitEditor {
     ) -> Result<()> {
         self.cancel.check()?;
         let path = self.file_path(file)?;
+        {
+            let mut state = guard(&self.state);
+            match state.upload_cut {
+                Some(0) => {
+                    state.upload_cut = None;
+                    return Err(SvnError::new(
+                        ErrorCode::Network,
+                        "HTTP request failed: connection reset by peer (injected)",
+                    )
+                    .with_connection(svn_types::ConnectionFailure::ConnectionReset));
+                }
+                Some(n) => state.upload_cut = Some(n - 1),
+                None => {}
+            }
+        }
         let content = tokio::fs::read(&target.path)
             .await
             .map_err(|e| SvnError::from_io(format!("read {}", target.path.display()), &e))?;
@@ -489,8 +504,14 @@ impl CommitEditor for FakeCommitEditor {
         Ok(info)
     }
 
-    async fn abort_edit(self: Box<Self>) -> Result<()> {
-        guard(&self.state).txns.remove(&self.txn);
-        Ok(())
+    async fn abort_edit(self: Box<Self>) -> Result<crate::TxnAbort> {
+        if let Some(reason) = guard(&self.state).abort_fault.clone() {
+            return Err(SvnError::new(ErrorCode::Network, reason));
+        }
+        Ok(if guard(&self.state).txns.remove(&self.txn) {
+            crate::TxnAbort::Deleted
+        } else {
+            crate::TxnAbort::Gone
+        })
     }
 }

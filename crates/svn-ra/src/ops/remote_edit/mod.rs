@@ -251,9 +251,10 @@ pub async fn commit_ops(
     match apply(editor.as_mut(), &edits, cancel).await {
         Ok(()) => editor.close_edit().await,
         Err(e) => {
-            // The original failure is what the caller needs; the abort only cleans up.
-            let _ = editor.abort_edit().await;
-            Err(e)
+            // The original failure is what the caller needs; the abort only cleans up, and
+            // turns a broken connection into "nothing committed" once the transaction is gone.
+            let abort = editor.abort_edit().await;
+            Err(svn_ra_api::unsent_commit_error(e, &abort))
         }
     }
 }

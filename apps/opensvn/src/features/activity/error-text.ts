@@ -47,6 +47,7 @@ const UNSURE: ReadonlyArray<[RegExp, ActivityKey]> = [
 /** Codes with a fixed short text; the backend's message stays in the details. */
 const BY_CODE: Partial<Record<AppError["code"], ActivityKey>> = {
   "unrelated-resources": "errUnrelated",
+  "commit-not-applied": "errNothingCommitted",
 };
 
 /** Codes whose message may be a raw transport chain. */

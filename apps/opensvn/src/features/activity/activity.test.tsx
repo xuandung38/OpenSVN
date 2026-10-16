@@ -139,6 +139,17 @@ describe("error mapping", () => {
     expect(commit.key).toBe("errCommitUnsure");
   });
 
+  test("a commit that left nothing behind says it is safe to try again, raw text in the details", () => {
+    const t = errorText({
+      code: "commit-not-applied",
+      message: "Nothing was committed; it is safe to try again.",
+      detail: `Nothing was committed; it is safe to try again. <- ${OWNER_TEXT}`,
+    });
+    expect(t.key).toBe("errNothingCommitted");
+    expect(t.detail).toContain(OWNER_TEXT);
+    expect(t.detail).toContain("(commit-not-applied)");
+  });
+
   test("a switch refused for unrelated history gets the short text that names the way out", () => {
     const t = errorText({
       code: "unrelated-resources",

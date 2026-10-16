@@ -61,7 +61,9 @@ use opensvn_lib::engine::real::{ClientRecovery, HttpConnector, RealEngine, RealE
 use opensvn_lib::engine::{CheckoutPlan, CompareLeft, EngineFacade, OpContext, StatusQuery, WcRef};
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject as _;
-use svn_ra::transport::{MemoryTrustStore, ProxyConfig};
+use svn_ra::transport::{
+    DEFAULT_WRITE_CONNECTION_REQUESTS, DEFAULT_WRITE_REUSE_WINDOW, MemoryTrustStore, ProxyConfig,
+};
 use svn_ra_api::{
     AuthMethod, AuthPrompter, CertDecision, CertInfo, CredentialRequest, Credentials,
 };
@@ -320,12 +322,90 @@ impl Drop for Scratch {
 // `OPENSVN_COMPAT_FAULTS` names the faults of a flaky proxy that `OPENSVN_COMPAT_LOCAL_URL`
 // goes through (e.g. `--reset-after 2 --idle-reset 2`), `OPENSVN_COMPAT_PROXY_LOG` its log
 // (written with `--log-requests`). Reads must then still succeed (they are sent again or
-// resumed). A write whose connection the proxy breaks is never sent again (#166): it fails, and
-// the suite checks that it failed for that reason and left nothing behind, then repeats it like
-// a user would (`write_op!`). The tests that start their own proxy are skipped.
+// resumed). Writes must succeed too when the faults are ones the transport keeps writes away
+// from ([`writes_survive`]: a connection reset or closed after two or more requests, or dropped
+// after an idle time longer than the write reuse window): then no write may meet a fault at
+// all. Under any other fault, a write whose connection the proxy breaks is never sent again
+// (#166): it fails, and the suite checks that it failed for that reason and left nothing behind,
+// then repeats it like a user would (`write_op!`). The tests that start their own proxy are
+// skipped.
 
 fn behind_a_faulty_proxy() -> bool {
     std::env::var("OPENSVN_COMPAT_FAULTS").is_ok_and(|f| !f.trim().is_empty())
+}
+
+/// Whether every write gets through the proxy faults `faults` (`OPENSVN_COMPAT_FAULTS`)
+/// untouched: the transport sends a write on a connection's first or second request only
+/// ([`DEFAULT_WRITE_CONNECTION_REQUESTS`]) and never on one idle for longer than
+/// [`DEFAULT_WRITE_REUSE_WINDOW`], and the settling writes on a new connection. Cutting
+/// responses of writes, outages and limits below two requests per connection break writes.
+fn writes_survive(faults: &str) -> bool {
+    let window = DEFAULT_WRITE_REUSE_WINDOW.as_secs_f64();
+    let mut args = faults.split_whitespace();
+    let mut cut_methods: Option<Vec<String>> = None;
+    let mut cuts = false;
+    while let Some(flag) = args.next() {
+        let mut value = || args.next().unwrap_or_default().to_owned();
+        match flag {
+            "--log-requests" => {}
+            "--truncate-at" => {
+                value();
+            }
+            "--close-after" | "--reset-after" => {
+                if value().parse::<usize>().unwrap_or(0) < DEFAULT_WRITE_CONNECTION_REQUESTS {
+                    return false;
+                }
+            }
+            "--idle-reset" | "--stale-after" => {
+                if value().parse::<f64>().unwrap_or(0.0) <= window {
+                    return false;
+                }
+            }
+            "--truncate-every" => cuts = value().parse::<u32>().unwrap_or(0) > 0,
+            "--truncate-method" => {
+                cut_methods = Some(
+                    value()
+                        .split(',')
+                        .map(|m| m.trim().to_ascii_uppercase())
+                        .collect(),
+                );
+            }
+            _ => return false,
+        }
+    }
+    !cuts || cut_methods.is_some_and(|ms| ms.iter().all(|m| !WRITE_METHODS.contains(&m.as_str())))
+}
+
+/// The proxy faults that hit a write of this repository after line `mark` of the proxy log: a
+/// reset or close under a write request, or a cut write response.
+fn writes_hit_by_the_proxy(scratch: &Scratch, mark: usize) -> Vec<String> {
+    let log = proxy_log();
+    let lines: Vec<&str> = log.lines().skip(mark).collect();
+    let conn_of = |l: &str| {
+        l.strip_prefix("flaky-tls-proxy: conn ")
+            .and_then(|r| r.split_once(':'))
+            .map(|(c, _)| c.to_owned())
+    };
+    let ours: std::collections::HashSet<String> = lines
+        .iter()
+        .filter(|l| l.contains(": request ") && l.contains(&format!("/{}", scratch.name)))
+        .filter_map(|l| conn_of(l))
+        .collect();
+    // "closing before request 3 (PUT, no close_notify)", "resetting before request 3 (PUT)",
+    // "resetting a connection idle 2.1s under request 3 (PUT)", "truncated a PUT response".
+    lines
+        .iter()
+        .filter(|l| !l.contains(": request "))
+        .filter(|l| conn_of(l).is_some_and(|c| ours.contains(&c)))
+        .filter(|l| {
+            WRITE_METHODS.iter().any(|m| {
+                l.contains(&format!("({m})"))
+                    || l.contains(&format!("({m},"))
+                    || l.contains(&format!("truncated a {m} response"))
+            })
+        })
+        .map(|l| (*l).to_owned())
+        .collect()
 }
 
 /// The proxy cuts answers: the svn command line client, which the comparisons with svn run
@@ -493,6 +573,7 @@ impl Harness for DavHarness {
     }
     fn writes_may_break(&self) -> bool {
         behind_a_faulty_proxy()
+            && !writes_survive(&std::env::var("OPENSVN_COMPAT_FAULTS").unwrap_or_default())
     }
     fn write_mark(&self) -> usize {
         if behind_a_faulty_proxy() {
@@ -541,7 +622,14 @@ macro_rules! scenario {
         async fn $name() {
             for (version, host) in servers() {
                 eprintln!("{}: server {version}", stringify!($name));
-                conformance::$name(&harness(&host, stringify!($name))).await;
+                let h = harness(&host, stringify!($name));
+                let mark = h.write_mark();
+                conformance::$name(&h).await;
+                // Faults the writes are kept away from: none may have met one.
+                if behind_a_faulty_proxy() && !h.writes_may_break() {
+                    let hit = writes_hit_by_the_proxy(&h.scratch, mark);
+                    assert!(hit.is_empty(), "writes met a proxy fault: {hit:#?}");
+                }
             }
             assert_no_prompt();
         }
@@ -1924,8 +2012,10 @@ async fn writes_after_a_pause_survive_a_proxy_that_dropped_the_idle_connection()
     assert_no_prompt();
 }
 
-/// A proxy that closes every reused connection under its next request: a write that goes out
-/// on such a connection fails, but is never sent a second time.
+/// A proxy that closes every reused connection under its next request (below the two requests a
+/// write connection may carry): a write that goes out on such a connection fails, is never sent
+/// a second time, and once the server confirmed the transaction deleted the commit reports that
+/// nothing was committed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
 async fn a_write_the_proxy_cuts_is_never_sent_again() {
@@ -1999,10 +2089,9 @@ async fn a_write_the_proxy_cuts_is_never_sent_again() {
         "the proxy cut no write ({outcome:?}):\n{log}"
     );
     let err = outcome.expect_err("a commit whose write was cut fails");
-    assert!(
-        err.code == ErrorCode::CommitOutcomeUnknown || err.connection_failure().is_some(),
-        "{err:?}"
-    );
+    assert_eq!(err.code, ErrorCode::CommitNotApplied, "{err:?}");
+    assert!(err.connection_failure().is_some(), "{err:?}");
+    assert!(h.scratch.transactions().is_empty());
     let mut writes: Vec<_> = requests(&proxy)
         .into_iter()
         .filter(|(m, _)| WRITE_METHODS.contains(&m.as_str()))
@@ -2011,6 +2100,250 @@ async fn a_write_the_proxy_cuts_is_never_sent_again() {
     writes.sort();
     writes.dedup();
     assert_eq!(writes.len(), all, "a write was sent twice:\n{log}");
+    assert_no_prompt();
+}
+
+/// Versioned and unversioned nodes.
+const ALL_FILES: StatusQuery = StatusQuery {
+    include_ignored: false,
+    include_unversioned: true,
+};
+
+/// Checks out `trunk` of the harness's repository through `url` (the proxy's) into `name`.
+async fn checkout_via(h: &DavHarness, url: &str, name: &str) -> WcRef {
+    let info = h
+        .engine()
+        .checkout(
+            &CheckoutPlan {
+                url: format!("{url}/trunk"),
+                path: h.work_dir().join(name),
+                rev: None,
+                depth: Depth::Infinity,
+                sparse: None,
+                format: WcFormat::V31,
+                store_pristine: true,
+                ignore_externals: false,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("checkout (reads are sent again)");
+    WcRef {
+        id: WcId(name.to_owned()),
+        root: PathBuf::from(info.root_path),
+    }
+}
+
+/// Commits `paths` of `wc` with `message`.
+async fn commit_paths(
+    h: &DavHarness,
+    wc: &WcRef,
+    paths: &[String],
+    message: &str,
+) -> Result<opensvn_ipc::Rev, SvnError> {
+    h.engine()
+        .commit(
+            wc,
+            &CommitRequest {
+                wc_id: wc.id.clone(),
+                paths: paths.to_vec(),
+                message: message.into(),
+                keep_locks: false,
+                auto_add_remove: true,
+            },
+            &ctx(),
+        )
+        .await
+}
+
+/// A middlebox that resets every connection under its third request (`--reset-after 2`): a
+/// commit of 60 files, a lock, an unlock and a copy all get through, every write is sent once,
+/// and no write ever meets the reset (only reads do, and they are sent again).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
+async fn a_commit_gets_through_a_proxy_that_resets_connections_after_two_requests() {
+    if behind_a_faulty_proxy() {
+        eprintln!("SKIPPED: starts its own flaky proxy, so it runs against the server directly");
+        return;
+    }
+    for (version, host) in servers() {
+        let Host::Local { base, .. } = &host else {
+            eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
+            return;
+        };
+        eprintln!("server {version}");
+        let h = harness(&host, "reset2");
+        let Some(proxy) = FlakyProxy::start(
+            base,
+            &["--reset-after", "2", "--log-requests"],
+            h.scratch_dir().join("proxy.log"),
+        ) else {
+            eprintln!("SKIPPED: no server certificate next to the CA for the flaky proxy");
+            return;
+        };
+        let url = format!("{}/{}", proxy.url(base), h.scratch.name);
+        let wc = checkout_via(&h, &url, "wc").await;
+        let mut paths = vec!["README.md".to_owned()];
+        h.write_file(&wc.root, "README.md", "changed\n").unwrap();
+        for i in 0..60 {
+            let p = format!("many/f{i:02}.txt");
+            h.write_file(&wc.root, &p, &format!("file {i}\n")).unwrap();
+            paths.push(p);
+        }
+        commit_paths(&h, &wc, &paths, "through a resetting proxy")
+            .await
+            .expect("commit through a proxy that resets after two requests");
+        let scope = opensvn_lib::engine::LockScope::Wc {
+            wc: wc.clone(),
+            paths: vec!["README.md".into()],
+        };
+        let e = h.engine();
+        e.lock(&scope, Some("reset proxy"), false, &ctx())
+            .await
+            .expect("lock");
+        e.unlock(&scope, false, &ctx()).await.expect("unlock");
+        e.copy_location(
+            &CopyLocationRequest {
+                from_url: format!("{url}/trunk"),
+                from_rev: None,
+                to_url: format!("{url}/branches/reset2"),
+                message: "copy through a resetting proxy".into(),
+                switch_wc_id: None,
+                from_wc: None,
+            },
+            None,
+            &ctx(),
+        )
+        .await
+        .expect("copy");
+
+        let log = std::fs::read_to_string(&proxy.log).unwrap_or_default();
+        let resets: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("resetting before request"))
+            .collect();
+        for r in &resets {
+            assert!(
+                !WRITE_METHODS.iter().any(|m| r.contains(&format!("({m})"))),
+                "a write met the reset: {r}\n{log}"
+            );
+        }
+        let count = |m: &str| requests(&proxy).iter().filter(|(x, _)| x == m).count();
+        assert_eq!(count("PUT"), 61, "{log}");
+        assert_eq!(count("MERGE"), 2, "{log}");
+        assert_eq!(count("LOCK"), 1, "{log}");
+        assert_eq!(count("UNLOCK"), 1, "{log}");
+        let mut writes: Vec<_> = requests(&proxy)
+            .into_iter()
+            .filter(|(m, _)| WRITE_METHODS.contains(&m.as_str()))
+            .filter(|(m, _)| m != "POST" && m != "MERGE")
+            .collect();
+        let all = writes.len();
+        writes.sort();
+        writes.dedup();
+        assert_eq!(writes.len(), all, "a write was sent twice:\n{log}");
+        assert!(h.scratch.transactions().is_empty());
+        // The working copy is at the commit.
+        let st = e.status(&wc, ALL_FILES, &ctx()).await.expect("status");
+        assert!(
+            !st.iter().any(|f| matches!(
+                f.text,
+                opensvn_ipc::NodeStatus::Modified
+                    | opensvn_ipc::NodeStatus::Added
+                    | opensvn_ipc::NodeStatus::Unversioned
+            )),
+            "{st:?}"
+        );
+    }
+    assert_no_prompt();
+}
+
+/// A `PUT` whose response the proxy cuts off: the commit stops, the transaction is deleted,
+/// and the error says nothing was committed (`commit-not-applied`, Retry). The same commit
+/// then goes through once the connection behaves.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn and scripts/test-env/visualsvn-like.sh certificates"]
+async fn a_cut_put_commits_nothing_and_the_same_commit_can_be_sent_again() {
+    if behind_a_faulty_proxy() {
+        eprintln!("SKIPPED: starts its own flaky proxy, so it runs against the server directly");
+        return;
+    }
+    for (version, host) in servers() {
+        let Host::Local { base, .. } = &host else {
+            eprintln!("SKIPPED: the flaky proxy runs in front of the local server only");
+            return;
+        };
+        eprintln!("server {version}");
+        let h = harness(&host, "cutput");
+        let Some(proxy) = FlakyProxy::start(
+            base,
+            &[
+                "--truncate-every",
+                "2",
+                "--truncate-method",
+                "PUT",
+                "--truncate-at",
+                "1",
+                "--log-requests",
+            ],
+            h.scratch_dir().join("proxy.log"),
+        ) else {
+            eprintln!("SKIPPED: no server certificate next to the CA for the flaky proxy");
+            return;
+        };
+        let port = proxy.port;
+        let url = format!("{}/{}", proxy.url(base), h.scratch.name);
+        let wc = checkout_via(&h, &url, "wc").await;
+        let paths: Vec<String> = ["README.md", "src/main.rs"].map(str::to_owned).to_vec();
+        for p in &paths {
+            h.write_file(&wc.root, p, "changed\n").unwrap();
+        }
+        let before = h
+            .engine()
+            .status(&wc, ALL_FILES, &ctx())
+            .await
+            .expect("status");
+        let err = commit_paths(&h, &wc, &paths, "cut")
+            .await
+            .expect_err("the second PUT is cut");
+        assert_eq!(proxy.cuts(), 1, "{err:?}");
+        assert_eq!(err.code, ErrorCode::CommitNotApplied, "{err:?}");
+        assert!(err.connection_failure().is_some(), "{err:?}");
+        let app = opensvn_ipc::AppError::from(&err);
+        assert_eq!(app.code, opensvn_ipc::ErrorCode::CommitNotApplied);
+        assert!(app.retryable);
+        assert_eq!(
+            app.actions,
+            Some(Box::new(vec![opensvn_ipc::ErrorAction::Retry]))
+        );
+        // Nothing committed, nothing left on the server, the working copy as it was.
+        assert!(h.scratch.transactions().is_empty());
+        assert!(requests(&proxy).iter().all(|(m, _)| m != "MERGE"));
+        let after = h
+            .engine()
+            .status(&wc, ALL_FILES, &ctx())
+            .await
+            .expect("status");
+        assert_eq!(format!("{after:?}"), format!("{before:?}"));
+
+        // The connection behaves again: the very same commit goes through.
+        drop(proxy);
+        let plain = proxy_on(
+            base,
+            port,
+            &["--log-requests"],
+            h.scratch_dir().join("plain.log"),
+        );
+        let rev = commit_paths(&h, &wc, &paths, "cut")
+            .await
+            .expect("the same commit, sent again");
+        assert_eq!(rev, opensvn_ipc::Rev(2));
+        assert_eq!(
+            requests(&plain).iter().filter(|(m, _)| m == "PUT").count(),
+            2
+        );
+        drop(plain);
+    }
     assert_no_prompt();
 }
 

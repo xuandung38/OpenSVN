@@ -698,7 +698,12 @@ export type ErrorCode = "network" | "timeout" | "auth-required" |
  */
 "server-protocol-error" | 
 /**  The request itself is invalid (bad value, expired path grant, unsupported option). */
-"invalid-argument" | "internal";
+"invalid-argument" | 
+/**
+ *  A commit broke off before it was applied and its server transaction is confirmed gone:
+ *  nothing was committed, so the same commit can be sent again (Retry).
+ */
+"commit-not-applied" | "internal";
 
 /**
  *  External diff tool for one file extension, used instead of `diff.externalTool` for files with

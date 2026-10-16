@@ -15,7 +15,9 @@ use svn_protocol::TxnName;
 use svn_protocol::commit::{
     LockToken, copy_request, delete_request, mkcol_request, proppatch_request,
 };
-use svn_ra_api::{CommitEditor, CommitInfo, CommitObserver, ReplayableSource};
+use svn_ra_api::{
+    CommitEditor, CommitInfo, CommitObserver, ReplayableSource, TxnAbort, unsent_commit_error,
+};
 use svn_types::{
     CancelToken, Checksum, DirId, ErrorCode, FileId, NodeKind, PropChange, RelPath, Result, Revnum,
     SvnError,
@@ -253,8 +255,14 @@ impl HttpCommitEditor {
 
     /// Deletes the transaction after a failure; its own failure must not hide the cause.
     /// Never prompts and gives up after a short timeout (see [`cleanup_txn`]).
-    async fn discard_txn(&self) {
-        let _ = cleanup_txn(&self.wire, &self.txn).await;
+    async fn discard_txn(&self) -> Result<TxnAbort> {
+        cleanup_txn(&self.wire, &self.txn).await.map(|found| {
+            if found {
+                TxnAbort::Deleted
+            } else {
+                TxnAbort::Gone
+            }
+        })
     }
 
     /// Collects the closed files that already finished, so a failure stops the drive early
@@ -596,9 +604,15 @@ impl CommitEditor for HttpCommitEditor {
         let info = match self.close_edit_inner().await {
             Ok(info) => info,
             Err(CommitFailure::NotMerged(e)) => {
-                self.discard_txn().await;
+                // `settled` is set right before the MERGE goes out.
+                let merge_sent = self.settled;
+                let abort = self.discard_txn().await;
                 self.settled = true;
-                return Err(e);
+                return Err(if merge_sent {
+                    e
+                } else {
+                    unsent_commit_error(e, &abort)
+                });
             }
             // The MERGE may still be applied on the server: deleting the transaction could race
             // it, so it is kept for the caller to reconcile (as libsvn_ra_serf does).
@@ -625,12 +639,12 @@ impl CommitEditor for HttpCommitEditor {
     /// If this future is dropped before the `DELETE` completes, the delete is not retried
     /// (neither here nor from `Drop`): the transaction may then remain on the server, and the
     /// journaled name plus [`super::abort_txn`] remove it.
-    async fn abort_edit(mut self: Box<Self>) -> Result<()> {
+    async fn abort_edit(mut self: Box<Self>) -> Result<TxnAbort> {
         // Stop uploads first so nothing writes into the transaction while it is deleted.
         drop(std::mem::take(&mut self.files));
         drop(std::mem::take(&mut self.closing));
         self.settled = true;
-        cleanup_txn(&self.wire, &self.txn).await
+        self.discard_txn().await
     }
 }
 

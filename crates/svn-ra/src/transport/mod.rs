@@ -13,12 +13,13 @@ mod tls;
 
 pub use client::HttpTransport;
 pub use config::{
-    DEFAULT_CONNECTIONS, DEFAULT_POOL_IDLE_TIMEOUT, MAX_CONNECTIONS, MIN_CONNECTIONS, ProxyConfig,
-    SVN_COMPAT_VERSION, TransportConfig, USER_AGENT,
+    DEFAULT_CONNECTIONS, DEFAULT_POOL_IDLE_TIMEOUT, DEFAULT_WRITE_CONNECTION_REQUESTS,
+    DEFAULT_WRITE_REUSE_WINDOW, MAX_CONNECTIONS, MIN_CONNECTIONS, ProxyConfig, SVN_COMPAT_VERSION,
+    TransportConfig, USER_AGENT,
 };
 pub use redact::{
     RedactedHeaders, RedactingMakeWriter, RedactingWriter, redact_text, redacted_url,
 };
 pub use request::{BodyStream, BufferedResponse, HttpRequest, HttpResponse, RequestBody};
-pub use retry::{RetryPolicy, classify_status, is_idempotent};
+pub use retry::{RetryPolicy, classify_status, is_idempotent, needs_new_connection};
 pub use tls::{MemoryTrustStore, TrustStore, sha256_fingerprint};

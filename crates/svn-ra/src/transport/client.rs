@@ -16,6 +16,7 @@ use super::redact::{RedactedHeaders, redacted_url};
 use super::request::{BufferedResponse, HttpRequest, HttpResponse};
 use super::retry::{
     classify_error, error_chain, is_connection_failure, is_idempotent, is_transient_status,
+    needs_new_connection,
 };
 use super::tls::{
     CertProblem, OriginTls, PinAction, TrustStore, make_client_config, tls_server_end_point,
@@ -32,18 +33,33 @@ const MAX_AUTH_ROUND_TRIPS: u8 = 10;
 /// Client, TLS state and connection limit of one `(scheme, host, port)`.
 struct OriginClient {
     client: reqwest::Client,
-    /// Same settings with a pool of its own for writes, whose idle connections expire after
-    /// [`TransportConfig::write_reuse_window`]: a write is sent once, so it only reuses a
-    /// connection that was busy moments ago (see [`HttpTransport::attempt`]).
-    writer: reqwest::Client,
+    /// Same settings with a pool of its own for writes (see [`WriterPool`]).
+    writer: Mutex<WriterPool>,
     /// Same settings without a pool: every request opens its own connection. Used to retry a
-    /// request whose pooled connection broke, so the retry cannot pick another stale one.
+    /// request whose pooled connection broke, so the retry cannot pick another stale one, and
+    /// for the writes that settle an operation ([`needs_new_connection`]).
     fresh: reqwest::Client,
+    /// TLS settings every client of the origin is built from. Clones share its session cache,
+    /// so a new connection of any of them resumes the TLS session of an earlier one instead of
+    /// a full handshake.
+    tls_config: rustls::ClientConfig,
     tls: Arc<OriginTls>,
     slots: Arc<Semaphore>,
     /// RFC 5929 `tls-server-end-point` channel binding of the certificate the server presented on
     /// its latest response, for Negotiate (Extended Protection).
     channel_binding: Mutex<Option<Arc<[u8]>>>,
+}
+
+/// The pool writes go out on. Its idle connections expire after
+/// [`TransportConfig::write_reuse_window`]: a write is sent once, so it only reuses a connection
+/// that was busy moments ago. It is replaced by a new, empty pool once it was handed out for
+/// [`TransportConfig::write_connection_requests`] requests, so none of its connections ever
+/// carries more than that many: a proxy that resets a connection under its (N+1)-th request
+/// never meets a write (see [`HttpTransport::attempt`]).
+struct WriterPool {
+    client: reqwest::Client,
+    /// Requests handed to `client` so far.
+    sent: usize,
 }
 
 impl OriginClient {
@@ -163,7 +179,8 @@ impl HttpTransport {
     /// idempotent methods, TLS exceptions and same-origin redirects. Statuses other than those
     /// are returned for the caller to interpret; see [`super::classify_status`].
     pub async fn send(&self, req: HttpRequest, cancel: &CancelToken) -> Result<HttpResponse> {
-        self.send_mode(req, cancel, Interaction::Allowed).await
+        self.send_mode(req, cancel, Interaction::Allowed, false)
+            .await
     }
 
     /// Like [`Self::send`], but never asks the user: only credentials already cached for the
@@ -179,7 +196,8 @@ impl HttpTransport {
         req: HttpRequest,
         cancel: &CancelToken,
     ) -> Result<HttpResponse> {
-        self.send_mode(req, cancel, Interaction::Forbidden).await
+        self.send_mode(req, cancel, Interaction::Forbidden, false)
+            .await
     }
 
     /// Sends a request and reads its whole body, failing with `ProtocolViolation` above `limit` bytes.
@@ -220,13 +238,16 @@ impl HttpTransport {
         interaction: Interaction,
     ) -> Result<BufferedResponse> {
         let mut retries = 0usize;
+        // Set once a body broke off: the request goes out again on a new connection, as other
+        // pooled ones may have broken the same way.
+        let mut fresh = false;
         loop {
             let again = if is_idempotent(&req.method) {
                 req.try_clone()
             } else {
                 None
             };
-            let resp = self.send_mode(req, cancel, interaction).await?;
+            let resp = self.send_mode(req, cancel, interaction, fresh).await?;
             let (status, headers) = (resp.status, resp.headers.clone());
             match resp.bytes(limit).await {
                 Ok(body) => {
@@ -250,17 +271,20 @@ impl HttpTransport {
                     );
                     backoff(delay, cancel).await?;
                     req = next;
+                    fresh = true;
                 }
                 Err(e) => return Err(e),
             }
         }
     }
 
+    /// One request with its redirects; `fresh` sends its first attempt on a new connection.
     async fn send_mode(
         &self,
         mut req: HttpRequest,
         cancel: &CancelToken,
         interaction: Interaction,
+        fresh: bool,
     ) -> Result<HttpResponse> {
         validate_url(&req.url)?;
         req.headers.remove(AUTHORIZATION);
@@ -268,7 +292,7 @@ impl HttpTransport {
         loop {
             let origin = self.origin_client(&req.url)?;
             let resp = self
-                .send_authenticated(&origin, &mut req, cancel, interaction)
+                .send_authenticated(&origin, &mut req, cancel, interaction, fresh)
                 .await?;
             if !is_redirect(resp.status) {
                 return Ok(resp);
@@ -313,19 +337,23 @@ impl HttpTransport {
     pub fn reset_connections(&self) {
         let mut map = self.origins.lock().unwrap_or_else(PoisonError::into_inner);
         for entry in map.values_mut() {
-            let tls = &entry.tls;
+            let tls_config = &entry.tls_config;
             let (Ok(client), Ok(writer), Ok(fresh)) = (
-                self.make_client(tls, Some(self.config.pool_idle_timeout)),
-                self.make_client(tls, Some(self.config.write_reuse_window)),
-                self.make_client(tls, None),
+                self.make_client(tls_config, Some(self.config.pool_idle_timeout)),
+                self.make_client(tls_config, Some(self.config.write_reuse_window)),
+                self.make_client(tls_config, None),
             ) else {
                 continue;
             };
             *entry = Arc::new(OriginClient {
                 client,
-                writer,
+                writer: Mutex::new(WriterPool {
+                    client: writer,
+                    sent: 0,
+                }),
                 fresh,
-                tls: Arc::clone(tls),
+                tls_config: tls_config.clone(),
+                tls: Arc::clone(&entry.tls),
                 slots: Arc::clone(&entry.slots),
                 channel_binding: Mutex::new(entry.channel_binding()),
             });
@@ -351,13 +379,18 @@ impl HttpTransport {
         let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
         let port = url.port_or_known_default().unwrap_or(0);
         let tls = Arc::new(OriginTls::new(host, port, Arc::clone(&self.trust)));
-        let client = self.make_client(&tls, Some(self.config.pool_idle_timeout))?;
-        let writer = self.make_client(&tls, Some(self.config.write_reuse_window))?;
-        let fresh = self.make_client(&tls, None)?;
+        let tls_config = make_client_config(Arc::clone(&tls), &self.config.extra_root_certs)?;
+        let client = self.make_client(&tls_config, Some(self.config.pool_idle_timeout))?;
+        let writer = self.make_client(&tls_config, Some(self.config.write_reuse_window))?;
+        let fresh = self.make_client(&tls_config, None)?;
         let entry = Arc::new(OriginClient {
             client,
-            writer,
+            writer: Mutex::new(WriterPool {
+                client: writer,
+                sent: 0,
+            }),
             fresh,
+            tls_config,
             tls,
             slots: Arc::new(Semaphore::new(self.config.effective_connections())),
             channel_binding: Mutex::default(),
@@ -370,10 +403,9 @@ impl HttpTransport {
     /// idle connection.
     fn make_client(
         &self,
-        tls: &Arc<OriginTls>,
+        tls_config: &rustls::ClientConfig,
         pool_idle: Option<Duration>,
     ) -> Result<reqwest::Client> {
-        let tls_config = make_client_config(Arc::clone(tls), &self.config.extra_root_certs)?;
         let mut b = reqwest::Client::builder()
             .http1_only()
             .redirect(reqwest::redirect::Policy::none())
@@ -390,7 +422,7 @@ impl HttpTransport {
             .user_agent(self.config.user_agent.clone())
             // Exposes the server certificate per response, for Negotiate channel bindings.
             .tls_info(true)
-            .use_preconfigured_tls(tls_config);
+            .use_preconfigured_tls(tls_config.clone());
         match &self.config.proxy {
             ProxyConfig::System => {}
             ProxyConfig::Disabled => b = b.no_proxy(),
@@ -426,6 +458,7 @@ impl HttpTransport {
         req: &mut HttpRequest,
         cancel: &CancelToken,
         interaction: Interaction,
+        fresh: bool,
     ) -> Result<HttpResponse> {
         let mut sent = self
             .auth
@@ -436,7 +469,7 @@ impl HttpTransport {
         let mut per_realm: HashMap<String, u8> = HashMap::new();
         loop {
             cancel.check()?;
-            match self.attempt(origin, req, &mut sent, cancel).await {
+            match self.attempt(origin, req, &mut sent, cancel, fresh).await {
                 Ok(resp) if resp.status == StatusCode::UNAUTHORIZED => {
                     let challenges = Challenges::from_headers(&resp.headers);
                     drop(resp);
@@ -558,20 +591,42 @@ impl HttpTransport {
         }
     }
 
+    /// The writer pool for one more request, replaced by a new one once it carried
+    /// [`TransportConfig::write_connection_requests`] (see [`WriterPool`]).
+    fn writer_client(&self, origin: &OriginClient) -> Result<reqwest::Client> {
+        let limit = self.config.write_connection_requests;
+        let mut pool = origin.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        if limit > 0 && pool.sent >= limit {
+            // Requests in flight keep the old pool alive; its connections close with it.
+            pool.client =
+                self.make_client(&origin.tls_config, Some(self.config.write_reuse_window))?;
+            pool.sent = 0;
+        }
+        pool.sent += 1;
+        Ok(pool.client.clone())
+    }
+
     /// Sends once (plus transient retries for idempotent requests). A retry never resends a
     /// Negotiate token: `sent` is renewed with a fresh context first.
     ///
     /// A write (not [`is_idempotent`]) is sent at most once. It goes out on a connection idle
-    /// for at most [`TransportConfig::write_reuse_window`] or on a new one, so a connection the
-    /// server or a proxy dropped while idle does not take it down. It is sent again only when
-    /// it provably never left: the connection could not be opened (`is_connect`). A connection
-    /// that breaks after the write was handed to it fails the write, whatever was sent.
+    /// for at most [`TransportConfig::write_reuse_window`] that carried fewer than
+    /// [`TransportConfig::write_connection_requests`] requests, or on a new one, so a connection
+    /// the server or a proxy dropped while idle, or resets after a number of requests, does not
+    /// take it down; a write that settles the operation ([`needs_new_connection`]) always opens
+    /// a new one. It is sent again only when it provably never left: the connection could not
+    /// be opened (`is_connect`). A connection that breaks after the write was handed to it fails
+    /// the write, whatever was sent.
+    ///
+    /// `fresh` sends the first attempt on a new connection too; every retry after a broken
+    /// connection does.
     async fn attempt(
         &self,
         origin: &OriginClient,
         req: &mut HttpRequest,
         sent: &mut Attached,
         cancel: &CancelToken,
+        fresh: bool,
     ) -> std::result::Result<HttpResponse, AttemptError> {
         let permit = tokio::select! {
             biased;
@@ -584,7 +639,7 @@ impl HttpTransport {
         let retriable = idempotent && req.body.is_replayable();
         let mut retries = 0usize;
         // Set once a connection broke under this request: the retries do not use the pool.
-        let mut fresh_connection = false;
+        let mut fresh_connection = fresh || needs_new_connection(&req.method);
         loop {
             cancel.check()?;
             if retries > 0 && sent.is_negotiate() {
@@ -596,11 +651,11 @@ impl HttpTransport {
             let authorization = &sent.header;
             let prepared = req.body.prepare().await?;
             let client = if fresh_connection {
-                &origin.fresh
+                origin.fresh.clone()
             } else if idempotent {
-                &origin.client
+                origin.client.clone()
             } else {
-                &origin.writer
+                self.writer_client(origin)?
             };
             let mut rb = client
                 .request(req.method.clone(), req.url.clone())

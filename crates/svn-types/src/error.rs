@@ -90,6 +90,11 @@ pub enum ErrorCode {
     /// commit, it happened; otherwise remove the transaction with `abort_txn`. Never retry the
     /// commit blindly: it could be applied twice.
     CommitOutcomeUnknown,
+    /// A commit failed before its final request (`MERGE`) was sent, its connection broke under
+    /// one of the earlier writes, and the server then confirmed that it deleted the commit's
+    /// transaction. Nothing was committed and nothing is left on the server: the same commit
+    /// can safely be tried again. The cause (the broken connection) is the child error.
+    CommitNotApplied,
     /// A write other than a commit (a lock or an unlock) whose connection broke after the
     /// request was handed to it: the server may or may not have carried it out. Writes are
     /// never sent twice, so the caller checks the server's state before trying again.
