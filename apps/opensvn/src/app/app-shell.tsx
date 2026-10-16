@@ -29,6 +29,7 @@ import { ShortcutsDialog } from "../features/wc/shortcuts-dialog";
 import { useOpNotifications } from "../features/wc/use-op-notifications";
 import { useWcActions } from "../features/wc/use-wc-actions";
 import { useWcShortcuts } from "../features/wc/use-wc-shortcuts";
+import { useViewPrefs } from "../features/wc/view-prefs";
 import { WcBanners } from "../features/wc/wc-banners";
 import { changedFiles, wcPathUrl } from "../features/wc/wc-model";
 import { useWcSession, type WcLinks, WcSessionProvider } from "../features/wc/wc-session";
@@ -85,7 +86,8 @@ export function AppShell() {
     closed || (wcId === null && openLast !== true)
       ? null
       : (wcs.data?.find((w) => w.id === (wcId ?? lastOpened)) ?? wcs.data?.[0] ?? null);
-  const status = useStatus(current?.id ?? null);
+  const { showIgnored } = useViewPrefs();
+  const status = useStatus(current?.id ?? null, showIgnored);
   const [view, setView] = useState<View>("changes");
   const links = useRemoteLinks(setView);
 

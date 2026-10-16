@@ -24,7 +24,7 @@ import { ToolbarItem } from "../components/ui/toolbar-item";
 import type { StatusCode } from "../lib/status";
 import { RemoteDemo } from "./remote-demo";
 
-const CODES: StatusCode[] = ["M", "A", "D", "R", "?", "!", "C"];
+const CODES: StatusCode[] = ["M", "A", "D", "R", "?", "!", "C", "P", "I"];
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -108,26 +108,29 @@ function AllComponents() {
         </div>
       </Section>
       <Section title="File row · Revision row">
-        <div className="h-[28px]">
-          <FileRow path="src/engine/renderer.ts" status="M" checked />
-        </div>
-        <div className="h-[28px]">
-          <FileRow path="assets/textures/hero.png" status="M" selected lock="other" />
-        </div>
-        <div className="h-[28px]">
-          <FileRow path="src/ui/main-menu.tsx" status="C" />
-        </div>
-        <div className="h-[44px]">
-          <RevisionRow
-            rev={48213}
-            message="Fix shadow flicker"
-            author="binh"
-            when="2h ago"
-            incoming
-          />
-        </div>
-        <div className="h-[44px]">
-          <RevisionRow rev={48210} message="Update module" author="chi" when="1d ago" selected />
+        {/* Rows are listbox options; in the app they live in a VirtualList. */}
+        <div role="listbox" aria-label="Sample rows">
+          <div className="h-[28px]">
+            <FileRow path="src/engine/renderer.ts" status="M" checked />
+          </div>
+          <div className="h-[28px]">
+            <FileRow path="assets/textures/hero.png" status="M" selected lock="other" />
+          </div>
+          <div className="h-[28px]">
+            <FileRow path="src/ui/main-menu.tsx" status="C" />
+          </div>
+          <div className="h-[44px]">
+            <RevisionRow
+              rev={48213}
+              message="Fix shadow flicker"
+              author="binh"
+              when="2h ago"
+              incoming
+            />
+          </div>
+          <div className="h-[44px]">
+            <RevisionRow rev={48210} message="Update module" author="chi" when="1d ago" selected />
+          </div>
         </div>
       </Section>
       <Section title="Banner">

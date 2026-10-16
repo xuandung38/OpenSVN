@@ -57,6 +57,7 @@
     "allow-reveal-in-os",
     "allow-open-external",
     "allow-diagnostics-export",
+    "allow-logs-reveal",
     "allow-wc-list",
     "allow-wc-add-existing",
     "allow-wc-remove",

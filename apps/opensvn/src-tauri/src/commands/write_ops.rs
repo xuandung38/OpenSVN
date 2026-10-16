@@ -169,6 +169,12 @@ fn forget_journal(db: &crate::db::AppDb, root: &str) {
     }
 }
 
+fn forget_switch(db: &crate::db::AppDb, root: &str) {
+    if let Err(e) = db.switch_journal_remove(root) {
+        tracing::warn!(error = %e, "could not update the switch journal");
+    }
+}
+
 /// The interrupted checkout of `url` at `path`, registered so it can be continued; `None` when
 /// `path` holds anything else (a complete working copy, another URL, user files).
 async fn interrupted_checkout_at(
@@ -195,9 +201,10 @@ async fn interrupted_checkout_at(
     })
 }
 
-/// Finishes an interrupted checkout or update of the whole working copy at the revision it was
-/// reaching (recorded in the working copy), with the depths it records and, for a checkout,
-/// the externals choice the user made. Fails when nothing is incomplete.
+/// Finishes an interrupted checkout, update or switch of the whole working copy at the revision
+/// it was reaching (recorded in the working copy), with the depths it records and, for a
+/// checkout, the externals choice the user made; a switch goes on to the URL it was switching
+/// to. Fails when nothing is incomplete.
 #[tauri::command]
 #[specta::specta]
 pub async fn wc_continue(
@@ -207,31 +214,48 @@ pub async fn wc_continue(
     guard(async {
         let row = state.wcs.resolve(&wc_id)?.row;
         let journal = state.db.checkout_journal_get(&row.root_path)?;
-        let title = if journal.is_some() {
-            format!("Continue checkout {}", row.name)
+        let switch_to = state.db.switch_journal_get(&row.root_path)?;
+        let (kind, title) = if switch_to.is_some() {
+            (
+                OperationKind::Switch,
+                format!("Continue switch {}", row.name),
+            )
+        } else if journal.is_some() {
+            (
+                OperationKind::Update,
+                format!("Continue checkout {}", row.name),
+            )
         } else {
-            format!("Continue update {}", row.name)
+            (
+                OperationKind::Update,
+                format!("Continue update {}", row.name),
+            )
         };
         let ignore_externals = journal.as_ref().is_some_and(|j| j.ignore_externals);
         let db = state.db.clone();
-        state.start_wc_op(
-            OperationKind::Update,
-            &wc_id,
-            title,
-            move |engine, wc, ctx| async move {
-                let info = engine.wc_info(&wc.root, &ctx).await?;
-                let Some(rev) = info.resume_rev.filter(|_| info.incomplete) else {
-                    return Err(svn_types::SvnError::new(
-                        svn_types::ErrorCode::WcInvalidOperation,
-                        "There is nothing to continue: the working copy is complete.",
-                    ));
-                };
-                let new_rev = engine.resume(&wc, rev, ignore_externals, &ctx).await?;
-                forget_journal(&db, &info.root_path);
-                forget_journal(&db, &row.root_path);
-                Ok(OpResult::NewRev { new_rev })
-            },
-        )
+        state.start_wc_op(kind, &wc_id, title, move |engine, wc, ctx| async move {
+            let info = engine.wc_info(&wc.root, &ctx).await?;
+            let Some(rev) = info.resume_rev.filter(|_| info.incomplete) else {
+                forget_switch(&db, &row.root_path);
+                return Err(svn_types::SvnError::new(
+                    svn_types::ErrorCode::WcInvalidOperation,
+                    "There is nothing to continue: the working copy is complete.",
+                ));
+            };
+            if let Some((url, ignore_ancestry)) = switch_to {
+                // A switch that stopped half-way: an update would keep the folders it had
+                // not reached at their old URL. Finished at the revision it was reaching.
+                let new_rev = engine
+                    .switch(&wc, &url, Some(rev), ignore_ancestry, &ctx)
+                    .await?;
+                forget_switch(&db, &row.root_path);
+                return Ok(OpResult::NewRev { new_rev });
+            }
+            let new_rev = engine.resume(&wc, rev, ignore_externals, &ctx).await?;
+            forget_journal(&db, &info.root_path);
+            forget_journal(&db, &row.root_path);
+            Ok(OpResult::NewRev { new_rev })
+        })
     })
     .await
 }
@@ -246,13 +270,18 @@ pub async fn update(
         let wc_id = request.wc_id.clone();
         let latest = request.rev.is_none();
         let wcs = std::sync::Arc::clone(&state.wcs);
-        let name = state.wcs.resolve(&wc_id)?.row.name;
+        let row = state.wcs.resolve(&wc_id)?.row;
+        let (name, root, db) = (row.name, row.root_path, state.db.clone());
         state.start_wc_op(OperationKind::Update, &wc_id, format!("Update {name}"), {
             let wc_id = wc_id.clone();
             move |engine, wc, ctx| async move {
                 let rev = engine.update(&wc, &request, &ctx).await?;
-                if latest && request.paths.as_ref().is_none_or(Vec::is_empty) {
-                    wcs.set_incoming(&wc_id, 0);
+                if request.paths.as_ref().is_none_or(Vec::is_empty) {
+                    // The whole working copy is complete: an unfinished switch is no more.
+                    forget_switch(&db, &root);
+                    if latest {
+                        wcs.set_incoming(&wc_id, 0);
+                    }
                 }
                 Ok(OpResult::NewRev { new_rev: rev })
             }
@@ -271,13 +300,20 @@ pub async fn switch(
     ignore_ancestry: bool,
 ) -> Result<OperationHandle, AppError> {
     guard(async {
-        let name = state.wcs.resolve(&wc_id)?.row.name;
+        let row = state.wcs.resolve(&wc_id)?.row;
+        let db = state.db.clone();
         state.start_wc_op(
             OperationKind::Switch,
             &wc_id,
-            format!("Switch {name}"),
+            format!("Switch {}", row.name),
             move |engine, wc, ctx| async move {
+                // Kept until the switch finishes: one that stops half-way (connection lost for
+                // good, cancelled, app closed) is continued as a switch to this URL.
+                if let Err(e) = db.switch_journal_put(&row.root_path, &url, ignore_ancestry) {
+                    tracing::warn!(error = %e, "could not record the switch");
+                }
                 let new_rev = engine.switch(&wc, &url, rev, ignore_ancestry, &ctx).await?;
+                forget_switch(&db, &row.root_path);
                 Ok(OpResult::NewRev { new_rev })
             },
         )

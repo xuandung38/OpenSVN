@@ -26,12 +26,19 @@ export type WcDialog =
   | { kind: "properties"; paths: string[] }
   | { kind: "layout" }
   | { kind: "resolver"; path: string | null }
+  | { kind: "compare" }
+  | { kind: "report" }
   | { kind: "repo-rename"; wcId: string; name: string }
   | { kind: "repo-remove"; wcId: string; name: string };
 
 /** Dialogs that do not belong to the current working copy (they survive switching to another). */
 export function isAppDialog(d: WcDialog | null): boolean {
-  return d?.kind === "checkout" || d?.kind === "repo-rename" || d?.kind === "repo-remove";
+  return (
+    d?.kind === "checkout" ||
+    d?.kind === "repo-rename" ||
+    d?.kind === "repo-remove" ||
+    d?.kind === "report"
+  );
 }
 
 export interface WcLinks {

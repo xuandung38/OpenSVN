@@ -1,3 +1,4 @@
+import { Check } from "lucide-react";
 import type { ContextMenu, DropdownMenu } from "radix-ui";
 import { MENU_ITEM, MENU_SEPARATOR } from "./menu-styles";
 
@@ -5,6 +6,8 @@ export interface MenuEntry {
   label: string;
   shortcut?: string;
   disabled?: boolean;
+  /** Set for an on/off item: rendered as a checkbox item (`menuitemcheckbox`). */
+  checked?: boolean;
   onSelect?: () => void;
 }
 export type MenuEntries = (MenuEntry | "separator")[];
@@ -17,6 +20,22 @@ export function renderEntries(kit: Kit, entries: MenuEntries) {
     e === "separator" ? (
       // biome-ignore lint/suspicious/noArrayIndexKey: static separator list
       <kit.Separator key={i} className={MENU_SEPARATOR} />
+    ) : e.checked !== undefined ? (
+      <kit.CheckboxItem
+        key={e.label}
+        checked={e.checked}
+        disabled={e.disabled}
+        onSelect={() => e.onSelect?.()}
+        className={MENU_ITEM}
+      >
+        <span className="flex items-center gap-2">
+          <span className="inline-flex w-3.5 justify-center" aria-hidden="true">
+            {e.checked && <Check size={13} />}
+          </span>
+          {e.label}
+        </span>
+        {e.shortcut && <kbd className="font-mono text-[11px] opacity-70">{e.shortcut}</kbd>}
+      </kit.CheckboxItem>
     ) : (
       <kit.Item
         key={e.label}

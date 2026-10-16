@@ -77,9 +77,10 @@ export const commands = {
 	checkout: (request: CheckoutRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("checkout", { request })),
 	update: (request: UpdateRequest) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("update", { request })),
 	/**
-	 *  Finishes an interrupted checkout or update of the whole working copy at the revision it was
-	 *  reaching (recorded in the working copy), with the depths it records and, for a checkout,
-	 *  the externals choice the user made. Fails when nothing is incomplete.
+	 *  Finishes an interrupted checkout, update or switch of the whole working copy at the revision
+	 *  it was reaching (recorded in the working copy), with the depths it records and, for a
+	 *  checkout, the externals choice the user made; a switch goes on to the URL it was switching
+	 *  to. Fails when nothing is incomplete.
 	 */
 	wcContinue: (wcId: WcId) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("wc_continue", { wcId })),
 	switch: (wcId: WcId, url: string, rev: number | null, ignoreAncestry: boolean) => typedError<OperationHandle, AppError>(__TAURI_INVOKE("switch", { wcId, url, rev, ignoreAncestry })),
@@ -218,6 +219,11 @@ export const commands = {
 	 *  returns the saved path, or `None` when the user cancels the dialog.
 	 */
 	diagnosticsExport: (token: string) => typedError<string | null, AppError>(__TAURI_INVOKE("diagnostics_export", { token })),
+	/**
+	 *  Shows the app's logs folder in the file manager (Help > Show logs folder). The path is the app's
+	 *  own data folder; nothing in it comes from the UI.
+	 */
+	logsReveal: () => typedError<null, AppError>(__TAURI_INVOKE("logs_reveal")),
 };
 
 /** Events */

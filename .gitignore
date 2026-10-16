@@ -19,6 +19,9 @@ dist/
 .idea/
 .vscode/
 
+# Browser check output (pnpm test:browser)
+apps/opensvn/test-results/
+
 # Tauri generated
 apps/opensvn/src-tauri/gen/
 

@@ -137,6 +137,18 @@ export const wcStrings = defineStrings({
     // Shortcuts help
     shortcutsTitle: "Keyboard shortcuts",
     menuNotYet: "This menu item is not available yet.",
+    // View options (doc 01 8.4)
+    viewOptions: "View options",
+    viewShowUnversioned: "Show unversioned files",
+    viewShowIgnored: "Show ignored files",
+    viewGroupChangelist: "Group by changelist",
+    viewTree: "Show as tree",
+    viewOn: "{name}: on",
+    viewOff: "{name}: off",
+    folderRow: "Folder {path}, {count} file(s)",
+    // Help menu
+    docsFailed: "Could not open the documentation: {message}",
+    logsFailed: "Could not show the logs folder: {message}",
   },
   vi: {
     welcomeTitle: "Chào mừng đến OpenSVN",
@@ -261,5 +273,15 @@ export const wcStrings = defineStrings({
       "Đã bỏ qua một working copy lồng bên trong, nó vẫn chưa được version: {detail}",
     shortcutsTitle: "Phím tắt",
     menuNotYet: "Mục menu này chưa có trong phiên bản này.",
+    viewOptions: "Tùy chọn hiển thị",
+    viewShowUnversioned: "Hiện file chưa quản lý (unversioned)",
+    viewShowIgnored: "Hiện file bị ignore",
+    viewGroupChangelist: "Nhóm theo changelist",
+    viewTree: "Hiện dạng cây thư mục",
+    viewOn: "{name}: bật",
+    viewOff: "{name}: tắt",
+    folderRow: "Thư mục {path}, {count} file",
+    docsFailed: "Không mở được tài liệu: {message}",
+    logsFailed: "Không mở được thư mục log: {message}",
   },
 });

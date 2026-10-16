@@ -1,4 +1,6 @@
+import { CompareDialog } from "../compare/compare-dialog";
 import { ConflictResolver } from "../conflicts/conflict-resolver";
+import { ReportProblemDialog } from "../help/report-problem-dialog";
 import { LayoutDialog } from "../props/layout-dialog";
 import { PropertiesDialog } from "../props/properties-dialog";
 import { RemoveRepoDialog, RenameRepoDialog } from "../repos/repo-dialogs";
@@ -53,5 +55,9 @@ export function WcDialogHost() {
       return <RemoveRepoDialog wcId={dialog.wcId} name={dialog.name} onClose={closeDialog} />;
     case "resolver":
       return <ConflictResolver initialPath={dialog.path} onClose={closeDialog} />;
+    case "compare":
+      return <CompareDialog onClose={closeDialog} />;
+    case "report":
+      return <ReportProblemDialog onClose={closeDialog} />;
   }
 }
