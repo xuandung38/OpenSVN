@@ -13,6 +13,8 @@ steps:
   - { on: engine, wc: s, svn: [cleanup, --remove-unversioned, --remove-ignored, --vacuum-pristines] }
   - { on: engine, wc: e, svn: [cleanup] }
   - { on: svn14, wc: s, svn: [cleanup] }
+  # svn's cleanup empties the RA layer's cache (dav_cache): the oracle cleans up too.
+  - { on: svn15, wc: o, svn: [cleanup] }
 compare:
-  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
-  - { left: s, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e, right: o, checks: [tree, status, info, wcdb] }
+  - { left: s, right: o, checks: [tree, status, info, wcdb] }

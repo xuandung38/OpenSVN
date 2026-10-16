@@ -363,6 +363,13 @@ pub async fn drive_update(
         blocking(move || crate::wc::run_work_queue(&db, &cancel).map(|_| ())).await?;
     }
 
+    // A switch empties the RA layer's cache (`dav_cache`) of the whole target before it
+    // drives, like svn's (file externals below it included): the nodes the drive sends get
+    // theirs again, the others keep none.
+    if matches!(params.kind, UpdateKind::Switch(_)) {
+        db.with_txn(|t| t.clear_dav_cache(&target_wc))?;
+    }
+
     // Nodes whose inherited-properties cache the drive refreshes (svn collects them before it
     // drives, `svn_client__get_inheritable_props`); the target itself is decided afterwards.
     let mut iprop_paths = super::iprops::targets(&db, &target_wc, params.depth)?;

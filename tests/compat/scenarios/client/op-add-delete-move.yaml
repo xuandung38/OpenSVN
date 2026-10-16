@@ -17,5 +17,5 @@ steps:
   - { on: svn15, wc: o, svn: [move, docs, documentation] }
   - { on: svn14, wc: e, svn: [status] }
 compare:
-  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e, right: o, checks: [tree, status, info, wcdb] }
   - { left: e, right: o, checks: [status], reader: svn14 }

@@ -13,6 +13,6 @@ steps:
   - { on: engine, wc: e2, svn: [checkout, "{url}/trunk", ".", -r, "5", --depth, immediates] }
   - { on: svn15, wc: o2, svn: [checkout, "{url}/trunk", ".", -r, "5", --depth, immediates] }
 compare:
-  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
-  - { left: e, right: o14, checks: [tree, status, info, wcdb], reader: svn14, ignore: [dav_cache] }
-  - { left: e2, right: o2, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e, right: o, checks: [tree, status, info, wcdb] }
+  - { left: e, right: o14, checks: [tree, status, info, wcdb], reader: svn14 }
+  - { left: e2, right: o2, checks: [tree, status, info, wcdb] }

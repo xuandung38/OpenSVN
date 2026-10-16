@@ -14,5 +14,5 @@ steps:
   - { on: svn15, wc: s, sh: "printf 'edit\\n' >> src/app.c" }
   - { on: engine, wc: s, svn: [revert, README.txt, crlf.txt, src/app.c] }
 compare:
-  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
-  - { left: s, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e, right: o, checks: [tree, status, info, wcdb] }
+  - { left: s, right: o, checks: [tree, status, info, wcdb] }

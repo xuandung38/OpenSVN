@@ -48,7 +48,7 @@ pub use mark_move::MarkMove;
 pub use misc::LockInfo;
 pub use node_api::FileInfo;
 pub(crate) use nodes::decode_props;
-pub use nodes::{Node, Presence, Props};
+pub use nodes::{Node, Presence, Props, encode_props};
 pub use ops::{BaseNode, CommitInfo};
 pub use repos_info::ReposInfo;
 pub use schema::{FORMAT_MAX_READ, FORMAT_WRITE, check_supported_format, read_user_version};

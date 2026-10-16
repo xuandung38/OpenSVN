@@ -26,7 +26,7 @@ pub struct LockInfo {
     pub date: Option<i64>,
 }
 
-fn base_blob(
+pub(super) fn base_blob(
     conn: &Connection,
     wc_id: i64,
     path: &RelPath,

@@ -72,6 +72,29 @@ impl WcTxn<'_> {
         nodes::read_base(self.conn, self.wc_id, path)
     }
 
+    /// `dav_cache` of the BASE node at `path` (see [`WcDb::dav_cache`]).
+    pub fn dav_cache(&self, path: &RelPath) -> Result<Option<Props>> {
+        super::misc::base_blob(self.conn, self.wc_id, path, "dav_cache")?
+            .map(|b| nodes::decode_props(&b))
+            .transpose()
+    }
+
+    /// Empties the `dav_cache` of every BASE node at or below `root`, like svn's
+    /// `svn_wc__db_base_clear_dav_cache_recursive` (run by `svn cleanup`).
+    pub fn clear_dav_cache(&self, root: &RelPath) -> Result<()> {
+        super::connection::cached_exec(
+            self.conn,
+            &format!(
+                "UPDATE nodes SET dav_cache = NULL WHERE wc_id = ?1 AND op_depth = 0 \
+                 AND dav_cache IS NOT NULL AND (?2 = '' OR {})",
+                scope_sql()
+            ),
+            params![self.wc_id, root.as_str()],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
     /// The `conflict_data` skel recorded for `path`.
     pub fn conflict_skel(&self, path: &RelPath) -> Result<Option<Skel>> {
         Ok(actual::read_conflict(self.conn, self.wc_id, path)?.map(|r| r.skel))

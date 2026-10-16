@@ -3210,3 +3210,311 @@ async fn switch_with_a_narrow_depth_cut_mid_answer_matches_svn() {
     }
     assert_no_prompt();
 }
+
+// ---- the RA layer's cache (`NODES.dav_cache`) ----
+
+/// BASE rows with the RA layer's cache, the repository name masked (each client works on its
+/// own copy of the same repository).
+fn dav_rows(wc: &Path, repo: &str) -> Vec<String> {
+    let db = WcDb::open(wc).unwrap();
+    db.with_read(|c| {
+        let mut s = c
+            .prepare(
+                "SELECT local_relpath, presence, revision, repos_path, checksum, dav_cache \
+                 FROM nodes WHERE op_depth = 0 ORDER BY local_relpath",
+            )
+            .unwrap();
+        let rows = s
+            .query_map([], |r| {
+                let dav: Option<Vec<u8>> = r.get(5)?;
+                Ok(format!(
+                    "{}|{}|{:?}|{:?}|{:?}|{}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    dav.map(|d| {
+                        let props = svn_wc::skel::parse_proplist(
+                            &svn_wc::skel::Skel::parse(&d).expect("dav_cache skel"),
+                        )
+                        .expect("dav_cache properties");
+                        props
+                            .iter()
+                            .map(|(k, v)| {
+                                format!(
+                                    "{}={}",
+                                    String::from_utf8_lossy(k),
+                                    String::from_utf8_lossy(v).replace(repo, "{repo}")
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(";")
+                    })
+                    .unwrap_or_else(|| "NULL".into()),
+                ))
+            })
+            .unwrap();
+        Ok(rows.map(|r| r.unwrap()).collect::<Vec<_>>())
+    })
+    .unwrap()
+}
+
+/// The engine fills `NODES.dav_cache` like svn 1.15 over mod_dav_svn: every file it receives
+/// caches its `D:checked-in` href as `svn:wc:ra_dav:version-url` (names with spaces, `%`, `#`
+/// and Vietnamese letters percent-encoded as the server sends them), a commit drops the cache
+/// of what it committed, an update leaves untouched files alone, a switch empties the target's
+/// cache before its drive, and cleanup empties it. The engine works on one copy of the
+/// repository, svn on another, through the same steps; the rows must be equal at every step.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn dav_cache_matches_svn() {
+    let Some(oracle) =
+        opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15).unwrap()
+    else {
+        return;
+    };
+    if negotiate_mode() {
+        eprintln!("skipping: svn is given Basic credentials");
+        return;
+    }
+    for (version, host) in servers() {
+        eprintln!("server {version}");
+        let h = harness(&host, "dav-cache");
+        let theirs_repo = Scratch::new(&host, "dav-cache-svn");
+        let e = h.engine();
+        let ours_url = h.repo_url();
+        let theirs_url = theirs_repo.url();
+        let (ours_name, theirs_name) = (h.scratch.name.clone(), theirs_repo.name.clone());
+        let tmp = h.tmp.path().to_path_buf();
+        let svn = |cwd: &Path, args: &[&str]| svn_cli(&oracle, cwd, args);
+        let ours = h.work_dir().join("ours");
+        let theirs = tmp.join("theirs");
+        let compare = |what: &str| {
+            assert_eq!(
+                dav_rows(&ours, &ours_name),
+                dav_rows(&theirs, &theirs_name),
+                "server {version}: {what}"
+            );
+        };
+        let wc = WcRef {
+            id: WcId("ours".into()),
+            root: ours.clone(),
+        };
+        let update = || async {
+            e.update(
+                &wc,
+                &UpdateRequest {
+                    wc_id: wc.id.clone(),
+                    paths: None,
+                    rev: None,
+                    depth: None,
+                },
+                &ctx(),
+            )
+            .await
+            .expect("update")
+        };
+        let commit = |paths: Vec<String>| async {
+            let mark = h.write_mark();
+            match e
+                .commit(
+                    &wc,
+                    &CommitRequest {
+                        wc_id: wc.id.clone(),
+                        paths,
+                        message: "Edit".into(),
+                        keep_locks: false,
+                        auto_add_remove: true,
+                    },
+                    &ctx(),
+                )
+                .await
+            {
+                Ok(_) => true,
+                Err(err) if conformance::broken_write_ends_scenario(&h, mark, &err) => false,
+                Err(err) => panic!("commit: {err:?}"),
+            }
+        };
+        let both = |rel: &str, text: &str| {
+            for root in [&ours, &theirs] {
+                let p = root.join(rel);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, text).unwrap();
+            }
+        };
+
+        // Checkout of trunk, then files with names that need encoding, committed by each.
+        e.checkout(
+            &CheckoutPlan {
+                url: format!("{ours_url}/trunk"),
+                path: ours.clone(),
+                rev: None,
+                depth: Depth::Infinity,
+                sparse: None,
+                format: WcFormat::V31,
+                store_pristine: true,
+                ignore_externals: false,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("checkout");
+        svn(
+            &tmp,
+            &[
+                "checkout",
+                "-q",
+                &format!("{theirs_url}/trunk"),
+                theirs.to_str().unwrap(),
+            ],
+        );
+        compare("checkout");
+        let odd = ["Tài liệu/Đọc tôi %#.txt", "a b/x y.txt"];
+        for f in odd {
+            both(f, "odd\n");
+        }
+        svn(&theirs, &["add", "-q", "Tài liệu", "a b"]);
+        if !commit(vec!["Tài liệu".into(), "a b".into()]).await {
+            continue;
+        }
+        svn(&theirs, &["commit", "-q", "-m", "Edit"]);
+        compare("commit of new files");
+        update().await;
+        svn(&theirs, &["update", "-q"]);
+        compare("update after the commit");
+
+        // An edit committed from a second working copy of each: the update brings it.
+        let other = |name: &str| tmp.join(name);
+        e.checkout(
+            &CheckoutPlan {
+                url: format!("{ours_url}/trunk"),
+                path: other("ours-2"),
+                rev: None,
+                depth: Depth::Infinity,
+                sparse: None,
+                format: WcFormat::V31,
+                store_pristine: true,
+                ignore_externals: false,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("second checkout");
+        let second = WcRef {
+            id: WcId("ours-2".into()),
+            root: other("ours-2"),
+        };
+        svn(
+            &tmp,
+            &[
+                "checkout",
+                "-q",
+                &format!("{theirs_url}/trunk"),
+                other("theirs-2").to_str().unwrap(),
+            ],
+        );
+        for root in [other("ours-2"), other("theirs-2")] {
+            std::fs::write(root.join("Tài liệu/Đọc tôi %#.txt"), "odd\nedited\n").unwrap();
+        }
+        let mark = h.write_mark();
+        match e
+            .commit(
+                &second,
+                &CommitRequest {
+                    wc_id: second.id.clone(),
+                    paths: vec!["Tài liệu/Đọc tôi %#.txt".into()],
+                    message: "Edit".into(),
+                    keep_locks: false,
+                    auto_add_remove: false,
+                },
+                &ctx(),
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(err) if conformance::broken_write_ends_scenario(&h, mark, &err) => continue,
+            Err(err) => panic!("commit: {err:?}"),
+        }
+        svn(&other("theirs-2"), &["commit", "-q", "-m", "Edit"]);
+        update().await;
+        svn(&theirs, &["update", "-q"]);
+        compare("update with an incoming edit");
+
+        // A local edit keeps the cache; a commit of it drops it.
+        both("README.md", "hello\nlocal\n");
+        compare("local edit");
+        if !commit(vec!["README.md".into()]).await {
+            continue;
+        }
+        svn(&theirs, &["commit", "-q", "-m", "Edit"]);
+        compare("commit of an edit");
+
+        // A switch (to the same URL: nothing to send) empties the cache of the target.
+        update().await;
+        svn(&theirs, &["update", "-q"]);
+        e.switch(&wc, &format!("{ours_url}/trunk"), None, false, &ctx())
+            .await
+            .expect("switch");
+        svn(
+            &theirs,
+            &["switch", "-q", &format!("{theirs_url}/trunk"), "."],
+        );
+        compare("switch");
+        // And an update to an older revision and back fills it again.
+        e.update(
+            &wc,
+            &UpdateRequest {
+                wc_id: wc.id.clone(),
+                paths: None,
+                rev: Some(opensvn_ipc::Rev(1)),
+                depth: None,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("update -r 1");
+        svn(&theirs, &["update", "-q", "-r", "1"]);
+        compare("update -r 1");
+        update().await;
+        svn(&theirs, &["update", "-q"]);
+        compare("update to HEAD");
+
+        // Cleanup empties it.
+        e.cleanup(
+            &wc,
+            &opensvn_ipc::CleanupRequest {
+                wc_id: wc.id.clone(),
+                remove_unversioned: None,
+                remove_ignored: None,
+                vacuum_pristines: None,
+                break_foreign_locks: None,
+            },
+            &ctx(),
+        )
+        .await
+        .expect("cleanup");
+        svn(&theirs, &["cleanup"]);
+        compare("cleanup");
+        // svn 1.14 and 1.15 take the engine's working copy as it is.
+        for bin in [Some("/usr/bin/svn"), None] {
+            let mut c = match bin {
+                Some(b) if Path::new(b).exists() => Command::new(b),
+                Some(_) => continue,
+                None => oracle.svn(),
+            };
+            let out = c
+                .current_dir(&ours)
+                .env("LC_ALL", "C.UTF-8")
+                .args(["status", "--xml"])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+    assert_no_prompt();
+}
