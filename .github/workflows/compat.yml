@@ -129,6 +129,10 @@ jobs:
       # The oracle of the svn comparisons in the conformance suite (OPENSVN_SVN_BIN).
       - name: Install Subversion 1.15 (oracle client)
         uses: ./.github/actions/install-svn-115
+      # The containers publish on 127.0.0.1 only, and the runner resolves `localhost` to ::1
+      # first; svn (serf) tries that address alone and gets "connection refused". Prefer IPv4.
+      - name: Resolve localhost to IPv4 first
+        run: echo 'precedence ::ffff:0:0/96  100' | sudo tee -a /etc/gai.conf
       - name: Real engine conformance against Apache + mod_dav_svn
         run: >-
           cargo test -p opensvn --features real-engine,engine-conformance --locked
