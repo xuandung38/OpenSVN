@@ -175,11 +175,13 @@ reproduce this:
   - `--log-requests`: logs the request line of every request the client starts, forwarded or
     not, so a test can check that no write was sent twice.
   - `--truncate-every K --truncate-at B`: cuts every K-th response bigger than B bytes mid-body.
-    With K above 1 a cut is a passing fault: the next request with the same request line (the
-    client sending the cut request again) is not cut. A client whose retry sends a multiple of K
-    requests (`OPTIONS` + `REPORT` with K = 2) would otherwise meet the cut at the same byte on
-    every resume, and give up after two resumes without progress, as designed for a server that
-    always breaks at the same point (that fault is `--truncate-every 1`).
+    With K above 1 a cut read is a passing fault: the next request with the same request line
+    (the client sending the cut `GET`, `HEAD`, `OPTIONS`, `PROPFIND` or `REPORT` again) is not
+    cut. A client whose retry sends a multiple of K requests (`OPTIONS` + `REPORT` with K = 2)
+    would otherwise meet the cut at the same byte on every resume, and give up after two resumes
+    without progress, as designed for a server that always breaks at the same point (that fault
+    is `--truncate-every 1`). A write sent again gets no such pass: a client must never send one
+    twice (#166), and a write that passed would hide it.
   - `--truncate-method M`: counts and cuts only responses to these methods (`REPORT,GET`). With
     `--truncate-every 1` every such response is cut at the same offset: a server that always
     breaks at the same point.

@@ -18,7 +18,9 @@ close is a plain TCP close (FIN) or, where asked, a reset (RST). Faults, per cli
   --truncate-every K cut every K-th response bigger than --truncate-at bytes after that many
                      bytes and close without close_notify (a broken connection mid-body). With
                      K > 1 the break is transient: the next request with the request line of a
-                     cut one (the client sending it again) is not cut, wherever the count is.
+                     cut read (GET, HEAD, OPTIONS, PROPFIND, REPORT; the client sending it
+                     again) is not cut, wherever the count is. A write sent again is counted
+                     as any request, as a client must never send one twice.
                      Otherwise a client whose retry cycle has a multiple of K requests (OPTIONS
                      plus REPORT, K = 2) would meet the cut at the same byte every time: a server
                      that always breaks at the same point, which is what --truncate-every 1 is for
@@ -53,6 +55,10 @@ COUNTER = itertools.count(1)
 COUNTER_LOCK = threading.Lock()
 # Request lines ("METHOD URI") whose response was cut and that were not sent again yet.
 CUT_LINES = set()
+# Only these may pass when sent again after a cut: a client must never send a write twice
+# (#166), and a write that passed when sent again would hide it, as a write that succeeds is
+# not checked against the request log.
+IDEMPOTENT = {"GET", "HEAD", "OPTIONS", "PROPFIND", "REPORT"}
 
 
 class Outage:
@@ -271,8 +277,9 @@ class Conn:
                     self.response_bytes += len(data)
                     cut = self.truncate_this and self.response_bytes > self.args.truncate_at
                 if cut:
-                    with COUNTER_LOCK:
-                        CUT_LINES.add(self.request_line)
+                    if self.method in IDEMPOTENT:
+                        with COUNTER_LOCK:
+                            CUT_LINES.add(self.request_line)
                     keep = max(0, self.args.truncate_at - before)
                     self.client_io.sendall(data[:keep])
                     self.close(False, f"truncated a {self.method} response after {self.args.truncate_at} bytes")
