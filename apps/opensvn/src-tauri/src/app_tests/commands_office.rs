@@ -285,7 +285,8 @@ async fn a_diff_tool_set_for_the_extension_gets_both_files_even_when_binary() {
     let launched = f.launcher.launched.lock().unwrap().clone();
     assert_eq!(launched.len(), 1);
     let (program, args) = &launched[0];
-    assert_eq!(program, &std::fs::canonicalize(&exe).unwrap());
+    // Launched from the path without the Windows `\\?\` prefix.
+    assert_eq!(program, &dunce::canonicalize(&exe).unwrap());
     let (l, r) = (
         std::path::Path::new(&args[0]),
         std::path::Path::new(&args[1]),
