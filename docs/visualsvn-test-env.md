@@ -175,6 +175,11 @@ reproduce this:
   - `--log-requests`: logs the request line of every request the client starts, forwarded or
     not, so a test can check that no write was sent twice.
   - `--truncate-every K --truncate-at B`: cuts every K-th response bigger than B bytes mid-body.
+    With K above 1 a cut is a passing fault: the next request with the same request line (the
+    client sending the cut request again) is not cut. A client whose retry sends a multiple of K
+    requests (`OPTIONS` + `REPORT` with K = 2) would otherwise meet the cut at the same byte on
+    every resume, and give up after two resumes without progress, as designed for a server that
+    always breaks at the same point (that fault is `--truncate-every 1`).
   - `--truncate-method M`: counts and cuts only responses to these methods (`REPORT,GET`). With
     `--truncate-every 1` every such response is cut at the same offset: a server that always
     breaks at the same point.
@@ -224,7 +229,9 @@ OPENSVN_COMPAT_LOCAL_URL=https://svn.opensvn.test:18461/svn-basic \
 ```
 
 Modes used for the PR tables: `--reset-after 2`, `--idle-reset 2`, both, `--stale-after 2`,
-`--truncate-every 2 --truncate-at 1024 --truncate-method REPORT,GET`.
+`--close-after 1`, `--truncate-every 2 --truncate-at 1024 --truncate-method REPORT,GET`, and
+`--truncate-every 2` with `--truncate-at` 2048 (the default), 1024 and 100. Only the last cuts
+write answers: those of the standard repository's writes are all below 1 KiB.
 
 - Reads must succeed: they are sent again on a fresh connection, and checkout, update, switch
   and the streamed reads resume.
