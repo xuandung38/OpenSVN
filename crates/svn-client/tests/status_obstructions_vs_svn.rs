@@ -8,6 +8,8 @@
 //! file, and nothing behind it is listed.
 //!
 //! Skipped when no svn 1.14 or newer is installed (fails instead when `OPENSVN_REQUIRE_SVN=1`).
+//! Unix only: both cases need symlinks.
+#![cfg(unix)]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod common;
@@ -125,7 +127,6 @@ fn build_dirs(repo: &Repo) {
 /// Replaces versioned directories on disk: `filed` by a file, `nested/sub` by a file,
 /// `linked` by a symlink to a copy of it outside the working copy, with an edit and an
 /// unversioned file there that must not show up.
-#[cfg(unix)]
 fn obstruct_dirs(wc: &Path, outside: &Path) {
     fs::remove_dir_all(wc.join("filed")).expect("rm filed");
     fs::write(wc.join("filed"), "now a file\n").expect("file over dir");
@@ -164,7 +165,6 @@ fn under_linked(l: &str) -> bool {
     l[3..] == *"linked" || l[3..].starts_with("linked/")
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn directory_replaced_by_file_or_symlink_is_obstructed_like_svn() {
     let Some(oracle) = oracle() else { return };
@@ -248,7 +248,6 @@ async fn directory_replaced_by_file_or_symlink_is_obstructed_like_svn() {
 }
 
 /// r1: regular files and `svn:special` links.
-#[cfg(unix)]
 fn build_links(repo: &Repo) {
     let seed = repo.checkout("seed");
     for f in ["reg", "reg2", "regprop", "kept"] {
@@ -271,7 +270,6 @@ fn build_links(repo: &Repo) {
     repo.svn(&seed, &["commit", "-q", "-m", "r1"]);
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn special_and_regular_files_swapped_are_obstructed_like_svn() {
     let Some(oracle) = oracle() else { return };

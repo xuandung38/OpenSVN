@@ -51,9 +51,13 @@ impl<R: Read + Seek> Package<R> {
         self.resolve(name).is_some()
     }
 
-    /// Names of all parts, in directory order.
+    /// Names of all parts, in directory order. A name the zip reader cannot decode is left out:
+    /// it cannot be asked for by name either.
     pub(crate) fn names(&self) -> Vec<String> {
-        self.archive.file_names().map(str::to_owned).collect()
+        self.archive
+            .file_names()
+            .filter_map(|n| n.ok().map(String::from))
+            .collect()
     }
 
     /// Exact name of the part `name` (part names are case-insensitive in a package).
@@ -63,8 +67,9 @@ impl<R: Read + Seek> Package<R> {
         }
         self.archive
             .file_names()
+            .filter_map(Result::ok)
             .find(|n| n.eq_ignore_ascii_case(name))
-            .map(str::to_owned)
+            .map(String::from)
     }
 
     /// Runs `f` on a buffered, size-bounded reader of the part `name`; `Ok(None)` when the

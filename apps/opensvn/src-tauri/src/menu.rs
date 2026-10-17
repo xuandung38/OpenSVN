@@ -549,8 +549,8 @@ impl<R: tauri::Runtime> TauriMenu<R> {
         Ok(())
     }
 
-    /// The check marks of the installed menu, by item id.
-    #[cfg(test)]
+    /// The check marks of the installed menu, by item id (its test does not run on macOS).
+    #[cfg(all(test, not(target_os = "macos")))]
     pub fn check_marks(&self) -> Vec<(&'static str, bool)> {
         self.shown()
             .checks
