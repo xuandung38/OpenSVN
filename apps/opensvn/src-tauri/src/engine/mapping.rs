@@ -148,6 +148,30 @@ impl LogPager {
         true
     }
 
+    /// Own entries taken so far.
+    pub(crate) fn taken(&self) -> usize {
+        self.tops
+    }
+
+    /// Ends the page early, before the report is complete (a newest-first report the server is
+    /// slow to finish): the next page starts below the last own entry taken. An entry whose
+    /// merged revisions may still have been arriving is left for the next page unless it is the
+    /// only one. `floor` is the oldest revision of the range.
+    pub(crate) fn cut(&mut self, floor: u64) {
+        let Some(last) = self.entries.iter().rposition(|e| e.merge_depth == 0) else {
+            return;
+        };
+        let top = &self.entries[last];
+        if top.has_children && self.tops > 1 {
+            self.next = Some(top.rev);
+            self.entries.truncate(last);
+            self.tops -= 1;
+        } else {
+            let below = top.rev.0.saturating_sub(1);
+            self.next = (below >= floor.max(1)).then_some(svn_types::Revnum(below));
+        }
+    }
+
     pub(crate) fn page(self) -> opensvn_ipc::LogPage {
         opensvn_ipc::LogPage {
             entries: log_entries(self.entries),
@@ -243,6 +267,82 @@ mod tests {
     use svn_types::{RepoDisplayPath, Revnum};
 
     use super::*;
+
+    fn raw(rev: u64, depth: u32, has_children: bool) -> svn_types::LogEntry {
+        svn_types::LogEntry {
+            rev: Revnum(rev),
+            author: None,
+            date: None,
+            message: Some(format!("r{rev}")),
+            changed_paths: Vec::new(),
+            has_children,
+            merge_depth: depth,
+            subtractive_merge: false,
+            revprops: Vec::new(),
+        }
+    }
+
+    fn request(limit: u32) -> opensvn_ipc::LogGetRequest {
+        opensvn_ipc::LogGetRequest {
+            target: opensvn_ipc::LogTarget::Url { url: "u".into() },
+            from_rev: None,
+            to_rev: None,
+            limit,
+            stop_on_copy: None,
+            with_paths: false,
+            filter: None,
+            include_merged: Some(true),
+            revprops: None,
+        }
+    }
+
+    #[test]
+    fn merged_revisions_nest_under_the_merging_entry_and_do_not_count_against_the_limit() {
+        let mut p = LogPager::new(&request(2));
+        for e in [
+            raw(9, 0, true),
+            raw(7, 1, true),
+            raw(5, 2, false),
+            raw(6, 1, false),
+            raw(8, 0, false),
+        ] {
+            assert!(p.accept(e));
+        }
+        assert!(!p.accept(raw(4, 0, false)));
+        let page = p.page();
+        assert_eq!(page.next_rev, Some(Rev(4)));
+        assert_eq!(page.entries.len(), 2);
+        let merged = page.entries[0].merged.as_ref().unwrap();
+        assert_eq!(merged.iter().map(|e| e.rev.0).collect::<Vec<_>>(), [7, 6]);
+        assert_eq!(merged[0].merged.as_ref().unwrap()[0].rev, Rev(5));
+        assert!(page.entries[1].merged.is_none());
+    }
+
+    #[test]
+    fn a_page_cut_short_continues_below_the_last_entry_and_never_splits_a_merge() {
+        let mut p = LogPager::new(&request(100));
+        for e in [raw(9, 0, false), raw(8, 0, false)] {
+            p.accept(e);
+        }
+        p.cut(1);
+        assert_eq!(p.page().next_rev, Some(Rev(7)));
+
+        // The last entry's merged revisions may be incomplete: it moves to the next page.
+        let mut p = LogPager::new(&request(100));
+        for e in [raw(9, 0, false), raw(8, 0, true), raw(3, 1, false)] {
+            p.accept(e);
+        }
+        p.cut(1);
+        let page = p.page();
+        assert_eq!(page.next_rev, Some(Rev(8)));
+        assert_eq!(page.entries.len(), 1);
+
+        // Nothing older than the range's floor: the page is complete.
+        let mut p = LogPager::new(&request(100));
+        p.accept(raw(5, 0, false));
+        p.cut(5);
+        assert_eq!(p.page().next_rev, None);
+    }
 
     #[test]
     fn log_entries_carry_display_paths_as_text() {

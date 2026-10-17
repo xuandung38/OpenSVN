@@ -2,7 +2,9 @@
 
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use opensvn_ipc::time_fmt::timestamp_to_iso;
 use opensvn_ipc::{
@@ -13,6 +15,10 @@ use svn_types::{CancelToken, ErrorCode, NodeKind, RelPath, Revnum, SvnError, ren
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use super::RealEngine;
+
+/// A newest-first log page still incomplete after this long, with at least one entry, ends
+/// with what arrived (see `do_log`).
+pub(crate) const PARTIAL_LOG_AFTER: Duration = Duration::from_secs(3);
 use super::text::CappedBuf;
 use crate::engine::context::{OpContext, ProgressUpdate};
 use crate::engine::facade::{DiffOptions, EngineResult, LogScope};
@@ -354,25 +360,47 @@ impl RealEngine {
             include_merged_revisions: req.include_merged.unwrap_or(false),
             revprops: mapping::log_revprops(req),
         };
-        let mut page_full = false;
-        let outcome = session
-            .log(
-                &ra,
-                &mut |e| {
-                    if pager.accept(e) {
-                        return Ok(());
+        let page_full = AtomicBool::new(false);
+        let taken = AtomicUsize::new(0);
+        // A newest-first page ends early when the server is slow to finish it (behind authz a
+        // revision with many changed paths, often the import at r1, takes minutes to check):
+        // what arrived is shown, and the next page reads on from there.
+        let newest_first = match (req.from_rev, req.to_rev) {
+            (Some(from), Some(to)) => from >= to,
+            _ => true,
+        };
+        let floor = req.to_rev.map_or(1, |r| r.0);
+        let mut on_entry = |e| {
+            let more = pager.accept(e);
+            taken.store(pager.taken(), Ordering::Relaxed);
+            if more {
+                return Ok(());
+            }
+            // One entry beyond the page proves there is a next page; stop reading.
+            page_full.store(true, Ordering::Relaxed);
+            Err(internal("log page complete"))
+        };
+        let mut read = Box::pin(session.log(&ra, &mut on_entry, &ctx.cancel));
+        let mut check = tokio::time::interval_at(
+            tokio::time::Instant::now() + PARTIAL_LOG_AFTER,
+            Duration::from_millis(250),
+        );
+        let outcome = loop {
+            tokio::select! {
+                r = &mut read => break Some(r),
+                _ = check.tick(), if newest_first => {
+                    if taken.load(Ordering::Relaxed) > 0 {
+                        break None;
                     }
-                    // One entry beyond the page proves there is a next page; stop reading.
-                    page_full = true;
-                    Err(internal("log page complete"))
-                },
-                &ctx.cancel,
-            )
-            .await;
+                }
+            }
+        };
+        drop(read);
         match outcome {
-            Ok(()) => {}
-            Err(_) if page_full => {}
-            Err(e) => return Err(e),
+            None => pager.cut(floor),
+            Some(Ok(())) => {}
+            Some(Err(_)) if page_full.load(Ordering::Relaxed) => {}
+            Some(Err(e)) => return Err(e),
         }
         Ok(pager.page())
     }
