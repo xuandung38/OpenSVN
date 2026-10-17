@@ -1,13 +1,16 @@
 //! Turns engine status into `wc://status-changed` deltas and keeps the snapshot cache current.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use opensvn_ipc::{AppError, FileStatus, Incoming, Rev, RevisionChanged, StatusChanged, WcId};
+use opensvn_ipc::{
+    AppError, FileStatus, Incoming, Rev, RevisionChanged, StatusChanged, StatusSnapshot, WcId,
+};
 
 use crate::db::CacheDb;
 use crate::engine::{EngineFacade, OpContext, RemoteScan, StatusQuery, WcInfo};
+use crate::log_cache::LogCache;
 use crate::ops::AppEvents;
 use crate::wc::ResolvedWc;
 
@@ -29,6 +32,23 @@ pub struct StatusPublisher {
     events: Arc<dyn AppEvents>,
     last_rev: Mutex<HashMap<String, RevState>>,
     gens: Mutex<HashMap<String, Arc<Generation>>>,
+    /// Id of the stored snapshot of each working copy, see [`SnapState`].
+    snaps: Mutex<HashMap<String, SnapState>>,
+    /// Last snapshot id handed out (ids are unique across working copies).
+    last_id: AtomicU32,
+    /// Logs read so far; a moved revision or new revisions on the server make them stale.
+    logs: Arc<LogCache>,
+    /// Newest repository revision each working copy's last remote check saw.
+    latest: Mutex<HashMap<String, Rev>>,
+}
+
+/// What the stored snapshot of a working copy is to the UI.
+#[derive(Debug, Clone, Copy, Default)]
+struct SnapState {
+    /// Id the snapshot was given (0: none yet). Deltas are announced against it.
+    id: u32,
+    /// A scan of this app run produced it (rather than an earlier run's cache).
+    fresh: bool,
 }
 
 /// Orders publications of one working copy: a scan started earlier never overwrites the result of
@@ -37,6 +57,33 @@ pub struct StatusPublisher {
 struct Generation {
     next: AtomicU64,
     applied: tokio::sync::Mutex<u64>,
+    /// Scans running or waiting for their turn now.
+    running: AtomicUsize,
+    /// One scan at a time: a full scan of a large tree holds every NODES row, and two at once
+    /// (opening plus the first `status_get`, a refresh plus the watcher) double the peak.
+    scan: tokio::sync::Mutex<()>,
+    /// Ticket of the latest scan that started and completed: a request older than it needs
+    /// no scan of its own.
+    covered: AtomicU64,
+    /// Signalled whenever a scan ends.
+    ended: tokio::sync::Notify,
+}
+
+/// Counts a running scan for [`StatusPublisher::snapshot`] until dropped.
+struct Running(Arc<Generation>);
+
+impl Running {
+    fn start(generation: &Arc<Generation>) -> Self {
+        generation.running.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(generation))
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.running.fetch_sub(1, Ordering::SeqCst);
+        self.0.ended.notify_waiters();
+    }
 }
 
 fn by_path(list: Vec<FileStatus>) -> BTreeMap<String, FileStatus> {
@@ -52,7 +99,93 @@ impl StatusPublisher {
             events,
             last_rev: Mutex::new(HashMap::new()),
             gens: Mutex::new(HashMap::new()),
+            snaps: Mutex::new(HashMap::new()),
+            last_id: AtomicU32::new(0),
+            logs: Arc::new(LogCache::default()),
+            latest: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The shared log reads (`log_get`), dropped whenever this publisher sees a revision move.
+    pub fn logs(&self) -> &Arc<LogCache> {
+        &self.logs
+    }
+
+    fn snaps(&self) -> std::sync::MutexGuard<'_, HashMap<String, SnapState>> {
+        self.snaps.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn new_id(&self) -> u32 {
+        self.last_id
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1)
+            .max(1)
+    }
+
+    /// The snapshot of a working copy with its id, for `status_get`: the stored one when a scan
+    /// of this app run made it (the watcher keeps it current) or while a write runs (the running
+    /// operation is the "updating" indicator). Otherwise it waits for the scan already running,
+    /// or scans.
+    pub async fn snapshot(&self, r: &ResolvedWc) -> Result<StatusSnapshot, AppError> {
+        let generation = self.generation(&r.wc.id);
+        loop {
+            {
+                let _applying = generation.applied.lock().await;
+                let state = self.snaps().get(&r.wc.id.0).copied().unwrap_or_default();
+                if (state.fresh || r.actor.is_writing())
+                    && let Some(files) = self.cache.status_snapshot_get(&r.wc.id)?
+                {
+                    let id = self.hand_out(&r.wc.id);
+                    return Ok(StatusSnapshot {
+                        snapshot: Some(id),
+                        files,
+                    });
+                }
+                if generation.running.load(Ordering::SeqCst) > 0 {
+                    // Registered before the lock is released, so the end of that scan is seen.
+                    let ended = generation.ended.notified();
+                    drop(_applying);
+                    ended.await;
+                    continue;
+                }
+            }
+            self.publish(r).await?;
+            if !self.snaps().get(&r.wc.id.0).is_some_and(|s| s.fresh) {
+                // The scan did not store anything (a later one won the race and failed): return
+                // what is stored, or nothing.
+                let files = self
+                    .cache
+                    .status_snapshot_get(&r.wc.id)?
+                    .unwrap_or_default();
+                let id = self.hand_out(&r.wc.id);
+                return Ok(StatusSnapshot {
+                    snapshot: Some(id),
+                    files,
+                });
+            }
+        }
+    }
+
+    /// Id of the stored snapshot, given one if it has none yet. Called under `applied`.
+    fn hand_out(&self, wc_id: &WcId) -> u32 {
+        let mut snaps = self.snaps();
+        let state = snaps.entry(wc_id.0.clone()).or_default();
+        if state.id == 0 {
+            state.id = self.new_id();
+        }
+        state.id
+    }
+
+    /// Records that the stored snapshot changed (called under `applied`): the delta's base and
+    /// the new id.
+    fn advance(&self, wc_id: &WcId, fresh: bool) -> (Option<u32>, u32) {
+        let id = self.new_id();
+        let mut snaps = self.snaps();
+        let state = snaps.entry(wc_id.0.clone()).or_default();
+        let base = (state.id != 0).then_some(state.id);
+        state.id = id;
+        state.fresh |= fresh;
+        (base, id)
     }
 
     /// Last published snapshot (possibly stale), `None` when the working copy was never scanned.
@@ -63,6 +196,8 @@ impl StatusPublisher {
     /// Drops the snapshots of every working copy. Nothing else is stored in the cache, so this is
     /// all "Clear cache" removes; remote check results return with the next check.
     pub fn clear_cache(&self) -> Result<(), AppError> {
+        // Deltas against the dropped snapshots would be wrong: holders refetch.
+        self.snaps().clear();
         Ok(self.cache.status_snapshot_clear_all()?)
     }
 
@@ -71,6 +206,7 @@ impl StatusPublisher {
         if let Err(e) = self.cache.status_snapshot_clear(wc_id) {
             tracing::warn!(error = %e, "could not clear status snapshot");
         }
+        self.snaps().remove(&wc_id.0);
         self.last_rev
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -81,7 +217,14 @@ impl StatusPublisher {
     /// the base revision moved) and stores the new snapshot.
     pub async fn publish(&self, r: &ResolvedWc) -> Result<(), AppError> {
         let generation = self.generation(&r.wc.id);
-        // The ticket is taken before the scan starts, so it orders scans by start time.
+        let _running = Running::start(&generation);
+        let asked = generation.next.fetch_add(1, Ordering::SeqCst) + 1;
+        let _turn = generation.scan.lock().await;
+        if generation.covered.load(Ordering::SeqCst) > asked {
+            // A scan that started after this request finished meanwhile: nothing to add.
+            return Ok(());
+        }
+        // The ticket is taken as the scan starts, so it orders scans by start time.
         let ticket = generation.next.fetch_add(1, Ordering::SeqCst) + 1;
         let engine = Arc::clone(&self.engine);
         let wc = r.wc.clone();
@@ -110,6 +253,7 @@ impl StatusPublisher {
         *applied = ticket;
         self.apply_local(&r.wc.id, fresh)?;
         self.publish_revision(&r.wc.id, &info);
+        generation.covered.fetch_max(ticket, Ordering::SeqCst);
         Ok(())
     }
 
@@ -133,15 +277,26 @@ impl StatusPublisher {
             .filter(|p| !new.contains_key(*p))
             .cloned()
             .collect();
+        let unchanged = changed.is_empty() && removed.is_empty();
+        let stored = self.snaps().get(&wc_id.0).copied().unwrap_or_default();
+        if unchanged && stored.fresh {
+            return Ok(());
+        }
         self.cache
             .status_snapshot_replace(wc_id, &new.into_values().collect::<Vec<_>>())?;
-        if !changed.is_empty() || !removed.is_empty() {
-            self.events.status_changed(&StatusChanged {
-                wc_id: wc_id.clone(),
-                changed,
-                removed,
-            });
+        if unchanged {
+            // Same list as the earlier run's cache, now known current: the id stays.
+            self.snaps().entry(wc_id.0.clone()).or_default().fresh = true;
+            return Ok(());
         }
+        let (base, snapshot) = self.advance(wc_id, true);
+        self.events.status_changed(&StatusChanged {
+            wc_id: wc_id.clone(),
+            changed,
+            removed,
+            base,
+            snapshot,
+        });
         Ok(())
     }
 
@@ -155,6 +310,8 @@ impl StatusPublisher {
             }
         };
         if moved {
+            // An update, commit or switch: logs read so far may miss revisions now relevant.
+            self.logs.invalidate();
             self.events.revision_changed(&RevisionChanged {
                 wc_id: wc_id.clone(),
                 base_rev: info.base_rev,
@@ -187,14 +344,27 @@ impl StatusPublisher {
                 changed.push(s.clone());
             }
         }
-        self.cache
-            .status_snapshot_replace(wc_id, &snapshot.into_values().collect::<Vec<_>>())?;
         if !changed.is_empty() {
+            self.cache
+                .status_snapshot_replace(wc_id, &snapshot.into_values().collect::<Vec<_>>())?;
+            let (base, snapshot) = self.advance(wc_id, false);
             self.events.status_changed(&StatusChanged {
                 wc_id: wc_id.clone(),
                 changed,
                 removed: Vec::new(),
+                base,
+                snapshot,
             });
+        }
+        let newer = self
+            .latest
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(wc_id.0.clone(), scan.latest_rev)
+            .is_some_and(|before| before != scan.latest_rev);
+        if newer {
+            // Someone committed: logs that start at HEAD are stale.
+            self.logs.invalidate();
         }
         self.events.incoming(&Incoming {
             wc_id: wc_id.clone(),
@@ -211,7 +381,7 @@ mod tests {
     use super::*;
     use crate::db::CacheDb;
     use crate::engine::fake::demo_wc_root;
-    use crate::engine::{FakeEngine, WcRef};
+    use crate::engine::{FakeEngine, RemoteScan, WcRef};
     use crate::ops::events::{Recorded, RecordingEvents};
     use crate::wc::WcActor;
     use std::time::Duration;
@@ -266,5 +436,132 @@ mod tests {
         }
         let snapshot = by_path(publisher.cached(&WcId("w".into())).unwrap().unwrap());
         assert_eq!(replay, snapshot);
+    }
+
+    fn fixture() -> (Arc<StatusPublisher>, Arc<RecordingEvents>, ResolvedWc) {
+        let events = Arc::new(RecordingEvents::default());
+        let engine = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(FakeEngine::demo(Duration::ZERO))
+                .unwrap()
+        });
+        let publisher = Arc::new(StatusPublisher::new(
+            Arc::new(engine),
+            CacheDb::open_in_memory().unwrap(),
+            events.clone(),
+        ));
+        let resolved = ResolvedWc {
+            wc: WcRef {
+                id: WcId("w".into()),
+                root: demo_wc_root(),
+            },
+            actor: Arc::new(WcActor::spawn(Default::default())),
+            row: crate::db::WcRow {
+                id: "w".into(),
+                name: "demo".into(),
+                root_path: demo_wc_root().to_string_lossy().into_owned(),
+                repo_uuid: "u".into(),
+                repo_root_url: "u".into(),
+                sort_order: 0,
+                added_at: String::new(),
+                last_opened_at: None,
+            },
+        };
+        (publisher, events, resolved)
+    }
+
+    fn deltas(events: &RecordingEvents) -> Vec<StatusChanged> {
+        events
+            .all()
+            .into_iter()
+            .filter_map(|r| match r {
+                Recorded::Status(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn apply(files: &mut BTreeMap<String, FileStatus>, d: &StatusChanged) {
+        for c in &d.changed {
+            files.insert(c.path.clone(), c.clone());
+        }
+        for gone in &d.removed {
+            files.remove(gone);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deltas_chain_from_the_snapshot_status_get_hands_out() {
+        let (publisher, events, r) = fixture();
+        let first = publisher.snapshot(&r).await.unwrap();
+        let id = first.snapshot.unwrap();
+        // The first scan's delta (against nothing handed out) came before the id was given.
+        assert!(deltas(&events).iter().all(|d| d.snapshot <= id));
+        // A fresh snapshot is served again without a change of id.
+        assert_eq!(publisher.snapshot(&r).await.unwrap(), first);
+
+        let mut remote = first.files[0].clone();
+        remote.remote = Some(opensvn_ipc::RemoteStatus {
+            out_of_date: true,
+            remote_rev: Some(Rev(99)),
+            remote_lock: None,
+        });
+        let scan = RemoteScan {
+            statuses: vec![remote.clone()],
+            incoming: 1,
+            latest_rev: Rev(99),
+        };
+        publisher.apply_remote(&r.wc.id, &scan).await.unwrap();
+        let delta = deltas(&events).pop().unwrap();
+        assert_eq!(delta.base, Some(id));
+        assert!(delta.snapshot > id);
+        let mut held = by_path(first.files);
+        apply(&mut held, &delta);
+        let second = publisher.snapshot(&r).await.unwrap();
+        assert_eq!(second.snapshot, Some(delta.snapshot));
+        assert_eq!(held, by_path(second.files));
+
+        // An unchanged rescan announces nothing and keeps the id.
+        let before = deltas(&events).len();
+        publisher.publish(&r).await.unwrap();
+        assert_eq!(deltas(&events).len(), before);
+        assert_eq!(
+            publisher.snapshot(&r).await.unwrap().snapshot,
+            Some(delta.snapshot)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn after_clear_cache_the_next_delta_has_no_base() {
+        let (publisher, events, r) = fixture();
+        publisher.snapshot(&r).await.unwrap();
+        publisher.clear_cache().unwrap();
+        publisher.publish(&r).await.unwrap();
+        let delta = deltas(&events).pop().unwrap();
+        assert_eq!(delta.base, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_get_during_scans_matches_the_deltas_that_follow() {
+        let (publisher, events, r) = fixture();
+        let tasks: Vec<_> = (0..4)
+            .map(|_| {
+                let (p, r) = (publisher.clone(), r.clone());
+                tokio::spawn(async move { p.publish(&r).await })
+            })
+            .collect();
+        let got = publisher.snapshot(&r).await.unwrap();
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+        let id = got.snapshot.unwrap();
+        let mut held = by_path(got.files);
+        for d in deltas(&events) {
+            if d.base == Some(id) || (d.base.is_some() && d.snapshot > id) {
+                apply(&mut held, &d);
+            }
+        }
+        let now = by_path(publisher.cached(&r.wc.id).unwrap().unwrap());
+        assert_eq!(held, now);
     }
 }

@@ -242,6 +242,20 @@ pub struct LogEntry {
     pub changed_paths: Option<Vec<ChangedPath>>,
     /// Has merged child revisions.
     pub has_children: Option<bool>,
+    /// Revisions this one merged in (`includeMerged`), newest first, each with its own merged
+    /// revisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub merged: Option<Vec<LogEntry>>,
+    /// This revision came in through a reverse merge (only inside `merged`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub subtractive_merge: Option<bool>,
+    /// Revision properties asked for with `revprops`, other than author, date and message
+    /// (values decoded as UTF-8, invalid bytes replaced).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub revprops: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -767,6 +781,16 @@ pub struct LayoutDetection {
 }
 
 /// Result of `log_get`.
+/// Result of `status_get`. `snapshot` identifies the list for the deltas of
+/// `wc://status-changed`; it is `None` for queries the deltas do not cover (ignored items).
+/// Ids grow over the app's lifetime, so a larger id is a later snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusSnapshot {
+    pub snapshot: Option<u32>,
+    pub files: Vec<FileStatus>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct LogPage {

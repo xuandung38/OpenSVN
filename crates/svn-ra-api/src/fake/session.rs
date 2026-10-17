@@ -481,6 +481,9 @@ impl RaSession for FakeRaSession {
                         Vec::new()
                     },
                     has_children: false,
+                    merge_depth: 0,
+                    subtractive_merge: false,
+                    revprops: Vec::new(),
                 });
                 if req.limit.is_some_and(|l| out.len() >= l as usize) {
                     break;

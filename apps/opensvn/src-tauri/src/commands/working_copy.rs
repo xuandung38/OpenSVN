@@ -1,9 +1,9 @@
 //! Working copy registry (3.1) and status / local changes (3.2).
 
 use opensvn_ipc::{
-    AppError, DiffGetRequest, DiffSideKind, DiffTarget, FileDiff, FileStatus, IgnoreAddRequest,
-    NodeStatus, OpResult, OperationHandle, OperationKind, PathGrantId, SparseEntry,
-    StatusGetRequest, WcId, WorkingCopy,
+    AppError, DiffGetRequest, DiffSideKind, DiffTarget, FileDiff, IgnoreAddRequest, NodeStatus,
+    OpResult, OperationHandle, OperationKind, PathGrantId, SparseEntry, StatusGetRequest,
+    StatusSnapshot, WcId, WorkingCopy,
 };
 use tauri::State;
 
@@ -86,39 +86,51 @@ pub async fn wc_close(state: State<'_, AppState>, wc_id: WcId) -> Result<(), App
     .await
 }
 
-/// Status from the engine, or from the snapshot while a write is running on the working copy
-/// (the running operation in `op_list` is the "updating" indicator).
+/// Status of a working copy. The Changes list (no ignored items) is the published snapshot with
+/// its id, kept current by `wc://status-changed` deltas; other queries scan, or filter the
+/// snapshot while a write is running on the working copy (the running operation in `op_list`
+/// is the "updating" indicator).
 #[tauri::command]
 #[specta::specta]
 pub async fn status_get(
     state: State<'_, AppState>,
     request: StatusGetRequest,
-) -> Result<Vec<FileStatus>, AppError> {
+) -> Result<StatusSnapshot, AppError> {
     guard(async {
         let query = StatusQuery {
             include_ignored: request.include_ignored.unwrap_or(false),
             include_unversioned: request.include_unversioned.unwrap_or(true),
         };
         let resolved = state.wcs.resolve(&request.wc_id)?;
+        if query == crate::status::SNAPSHOT_QUERY {
+            return state.status.snapshot(&resolved).await;
+        }
         if resolved.actor.is_writing()
             && let Some(cached) = state.status.cached(&request.wc_id)?
         {
-            return Ok(cached
-                .into_iter()
-                .filter(|s| match s.text {
-                    NodeStatus::Ignored => query.include_ignored,
-                    NodeStatus::Unversioned => query.include_unversioned,
-                    _ => true,
-                })
-                .collect());
+            return Ok(StatusSnapshot {
+                snapshot: None,
+                files: cached
+                    .into_iter()
+                    .filter(|s| match s.text {
+                        NodeStatus::Ignored => query.include_ignored,
+                        NodeStatus::Unversioned => query.include_unversioned,
+                        _ => true,
+                    })
+                    .collect(),
+            });
         }
-        state
+        let files = state
             .wc_read(&request.wc_id, move |engine, wc| async move {
                 engine
                     .status(&wc, query, &crate::engine::OpContext::detached())
                     .await
             })
-            .await
+            .await?;
+        Ok(StatusSnapshot {
+            snapshot: None,
+            files,
+        })
     })
     .await
 }

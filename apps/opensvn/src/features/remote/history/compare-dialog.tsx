@@ -3,12 +3,13 @@ import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { SafeText } from "../../../components/ui/safe-text";
 import { StatusGlyph } from "../../../components/ui/status-glyph";
-import type { ChangeAction, LogEntry } from "../../../ipc/bindings";
+import type { ChangeAction, LogEntry, LogTarget } from "../../../ipc/bindings";
 import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
 import { urlFromRepoPath } from "../repo-url";
 import { historyStrings } from "./history-strings";
 import { RevisionDiffDialog } from "./revision-diff-dialog";
+import { useRevisionPaths } from "./use-history";
 
 /**
  * Files changed after `from` up to `to`, as far as the loaded log knows, newest change first: the
@@ -32,13 +33,14 @@ export function filesBetween(
 
 /** Compare two revisions: pick a changed file, then see `diff_rev(from, to)` of it. */
 export function CompareDialog({
-  entries,
+  target,
   from,
   to,
   repoRootUrl,
   onClose,
 }: {
-  entries: readonly LogEntry[];
+  /** The logged node; the changed paths of the revisions between are read from it. */
+  target: LogTarget;
   from: number;
   to: number;
   repoRootUrl: string;
@@ -46,10 +48,11 @@ export function CompareDialog({
 }) {
   const t = useT(historyStrings);
   const c = useT(commonStrings);
-  const files = filesBetween(entries, from, to);
-  const [open, setOpen] = useState<string | null>(
-    files.length === 1 ? (files[0]?.path ?? null) : null,
-  );
+  const paths = useRevisionPaths(target, { from: from + 1, to }, repoRootUrl);
+  const files = filesBetween(paths.data ?? [], from, to);
+  const [picked, setOpen] = useState<string | null>(null);
+  // A single changed file opens its diff directly.
+  const open = picked ?? (paths.isSuccess && files.length === 1 ? (files[0]?.path ?? null) : null);
 
   if (open) {
     return (
@@ -69,7 +72,13 @@ export function CompareDialog({
       title={t("compareFilesTitle", { from, to })}
       footer={<Button onClick={onClose}>{c("close")}</Button>}
     >
-      {files.length === 0 ? (
+      {paths.isPending ? (
+        <p className="m-0 text-muted-text">{t("loadingPaths")}</p>
+      ) : paths.isError ? (
+        <SafeText as="p" className="m-0 text-bad-text">
+          {t("pathsFailed", { message: paths.error.message })}
+        </SafeText>
+      ) : files.length === 0 ? (
         <p className="m-0">{t("compareNoFiles")}</p>
       ) : (
         <div className="flex flex-col gap-2">

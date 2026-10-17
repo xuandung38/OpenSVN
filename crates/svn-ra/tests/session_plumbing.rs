@@ -337,6 +337,7 @@ async fn reparented_root_session_works_when_the_root_is_forbidden() {
             limit: None,
             discover_changed_paths: true,
             strict_node_history: false,
+            ..Default::default()
         },
         &mut |e| {
             seen.push(e);

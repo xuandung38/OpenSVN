@@ -60,6 +60,8 @@ async fn repository_reads_over_the_demo_repository() {
             stop_on_copy: None,
             with_paths: true,
             filter: Some("guide".into()),
+            include_merged: None,
+            revprops: None,
         },
     )
     .await
@@ -302,6 +304,7 @@ async fn working_copy_edits_and_depth_through_commands() {
         )
         .await
         .unwrap()
+        .files
     };
 
     commands::ignore_add(
@@ -536,6 +539,8 @@ async fn log_paging_walks_every_revision_once_newest_first() {
                 stop_on_copy: None,
                 with_paths: false,
                 filter: None,
+                include_merged: None,
+                revprops: None,
             },
         )
         .await
@@ -683,6 +688,8 @@ async fn a_slow_working_copy_log_does_not_hold_the_working_copy() {
             stop_on_copy: None,
             with_paths: true,
             filter: None,
+            include_merged: None,
+            revprops: None,
         },
     );
     tokio::pin!(log);
@@ -736,11 +743,143 @@ async fn a_working_copy_log_of_an_unversioned_path_reports_it() {
             stop_on_copy: None,
             with_paths: false,
             filter: None,
+            include_merged: None,
+            revprops: None,
         },
     )
     .await
     .unwrap_err();
     assert_eq!(err.code, opensvn_ipc::ErrorCode::PathNotFound);
+}
+
+/// After an update the History bar, the History screen and a URL view of the same node ask for
+/// the same log at once: the server is asked once, later asks come from the cache until the
+/// working copy's revision moves.
+#[tokio::test]
+async fn identical_logs_share_one_server_read_until_the_revision_moves() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    let req = |target: LogTarget, with_paths: bool| LogGetRequest {
+        target,
+        from_rev: None,
+        to_rev: None,
+        limit: 100,
+        stop_on_copy: None,
+        with_paths,
+        filter: None,
+        include_merged: None,
+        revprops: None,
+    };
+    let wc_target = || LogTarget::Wc {
+        wc_id: wc.id.clone(),
+        path: String::new(),
+    };
+    let gate = f.engine.hold_logs();
+    let first = commands::log_get(f.state(), req(wc_target(), true));
+    tokio::pin!(first);
+    tokio::select! {
+        biased;
+        _ = &mut first => panic!("the held log returned"),
+        () = gate.started.notified() => {}
+    }
+    // Two more while the first waits on the server: one without changed paths (answered by the
+    // one with them), one by URL naming the same location.
+    let url = f
+        .state()
+        .wc_read(&wc.id, |engine, wc| async move {
+            engine.wc_info(&wc.root, &OpContext::detached()).await
+        })
+        .await
+        .unwrap()
+        .url;
+    let second = commands::log_get(f.state(), req(wc_target(), false));
+    let third = commands::log_get(f.state(), req(LogTarget::Url { url }, true));
+    gate.release.add_permits(10);
+    let (a, b, c) = tokio::join!(first, second, third);
+    let (a, b, c) = (a.unwrap(), b.unwrap(), c.unwrap());
+    assert_eq!(a, c);
+    assert!(b.entries.iter().all(|e| e.changed_paths.is_none()));
+    assert_eq!(
+        a.entries.iter().map(|e| e.rev).collect::<Vec<_>>(),
+        b.entries.iter().map(|e| e.rev).collect::<Vec<_>>()
+    );
+    let logs = std::sync::Arc::clone(f.state().status.logs());
+    assert_eq!(logs.fetches(), 1);
+
+    // Served from the cache now.
+    commands::log_get(f.state(), req(wc_target(), false))
+        .await
+        .unwrap();
+    assert_eq!(logs.fetches(), 1);
+    // A moved revision (update, commit, switch) drops it.
+    logs.invalidate();
+    commands::log_get(f.state(), req(wc_target(), false))
+        .await
+        .unwrap();
+    assert_eq!(logs.fetches(), 2);
+}
+
+/// The app's own remote writes make revisions: a log page read from HEAD before them is not
+/// served from the cache afterwards.
+#[tokio::test]
+async fn remote_edits_and_copies_drop_cached_logs() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let log = || {
+        commands::log_get(
+            f.state(),
+            LogGetRequest {
+                target: LogTarget::Url { url: url("trunk") },
+                from_rev: None,
+                to_rev: None,
+                limit: 5,
+                stop_on_copy: None,
+                with_paths: false,
+                filter: None,
+                include_merged: None,
+                revprops: None,
+            },
+        )
+    };
+    let logs = std::sync::Arc::clone(f.state().status.logs());
+    log().await.unwrap();
+    log().await.unwrap();
+    assert_eq!(logs.fetches(), 1);
+
+    let h = commands::remote_edit(
+        f.state(),
+        RemoteEditRequest {
+            ops: vec![RemoteOp::Mkdir {
+                url: url("trunk/tools"),
+            }],
+            message: "tools".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let OpResult::NewRev { new_rev } = f.wait_op(&h).await.unwrap() else {
+        panic!("a new revision");
+    };
+    assert_eq!(log().await.unwrap().entries[0].rev, new_rev);
+    assert_eq!(logs.fetches(), 2);
+
+    let h = commands::copy_location(
+        f.state(),
+        CopyLocationRequest {
+            from_url: url("trunk/tools"),
+            from_rev: None,
+            to_url: url("trunk/tools2"),
+            message: "tools2".into(),
+            switch_wc_id: None,
+            from_wc: None,
+        },
+    )
+    .await
+    .unwrap();
+    let OpResult::NewRev { new_rev } = f.wait_op(&h).await.unwrap() else {
+        panic!("a new revision");
+    };
+    assert_eq!(log().await.unwrap().entries[0].rev, new_rev);
+    assert_eq!(logs.fetches(), 3);
 }
 
 fn compare_rows(s: &opensvn_ipc::CompareSummary) -> Vec<(String, &'static str, bool)> {

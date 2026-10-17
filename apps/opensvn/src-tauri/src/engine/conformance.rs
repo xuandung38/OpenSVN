@@ -217,6 +217,8 @@ pub async fn repository_reads(h: &dyn Harness) {
                 stop_on_copy: None,
                 with_paths: true,
                 filter: None,
+                include_merged: None,
+                revprops: None,
             },
             &ctx(),
         )
@@ -374,6 +376,8 @@ pub async fn commit_and_update_cycle(h: &dyn Harness) {
                 stop_on_copy: None,
                 with_paths: false,
                 filter: None,
+                include_merged: None,
+                revprops: None,
             },
             &ctx(),
         )
@@ -1372,6 +1376,8 @@ pub async fn commit_with_auto_add_remove(h: &dyn Harness) {
                 stop_on_copy: None,
                 with_paths: true,
                 filter: None,
+                include_merged: None,
+                revprops: None,
             },
             &ctx(),
         )

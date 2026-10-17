@@ -78,8 +78,11 @@ impl Ipc {
         let st = self
             .call("status_get", json!({ "request": { "wcId": wc_id } }))
             .unwrap();
-        let st: Vec<opensvn_ipc::FileStatus> = serde_json::from_value(st).unwrap();
-        st.into_iter().find(|s| s.path == path).map(|s| s.text)
+        let st: opensvn_ipc::StatusSnapshot = serde_json::from_value(st).unwrap();
+        st.files
+            .into_iter()
+            .find(|s| s.path == path)
+            .map(|s| s.text)
     }
 }
 

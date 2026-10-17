@@ -477,6 +477,7 @@ async fn count_revisions(
         limit: None,
         discover_changed_paths: false,
         strict_node_history: false,
+        ..Default::default()
     };
     let mut n = 0u32;
     session

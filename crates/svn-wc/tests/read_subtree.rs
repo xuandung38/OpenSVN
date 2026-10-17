@@ -127,6 +127,26 @@ fn key(n: &Node) -> (&[u8], u32) {
     (n.relpath.as_str().as_bytes(), n.op_depth)
 }
 
+/// The rows of `sub` with the property lists kept undecoded put back, as the single-node
+/// readers return them.
+fn with_props(sub: &svn_wc::db::SubtreeRows) -> Vec<Node> {
+    sub.nodes
+        .iter()
+        .map(|n| {
+            let mut n = n.clone();
+            if let Some((_, lazy)) = sub
+                .pristine
+                .get(n.relpath.as_str())
+                .and_then(|v| v.iter().find(|(d, _)| *d == n.op_depth))
+            {
+                assert!(n.properties.is_none(), "a row's list is in one place only");
+                n.properties = lazy.get().expect("decode").cloned();
+            }
+            n
+        })
+        .collect()
+}
+
 /// Rows of `rows` agree with the single-node readers and come in path, then layer, order.
 fn assert_like_readers(db: &WcDb, rows: &[Node]) {
     assert!(rows.windows(2).all(|w| key(&w[0]) < key(&w[1])), "order");
@@ -156,7 +176,7 @@ fn whole_tree_read_matches_the_node_readers() {
         .expect("count");
     assert!(total > 6000, "large enough to be split: {total}");
     assert_eq!(i64::try_from(all.nodes.len()).unwrap(), total);
-    assert_like_readers(&db, &all.nodes);
+    assert_like_readers(&db, &with_props(&all));
 
     let actual: Vec<_> = all.actual.iter().map(|a| a.relpath.as_str()).collect();
     assert_eq!(actual, ["d005/f0003.txt", "d007"]);
@@ -187,6 +207,6 @@ fn subtree_read_is_the_slice_of_the_whole_tree() {
             .filter(|n| n.relpath.starts_with(&root))
             .collect();
         assert_eq!(part.nodes.iter().collect::<Vec<_>>(), expected, "{sub}");
-        assert_like_readers(&db, &part.nodes);
+        assert_like_readers(&db, &with_props(&part));
     }
 }

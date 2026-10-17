@@ -17,6 +17,7 @@ import type {
   UpdateProgress,
 } from "./bindings";
 import { queryKeys } from "./query-keys";
+import { applyStatusChanged } from "./status-delta";
 
 /** Typed payloads for the backend events the UI consumes (names match `bindings.ts` events). */
 export interface EventPayloads {
@@ -329,15 +330,18 @@ export function createEventBus(adapter: IpcAdapter, qc: QueryClient): EventBus {
 function applyToCache(qc: QueryClient, name: EventName, payload: unknown): void {
   switch (name) {
     case "wc://status-changed": {
-      const p = payload as StatusChanged;
-      void qc.invalidateQueries({ queryKey: queryKeys.status(p.wcId) });
+      applyStatusChanged(qc, payload as StatusChanged);
       break;
     }
     case "wc://revision-changed": {
-      const p = payload as RevisionChanged;
+      // The status of the same scan arrives as `wc://status-changed`.
       void qc.invalidateQueries({ queryKey: queryKeys.workingCopies });
-      void qc.invalidateQueries({ queryKey: queryKeys.status(p.wcId) });
-      void qc.invalidateQueries({ queryKey: queryKeys.logRoot });
+      // A log still loading for the old revision is dropped, not waited for: a refetch of a
+      // query without data joins the running fetch, which may be a page the server needs
+      // minutes for (see `do_log`), while the new revision's page is quick.
+      void qc
+        .cancelQueries({ queryKey: queryKeys.logRoot })
+        .then(() => qc.invalidateQueries({ queryKey: queryKeys.logRoot }));
       break;
     }
     case "wc://incoming":

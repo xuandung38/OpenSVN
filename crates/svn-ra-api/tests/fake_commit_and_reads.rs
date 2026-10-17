@@ -197,6 +197,7 @@ async fn commit_creates_a_new_revision() {
         limit: Some(1),
         discover_changed_paths: true,
         strict_node_history: false,
+        ..Default::default()
     };
     s.log(
         &req,
@@ -296,6 +297,7 @@ async fn delete_and_add_of_the_same_path_is_one_replace() {
         limit: Some(1),
         discover_changed_paths: true,
         strict_node_history: false,
+        ..Default::default()
     };
     s.log(
         &req,
@@ -700,6 +702,7 @@ async fn read_operations() {
         limit: None,
         discover_changed_paths: false,
         strict_node_history: false,
+        ..Default::default()
     };
     s.log(
         &req,

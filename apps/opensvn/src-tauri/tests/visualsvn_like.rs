@@ -370,6 +370,8 @@ async fn sso_checkout_commit_lock_log_blame_without_prompt() {
                 stop_on_copy: None,
                 with_paths: true,
                 filter: None,
+                include_merged: None,
+                revprops: None,
             },
             &ctx(),
         )

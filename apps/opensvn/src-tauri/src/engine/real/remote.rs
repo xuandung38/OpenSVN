@@ -2,7 +2,9 @@
 
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use opensvn_ipc::time_fmt::timestamp_to_iso;
 use opensvn_ipc::{
@@ -13,6 +15,17 @@ use svn_types::{CancelToken, ErrorCode, NodeKind, RelPath, Revnum, SvnError, ren
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use super::RealEngine;
+
+/// A newest-first log page still incomplete after this long, with at least one entry, ends
+/// with what arrived (see `do_log`).
+pub(crate) const PARTIAL_LOG_AFTER: Duration = Duration::from_secs(3);
+
+/// Entries asked for by the first request of a newest-first log page (see `do_log`).
+const FIRST_LOG_REQUEST: usize = 16;
+
+fn pager_limit(req: &opensvn_ipc::LogGetRequest) -> usize {
+    req.limit.clamp(1, 1000) as usize
+}
 use super::text::CappedBuf;
 use crate::engine::context::{OpContext, ProgressUpdate};
 use crate::engine::facade::{DiffOptions, EngineResult, LogScope};
@@ -340,60 +353,121 @@ impl RealEngine {
                     .await?
             }
         };
-        let filter = req
-            .filter
-            .as_ref()
-            .map(|f| f.to_lowercase())
-            .filter(|f| !f.is_empty());
-        let limit = req.limit.clamp(1, 1000) as usize;
-        let ra = LogRequest {
+        let mut pager = mapping::LogPager::new(req);
+        let mut ra = LogRequest {
             paths: vec![path],
             start: revnum(req.from_rev),
             end: revnum(req.to_rev),
-            // Without a text filter the server can stop after one page plus the look-ahead entry.
-            limit: filter
-                .is_none()
-                .then(|| u32::try_from(limit + 1).unwrap_or(u32::MAX)),
+            limit: None,
             discover_changed_paths: req.with_paths,
             strict_node_history: req.stop_on_copy.unwrap_or(false),
+            include_merged_revisions: req.include_merged.unwrap_or(false),
+            revprops: mapping::log_revprops(req),
         };
-        let mut matched = Vec::new();
-        let mut page_full = false;
-        let outcome = session
-            .log(
-                &ra,
-                &mut |e| {
-                    let hit = filter.as_ref().is_none_or(|f| {
-                        e.message
-                            .as_deref()
-                            .unwrap_or("")
-                            .to_lowercase()
-                            .contains(f)
-                            || e.author.as_deref().unwrap_or("").to_lowercase().contains(f)
-                    });
-                    if hit {
-                        matched.push(e);
+        let page_full = AtomicBool::new(false);
+        let taken = AtomicUsize::new(0);
+        // Behind authz the server checks every changed path of each revision it reports, and
+        // it sends nothing before its output buffer fills: a page that reaches a revision with
+        // many changed paths (often the import at r1) shows nothing for minutes. So a
+        // newest-first page is read in requests of growing size (16, 32, ... entries), and a
+        // page still incomplete after `PARTIAL_LOG_AFTER` ends with what arrived (the next page
+        // reads on from there). With `strict_node_history` each request goes on below the last
+        // entry of the one before. Otherwise it cannot: the server looks the path up at the
+        // start revision, where a copied or renamed node did not exist yet. The same range is
+        // then read again with a larger limit, and the entries already taken are skipped.
+        let newest_first = match (req.from_rev, req.to_rev) {
+            (Some(from), Some(to)) => from >= to,
+            _ => true,
+        };
+        // A text filter is applied here, not by the server: one request reads the range.
+        let filtered = pager.filtered();
+        let probing = newest_first && !filtered;
+        let floor = req.to_rev.map_or(1, |r| r.0);
+        let last_own = AtomicU64::new(0);
+        let moves_on = ra.strict_node_history;
+        // Own entries of a range read again still to skip, and whether the merged revisions
+        // that follow belong to a skipped one.
+        let skip = AtomicUsize::new(0);
+        let skipping = AtomicBool::new(false);
+        let mut on_entry = |e: svn_types::LogEntry| {
+            if e.merge_depth == 0 {
+                let left = skip.load(Ordering::Relaxed);
+                skipping.store(left > 0, Ordering::Relaxed);
+                if left > 0 {
+                    skip.store(left - 1, Ordering::Relaxed);
+                    return Ok(());
+                }
+            } else if skipping.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let own = (e.merge_depth == 0).then_some(e.rev.0);
+            let more = pager.accept(e);
+            if let Some(rev) = own.filter(|_| more) {
+                last_own.store(rev, Ordering::Relaxed);
+            }
+            taken.store(pager.taken(), Ordering::Relaxed);
+            if more {
+                return Ok(());
+            }
+            // One entry beyond the page proves there is a next page; stop reading.
+            page_full.store(true, Ordering::Relaxed);
+            Err(internal("log page complete"))
+        };
+        let mut check = tokio::time::interval_at(
+            tokio::time::Instant::now() + PARTIAL_LOG_AFTER,
+            Duration::from_millis(250),
+        );
+        let mut size = FIRST_LOG_REQUEST;
+        let mut cut = false;
+        loop {
+            let before = taken.load(Ordering::Relaxed);
+            // The page plus the look-ahead entry, or less while probing.
+            let wanted = pager_limit(req) + 1 - before;
+            let asked = if probing { wanted.min(size) } else { wanted };
+            // Read again from the start: the entries already taken come first.
+            let again = if moves_on { 0 } else { before };
+            skip.store(again, Ordering::Relaxed);
+            ra.limit = (!filtered).then(|| u32::try_from(again + asked).unwrap_or(u32::MAX));
+            let mut read = Box::pin(session.log(&ra, &mut on_entry, &ctx.cancel));
+            let outcome = loop {
+                tokio::select! {
+                    biased;
+                    // A finished read wins over the clock.
+                    r = &mut read => break Some(r),
+                    _ = check.tick(), if newest_first => {
+                        if taken.load(Ordering::Relaxed) > 0 {
+                            break None;
+                        }
                     }
-                    if matched.len() > limit {
-                        // One entry beyond the page proves there is a next page; stop reading.
-                        page_full = true;
-                        return Err(internal("log page complete"));
-                    }
-                    Ok(())
-                },
-                &ctx.cancel,
-            )
-            .await;
-        match outcome {
-            Ok(()) => {}
-            Err(_) if page_full => {}
-            Err(e) => return Err(e),
+                }
+            };
+            drop(read);
+            match outcome {
+                None => {
+                    cut = true;
+                    break;
+                }
+                Some(Ok(())) => {}
+                Some(Err(_)) if page_full.load(Ordering::Relaxed) => break,
+                Some(Err(e)) => return Err(e),
+            }
+            let got = taken.load(Ordering::Relaxed) - before;
+            // Fewer entries than asked for: the range is exhausted.
+            if !probing || got < asked {
+                break;
+            }
+            let last = last_own.load(Ordering::Relaxed);
+            if last <= floor {
+                break;
+            }
+            if moves_on {
+                ra.start = Some(Revnum(last - 1));
+            }
+            size = size.saturating_mul(2);
         }
-        let next_rev = (matched.len() > limit).then(|| mapping::rev(matched[limit].rev));
-        matched.truncate(limit);
-        Ok(LogPage {
-            entries: matched.into_iter().map(mapping::log_entry).collect(),
-            next_rev,
-        })
+        if cut {
+            pager.cut(floor);
+        }
+        Ok(pager.page())
     }
 }

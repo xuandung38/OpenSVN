@@ -13,6 +13,10 @@ export interface RevisionRowProps {
   selected?: boolean;
   /** Short tag before the message (e.g. the revision marked for a comparison). */
   badge?: string;
+  /** Nesting level (revisions a merge brought in sit below the merging one). */
+  indent?: number;
+  /** Second-line note after the time (e.g. which revision merged this one in). */
+  note?: string;
   /** Keyboard-active row of the owning listbox and its DOM id (see VirtualList). */
   active?: boolean;
   id?: string;
@@ -29,6 +33,8 @@ export const RevisionRow = memo(function RevisionRow({
   incoming = false,
   selected = false,
   badge,
+  indent = 0,
+  note,
   active = false,
   id,
   onSelect,
@@ -46,8 +52,10 @@ export const RevisionRow = memo(function RevisionRow({
         onPointerActivate?.();
         onSelect?.(rev);
       }}
+      style={indent > 0 ? { paddingLeft: `${10 + indent * 16}px` } : undefined}
       className={cn(
         "flex h-full cursor-default flex-col justify-center px-2.5 py-[5px]",
+        indent > 0 && "border-l-2 border-line",
         selected ? "bg-sel" : "hover:bg-surface-2",
         active &&
           "group-focus-visible:outline-2 group-focus-visible:-outline-offset-2 group-focus-visible:outline-accent",
@@ -64,6 +72,7 @@ export const RevisionRow = memo(function RevisionRow({
       </span>
       <span className="tnum truncate text-[11px] text-muted-text">
         <span className="font-mono">r{rev}</span> · <SafeText>{author}</SafeText> · {when}
+        {note && <> · {note}</>}
       </span>
     </div>
   );

@@ -43,13 +43,18 @@ pub struct OpFailed {
     pub error: AppError,
 }
 
-/// Status delta for a working copy.
+/// Status delta for a working copy: applied to snapshot `base` it yields snapshot `snapshot`
+/// (see [`crate::models::StatusSnapshot`]). A holder of another snapshot than `base` fetches
+/// the status again, unless it already holds `snapshot` or a later one. `base` is `None` when
+/// the delta is against a snapshot nobody was given.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusChanged {
     pub wc_id: WcId,
     pub changed: Vec<FileStatus>,
     pub removed: Vec<String>,
+    pub base: Option<u32>,
+    pub snapshot: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]

@@ -154,12 +154,8 @@ pub async fn log_get(
     request: LogGetRequest,
 ) -> Result<LogPage, AppError> {
     guard(async {
-        match request.target.clone() {
-            LogTarget::Url { url } => state
-                .engine
-                .log(&LogScope::Url(url), &request, &OpContext::detached())
-                .await
-                .map_err(engine_err),
+        let scope = match request.target.clone() {
+            LogTarget::Url { url } => LogScope::Url(url),
             LogTarget::Wc { wc_id, path } => {
                 // Only the location lookup reads the working copy. The log itself can take
                 // minutes (a revision with 100k changed paths behind authz), and holding the
@@ -174,13 +170,24 @@ pub async fn log_get(
                         }
                     })
                     .await?;
-                state
-                    .engine
-                    .log(&LogScope::Repo(loc), &request, &OpContext::detached())
+                LogScope::Repo(loc)
+            }
+        };
+        // Identical requests (the History bar, the History screen and the Incoming list all
+        // reload after an update) share one read of the server, and finished pages are kept
+        // until a revision moves.
+        let key = crate::log_cache::LogKey::new(&scope, &request);
+        let engine = std::sync::Arc::clone(&state.engine);
+        state
+            .status
+            .logs()
+            .get(key, || async move {
+                engine
+                    .log(&scope, &request, &OpContext::detached())
                     .await
                     .map_err(engine_err)
-            }
-        }
+            })
+            .await
     })
     .await
 }
@@ -337,12 +344,16 @@ pub async fn remote_edit(
             ops,
             message: request.message,
         };
+        // The edit makes a revision (or may have, when its outcome is unknown): log pages
+        // read from HEAD before it are stale.
+        let logs = std::sync::Arc::clone(state.status.logs());
         Ok(state.start_op(
             OperationKind::RemoteEdit,
             "Change repository",
             move |engine, ctx| async move {
-                let new_rev = engine.remote_edit(&request, &ctx).await?;
-                Ok(OpResult::NewRev { new_rev })
+                let edited = engine.remote_edit(&request, &ctx).await;
+                logs.invalidate();
+                Ok(OpResult::NewRev { new_rev: edited? })
             },
         ))
     })
@@ -450,13 +461,14 @@ pub async fn copy_location(
             .transpose()?;
         let to_url = request.to_url.clone();
         let title = format!("Copy to {}", leaf(&request.to_url));
+        // The copy makes a revision (or may have): log pages read from HEAD before it are stale.
+        let logs = std::sync::Arc::clone(state.status.logs());
         match switch_to {
             None => Ok(
                 state.start_op(OperationKind::Copy, title, move |engine, ctx| async move {
-                    let new_rev = engine
-                        .copy_location(&request, source.as_ref(), &ctx)
-                        .await?;
-                    Ok(OpResult::NewRev { new_rev })
+                    let copied = engine.copy_location(&request, source.as_ref(), &ctx).await;
+                    logs.invalidate();
+                    Ok(OpResult::NewRev { new_rev: copied? })
                 }),
             ),
             Some(wc_id) => state.start_wc_op(
@@ -464,9 +476,9 @@ pub async fn copy_location(
                 &wc_id,
                 title,
                 move |engine, wc, ctx| async move {
-                    let new_rev = engine
-                        .copy_location(&request, source.as_ref(), &ctx)
-                        .await?;
+                    let copied = engine.copy_location(&request, source.as_ref(), &ctx).await;
+                    logs.invalidate();
+                    let new_rev = copied?;
                     // Switch the working copy to the location that was just created. A copy of
                     // the working copy's own location shares its history; anything else is
                     // refused like any switch, after the copy.

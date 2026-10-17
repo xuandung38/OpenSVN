@@ -1,11 +1,13 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { beforeAll, expect, test, vi } from "vitest";
-import { HOSTILE_NAME, MOCK_REPO_ROOT } from "../../../ipc/mock/remote-data";
+import type { LogEntry, LogGetRequest } from "../../../ipc/bindings";
+import { mockCalls } from "../../../ipc/mock/adapter";
+import { HOSTILE_NAME, MOCK_REPO_ROOT, mockMerged } from "../../../ipc/mock/remote-data";
 import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../../test-utils";
 import { filesBetween } from "./compare-dialog";
 import { HistoryScreen } from "./history-screen";
 import { splitLinks } from "./linkified-text";
-import { applyClientFilters, type HistoryFilters, NO_FILTERS } from "./use-history";
+import { applyClientFilters, flattenMerged, type HistoryFilters, NO_FILTERS } from "./use-history";
 import { expandWebUrl } from "./web-url";
 
 beforeAll(async () => {
@@ -198,4 +200,65 @@ test("the revision menu marks and unmarks a revision for comparison", async () =
   expect(await screen.findByText(/r48212 is marked for comparison/)).toBeTruthy();
   await user().click(screen.getByRole("button", { name: "Clear comparison" }));
   await waitFor(() => expect(screen.queryByText(/is marked for comparison/)).toBeNull());
+});
+
+test("flattenMerged puts merged revisions right below the merging one, nested deeper", () => {
+  const top = (rev: number, merged?: LogEntry[]) =>
+    ({
+      rev,
+      author: null,
+      date: "",
+      message: "",
+      changedPaths: null,
+      hasChildren: !!merged,
+      merged,
+    }) as LogEntry;
+  const rows = flattenMerged([top(10, mockMerged), top(9)]);
+  expect(rows.map((r) => [r.entry.rev, r.depth, r.mergedBy])).toEqual([
+    [10, 0, null],
+    [48150, 1, 10],
+    [48100, 2, 10],
+    [48140, 1, 10],
+    [9, 0, null],
+  ]);
+});
+
+test("the list is read without changed paths; the selected revision reads its own", async () => {
+  mockCalls.length = 0;
+  renderApp(screenUi());
+  const branch = await screen.findByRole("option", { name: /Add feature-x branch/ });
+  const logs = () =>
+    mockCalls.filter((c) => c.name === "logGet").map((c) => c.args[0] as LogGetRequest);
+  expect(logs().every((r) => !r.withPaths)).toBe(true);
+  await user().click(branch);
+  expect(await screen.findByText("Changed paths")).toBeTruthy();
+  await waitFor(() => expect(logs().some((r) => r.withPaths && r.limit === 1)).toBe(true));
+  const one = logs().find((r) => r.withPaths);
+  expect(one?.fromRev).toBe(one?.toRev);
+});
+
+test("Merged revisions lists what each revision merged in, grouped under it", async () => {
+  mockCalls.length = 0;
+  renderApp(screenUi());
+  await screen.findByRole("option", { name: /Add feature-x branch/ });
+  expect(screen.queryByRole("option", { name: /parser rewrite/ })).toBeNull();
+  await user().click(screen.getByRole("button", { name: "Merged revisions" }));
+  const child = await screen.findByRole("option", { name: /feature-x: parser rewrite/ });
+  expect(child.textContent).toContain("merged in r");
+  const nested = screen.getByRole("option", { name: /hotfix merged into feature-x/ });
+  expect(nested.style.paddingLeft).not.toBe(child.style.paddingLeft);
+  const sent = mockCalls.filter((c) => c.name === "logGet").map((c) => c.args[0] as LogGetRequest);
+  expect(sent.some((r) => r.includeMerged === true)).toBe(true);
+  // A merged revision's paths come from the repository root (it is not in the node's history).
+  await user().click(child);
+  await waitFor(() =>
+    expect(
+      mockCalls.some(
+        (c) =>
+          c.name === "logGet" &&
+          (c.args[0] as LogGetRequest).target.kind === "url" &&
+          (c.args[0] as LogGetRequest).fromRev === 48150,
+      ),
+    ).toBe(true),
+  );
 });

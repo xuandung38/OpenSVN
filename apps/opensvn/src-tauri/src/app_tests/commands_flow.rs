@@ -92,7 +92,8 @@ async fn status_get_and_background_scan_on_open() {
     let wc = f.add_demo_wc().await;
     let st = commands::status_get(f.state(), status_req(&wc.id))
         .await
-        .unwrap();
+        .unwrap()
+        .files;
     let text = |p: &str| st.iter().find(|s| s.path == p).map(|s| s.text);
     assert_eq!(text("README.md"), Some(NodeStatus::Modified));
     assert_eq!(text("notes.txt"), Some(NodeStatus::Unversioned));
@@ -106,7 +107,8 @@ async fn status_get_and_background_scan_on_open() {
         },
     )
     .await
-    .unwrap();
+    .unwrap()
+    .files;
     assert!(without.iter().all(|s| s.text != NodeStatus::Unversioned));
 
     // opening scans in the background and announces the first snapshot as a delta
@@ -231,7 +233,8 @@ async fn commit_operation_emits_lifecycle_and_updates_status_and_history() {
     // the delta for the committed file arrives after the operation's work
     let st = commands::status_get(f.state(), status_req(&wc.id))
         .await
-        .unwrap();
+        .unwrap()
+        .files;
     assert!(st.iter().all(|s| s.path != "README.md"));
     let removed = f.events.all().into_iter().any(|r| match r {
         Recorded::Status(s) => {
@@ -261,6 +264,8 @@ async fn commit_operation_emits_lifecycle_and_updates_status_and_history() {
             stop_on_copy: None,
             with_paths: true,
             filter: None,
+            include_merged: None,
+            revprops: None,
         },
     )
     .await

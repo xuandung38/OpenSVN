@@ -10,6 +10,6 @@ mod watcher;
 pub use poller::{IncomingPoller, PollerDeps};
 #[cfg(test)]
 pub use poller::{SkipReason, skip_reason};
-pub use publisher::StatusPublisher;
+pub use publisher::{SNAPSHOT_QUERY, StatusPublisher};
 pub use remote_check::run_remote_check;
 pub use service::{StatusService, StatusTiming};

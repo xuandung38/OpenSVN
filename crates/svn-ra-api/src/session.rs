@@ -97,7 +97,7 @@ pub struct DirListing {
 }
 
 /// Parameters of `log`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LogRequest {
     /// Session-relative paths (empty = root).
     pub paths: Vec<RelPath>,
@@ -111,6 +111,26 @@ pub struct LogRequest {
     pub discover_changed_paths: bool,
     /// Stop at copies.
     pub strict_node_history: bool,
+    /// Also report the revisions merged in by each entry (`svn log -g`), nested under it
+    /// ([`LogEntry::merge_depth`]). Only top-level entries count against `limit`.
+    pub include_merged_revisions: bool,
+    /// Which revision properties to read.
+    pub revprops: LogRevprops,
+}
+
+/// Revision properties a log reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LogRevprops {
+    /// `svn:author`, `svn:date` and `svn:log`, as `svn log` reads them.
+    #[default]
+    Default,
+    /// Every revision property (`svn log --with-all-revprops`).
+    All,
+    /// No revision property (`svn log --with-no-revprops`).
+    None,
+    /// These revision properties (`svn log --with-revprop`); author, date and message are
+    /// filled in when listed, the others land in [`LogEntry::revprops`].
+    Only(Vec<String>),
 }
 
 /// One stretch of a node's history, as reported by

@@ -7,6 +7,7 @@ import {
   type EngineCapabilities,
   type Layout,
   type LockRequest,
+  type LogEntry,
   type LogGetRequest,
   type MenuViewState,
   type OperationHandle,
@@ -35,6 +36,7 @@ import {
   mockFileText,
   mockList,
   mockLogWithPaths,
+  mockMerged,
   myLocks,
   otherLocks,
 } from "./remote-data";
@@ -247,7 +249,8 @@ function simulateOp(
     }
     onDone?.();
     mockEmit("op://finished", { opId: handle.opId, result });
-    if (wcId) mockEmit("wc://status-changed", { wcId, changed: [], removed: [] });
+    if (wcId)
+      mockEmit("wc://status-changed", { wcId, changed: [], removed: [], base: null, snapshot: 0 });
   }, opDurationMs);
   return handle;
 }
@@ -363,12 +366,24 @@ const implemented: Partial<Record<keyof Commands, (...args: never[]) => unknown>
     const filtered = q
       ? all.filter((e) => `${e.message} ${e.author ?? ""}`.toLowerCase().includes(q))
       : all;
+    const ranged = req.toRev == null ? filtered : filtered.filter((e) => e.rev >= (req.toRev ?? 0));
     const start =
-      req.fromRev == null ? 0 : filtered.findIndex((e) => e.rev <= (req.fromRev as number));
-    const page = start < 0 ? [] : filtered.slice(start, start + req.limit);
-    const next = filtered[start + req.limit];
+      req.fromRev == null ? 0 : ranged.findIndex((e) => e.rev <= (req.fromRev as number));
+    const page = start < 0 ? [] : ranged.slice(start, start + req.limit);
+    const next = ranged[start + req.limit];
+    const shape = (e: LogEntry): LogEntry => ({
+      ...e,
+      changedPaths: req.withPaths ? e.changedPaths : null,
+      merged: e.merged?.map(shape),
+    });
+    // The newest revision merged feature-x in.
+    const withMerges = page.map((e) =>
+      req.includeMerged && e.rev === all[0]?.rev
+        ? { ...e, hasChildren: true, merged: mockMerged }
+        : e,
+    );
     return ok({
-      entries: req.withPaths ? page : page.map((e) => ({ ...e, changedPaths: null })),
+      entries: withMerges.map(shape),
       nextRev: next ? next.rev : null,
     });
   },

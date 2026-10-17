@@ -346,6 +346,7 @@ fn log_req(start: u64, end: u64, limit: Option<u32>, strict: bool, paths: &[&str
         limit,
         discover_changed_paths: false,
         strict_node_history: strict,
+        ..Default::default()
     }
 }
 

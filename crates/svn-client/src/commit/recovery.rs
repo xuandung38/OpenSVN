@@ -578,6 +578,7 @@ async fn search_log(
         limit: u32::try_from(max_revisions).ok(),
         discover_changed_paths: true,
         strict_node_history: false,
+        ..Default::default()
     };
     ra.log(
         &req,

@@ -247,6 +247,7 @@ async fn log_matches_svn_log() {
             limit,
             discover_changed_paths: true,
             strict_node_history: false,
+            ..Default::default()
         };
         let mut entries = Vec::new();
         s.log(

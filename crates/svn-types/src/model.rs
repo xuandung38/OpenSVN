@@ -140,6 +140,13 @@ pub struct LogEntry {
     pub changed_paths: Vec<ChangedPath>,
     /// Entry has merged-in children.
     pub has_children: bool,
+    /// Nesting level under the merge that brought this revision in (`log -g`); 0 for an
+    /// entry of the logged node's own history.
+    pub merge_depth: u32,
+    /// The entry came in through a reverse merge (`log -g`).
+    pub subtractive_merge: bool,
+    /// Revision properties other than author, date and message, when asked for.
+    pub revprops: Vec<(String, Vec<u8>)>,
 }
 
 /// Local node status.

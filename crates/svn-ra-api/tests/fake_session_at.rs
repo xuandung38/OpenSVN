@@ -115,6 +115,7 @@ async fn reads_are_relative_to_the_session_url() {
         limit: None,
         discover_changed_paths: false,
         strict_node_history: false,
+        ..Default::default()
     };
     t.log(
         &req,
