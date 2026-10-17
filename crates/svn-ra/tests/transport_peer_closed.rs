@@ -749,7 +749,10 @@ async fn a_read_cut_off_mid_body_goes_out_again_on_a_new_connection() {
     let t = transport(&ca, |c| c.retry.delays = vec![Duration::ZERO; 3]);
     let (ua, ub) = (server.url("/a"), server.url("/b"));
     let (a, b) = tokio::join!(body_of(&t, "GET", &ua), body_of(&t, "GET", &ub));
-    assert_eq!((a.unwrap(), b.unwrap()), ("a".into(), "b".into()));
+    // The server answers in the order the requests arrive, whichever path they name.
+    let mut bodies = [a.unwrap(), b.unwrap()];
+    bodies.sort();
+    assert_eq!(bodies, ["a", "b"]);
     assert_eq!(server.connections(), 2);
     let read = t
         .send_and_read(req("REPORT", &server.url("/r")), 1024, &CancelToken::new())
