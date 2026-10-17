@@ -295,10 +295,7 @@ impl Scratch {
 
     fn url(&self) -> String {
         match &self.host {
-            // Not `localhost`: the svn client (serf) connects to its first address only, `::1`
-            // where the hosts file names it, and the containers publish on 127.0.0.1 only. The
-            // server certificate names 127.0.0.1 too.
-            Host::Docker { port, .. } => format!("https://127.0.0.1:{port}/svn/{}", self.name),
+            Host::Docker { port, .. } => format!("https://localhost:{port}/svn/{}", self.name),
             Host::Local { base, .. } => format!("{base}/{}", self.name),
         }
     }
