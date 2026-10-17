@@ -109,6 +109,7 @@ impl LogPager {
     }
 
     /// True when a text filter decides which entries match (the server cannot stop early).
+    #[cfg_attr(not(feature = "real-engine"), allow(dead_code))]
     pub(crate) fn filtered(&self) -> bool {
         self.filter.is_some()
     }
@@ -144,6 +145,7 @@ impl LogPager {
     }
 
     /// Own entries taken so far.
+    #[cfg_attr(not(feature = "real-engine"), allow(dead_code))]
     pub(crate) fn taken(&self) -> usize {
         self.tops
     }
@@ -152,6 +154,7 @@ impl LogPager {
     /// slow to finish): the next page starts below the last own entry taken. An entry whose
     /// merged revisions may still have been arriving is left for the next page unless it is the
     /// only one. `floor` is the oldest revision of the range.
+    #[cfg_attr(not(feature = "real-engine"), allow(dead_code))]
     pub(crate) fn cut(&mut self, floor: u64) {
         let Some(last) = self.entries.iter().rposition(|e| e.merge_depth == 0) else {
             return;

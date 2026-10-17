@@ -126,14 +126,14 @@ impl StatusPublisher {
             {
                 let _applying = generation.applied.lock().await;
                 let state = self.snaps().get(&r.wc.id.0).copied().unwrap_or_default();
-                if state.fresh || r.actor.is_writing() {
-                    if let Some(files) = self.cache.status_snapshot_get(&r.wc.id)? {
-                        let id = self.hand_out(&r.wc.id);
-                        return Ok(StatusSnapshot {
-                            snapshot: Some(id),
-                            files,
-                        });
-                    }
+                if (state.fresh || r.actor.is_writing())
+                    && let Some(files) = self.cache.status_snapshot_get(&r.wc.id)?
+                {
+                    let id = self.hand_out(&r.wc.id);
+                    return Ok(StatusSnapshot {
+                        snapshot: Some(id),
+                        files,
+                    });
                 }
                 if generation.running.load(Ordering::SeqCst) > 0 {
                     // Registered before the lock is released, so the end of that scan is seen.

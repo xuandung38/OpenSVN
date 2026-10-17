@@ -26,10 +26,6 @@ const FIRST_LOG_REQUEST: usize = 16;
 fn pager_limit(req: &opensvn_ipc::LogGetRequest) -> usize {
     req.limit.clamp(1, 1000) as usize
 }
-
-fn pager_filtered(req: &opensvn_ipc::LogGetRequest) -> bool {
-    req.filter.as_deref().is_some_and(|f| !f.is_empty())
-}
 use super::text::CappedBuf;
 use crate::engine::context::{OpContext, ProgressUpdate};
 use crate::engine::facade::{DiffOptions, EngineResult, LogScope};
@@ -381,7 +377,8 @@ impl RealEngine {
             _ => true,
         };
         // A text filter is applied here, not by the server: one request reads the range.
-        let probing = newest_first && !pager.filtered();
+        let filtered = pager.filtered();
+        let probing = newest_first && !filtered;
         let floor = req.to_rev.map_or(1, |r| r.0);
         let last_own = AtomicU64::new(0);
         let mut on_entry = |e: svn_types::LogEntry| {
@@ -409,7 +406,7 @@ impl RealEngine {
             // The page plus the look-ahead entry, or less while probing.
             let wanted = pager_limit(req) + 1 - before;
             let asked = if probing { wanted.min(size) } else { wanted };
-            ra.limit = (!pager_filtered(req)).then(|| u32::try_from(asked).unwrap_or(u32::MAX));
+            ra.limit = (!filtered).then(|| u32::try_from(asked).unwrap_or(u32::MAX));
             let mut read = Box::pin(session.log(&ra, &mut on_entry, &ctx.cancel));
             let outcome = loop {
                 tokio::select! {
