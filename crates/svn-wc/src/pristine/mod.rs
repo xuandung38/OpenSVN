@@ -556,8 +556,8 @@ pub(crate) fn ensure_stored(
             actual: format!("{len} bytes"),
         });
     }
-    file.sync_all().map_err(PristineError::io("sync", src))?;
     drop(file);
+    crate::durable::sync_file(src).map_err(PristineError::io("sync", src))?;
     let parent = dest.parent().unwrap_or(adm_dir);
     fs::create_dir_all(parent).map_err(PristineError::io("create directory", parent))?;
     rename_replacing(src, &dest)?;

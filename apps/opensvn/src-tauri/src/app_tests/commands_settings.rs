@@ -526,7 +526,8 @@ async fn diff_external_needs_a_configured_tool_and_launches_it_on_read_only_copi
     let launched = f.launcher.launched.lock().unwrap().clone();
     assert_eq!(launched.len(), 1);
     let (program, args) = &launched[0];
-    assert_eq!(program, &std::fs::canonicalize(&exe).unwrap());
+    // Launched from the path without the Windows `\\?\` prefix.
+    assert_eq!(program, &dunce::canonicalize(&exe).unwrap());
     assert_eq!(args.len(), 3);
     assert_eq!(args[0], "--label=old");
     let (left, right) = (

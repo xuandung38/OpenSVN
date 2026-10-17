@@ -13,7 +13,8 @@ pub const RECENT_URL_CAP: u32 = 20;
 
 /// One stored setting of the `app.sqlite` in `dir`, read without creating or migrating anything
 /// (the app reads it before it starts, see `startup_env`). `None` when the file, the table or the
-/// key is missing, or the value is not JSON.
+/// key is missing, or the value is not JSON. Only Linux reads a setting that early.
+#[cfg(any(target_os = "linux", test))]
 pub fn stored_setting(dir: &Path, key: &str) -> Option<serde_json::Value> {
     use rusqlite::OpenFlags;
     let path = dir.join("app.sqlite");

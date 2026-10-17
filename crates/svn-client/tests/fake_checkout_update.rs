@@ -37,7 +37,13 @@ async fn checkout_materializes_tree_and_records_base() {
     assert_eq!(sum.revision, Some(Revnum(1)));
     assert_eq!(read(&wc.join("trunk/a.txt")), "alpha\n");
     assert_eq!(read(&wc.join("trunk/src/lib.rs")), "pub fn f() {}\n");
-    assert_eq!(read(&wc.join("README")), "hello\n");
+    // `svn:eol-style native`: the platform line ending, as svn writes it.
+    let native = if cfg!(windows) {
+        "hello\r\n"
+    } else {
+        "hello\n"
+    };
+    assert_eq!(read(&wc.join("README")), native);
 
     let db = open_db(&wc);
     let rows = base_rows(&db);
