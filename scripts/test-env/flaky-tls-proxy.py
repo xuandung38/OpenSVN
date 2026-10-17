@@ -16,7 +16,14 @@ close is a plain TCP close (FIN) or, where asked, a reset (RST). Faults, per cli
   --log-requests     log the request line of every request the client starts, forwarded or not
                      ("conn N: request METHOD URI"), so a test can count what was sent
   --truncate-every K cut every K-th response bigger than --truncate-at bytes after that many
-                     bytes and close without close_notify (a broken connection mid-body)
+                     bytes and close without close_notify (a broken connection mid-body). With
+                     K > 1 the break is transient: the next request with the request line of a
+                     cut read (GET, HEAD, OPTIONS, PROPFIND, REPORT; the client sending it
+                     again) is not cut, wherever the count is. A write sent again is counted
+                     as any request, as a client must never send one twice.
+                     Otherwise a client whose retry cycle has a multiple of K requests (OPTIONS
+                     plus REPORT, K = 2) would meet the cut at the same byte every time: a server
+                     that always breaks at the same point, which is what --truncate-every 1 is for
   --truncate-method M  only count and cut responses to these methods (comma-separated, e.g.
                      REPORT,GET); with --truncate-every 1 every such response is cut at the
                      same offset (a server or proxy that always breaks at the same point)
@@ -46,6 +53,12 @@ import time
 
 COUNTER = itertools.count(1)
 COUNTER_LOCK = threading.Lock()
+# Request lines ("METHOD URI") whose response was cut and that were not sent again yet.
+CUT_LINES = set()
+# Only these may pass when sent again after a cut: a client must never send a write twice
+# (#166), and a write that passed when sent again would hide it, as a write that succeeds is
+# not checked against the request log.
+IDEMPOTENT = {"GET", "HEAD", "OPTIONS", "PROPFIND", "REPORT"}
 
 
 class Outage:
@@ -162,6 +175,8 @@ class Conn:
         self.truncate_this = False
         # Method of the request being answered (first word of the exchange's first bytes).
         self.method = ""
+        # Request line ("METHOD URI") of the request being answered.
+        self.request_line = ""
         self.started = False
         self.last_activity = time.monotonic()
         # A request was forwarded and no response byte came back yet (the server is working).
@@ -209,6 +224,7 @@ class Conn:
                         self.started = True
                         self.method = data.split(b" ", 1)[0].decode("ascii", "replace")
                         line = data.split(b"\r\n", 1)[0].decode("ascii", "replace")
+                        self.request_line = " ".join(line.split(" ")[:2])
                     if self.responding:
                         self.responding = False
                         self.exchanges += 1
@@ -251,11 +267,19 @@ class Conn:
                         if self.args.truncate_every and (not methods or self.method in methods):
                             with COUNTER_LOCK:
                                 n = next(COUNTER)
-                            self.truncate_this = n % self.args.truncate_every == 0
+                                # The client sends a cut request again: let it through.
+                                again = self.request_line in CUT_LINES
+                                CUT_LINES.discard(self.request_line)
+                            self.truncate_this = n % self.args.truncate_every == 0 and not (
+                                again and self.args.truncate_every > 1
+                            )
                     before = self.response_bytes
                     self.response_bytes += len(data)
                     cut = self.truncate_this and self.response_bytes > self.args.truncate_at
                 if cut:
+                    if self.method in IDEMPOTENT:
+                        with COUNTER_LOCK:
+                            CUT_LINES.add(self.request_line)
                     keep = max(0, self.args.truncate_at - before)
                     self.client_io.sendall(data[:keep])
                     self.close(False, f"truncated a {self.method} response after {self.args.truncate_at} bytes")

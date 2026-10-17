@@ -175,6 +175,13 @@ reproduce this:
   - `--log-requests`: logs the request line of every request the client starts, forwarded or
     not, so a test can check that no write was sent twice.
   - `--truncate-every K --truncate-at B`: cuts every K-th response bigger than B bytes mid-body.
+    With K above 1 a cut read is a passing fault: the next request with the same request line
+    (the client sending the cut `GET`, `HEAD`, `OPTIONS`, `PROPFIND` or `REPORT` again) is not
+    cut. A client whose retry sends a multiple of K requests (`OPTIONS` + `REPORT` with K = 2)
+    would otherwise meet the cut at the same byte on every resume, and give up after two resumes
+    without progress, as designed for a server that always breaks at the same point (that fault
+    is `--truncate-every 1`). A write sent again gets no such pass: a client must never send one
+    twice (#166), and a write that passed would hide it.
   - `--truncate-method M`: counts and cuts only responses to these methods (`REPORT,GET`). With
     `--truncate-every 1` every such response is cut at the same offset: a server that always
     breaks at the same point.
@@ -224,7 +231,9 @@ OPENSVN_COMPAT_LOCAL_URL=https://svn.opensvn.test:18461/svn-basic \
 ```
 
 Modes used for the PR tables: `--reset-after 2`, `--idle-reset 2`, both, `--stale-after 2`,
-`--truncate-every 2 --truncate-at 1024 --truncate-method REPORT,GET`.
+`--close-after 1`, `--truncate-every 2 --truncate-at 1024 --truncate-method REPORT,GET`, and
+`--truncate-every 2` with `--truncate-at` 2048 (the default), 1024 and 100. Only the last cuts
+write answers: those of the standard repository's writes are all below 1 KiB.
 
 - Reads must succeed: they are sent again on a fresh connection, and checkout, update, switch
   and the streamed reads resume.
@@ -241,6 +250,10 @@ Modes used for the PR tables: `--reset-after 2`, `--idle-reset 2`, both, `--stal
   confirmed deleted fails with `CommitNotApplied`: nothing was committed). `write_op!`
   (`engine/conformance.rs`) then checks with the proxy log that a write really met the fault,
   that no write request line repeats, and with `svnadmin lstxns` that no transaction is left.
+  One exception: the answer to the `POST` that creates a commit's transaction is only headers
+  (`SVN-Txn-Name`, no body), so when it is cut the client never learns the transaction's name
+  and cannot delete it, as svn cannot. The commit then fails with the connection failure before
+  any `MERGE` (nothing was committed), and at most one transaction per cut `POST` may stay.
   The scenario then ends ("ends as designed" in the output, with `--nocapture`), because
   repeating the write would meet the same fault. The rest of the scenario is covered by the
   direct run.
