@@ -410,6 +410,8 @@ impl RealEngine {
             let mut read = Box::pin(session.log(&ra, &mut on_entry, &ctx.cancel));
             let outcome = loop {
                 tokio::select! {
+                    biased;
+                    // A finished read wins over the clock.
                     r = &mut read => break Some(r),
                     _ = check.tick(), if newest_first => {
                         if taken.load(Ordering::Relaxed) > 0 {
