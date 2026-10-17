@@ -4501,3 +4501,89 @@ async fn log_with_merged_revisions_matches_svn_log_g() {
     }
     assert_no_prompt();
 }
+
+/// `log_get` of a branch follows its copy like `svn log` (svn 1.15) when more entries than the
+/// first request of a page asks for (16) lie before the copy: the next request cannot start
+/// below the copy on the branch's path, which did not exist there. With stop-on-copy the page
+/// ends at the copy, like `svn log --stop-on-copy`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn log_of_a_branch_follows_its_copy_past_the_first_request() {
+    let Some(oracle) =
+        opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15).unwrap()
+    else {
+        return;
+    };
+    if negotiate_mode() {
+        eprintln!("skipping: svn is given Basic credentials");
+        return;
+    }
+    for (version, host) in servers() {
+        eprintln!("log_of_a_branch_follows_its_copy_past_the_first_request: server {version}");
+        let h = harness(&host, "log-copy");
+        // As in `log_with_merged_revisions_matches_svn_log_g`: behind a faulty proxy svn works
+        // on the repository directly.
+        let url = match &host {
+            Host::Local { repos, .. } if behind_a_faulty_proxy() => {
+                format!("file://{}", repos.join(&h.scratch.name).display())
+            }
+            _ => h.repo_url(),
+        };
+        let work = h.work_dir();
+        std::fs::create_dir_all(&work).unwrap();
+        let svn = |cwd: &Path, args: &[&str]| svn_cli(&oracle, cwd, args);
+        let trunk = format!("{url}/trunk");
+        let long = format!("{url}/branches/long");
+        let ours_long = format!("{}/branches/long", h.repo_url());
+        svn(&work, &["checkout", "-q", &trunk, "t"]);
+        let tdir = work.join("t");
+        for i in 0..20 {
+            std::fs::write(tdir.join("README.md"), format!("trunk {i}\n")).unwrap();
+            svn(&tdir, &["commit", "-q", "-m", &format!("trunk {i}")]);
+        }
+        svn(&work, &["copy", "-q", "-m", "branch long", &trunk, &long]);
+        svn(&work, &["checkout", "-q", &long, "l"]);
+        let ldir = work.join("l");
+        for i in 0..3 {
+            std::fs::write(ldir.join("README.md"), format!("branch {i}\n")).unwrap();
+            svn(&ldir, &["commit", "-q", "-m", &format!("branch {i}")]);
+        }
+        for stop_on_copy in [false, true] {
+            let mut args = vec!["log", "--xml", "-l", "50"];
+            if stop_on_copy {
+                args.push("--stop-on-copy");
+            }
+            args.push(&long);
+            let theirs = parse_svn_log(&svn_out(&oracle, &work, &args));
+            assert!(stop_on_copy || theirs.len() > 20, "{theirs:?}");
+            let page = h
+                .engine()
+                .log(
+                    &opensvn_lib::engine::LogScope::Url(ours_long.clone()),
+                    &opensvn_ipc::LogGetRequest {
+                        target: opensvn_ipc::LogTarget::Url {
+                            url: ours_long.clone(),
+                        },
+                        from_rev: None,
+                        to_rev: None,
+                        limit: 50,
+                        stop_on_copy: Some(stop_on_copy),
+                        with_paths: false,
+                        filter: None,
+                        include_merged: None,
+                        revprops: None,
+                    },
+                    &ctx(),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("log, stop on copy {stop_on_copy}: {e:?}"));
+            assert_eq!(page.next_rev, None, "stop on copy {stop_on_copy}");
+            assert_eq!(
+                engine_log_nodes(page.entries),
+                theirs,
+                "stop on copy {stop_on_copy}"
+            );
+        }
+    }
+    assert_no_prompt();
+}

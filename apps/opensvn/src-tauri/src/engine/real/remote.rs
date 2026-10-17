@@ -369,9 +369,12 @@ impl RealEngine {
         // Behind authz the server checks every changed path of each revision it reports, and
         // it sends nothing before its output buffer fills: a page that reaches a revision with
         // many changed paths (often the import at r1) shows nothing for minutes. So a
-        // newest-first page is read in requests of growing size (16, 32, ... entries), each
-        // going on below the last entry of the one before, and a page still incomplete after
-        // `PARTIAL_LOG_AFTER` ends with what arrived (the next page reads on from there).
+        // newest-first page is read in requests of growing size (16, 32, ... entries), and a
+        // page still incomplete after `PARTIAL_LOG_AFTER` ends with what arrived (the next page
+        // reads on from there). With `strict_node_history` each request goes on below the last
+        // entry of the one before. Otherwise it cannot: the server looks the path up at the
+        // start revision, where a copied or renamed node did not exist yet. The same range is
+        // then read again with a larger limit, and the entries already taken are skipped.
         let newest_first = match (req.from_rev, req.to_rev) {
             (Some(from), Some(to)) => from >= to,
             _ => true,
@@ -381,7 +384,22 @@ impl RealEngine {
         let probing = newest_first && !filtered;
         let floor = req.to_rev.map_or(1, |r| r.0);
         let last_own = AtomicU64::new(0);
+        let moves_on = ra.strict_node_history;
+        // Own entries of a range read again still to skip, and whether the merged revisions
+        // that follow belong to a skipped one.
+        let skip = AtomicUsize::new(0);
+        let skipping = AtomicBool::new(false);
         let mut on_entry = |e: svn_types::LogEntry| {
+            if e.merge_depth == 0 {
+                let left = skip.load(Ordering::Relaxed);
+                skipping.store(left > 0, Ordering::Relaxed);
+                if left > 0 {
+                    skip.store(left - 1, Ordering::Relaxed);
+                    return Ok(());
+                }
+            } else if skipping.load(Ordering::Relaxed) {
+                return Ok(());
+            }
             let own = (e.merge_depth == 0).then_some(e.rev.0);
             let more = pager.accept(e);
             if let Some(rev) = own.filter(|_| more) {
@@ -406,7 +424,10 @@ impl RealEngine {
             // The page plus the look-ahead entry, or less while probing.
             let wanted = pager_limit(req) + 1 - before;
             let asked = if probing { wanted.min(size) } else { wanted };
-            ra.limit = (!filtered).then(|| u32::try_from(asked).unwrap_or(u32::MAX));
+            // Read again from the start: the entries already taken come first.
+            let again = if moves_on { 0 } else { before };
+            skip.store(again, Ordering::Relaxed);
+            ra.limit = (!filtered).then(|| u32::try_from(again + asked).unwrap_or(u32::MAX));
             let mut read = Box::pin(session.log(&ra, &mut on_entry, &ctx.cancel));
             let outcome = loop {
                 tokio::select! {
@@ -439,7 +460,9 @@ impl RealEngine {
             if last <= floor {
                 break;
             }
-            ra.start = Some(Revnum(last - 1));
+            if moves_on {
+                ra.start = Some(Revnum(last - 1));
+            }
             size = size.saturating_mul(2);
         }
         if cut {
