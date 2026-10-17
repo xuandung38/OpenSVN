@@ -24,6 +24,9 @@ fn generated(name: &str) -> Vec<u8> {
     prej_text(&operation, prop, pristine.as_deref())
 }
 
+// The golden files come from svn on Linux. A marker after a value without a line ending ends
+// with the native one (`\r\n` on Windows, like svn's `APR_EOL_STR`), so they hold off Windows.
+#[cfg(not(windows))]
 #[test]
 fn matches_the_reject_files_svn_wrote() {
     for name in [
@@ -47,6 +50,22 @@ fn matches_the_reject_files_svn_wrote() {
         );
         assert_eq!(got, expected, "{name}: bytes");
     }
+}
+
+/// On Windows the markers after values without a line ending end with `\r\n`; the rest of the
+/// text is the one svn wrote on Linux.
+#[cfg(windows)]
+#[test]
+fn markers_after_values_without_a_line_ending_end_with_crlf_on_windows() {
+    let linux = String::from_utf8(fixture("update_both_add", "prej").unwrap()).unwrap();
+    let expected = linux
+        .replace(")\n", ")\r\n")
+        .replace("=======\n", "=======\r\n");
+    assert_ne!(expected, linux);
+    assert_eq!(
+        String::from_utf8(generated("update_both_add")).unwrap(),
+        expected
+    );
 }
 
 fn values<'a>(

@@ -333,22 +333,23 @@ async fn cancel_while_the_provider_blocks_returns_promptly() {
     *provider.block_for.lock().unwrap() = Duration::from_millis(1500);
     let t = transport_with_negotiate(&ca, prompter, provider);
     let cancel = CancelToken::new();
-    let c = cancel.clone();
-    tokio::spawn(async move {
+    // The cancel comes 100 ms after the server answered the first request with its challenge,
+    // so while initiate blocks (the first TLS handshake takes longer on some runners).
+    let (result, cancelled_at) = tokio::join!(t.send(get(srv.url("/")), &cancel), async {
+        while srv.requests().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
-        c.cancel();
+        cancel.cancel();
+        Instant::now()
     });
-    let started = Instant::now();
-    let err = t
-        .send(get(srv.url("/")), &cancel)
-        .await
-        .expect_err("cancelled");
+    let err = result.expect_err("cancelled");
     assert_eq!(err.code, ErrorCode::Cancelled);
     // The runtime thread was free to run the cancel timer while initiate blocked.
     assert!(
-        started.elapsed() < Duration::from_millis(1000),
+        cancelled_at.elapsed() < Duration::from_millis(1000),
         "{:?}",
-        started.elapsed()
+        cancelled_at.elapsed()
     );
     assert_eq!(srv.requests().len(), 1);
 }

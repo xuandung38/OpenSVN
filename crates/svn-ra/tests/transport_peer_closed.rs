@@ -794,24 +794,27 @@ async fn a_cancel_during_the_retry_delay_stops_at_once() {
         }],
     )
     .await;
-    // SLOW_RETRY: the retry would wait 5 s; the cancel comes after 200 ms.
+    // SLOW_RETRY: the retry would wait 5 s; the cancel comes 200 ms after the server saw the
+    // first attempt (the first TLS handshake takes longer than that on some runners).
     let t = transport(&ca, |_| {});
     let cancel = CancelToken::new();
-    let trigger = cancel.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        trigger.cancel();
-    });
-    let started = Instant::now();
-    let err = t
-        .send_and_read(req("REPORT", &server.url("/r")), 1024, &cancel)
-        .await
-        .expect_err("cancelled");
+    let (result, cancelled_at) = tokio::join!(
+        t.send_and_read(req("REPORT", &server.url("/r")), 1024, &cancel),
+        async {
+            while server.seen().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel.cancel();
+            Instant::now()
+        }
+    );
+    let err = result.expect_err("cancelled");
     assert_eq!(err.code, ErrorCode::Cancelled, "{err:?}");
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        cancelled_at.elapsed() < Duration::from_secs(2),
         "{:?}",
-        started.elapsed()
+        cancelled_at.elapsed()
     );
     assert_eq!(server.seen(), ["REPORT"]);
 }
