@@ -31,12 +31,13 @@ Cập nhật lần cuối: 2026-10-16.
 
 ## 2. Gate trước khi mở PR ready
 
-GitHub Actions hiện **không có runner**: mọi job kết thúc sau 2–5 giây, không log, kể cả trên main. CI đỏ không phải do code. Gate thật là gate chạy trên máy. Ghi số lượng test vào mô tả PR.
+GitHub Actions đã có runner trở lại: `ci` chạy clippy và test trên Linux, macOS và Windows, `compat` chạy với các container svn 1.14.5/1.15.0. CI đỏ là lỗi thật, phải sửa. CI không chạy DAV suite qua flaky proxy, crash suite hay oracle svn 1.15 cho test workspace, nên gate trên máy vẫn bắt buộc. Ghi số lượng test vào mô tả PR.
 
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p opensvn --features real-engine --all-targets -- -D warnings
+cargo deny check   # advisory DB mới có thể làm CI đỏ dù dependency không đổi
 # failpoints, nếu chạm svn-wc/svn-client:
 cargo clippy -p svn-wc -p svn-client --features failpoints --all-targets -- -D warnings
 OPENSVN_REQUIRE_SVN=1 cargo test --workspace --locked      # oracle svn 1.15.0 (build bằng nix), đặt OPENSVN_SVN_BIN/OPENSVN_SVNADMIN_BIN
@@ -48,6 +49,19 @@ pnpm gen:ipc   # không được để lại diff
 # Tùy chọn, khi chạm UI: axe WCAG 2.2 A/AA (có color-contrast) trên `dev:mock`, phím mũi tên trên slider,
 # screenshot các trạng thái và /__gallery ở 2 theme, Chromium và WebKit (trình duyệt chưa cài thì bỏ qua và ghi chú)
 pnpm test:browser   # ảnh ở apps/opensvn/test-results/browser
+```
+
+Kiểm tra clippy macOS/Windows từ Linux trước khi push (code `#[cfg(unix)]` hay `#[cfg(target_os = "linux")]` dễ để lại dead code trên hai nền tảng kia):
+
+```bash
+rustup target add aarch64-apple-darwin x86_64-pc-windows-msvc
+cargo install cargo-xwin --locked
+cargo xwin clippy --workspace --all-targets --locked --keep-going --target x86_64-pc-windows-msvc -- -D warnings
+# macOS: sqlite bundled cần C compiler có header libc của macOS, `zig cc` có sẵn (`pip install ziglang`,
+# đặt ZIG nếu zig không nằm trên PATH). DOCS_RS=1 bỏ qua phần Objective-C của mac-notification-sys.
+# Chỉ dùng cho clippy, không build ra binary.
+DOCS_RS=1 CC_aarch64_apple_darwin="$PWD/scripts/dev/zig-cc-macos.sh" AR_aarch64_apple_darwin=llvm-ar \
+  cargo clippy --workspace --all-targets --locked --keep-going --target aarch64-apple-darwin -- -D warnings
 ```
 
 - **Chạm transport/RA:** chạy thêm DAV suite `real_engine_dav -- --ignored` với Apache + mod_dav_svn 1.14.3 và 1.15.0, chạy thẳng và qua `scripts/test-env/flaky-tls-proxy.py`.
@@ -145,7 +159,6 @@ Nhận việc nào thì comment vào issue tương ứng hoặc báo chủ repo,
 - **Kiểm trên 3 OS với VisualSVN thật** (#6, #17, #19, #20): đăng nhập SSO và Basic, browse, history, blame, lock, tạo branch, checkout lớn. Dùng `docs/visualsvn-iwa-checklist.md`.
 - **Kiểm chéo với TortoiseSVN** (#15, #16): OpenSVN tạo working copy rồi TortoiseSVN mở và commit, và làm chiều ngược lại.
 - **Ký số và phát hành** (#22): Apple Developer ID, Authenticode, cặp khóa minisign, repo `OpenSVN-releases` và token fine-grained. Làm theo `docs/RELEASE-SETUP.md` (có sau khi #169 merge).
-- **GitHub Actions không có runner:** chủ repo kiểm tra Billing/Runners của repo.
 - **Bản macOS:** build trên máy Mac.
 
 ## 7. Cách phối hợp

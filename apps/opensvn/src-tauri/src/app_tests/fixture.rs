@@ -390,6 +390,13 @@ pub fn ipc_app_with_events(
     (app, main, events)
 }
 
+/// Origin of the app's own pages as Tauri checks it: Windows serves custom protocols as
+/// `http://<scheme>.localhost`, the other platforms as `<scheme>://localhost`.
+#[cfg(windows)]
+const APP_ORIGIN: &str = "http://tauri.localhost";
+#[cfg(not(windows))]
+const APP_ORIGIN: &str = "tauri://localhost";
+
 /// Calls `cmd` through the IPC layer as the WebView does: JSON in, JSON (or the error) out.
 pub fn invoke(
     window: &tauri::WebviewWindow<MockRuntime>,
@@ -402,7 +409,7 @@ pub fn invoke(
             cmd: cmd.into(),
             callback: CallbackFn(0),
             error: CallbackFn(1),
-            url: "tauri://localhost".parse().unwrap(),
+            url: APP_ORIGIN.parse().unwrap(),
             body: InvokeBody::Json(body),
             headers: Default::default(),
             invoke_key: INVOKE_KEY.to_string(),

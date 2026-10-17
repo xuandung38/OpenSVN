@@ -231,6 +231,9 @@ fn snapshot(dir: &Path) -> Vec<(String, Option<Vec<u8>>)> {
             if fs::symlink_metadata(&p).unwrap().is_dir() {
                 stack.push(p);
                 out.push((rel, None));
+            } else if p.file_name().is_some_and(|n| n == CREATING_LOCK) {
+                // Only its lock counts; a held lock bars reading it on Windows.
+                out.push((rel, Some(Vec::new())));
             } else {
                 out.push((rel, Some(fs::read(&p).unwrap())));
             }
