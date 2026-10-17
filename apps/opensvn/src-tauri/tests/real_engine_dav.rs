@@ -4359,10 +4359,18 @@ async fn log_with_merged_revisions_matches_svn_log_g() {
     for (version, host) in servers() {
         eprintln!("log_with_merged_revisions_matches_svn_log_g: server {version}");
         let h = harness(&host, "log-g");
-        let url = h.repo_url();
+        // svn does not retry a cut response: behind a faulty proxy, the history is built and
+        // logged by svn straight from the repository; only the engine goes through the proxy.
+        let url = match &host {
+            Host::Local { repos, .. } if behind_a_faulty_proxy() => {
+                format!("file://{}", repos.join(&h.scratch.name).display())
+            }
+            _ => h.repo_url(),
+        };
         let work = h.work_dir();
         std::fs::create_dir_all(&work).unwrap();
         let svn = |cwd: &Path, args: &[&str]| svn_cli(&oracle, cwd, args);
+        let ours_trunk = format!("{}/trunk", h.repo_url());
         let trunk = format!("{url}/trunk");
         let b = format!("{url}/branches/b");
         let c = format!("{url}/branches/c");
@@ -4447,9 +4455,11 @@ async fn log_with_merged_revisions_matches_svn_log_g() {
             let page = h
                 .engine()
                 .log(
-                    &opensvn_lib::engine::LogScope::Url(trunk.clone()),
+                    &opensvn_lib::engine::LogScope::Url(ours_trunk.clone()),
                     &opensvn_ipc::LogGetRequest {
-                        target: opensvn_ipc::LogTarget::Url { url: trunk.clone() },
+                        target: opensvn_ipc::LogTarget::Url {
+                            url: ours_trunk.clone(),
+                        },
                         from_rev: None,
                         to_rev: None,
                         limit,
