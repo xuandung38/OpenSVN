@@ -4204,3 +4204,290 @@ async fn dav_cache_matches_svn() {
     }
     assert_no_prompt();
 }
+
+// ---- log with merged revisions (`svn log -g`) ----
+
+/// `svn` against the test server, returning its standard output.
+fn svn_out(oracle: &opensvn_svn_oracle::Oracle, cwd: &Path, args: &[&str]) -> String {
+    let mut c = oracle.svn();
+    c.current_dir(cwd)
+        .args([
+            "--username",
+            "tester",
+            "--password",
+            "tester-pass",
+            "--no-auth-cache",
+            "--config-option",
+        ])
+        .arg(format!(
+            "servers:global:ssl-authority-files={}",
+            ca_path().display()
+        ))
+        .args(args);
+    let out = c.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{c:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// One entry of a log as both sides are compared: revision, author, message, reverse merge,
+/// the extra revision properties and the merged-in entries below it.
+#[derive(Debug, PartialEq, Eq)]
+struct LogNode {
+    rev: u64,
+    author: Option<String>,
+    msg: String,
+    reverse: bool,
+    revprops: Vec<(String, String)>,
+    merged: Vec<LogNode>,
+}
+
+fn xml_unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// The entries of `svn log --xml` (with `-g`, nested `<logentry>` elements are merged-in
+/// revisions; `reverse-merge="true"` marks a reverse merge).
+fn parse_svn_log(xml: &str) -> Vec<LogNode> {
+    fn text_of(rest: &str, tag: &str) -> Option<(String, usize)> {
+        let open = format!("<{tag}");
+        let rest_t = rest.trim_start();
+        if !rest_t.starts_with(&open) {
+            return None;
+        }
+        let skip = rest.len() - rest_t.len();
+        let start = rest_t.find('>')? + 1;
+        let close = format!("</{tag}>");
+        let end = rest_t.find(&close)?;
+        Some((xml_unescape(&rest_t[start..end]), skip + end + close.len()))
+    }
+    let mut stack: Vec<LogNode> = Vec::new();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(off) = xml[i..].find('<') {
+        i += off;
+        let rest = &xml[i..];
+        if rest.starts_with("<logentry") {
+            let end = rest.find('>').unwrap();
+            let head = &rest[..end];
+            let attr = |name: &str| {
+                head.find(&format!("{name}=\"")).map(|p| {
+                    let v = &head[p + name.len() + 2..];
+                    v[..v.find('"').unwrap()].to_owned()
+                })
+            };
+            stack.push(LogNode {
+                rev: attr("revision").unwrap().parse().unwrap(),
+                author: None,
+                msg: String::new(),
+                reverse: attr("reverse-merge").as_deref() == Some("true"),
+                revprops: Vec::new(),
+                merged: Vec::new(),
+            });
+            i += end + 1;
+        } else if rest.starts_with("</logentry>") {
+            let done = stack.pop().unwrap();
+            match stack.last_mut() {
+                Some(parent) => parent.merged.push(done),
+                None => out.push(done),
+            }
+            i += "</logentry>".len();
+        } else if let Some((t, n)) = text_of(rest, "author") {
+            stack.last_mut().unwrap().author = Some(t);
+            i += n;
+        } else if let Some((t, n)) = text_of(rest, "msg") {
+            stack.last_mut().unwrap().msg = t;
+            i += n;
+        } else if rest
+            .strip_prefix("<property")
+            .is_some_and(|r| r.starts_with(char::is_whitespace))
+        {
+            // svn writes the attribute on its own line: `<property\n   name="...">`.
+            let name_at = rest.find("name=\"").unwrap() + 6;
+            let name = &rest[name_at..name_at + rest[name_at..].find('"').unwrap()];
+            let start = rest.find('>').unwrap() + 1;
+            let end = rest.find("</property>").unwrap();
+            stack
+                .last_mut()
+                .unwrap()
+                .revprops
+                .push((name.to_owned(), xml_unescape(&rest[start..end])));
+            i += end + "</property>".len();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn engine_log_nodes(entries: Vec<opensvn_ipc::LogEntry>) -> Vec<LogNode> {
+    entries
+        .into_iter()
+        .map(|e| LogNode {
+            rev: e.rev.0,
+            author: e.author,
+            msg: e.message,
+            reverse: e.subtractive_merge.unwrap_or(false),
+            revprops: e.revprops.unwrap_or_default().into_iter().collect(),
+            merged: engine_log_nodes(e.merged.unwrap_or_default()),
+        })
+        .collect()
+}
+
+/// `log_get` with merged revisions gives the tree of `svn log -g` (svn 1.15) for the same URL:
+/// a merge of a branch that itself merged another branch (nesting two deep), a reverse merge,
+/// the limit counting only the node's own entries, and an extra revision property.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Apache + mod_dav_svn (see the module docs)"]
+async fn log_with_merged_revisions_matches_svn_log_g() {
+    let Some(oracle) =
+        opensvn_svn_oracle::Oracle::resolve(opensvn_svn_oracle::MinVersion::V1_15).unwrap()
+    else {
+        return;
+    };
+    if negotiate_mode() {
+        eprintln!("skipping: svn is given Basic credentials");
+        return;
+    }
+    for (version, host) in servers() {
+        eprintln!("log_with_merged_revisions_matches_svn_log_g: server {version}");
+        let h = harness(&host, "log-g");
+        let url = h.repo_url();
+        let work = h.work_dir();
+        std::fs::create_dir_all(&work).unwrap();
+        let svn = |cwd: &Path, args: &[&str]| svn_cli(&oracle, cwd, args);
+        let trunk = format!("{url}/trunk");
+        let b = format!("{url}/branches/b");
+        let c = format!("{url}/branches/c");
+        svn(&work, &["copy", "-q", "-m", "branch b", &trunk, &b]);
+        svn(&work, &["copy", "-q", "-m", "branch c", &b, &c]);
+        svn(&work, &["checkout", "-q", &c, "c"]);
+        let cdir = work.join("c");
+        std::fs::write(cdir.join("README.md"), "on c\n").unwrap();
+        svn(&cdir, &["commit", "-q", "-m", "work on c"]);
+        svn(&work, &["checkout", "-q", &b, "b"]);
+        let bdir = work.join("b");
+        std::fs::write(bdir.join("src/main.rs"), "fn main() { b(); }\n").unwrap();
+        svn(&bdir, &["commit", "-q", "-m", "work on b"]);
+        svn(&bdir, &["update", "-q"]);
+        svn(&bdir, &["merge", "-q", &c]);
+        svn(&bdir, &["commit", "-q", "-m", "merge c into b"]);
+        svn(&work, &["checkout", "-q", &trunk, "t"]);
+        let tdir = work.join("t");
+        svn(&tdir, &["merge", "-q", &b]);
+        svn(
+            &tdir,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "merge b into trunk",
+                "--with-revprop",
+                "opensvn:test=merged <b>",
+            ],
+        );
+        svn(&tdir, &["update", "-q"]);
+        // Undo the merge of "work on b" (a reverse merge of one revision of b).
+        let work_on_b = svn_out(
+            &oracle,
+            &work,
+            &[
+                "log",
+                "-q",
+                "-l",
+                "1",
+                "--xml",
+                "-r",
+                "HEAD:1",
+                &format!("{b}/src/main.rs"),
+            ],
+        );
+        let rev_b = parse_svn_log(&work_on_b)[0].rev;
+        svn(&tdir, &["merge", "-q", "-c", &format!("-{rev_b}"), &b]);
+        svn(&tdir, &["commit", "-q", "-m", "revert work on b"]);
+
+        for limit in [100u32, 1, 2] {
+            let xml = svn_out(
+                &oracle,
+                &work,
+                &[
+                    "log",
+                    "-g",
+                    "--xml",
+                    "-l",
+                    &limit.to_string(),
+                    "--with-revprop",
+                    "svn:author",
+                    "--with-revprop",
+                    "svn:log",
+                    "--with-revprop",
+                    "svn:date",
+                    "--with-revprop",
+                    "opensvn:test",
+                    &trunk,
+                ],
+            );
+            let mut theirs = parse_svn_log(&xml);
+            // svn lists the requested standard properties as properties too; ours reports them
+            // as fields.
+            fn strip(nodes: &mut [LogNode]) {
+                for n in nodes {
+                    n.revprops.retain(|(k, _)| !k.starts_with("svn:"));
+                    strip(&mut n.merged);
+                }
+            }
+            strip(&mut theirs);
+            let page = h
+                .engine()
+                .log(
+                    &opensvn_lib::engine::LogScope::Url(trunk.clone()),
+                    &opensvn_ipc::LogGetRequest {
+                        target: opensvn_ipc::LogTarget::Url { url: trunk.clone() },
+                        from_rev: None,
+                        to_rev: None,
+                        limit,
+                        stop_on_copy: None,
+                        with_paths: false,
+                        filter: None,
+                        include_merged: Some(true),
+                        revprops: Some(vec!["opensvn:test".into()]),
+                    },
+                    &ctx(),
+                )
+                .await
+                .expect("log -g");
+            let ours = engine_log_nodes(page.entries);
+            assert_eq!(ours, theirs, "limit {limit}");
+            if limit == 100 {
+                let merge = ours
+                    .iter()
+                    .find(|n| n.msg == "merge b into trunk")
+                    .expect("the merge of b");
+                assert_eq!(
+                    merge.revprops,
+                    vec![("opensvn:test".to_owned(), "merged <b>".to_owned())]
+                );
+                let nested = merge
+                    .merged
+                    .iter()
+                    .find(|n| n.msg == "merge c into b")
+                    .expect("b's merge of c, merged into trunk");
+                assert!(nested.merged.iter().any(|n| n.msg == "work on c"));
+                let revert = ours
+                    .iter()
+                    .find(|n| n.msg == "revert work on b")
+                    .expect("the reverse merge");
+                assert!(revert.merged.iter().all(|n| n.reverse));
+                assert!(!revert.merged.is_empty());
+            }
+        }
+    }
+    assert_no_prompt();
+}

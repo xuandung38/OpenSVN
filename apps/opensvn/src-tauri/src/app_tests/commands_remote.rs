@@ -817,6 +817,7 @@ async fn identical_logs_share_one_server_read_until_the_revision_moves() {
         .await
         .unwrap();
     assert_eq!(logs.fetches(), 2);
+}
 
 fn compare_rows(s: &opensvn_ipc::CompareSummary) -> Vec<(String, &'static str, bool)> {
     use opensvn_ipc::CompareChange as C;
