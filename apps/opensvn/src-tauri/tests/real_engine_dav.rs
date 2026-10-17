@@ -426,7 +426,8 @@ fn proxy_log() -> String {
 ///   under it, or cut while idle right after it): the failure is the injected fault, not a
 ///   read that was not sent again;
 /// - no write was sent twice;
-/// - no transaction of the failed write is left in the repository.
+/// - no transaction of the failed write is left in the repository, except the one of a commit
+///   whose `POST` lost its answer (see below).
 fn check_broken_write(scratch: &Scratch, mark: usize, err: &SvnError) {
     let log = proxy_log();
     let lines: Vec<&str> = log.lines().skip(mark).collect();
@@ -489,8 +490,31 @@ fn check_broken_write(scratch: &Scratch, mark: usize, err: &SvnError) {
         "a write was sent twice:\n{}",
         lines.join("\n")
     );
+    // The answer to the `POST` that creates a commit's transaction is only headers (the name in
+    // `SVN-Txn-Name`, no body), so a cut answer never names the transaction: the server keeps one
+    // the client cannot delete, as svn cannot. Nothing was committed, as no `MERGE` went out,
+    // and the commit fails with the connection failure itself.
+    let unnamed = lines
+        .iter()
+        .filter(|l| conn_of(l).is_some_and(|c| ours.contains(&c)))
+        .filter(|l| l.contains("truncated a POST response"))
+        .count();
+    let merged = writes.iter().any(|r| r.starts_with("MERGE "));
     let txns = scratch.transactions();
-    assert!(txns.is_empty(), "transactions left after {err:?}: {txns:?}");
+    if unnamed > 0 {
+        assert!(
+            !merged && err.code == ErrorCode::Network && err.connection_failure().is_some(),
+            "a commit whose POST lost its answer must fail with the connection failure, \
+             before any MERGE: {err:?}\n{}",
+            lines.join("\n")
+        );
+        assert!(
+            txns.len() <= unnamed,
+            "transactions left after {err:?} beyond the {unnamed} unnamed one(s): {txns:?}"
+        );
+    } else {
+        assert!(txns.is_empty(), "transactions left after {err:?}: {txns:?}");
+    }
 }
 
 impl Scratch {
