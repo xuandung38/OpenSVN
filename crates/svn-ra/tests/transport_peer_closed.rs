@@ -29,6 +29,9 @@ use tokio_rustls::server::TlsStream;
 enum Act {
     /// Complete response with `Content-Length`; the connection stays open.
     Ok(String),
+    /// [`Act::Ok`] once every request sharing the barrier has been read: requests sent at the
+    /// same time then each hold a connection of their own, none can reuse another's.
+    OkTogether(String, Arc<tokio::sync::Barrier>),
     /// Complete response with `Content-Length`, then TCP close without `close_notify`.
     OkThenUncleanClose(String),
     /// Response headers announcing `body.len()` bytes, `keep` of them, then a close without
@@ -240,6 +243,13 @@ async fn serve_connection(
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| Act::Ok("ok".into()));
+        let act = match act {
+            Act::OkTogether(body, all_read) => {
+                all_read.wait().await;
+                Act::Ok(body)
+            }
+            other => other,
+        };
         match act {
             Act::Ok(body) => {
                 let resp = format!(
@@ -280,6 +290,7 @@ async fn serve_connection(
                 socket_reset(tcp);
                 return;
             }
+            Act::OkTogether(..) => unreachable!("answered as Ok above"),
             Act::Stall => {
                 let _ = tls
                     .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nabc")
@@ -396,9 +407,14 @@ async fn a_reused_connection_closed_or_reset_under_a_read_is_retried_at_once() {
 #[tokio::test]
 async fn the_retry_after_a_broken_pooled_connection_does_not_reuse_another_stale_one() {
     let ca = TestCa::new();
-    let server = RawServer::start_with(&ca, Vec::new(), true).await;
+    // Three pooled connections, each used once: the three first requests are answered only
+    // once all of them arrived, so none can reuse another's connection.
+    let all_read = Arc::new(tokio::sync::Barrier::new(3));
+    let warm = (0..3)
+        .map(|_| Act::OkTogether("ok".into(), Arc::clone(&all_read)))
+        .collect();
+    let server = RawServer::start_with(&ca, warm, true).await;
     let t = transport(&ca, |_| {});
-    // Three pooled connections, each used once (held at the same time so none is reused).
     let cancel = CancelToken::new();
     let held = futures_util::future::join_all(
         (0..3).map(|i| t.send(req("GET", &server.url(&format!("/warm{i}"))), &cancel)),
@@ -732,11 +748,14 @@ async fn a_read_cut_off_mid_body_goes_out_again_on_a_new_connection() {
     let ca = TestCa::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     // Every reused connection is closed under its next request: two pooled ones are stale.
+    // The two first reads are answered only once both arrived, so they cannot share a
+    // connection whatever the scheduling.
+    let both_read = Arc::new(tokio::sync::Barrier::new(2));
     let server = RawServer::serve(
         &ca,
         vec![
-            Act::Ok("a".into()),
-            Act::Ok("b".into()),
+            Act::OkTogether("a".into(), Arc::clone(&both_read)),
+            Act::OkTogether("b".into(), both_read),
             Act::Truncate {
                 body: "z".repeat(500),
                 keep: 50,
