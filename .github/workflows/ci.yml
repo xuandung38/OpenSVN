@@ -52,7 +52,8 @@ jobs:
           tool: cargo-nextest
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo nextest run --workspace --locked --no-tests=pass
+      # Every failure of a run, not only the first (Windows and macOS are not run locally).
+      - run: cargo nextest run --workspace --locked --no-tests=pass --no-fail-fast
       # Failpoints are compiled in only for these tests, never in release builds.
       - name: Test svn-wc with failpoints
         if: runner.os == 'Linux'
