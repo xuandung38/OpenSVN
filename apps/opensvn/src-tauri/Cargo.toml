@@ -67,7 +67,10 @@ tauri-plugin-notification = "=2.6.0"
 # Updates come from a private GitHub releases repository. The read token is kept in the credential
 # store (`updater/github-token`), never in settings or the binary; no updater permission is granted
 # to the WebView (the app exposes its own `update_check` / `update_install` commands).
-tauri-plugin-updater = "=2.13.3"
+# Without the `zip` feature: the updater artifacts are the signed `-setup.exe` (Windows) and
+# `.AppImage` (Linux), never the v1 `.zip`/`.tar.gz` wrappers, and that feature pulls zip 4
+# (RUSTSEC-2026-0367/0368/0369). The macOS `.app.tar.gz` does not depend on it.
+tauri-plugin-updater = { version = "=2.13.3", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tauri-specta = { workspace = true, features = ["derive", "typescript"] }
 specta.workspace = true
 specta-typescript.workspace = true

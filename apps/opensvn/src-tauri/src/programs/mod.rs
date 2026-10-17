@@ -37,7 +37,9 @@ fn refuse(msg: impl Into<String>) -> AppError {
     crate::errors::invalid_argument(msg)
 }
 
-/// Checks that `path` is something the OS can launch and returns its canonical form.
+/// Checks that `path` is something the OS can launch and returns its canonical form, without
+/// the Windows `\\?\` prefix (see [`strip_verbatim`]): the program runs from the path the user
+/// confirmed and the settings hold.
 fn validate_program(path: &Path) -> Result<PathBuf, AppError> {
     let canonical =
         std::fs::canonicalize(path).map_err(|_| refuse("The selected program does not exist."))?;
@@ -72,7 +74,7 @@ fn validate_program(path: &Path) -> Result<PathBuf, AppError> {
             "Select an executable file (.exe, .com, .bat or .cmd).",
         ));
     }
-    Ok(canonical)
+    Ok(PathBuf::from(strip_verbatim(&canonical.to_string_lossy())))
 }
 
 use crate::display_text::is_deceptive;
@@ -212,7 +214,7 @@ impl ProgramService {
             return Ok(None);
         };
         let canonical = validate_program(&picked)?;
-        let path = strip_verbatim(&canonical.to_string_lossy());
+        let path = canonical.to_string_lossy().into_owned();
         if path.chars().any(is_deceptive) {
             return Err(refuse(
                 "The program path contains characters that cannot be shown safely.",

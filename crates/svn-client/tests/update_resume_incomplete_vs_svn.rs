@@ -17,7 +17,6 @@
 mod common;
 
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::oracle::*;
@@ -206,7 +205,7 @@ fn untouched(_: &Path) {}
 
 #[cfg(unix)]
 fn dangling_link(wc: &Path) {
-    fs::remove_dir_all(wc.join("d")).expect("rm d");
+    std::fs::remove_dir_all(wc.join("d")).expect("rm d");
     std::os::unix::fs::symlink("nowhere", wc.join("d")).expect("link");
 }
 
@@ -220,6 +219,8 @@ async fn resumed_update_matches_svn() {
     let repo = Repo::new(&oracle);
     build(&repo);
     let sb = Sandbox::new();
+    // The symlink case needs Unix.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut cases: Vec<(&str, Local)> = vec![("plain", untouched), ("edited", edited)];
     #[cfg(unix)]
     cases.push(("link", dangling_link));

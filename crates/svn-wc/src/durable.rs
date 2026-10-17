@@ -80,8 +80,28 @@ pub(crate) fn device_of(_path: &Path) -> Option<u64> {
     None
 }
 
-/// Syncs one file that a filesystem barrier does not cover (another device below the root).
-pub(crate) fn sync_file(path: &Path) -> std::io::Result<()> {
+/// Syncs one existing file to disk (a file a filesystem barrier does not cover, or one written
+/// through a handle that is gone).
+///
+/// Windows flushes only through a handle with write access (`FlushFileBuffers`), so the file is
+/// opened for writing there, never truncated. A file with the read-only attribute cannot be
+/// opened that way: it is left to the system's write-back, like directory entries, which
+/// Windows cannot sync either.
+pub fn sync_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        match std::fs::OpenOptions::new().write(true).open(path) {
+            Ok(file) => file.sync_all(),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::PermissionDenied
+                    && std::fs::metadata(path).is_ok_and(|m| m.permissions().readonly()) =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(windows))]
     std::fs::File::open(path)?.sync_all()
 }
 
