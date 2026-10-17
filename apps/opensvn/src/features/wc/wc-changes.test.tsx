@@ -4,7 +4,7 @@ import { AppShell } from "../../app/app-shell";
 import type { FileStatus } from "../../ipc/bindings";
 import { mockCalls, setMockLogFailure, setMockOpDuration } from "../../ipc/mock/adapter";
 import { MOCK_WC_ID, mockWorkingCopies } from "../../ipc/mock/data";
-import { resetWcMock } from "../../ipc/mock/wc-mock-commands";
+import { resetWcMock, setMockCommitCuts } from "../../ipc/mock/wc-mock-commands";
 import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../test-utils";
 import { ChangesList } from "./changes/changes-list";
 import { WcSessionProvider } from "./wc-session";
@@ -100,6 +100,39 @@ test("commit needs a summary, reports out-of-date, recovers through Update and c
   expect(
     (screen.getByRole("textbox", { name: "Summary (required)" }) as HTMLInputElement).value,
   ).toBe("");
+});
+
+test("a commit cut off with nothing committed says so and offers Retry, which commits", async () => {
+  setMockCommitCuts(1);
+  renderApp(<AppShell />);
+  await option(/renderer\.ts/);
+  // Tick only a file that is not out of date, so the commit can go through.
+  await user().click(screen.getByRole("checkbox", { name: "Select all files" }));
+  await user().click(screen.getByRole("checkbox", { name: "Select all files" }));
+  await user().click(
+    (await option(/renderer\.ts/)).querySelector<HTMLElement>("[data-row-check]") as HTMLElement,
+  );
+  await user().type(screen.getByRole("textbox", { name: "Summary (required)" }), "Tune renderer");
+  await user().click(screen.getByRole("button", { name: /^Commit 1 file to trunk/ }));
+
+  const alert = await screen.findByRole("alert");
+  expect(
+    within(alert).getByText(
+      "The connection was cut while committing. Nothing was committed; it is safe to try again.",
+    ),
+  ).toBeTruthy();
+  // The raw transport text is not what the user reads.
+  expect(within(alert).queryByText(/connection reset by peer/)).toBeNull();
+  // Nothing was cleared: the same commit goes out again.
+  expect(
+    (screen.getByRole("textbox", { name: "Summary (required)" }) as HTMLInputElement).value,
+  ).toBe("Tune renderer");
+  await user().click(within(alert).getByRole("button", { name: "Retry" }));
+  expect(await screen.findByText("Committed r48214", {}, { timeout: 4000 })).toBeTruthy();
+  const commits = mockCalls.filter((c) => c.name === "commit");
+  expect(commits).toHaveLength(2);
+  expect(commits[1]?.args[0]).toEqual(commits[0]?.args[0]);
+  await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
 });
 
 test("commit box warns about foreign locks, long summaries and blocks on conflicts", async () => {

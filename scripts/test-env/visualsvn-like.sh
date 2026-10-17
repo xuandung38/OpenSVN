@@ -385,8 +385,10 @@ LoadModule setenvif_module      $m/mod_setenvif.so
 ErrorLog $VSVN_DIR/logs/error-$tag.log
 # core:notice keeps "AH00052: child pid ... exit signal" (a crashed mod_dav_svn request).
 LogLevel warn core:notice auth_gssapi:debug
-# %I / %O: bytes received / sent (request and response, headers included).
-LogFormat "%h %u \"%r\" %>s in=%I out=%O %Dus" vsvn
+# %I / %O: bytes received / sent (request and response, headers included). port= is the client
+# port (one per connection), tls= says whether its TLS session was resumed ("Initial"/"Resumed",
+# "-" over http): together they count the connections and full handshakes of an operation.
+LogFormat "%h %u \"%r\" %>s in=%I out=%O %Dus port=%{remote}p tls=%{SSL_SESSION_RESUMED}x" vsvn
 CustomLog $VSVN_DIR/logs/access-$tag.log vsvn
 # Large commits (100 MB+ files) and long reports.
 LimitRequestBody 0

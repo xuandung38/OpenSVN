@@ -22,6 +22,9 @@ const ENTRY_COMMITTED_REV: &str = "svn:entry:committed-rev";
 const ENTRY_COMMITTED_DATE: &str = "svn:entry:committed-date";
 const ENTRY_LAST_AUTHOR: &str = "svn:entry:last-author";
 const ENTRY_UUID: &str = "svn:entry:uuid";
+/// The wcprop ra_serf caches for every file it receives: the `D:checked-in` href (the file at
+/// its last changed revision), stored in `NODES.dav_cache`.
+const WC_VERSION_URL: &str = "svn:wc:ra_dav:version-url";
 
 fn corrupt(msg: impl Into<String>) -> SvnError {
     SvnError::new(ErrorCode::ProtocolViolation, msg)
@@ -38,6 +41,8 @@ struct FileState {
     delta: Option<(SvndiffDecoder, WindowSender)>,
     /// Download feeding this file (skeleton mode).
     download: Option<DownloadTask>,
+    /// The text change was announced to the editor (`announce_text`).
+    announced: bool,
 }
 
 struct Frame {
@@ -61,6 +66,9 @@ pub(super) struct EventBridge<'a> {
     scheduler: Option<FetchScheduler>,
     /// Status drives carry no text.
     send_text: bool,
+    /// Without text, still tell the editor that a file's text changed: `apply_textdelta`
+    /// closed at once with no window (diff drives).
+    announce_text: bool,
     stack: Vec<Frame>,
     pending: Vec<PendingClose>,
     root_closed: bool,
@@ -86,6 +94,7 @@ impl<'a> EventBridge<'a> {
             wire,
             scheduler,
             send_text,
+            announce_text: false,
             stack: Vec::new(),
             pending: Vec::new(),
             root_closed: false,
@@ -93,6 +102,33 @@ impl<'a> EventBridge<'a> {
             prefix: RelPath::root(),
             outer: Vec::new(),
         }
+    }
+
+    /// With `announce`, a drive without text still reports each text change (see the field).
+    pub(super) fn announcing_text(mut self, announce: bool) -> Self {
+        self.announce_text = announce;
+        self
+    }
+
+    /// Tells the editor that the text of the open file `path` changed, without contents.
+    async fn announce_text_change(
+        &mut self,
+        path: &RelPath,
+        base_checksum: Option<[u8; 16]>,
+    ) -> Result<()> {
+        if !self.announce_text {
+            return Ok(());
+        }
+        let editor = self.editor;
+        let file = self.top_file(path)?;
+        if file.announced {
+            return Ok(());
+        }
+        file.announced = true;
+        let sender = editor
+            .apply_textdelta(file.id, base_checksum.map(Checksum::Md5))
+            .await?;
+        sender.send(None).await
     }
 
     /// The server's edit is rooted at `prefix` below the session root.
@@ -210,20 +246,27 @@ impl<'a> EventBridge<'a> {
                 });
                 Ok(())
             }
-            E::OpenFile { path, base_rev, .. } => {
+            E::OpenFile {
+                path,
+                base_rev,
+                checked_in,
+            } => {
                 let parent = self.top_dir()?;
                 let id = self.editor.open_file(&path, parent, base_rev).await?;
                 self.push_file(path, id);
-                Ok(())
+                self.version_url(id, checked_in.as_ref()).await
             }
             E::AddFile {
-                path, copy_from, ..
+                path,
+                copy_from,
+                checked_in,
+                ..
             } => {
                 let parent = self.top_dir()?;
                 let copy = copy_from.as_ref().map(|(p, r)| (p.as_str(), *r));
                 let id = self.editor.add_file(&path, parent, copy).await?;
                 self.push_file(path, id);
-                Ok(())
+                self.version_url(id, checked_in.as_ref()).await
             }
             E::DeleteEntry { path, rev } => {
                 let parent = self.top_dir()?;
@@ -261,7 +304,7 @@ impl<'a> EventBridge<'a> {
                 base_checksum,
             } => {
                 if !self.send_text {
-                    return Ok(());
+                    return self.announce_text_change(&path, base_checksum).await;
                 }
                 let editor = self.editor;
                 let file = self.top_file(&path)?;
@@ -293,6 +336,22 @@ impl<'a> EventBridge<'a> {
         }
     }
 
+    /// Hands the file's `D:checked-in` href to the editor as the `svn:wc:ra_dav:version-url`
+    /// wcprop, as ra_serf does, so the working copy caches it like svn's (`NODES.dav_cache`).
+    /// The path is kept as the server encoded it.
+    async fn version_url(
+        &self,
+        id: FileId,
+        href: Option<&svn_protocol::AcceptedHref>,
+    ) -> Result<()> {
+        let Some(href) = href.filter(|_| self.send_text) else {
+            return Ok(());
+        };
+        self.editor
+            .change_file_prop(id, set(WC_VERSION_URL, href.url.path().as_bytes().to_vec()))
+            .await
+    }
+
     fn push_file(&mut self, path: RelPath, id: FileId) {
         self.stack.push(Frame {
             path,
@@ -300,6 +359,7 @@ impl<'a> EventBridge<'a> {
                 id,
                 delta: None,
                 download: None,
+                announced: false,
             }),
         });
     }
@@ -327,7 +387,7 @@ impl<'a> EventBridge<'a> {
         base_checksum: Option<[u8; 16]>,
     ) -> Result<()> {
         if !self.send_text {
-            return Ok(());
+            return self.announce_text_change(path, base_checksum).await;
         }
         let href = href.ok_or_else(|| corrupt(format!("no href to fetch {path} from")))?;
         // Like `fetch_props`: file text comes from a node of a revision root, never from any

@@ -487,3 +487,46 @@ pub async fn copy_location(
     })
     .await
 }
+
+/// Compare with branch / another folder: what differs between the working copy's location (at
+/// `left_rev`, or the working copy itself with its local changes) and another folder of the same
+/// repository at `right_rev`, like `svn diff --summarize`. Read-only.
+#[tauri::command]
+#[specta::specta]
+pub async fn compare_summarize(
+    state: State<'_, AppState>,
+    request: opensvn_ipc::CompareRequest,
+) -> Result<opensvn_ipc::CompareSummary, AppError> {
+    guard(async {
+        let resolved = state.wcs.resolve(&request.wc_id)?;
+        let ctx = OpContext::detached();
+        let left = if request.include_local {
+            crate::engine::CompareLeft::Wc(&resolved.wc)
+        } else {
+            let info = state
+                .engine
+                .wc_info(&resolved.wc.root, &ctx)
+                .await
+                .map_err(engine_err)?;
+            return state
+                .engine
+                .compare_summarize(
+                    crate::engine::CompareLeft::Url {
+                        url: &info.url,
+                        rev: request.left_rev,
+                    },
+                    &request.right_url,
+                    request.right_rev,
+                    &ctx,
+                )
+                .await
+                .map_err(engine_err);
+        };
+        state
+            .engine
+            .compare_summarize(left, &request.right_url, request.right_rev, &ctx)
+            .await
+            .map_err(engine_err)
+    })
+    .await
+}

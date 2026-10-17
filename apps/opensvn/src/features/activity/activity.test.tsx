@@ -139,6 +139,17 @@ describe("error mapping", () => {
     expect(commit.key).toBe("errCommitUnsure");
   });
 
+  test("a commit that left nothing behind says it is safe to try again, raw text in the details", () => {
+    const t = errorText({
+      code: "commit-not-applied",
+      message: "Nothing was committed; it is safe to try again.",
+      detail: `Nothing was committed; it is safe to try again. <- ${OWNER_TEXT}`,
+    });
+    expect(t.key).toBe("errNothingCommitted");
+    expect(t.detail).toContain(OWNER_TEXT);
+    expect(t.detail).toContain("(commit-not-applied)");
+  });
+
   test("a switch refused for unrelated history gets the short text that names the way out", () => {
     const t = errorText({
       code: "unrelated-resources",
@@ -394,9 +405,9 @@ describe("waiting for a lost connection", () => {
     ).toBeNull();
   });
 
-  for (const [lang, text, retry, cancel] of [
-    ["en", "Connection lost, retrying in 8s…", "Retry now", "Cancel"],
-    ["vi", "Mất kết nối, thử lại sau 8 giây…", "Thử lại ngay", "Hủy"],
+  for (const [lang, text, live, retry, cancel] of [
+    ["en", "Connection lost, retrying in 8s…", "Connection lost", "Retry now", "Cancel"],
+    ["vi", "Mất kết nối, thử lại sau 8 giây…", "Mất kết nối", "Thử lại ngay", "Hủy"],
   ] as const) {
     test(`${lang}: the panel counts down, retries now and cancels`, async () => {
       const cancelled: string[] = [];
@@ -411,7 +422,11 @@ describe("waiting for a lost connection", () => {
         </QueryClientProvider>,
       );
       const notice = screen.getByTestId("connection-wait");
-      expect(within(notice).getByRole("status").textContent).toBe(text);
+      expect(within(notice).getByTestId("connection-wait-countdown").textContent).toBe(text);
+      // The live region names the state only; the countdown is outside it.
+      expect(screen.getByTestId("connection-wait-live").textContent).toBe(live);
+      expect(within(notice).queryByRole("status")).toBeNull();
+      expect(screen.getByTestId("connection-wait-live").getAttribute("aria-live")).toBe("polite");
       await userEvent.click(within(notice).getByRole("button", { name: retry }));
       expect(mockCalls.filter((c) => c.name === "opRetryNow").map((c) => c.args)).toEqual([
         ["op1"],
@@ -431,5 +446,56 @@ describe("waiting for a lost connection", () => {
   test("an operation that is not waiting shows no notice", () => {
     renderPanel([applyProgress(newOpState(handle(), 0), progress(), 1000)]);
     expect(screen.queryByTestId("connection-wait")).toBeNull();
+    expect(screen.getByTestId("connection-wait-live").textContent).toBe("");
+  });
+
+  test("the live region changes on a state change only, never with the countdown", () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    try {
+      const start = Date.now();
+      const fetching = applyProgress(newOpState(handle(), 0), progress(), start);
+      const { rerender } = renderPanel([fetching]);
+      const live = screen.getByTestId("connection-wait-live");
+      const texts: string[] = [live.textContent ?? ""];
+      const countdown: string[] = [];
+      const record = () => {
+        texts.push(live.textContent ?? "");
+        const c = screen.queryByTestId("connection-wait-countdown");
+        if (c) countdown.push(c.textContent ?? "");
+      };
+      rerender([waiting(5, start)]);
+      record();
+      for (let i = 0; i < 6; i++) {
+        act(() => {
+          vi.advanceTimersByTime(1000);
+        });
+        record();
+      }
+      // A second attempt failed: still waiting, a new countdown.
+      rerender([waiting(3, Date.now())]);
+      record();
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      record();
+      rerender([applyProgress(fetching, progress({ stage: "fetching" }), Date.now())]);
+      record();
+      // The same node stayed in the document all along, so each change is announced.
+      expect(screen.getByTestId("connection-wait-live")).toBe(live);
+      expect(countdown).toContain("Connection lost, retrying in 5s…");
+      expect(countdown).toContain("Connection lost, retrying in 1s…");
+      expect(countdown).toContain("Connection lost, retrying…");
+      const changes = texts.filter((t, i) => i === 0 || t !== texts[i - 1]);
+      expect(changes).toEqual(["", "Connection lost", "Reconnected"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a wait that ends in a failure does not say reconnected", () => {
+    const { rerender } = renderPanel([waiting(5, Date.now())]);
+    const failed: OpState = { ...waiting(5, Date.now()), state: "failed", error: "gone" };
+    rerender([{ ...failed, progress: { ...progress(), stage: "fetching" } }]);
+    expect(screen.getByTestId("connection-wait-live").textContent).toBe("");
   });
 });

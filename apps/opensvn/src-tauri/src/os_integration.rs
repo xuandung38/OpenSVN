@@ -273,6 +273,7 @@ impl OsOpener for SystemOpener {
             Command::new("xdg-open")
         };
         c.arg(path);
+        crate::startup_env::scrub(&mut c);
         launch(c)
     }
 
@@ -291,6 +292,7 @@ impl OsOpener for SystemOpener {
             c
         };
         c.current_dir(cwd);
+        crate::startup_env::scrub(&mut c);
         launch(c)
     }
 }

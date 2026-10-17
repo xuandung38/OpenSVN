@@ -8,7 +8,10 @@ import { queryKeys } from "../../../ipc/query-keys";
 export interface ResumeActions {
   /** Finishes the interrupted checkout or update at the revision it was reaching. */
   continueWc(wcId: string): Promise<OperationHandle | undefined>;
-  /** Updates to HEAD instead (also finishes the incomplete folders). */
+  /**
+   * Updates to HEAD instead (also finishes the incomplete folders), with the choices of the
+   * interrupted checkout (externals) or switch (its URL), which the backend reads from its journal.
+   */
   updateLatest(wcId: string): Promise<OperationHandle | undefined>;
 }
 
@@ -29,8 +32,7 @@ export function useResumeActions(): ResumeActions {
     };
     return {
       continueWc: (wcId) => run(() => unwrap(ipc().commands.wcContinue(wcId))),
-      updateLatest: (wcId) =>
-        run(() => unwrap(ipc().commands.update({ wcId, paths: null, rev: null, depth: null }))),
+      updateLatest: (wcId) => run(() => unwrap(ipc().commands.wcUpdateLatest(wcId))),
     };
   }, [toast, qc]);
 }

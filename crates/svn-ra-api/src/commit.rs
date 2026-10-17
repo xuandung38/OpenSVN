@@ -4,7 +4,34 @@ use std::fs::File;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use svn_types::{Checksum, DirId, FileId, PropChange, RelPath, Result, Revnum, Timestamp};
+use svn_types::{
+    Checksum, DirId, ErrorCode, FileId, PropChange, RelPath, Result, Revnum, SvnError, Timestamp,
+};
+
+use crate::TxnAbort;
+
+/// Message of [`ErrorCode::CommitNotApplied`].
+pub const NOTHING_COMMITTED: &str = "Nothing was committed; it is safe to try again.";
+
+/// The error of a commit that failed before its `MERGE` was sent, once its transaction was
+/// deleted with the outcome `abort`.
+///
+/// When the connection broke under one of the commit's writes (`cause` is a connection failure
+/// or an unreachable server, see [`SvnError::is_connection_class`]) and the server confirmed it
+/// deleted the transaction ([`TxnAbort::Deleted`]), nothing of the commit exists on the server:
+/// the result is [`ErrorCode::CommitNotApplied`] with `cause` as its child. Anything else, a
+/// transaction whose deletion failed or that was already gone included, keeps `cause` as is:
+/// the user then sees what really failed.
+///
+/// Only for failures before the `MERGE` was sent: once it was, the transaction may have become
+/// a revision, whatever a later `DELETE` says.
+pub fn unsent_commit_error(cause: SvnError, abort: &Result<TxnAbort>) -> SvnError {
+    if cause.is_connection_class() && matches!(abort, Ok(TxnAbort::Deleted)) {
+        SvnError::new(ErrorCode::CommitNotApplied, NOTHING_COMMITTED).with_child(cause)
+    } else {
+        cause
+    }
+}
 
 /// File content that can be opened again, so uploads survive a 401 or network retry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,6 +178,9 @@ pub trait CommitEditor: Send {
     /// the repository storage fails during the post-commit steps. A caller that journaled the
     /// `MERGE` therefore reconciles with the repository before it forgets the commit.
     async fn close_edit(self: Box<Self>) -> Result<CommitInfo>;
-    /// Abandons the commit and deletes the server transaction.
-    async fn abort_edit(self: Box<Self>) -> Result<()>;
+    /// Abandons the commit and deletes the server transaction: [`crate::TxnAbort::Deleted`]
+    /// when the server confirmed it deleted the transaction, [`crate::TxnAbort::Gone`] when it
+    /// had none of that name. Any failure to find out is an error, so the transaction may
+    /// still exist.
+    async fn abort_edit(self: Box<Self>) -> Result<crate::TxnAbort>;
 }

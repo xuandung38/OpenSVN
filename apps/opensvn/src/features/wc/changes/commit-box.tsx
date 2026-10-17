@@ -8,6 +8,7 @@ import { useToast } from "../../../components/ui/toast";
 import type { AppError } from "../../../ipc/bindings";
 import { IpcError, ipc, unwrap } from "../../../ipc/client";
 import { useOperationOutcome } from "../../../ipc/queries";
+import { commonStrings } from "../../../lib/i18n/common-strings";
 import { useT } from "../../../lib/i18n/i18n";
 import { matchShortcut } from "../shortcuts";
 import { useWcActions } from "../use-wc-actions";
@@ -33,6 +34,7 @@ import { wcStrings } from "../wc-strings";
 export function CommitBox() {
   const { wc, files, checked, setChecked } = useWcSession();
   const t = useT(wcStrings);
+  const c = useT(commonStrings);
   const toast = useToast();
   const actions = useWcActions();
   const [summary, setSummary] = useState("");
@@ -154,6 +156,8 @@ export function CommitBox() {
         ? t("commitButtonOne", { where })
         : t("commitButton", { count: selected.length, where });
   const outOfDate = error?.code === "out-of-date" || error?.actions?.includes("update") === true;
+  // The server confirmed the commit left nothing behind: the same commit can simply be sent again.
+  const notApplied = error?.code === "commit-not-applied";
 
   return (
     <div className="flex flex-col gap-2 border-t border-line bg-surface-2 p-2.5">
@@ -242,11 +246,16 @@ export function CommitBox() {
         <div role="alert" className="rounded-md bg-bad-soft px-2.5 py-2">
           <b className="text-bad-text">{t("commitFailed")}</b>
           <SafeText as="p" className="m-0 break-words">
-            {outOfDate ? t("outOfDate") : error.message}
+            {outOfDate ? t("outOfDate") : notApplied ? t("nothingCommitted") : error.message}
           </SafeText>
           {outOfDate && (
             <Button small className="mt-1" onClick={() => void actions.update(null)}>
               {t("updateNow")}
+            </Button>
+          )}
+          {notApplied && (
+            <Button small className="mt-1" disabled={!canCommit} onClick={submit}>
+              {c("retry")}
             </Button>
           )}
         </div>

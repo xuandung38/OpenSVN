@@ -21,10 +21,52 @@ import { StatusGlyph } from "../components/ui/status-glyph";
 import { Tabs } from "../components/ui/tabs";
 import { useToast } from "../components/ui/toast";
 import { ToolbarItem } from "../components/ui/toolbar-item";
+import { ConnectionWaitNotice } from "../features/activity/connection-wait";
+import { applyProgress, newOpState } from "../ipc/events";
 import type { StatusCode } from "../lib/status";
 import { RemoteDemo } from "./remote-demo";
 
 const CODES: StatusCode[] = ["M", "A", "D", "R", "?", "!", "C", "P", "I"];
+
+/** An update waiting for a lost connection (the countdown starts at 30 s when the page opens). */
+const WAITING_OP = applyProgress(
+  newOpState(
+    {
+      opId: "gallery-wait",
+      kind: "update",
+      wcId: null,
+      title: "Update to HEAD",
+      rootPath: null,
+      background: false,
+    },
+    0,
+  ),
+  {
+    opId: "gallery-wait",
+    phase: "update",
+    current: null,
+    total: null,
+    bytesDone: 0,
+    bytesTotal: null,
+    currentPath: null,
+    stage: "waiting-for-connection",
+    entries: [],
+    entriesDropped: 0,
+    counts: {
+      added: 0,
+      deleted: 0,
+      updated: 0,
+      merged: 0,
+      conflicted: 0,
+      treeConflicted: 0,
+      existed: 0,
+      restored: 0,
+      skipped: 0,
+    },
+    connectionWait: { retryInSecs: 30, waitedSecs: 12, maxWaitSecs: 600, attempt: 2 },
+  },
+  Date.now(),
+);
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -215,6 +257,9 @@ function AllComponents() {
         />
         <ActivityRow title="Commit" percent={100} state="done" />
         <ActivityRow title="Update: network error" percent={30} state="failed" />
+      </Section>
+      <Section title="Connection wait">
+        <ConnectionWaitNotice op={WAITING_OP} onCancel={() => undefined} />
       </Section>
       <Section title="Status bar · Empty state · Safe link">
         <StatusBar>

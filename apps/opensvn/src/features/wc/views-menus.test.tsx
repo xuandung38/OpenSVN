@@ -2,13 +2,25 @@ import { act, configure, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { AppShell } from "../../app/app-shell";
 import type { FileStatus, RepoEntry } from "../../ipc/bindings";
-import { mockAdapter, mockCalls, mockEmit, setMockOpDuration } from "../../ipc/mock/adapter";
+import {
+  mockAdapter,
+  mockCalls,
+  mockEmit,
+  mockMenuViewState,
+  setMockOpDuration,
+} from "../../ipc/mock/adapter";
 import { MOCK_WC_ID } from "../../ipc/mock/data";
 import { resetWcMock } from "../../ipc/mock/wc-mock-commands";
 import { setExternalOpener } from "../../lib/external-link";
 import { expectNoSeriousA11yViolations } from "../../test-axe";
 import { installFakeClock, renderApp, setupMockIpc, stubLayout } from "../../test-utils";
-import { compareListings, isCompareTarget } from "./compare/compare-model";
+import {
+  compareListings,
+  hasTextDiff,
+  isCompareTarget,
+  parseRevision,
+  summaryState,
+} from "./compare/compare-model";
 import { DOCS_URL } from "./help/help-links";
 import { parseViewPrefs, reloadViewPrefs } from "./view-prefs";
 import { buildRows, listedFiles, rowGlyph } from "./wc-model";
@@ -199,14 +211,44 @@ describe("view model", () => {
     expect(isCompareTarget("https://other.example.com/x", root, `${root}/trunk`)).toBe(false);
     expect(isCompareTarget("javascript:alert(1)", root, `${root}/trunk`)).toBe(false);
   });
+
+  test("revision fields and summary labels", () => {
+    expect(parseRevision("")).toBeNull();
+    expect(parseRevision(" HEAD ")).toBeNull();
+    expect(parseRevision("42")).toBe(42);
+    expect(parseRevision("r42")).toBe(42);
+    expect(parseRevision("0")).toBe(0);
+    for (const bad of ["-1", "4.2", "abc", "1e3", "99999999999"]) {
+      expect(parseRevision(bad)).toBeUndefined();
+    }
+    expect(summaryState({ change: "added", propsChanged: false })).toBe("stateAdded");
+    expect(summaryState({ change: "deleted", propsChanged: false })).toBe("stateDeleted");
+    expect(summaryState({ change: "modified", propsChanged: false })).toBe("stateModified");
+    expect(summaryState({ change: "modified", propsChanged: true })).toBe("stateModifiedProps");
+    expect(summaryState({ change: "normal", propsChanged: true })).toBe("stateProps");
+    expect(hasTextDiff({ kind: "file", change: "added" })).toBe(true);
+    expect(hasTextDiff({ kind: "file", change: "normal" })).toBe(false);
+    expect(hasTextDiff({ kind: "dir", change: "modified" })).toBe(false);
+  });
 });
 
 test("View menu: show ignored, hide unversioned (and untick them), tree view, changelist groups", async () => {
   await boot();
   expect(option(/build\/game\.exe/)).toBeNull();
+  // The native check marks start from the stored choices.
+  await waitFor(() =>
+    expect(mockMenuViewState()).toEqual({
+      showUnversioned: true,
+      showIgnored: false,
+      groupByChangelist: true,
+      tree: false,
+    }),
+  );
 
   await emit("menu://view/show-ignored");
-  expect(await screen.findByText("Show ignored files: on")).toBeTruthy();
+  // The check mark in the native menu is the feedback: no toast.
+  await waitFor(() => expect(mockMenuViewState()?.showIgnored).toBe(true));
+  expect(screen.queryByText(/Show ignored files: on/)).toBeNull();
   const ignored = await within(changes()).findByRole("option", { name: /build\/game\.exe/ });
   expect(within(ignored).getByRole("img", { name: "Ignored" })).toBeTruthy();
   // Listed for reference only: no commit tick.
@@ -225,7 +267,8 @@ test("View menu: show ignored, hide unversioned (and untick them), tree view, ch
   await waitFor(() => expect(unversioned.getAttribute("aria-checked")).toBe("true"));
   await emit("menu://view/show-unversioned");
   await waitFor(() => expect(option(/tools\/readme-renamed\.md/)).toBeNull());
-  expect(screen.getByText("Show unversioned files: off")).toBeTruthy();
+  await waitFor(() => expect(mockMenuViewState()?.showUnversioned).toBe(false));
+  expect(screen.queryByText(/Show unversioned files: off/)).toBeNull();
   await emit("menu://view/show-unversioned");
   const back = await within(changes()).findByRole("option", { name: /tools\/readme-renamed\.md/ });
   expect(back.getAttribute("aria-checked")).toBe("false");
@@ -250,6 +293,14 @@ test("View menu: show ignored, hide unversioned (and untick them), tree view, ch
   ).toBeTruthy();
   await emit("menu://view/group-changelist");
   await waitFor(() => expect(option(/Changelist: refactor/)).toBeNull());
+  await waitFor(() =>
+    expect(mockMenuViewState()).toEqual({
+      showUnversioned: true,
+      showIgnored: true,
+      groupByChangelist: false,
+      tree: false,
+    }),
+  );
 
   // The choices are remembered.
   expect(JSON.parse(localStorage.getItem("opensvn.viewPrefs") ?? "{}")).toMatchObject({
@@ -269,9 +320,26 @@ test("the View options menu in the Changes list toggles the same prefs", async (
   await a11y("view options menu", menu);
   await user().click(tree);
   expect(await within(changes()).findByRole("option", { name: /^Folder src,/ })).toBeTruthy();
+  // The native View menu follows a change made here too.
+  await waitFor(() => expect(mockMenuViewState()?.tree).toBe(true));
 });
 
-test("Branch > Compare with branch: pick a branch, open changed folders, diff a file", async () => {
+test("a View check item clicked while a dialog is open gets its mark put back", async () => {
+  await boot();
+  await waitFor(() => expect(mockMenuViewState()?.tree).toBe(false));
+  await emit("menu://branch/compare");
+  await screen.findByRole("dialog", { name: "Compare with branch", hidden: true });
+  const sent = () => mockCalls.filter((c) => c.name === "menuSetView").length;
+  const before = sent();
+  // The native item has flipped its own mark; the app ignores the click behind the dialog and
+  // sends the unchanged choices again.
+  await emit("menu://view/tree");
+  await waitFor(() => expect(sent()).toBeGreaterThan(before));
+  expect(mockMenuViewState()?.tree).toBe(false);
+  expect(parseViewPrefs(localStorage.getItem("opensvn.viewPrefs")).tree).toBe(false);
+});
+
+test("Branch > Compare with branch: pick a branch, summary of differences, diff a file", async () => {
   await boot();
   await emit("menu://branch/compare");
   const dlg = await screen.findByRole("dialog", { name: "Compare with branch", hidden: true });
@@ -284,48 +352,136 @@ test("Branch > Compare with branch: pick a branch, open changed folders, diff a 
   );
   await user().click(compare);
 
-  const table = await q.findByRole("table", { name: "Entries of (top)", hidden: true });
-  const row = (name: string) =>
+  const table = await q.findByRole("table", {
+    name: "Differences between the current location at r48213 and the other folder at r48213",
+    hidden: true,
+  });
+  const lastCompare = () =>
+    mockCalls.filter((c) => c.name === "compareSummarize").at(-1)?.args[0] as Record<
+      string,
+      unknown
+    >;
+  expect(lastCompare()).toEqual({
+    wcId: MOCK_WC_ID,
+    leftRev: null,
+    includeLocal: false,
+    rightUrl: "https://svn.example.com/repos/game/branches/feature-x",
+    rightRev: null,
+  });
+  const row = (path: string) =>
     within(table)
       .getAllByRole("row", { hidden: true })
-      .find((r) => r.textContent?.startsWith(name));
+      .find((r) => r.querySelector("td")?.textContent === path);
   expect(row("README.md")?.textContent).toContain("Changed");
   expect(row("CHANGELOG.md")?.textContent).toContain("Only in other");
-  // Unchanged entries are hidden until asked for.
+  expect(row("src/engine/particles.ts")?.textContent).toContain("Only in other");
+  expect(row("src/engine/scene-graph.ts")?.textContent).toContain("Only in current");
+  // Only what differs is listed.
   expect(row("build.gradle")).toBeUndefined();
-  await user().click(q.getByRole("checkbox", { name: "Show unchanged", hidden: true }));
-  expect(row("build.gradle")?.textContent).toContain("Unchanged");
   await a11y("compare dialog", dlg);
 
-  await user().click(q.getByRole("button", { name: "Open src", hidden: true }));
-  await user().click(await q.findByRole("button", { name: "Open engine", hidden: true }));
-  const engine = await q.findByRole("table", { name: "Entries of /src/engine", hidden: true });
-  const states = within(engine)
-    .getAllByRole("row", { hidden: true })
-    .slice(1)
-    .map((r) => r.textContent);
-  expect(states).toEqual(
-    expect.arrayContaining([
-      "particles.tsOnly in other",
-      "renderer.tsChanged",
-      "scene-graph.tsOnly in current",
-    ]),
+  await user().click(
+    q.getByRole("button", { name: "Show diff of src/engine/renderer.ts", hidden: true }),
   );
-  await user().click(q.getByRole("button", { name: "Show diff of renderer.ts", hidden: true }));
   expect(
     await q.findByRole("region", { name: "Diff of src/engine/renderer.ts", hidden: true }),
   ).toBeTruthy();
   await waitFor(() => expect(q.getByTestId("editor")).toBeTruthy());
-  const cats = mockCalls.filter((c) => c.name === "repoCat").map((c) => c.args[0]);
+  const cats = mockCalls.filter((c) => c.name === "repoCat").map((c) => c.args);
   expect(cats).toEqual(
     expect.arrayContaining([
-      "https://svn.example.com/repos/game/trunk/src/engine/renderer.ts",
-      "https://svn.example.com/repos/game/branches/feature-x/src/engine/renderer.ts",
+      ["https://svn.example.com/repos/game/trunk/src/engine/renderer.ts", 48213],
+      ["https://svn.example.com/repos/game/branches/feature-x/src/engine/renderer.ts", 48213],
     ]),
   );
+});
 
-  await user().click(q.getByRole("button", { name: "Up one folder", hidden: true }));
-  expect(await q.findByRole("table", { name: "Entries of /src", hidden: true })).toBeTruthy();
+test("Compare at chosen revisions, and with the local changes of the working copy", async () => {
+  await boot();
+  await emit("menu://branch/compare");
+  const dlg = await screen.findByRole("dialog", { name: "Compare with branch", hidden: true });
+  const q = within(dlg);
+  await user().type(
+    q.getByRole("textbox", { name: "Folder URL to compare with", hidden: true }),
+    "https://svn.example.com/repos/game/branches/feature-x",
+  );
+  const compare = q.getByRole("button", { name: "Compare", hidden: true });
+
+  // A revision for each side; a bad number blocks Compare and says why.
+  await user().selectOptions(
+    q.getByRole("combobox", { name: "Revision of the other folder", hidden: true }),
+    "rev",
+  );
+  const rightRev = q.getByRole("textbox", {
+    name: "Revision of the other folder: revision number",
+    hidden: true,
+  });
+  await user().type(rightRev, "abc");
+  expect(q.getByRole("alert", { hidden: true }).textContent).toBe(
+    "Enter a revision number (0 or more).",
+  );
+  expect(compare.hasAttribute("disabled")).toBe(true);
+  await a11y("compare dialog, bad revision", dlg);
+  await user().clear(rightRev);
+  await user().type(rightRev, "48100");
+  await user().selectOptions(
+    q.getByRole("combobox", { name: "Revision of the current location", hidden: true }),
+    "rev",
+  );
+  await user().type(
+    q.getByRole("textbox", {
+      name: "Revision of the current location: revision number",
+      hidden: true,
+    }),
+    "r48000",
+  );
+  await user().click(compare);
+  await q.findByRole("table", {
+    name: "Differences between the current location at r48000 and the other folder at r48100",
+    hidden: true,
+  });
+  const calls = () => mockCalls.filter((c) => c.name === "compareSummarize").map((c) => c.args[0]);
+  expect(calls().at(-1)).toMatchObject({ leftRev: 48000, includeLocal: false, rightRev: 48100 });
+
+  // With the local changes: the working copy itself is the left side, its revision is not asked.
+  await user().click(
+    q.getByRole("checkbox", {
+      name: "Include local changes (compare the working copy itself)",
+      hidden: true,
+    }),
+  );
+  expect(
+    (
+      q.getByRole("combobox", {
+        name: "Revision of the current location",
+        hidden: true,
+      }) as HTMLSelectElement
+    ).disabled,
+  ).toBe(true);
+  await user().click(compare);
+  const table = await q.findByRole("table", {
+    name: "Differences between the working copy and the other folder at r48100",
+    hidden: true,
+  });
+  expect(calls().at(-1)).toMatchObject({ leftRev: null, includeLocal: true, rightRev: 48100 });
+  await a11y("compare dialog, local changes", dlg);
+  // A locally modified file: its left side is the working file.
+  const renderer = within(table).getByRole("button", {
+    name: "Show diff of src/engine/renderer.ts",
+    hidden: true,
+  });
+  await user().click(renderer);
+  await waitFor(() =>
+    expect(
+      mockCalls.some(
+        (c) =>
+          c.name === "diffGet" &&
+          JSON.stringify((c.args[0] as { target: unknown }).target) ===
+            JSON.stringify({ kind: "wc", wcId: MOCK_WC_ID, path: "src/engine/renderer.ts" }),
+      ),
+    ).toBe(true),
+  );
+  expect(await q.findByText("Working copy")).toBeTruthy();
 });
 
 test("Help: documentation opens in the browser, logs folder, report a problem with preview", async () => {

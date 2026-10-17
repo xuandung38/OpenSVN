@@ -18,7 +18,10 @@ pub use auth::{
     AuthMethod, AuthPrompter, CertDecision, CertFailure, CertInfo, CredentialRequest, Credentials,
     PromptReason,
 };
-pub use commit::{CommitEditor, CommitInfo, CommitObserver, ReplayableSource};
+pub use commit::{
+    CommitEditor, CommitInfo, CommitObserver, NOTHING_COMMITTED, ReplayableSource,
+    unsent_commit_error,
+};
 pub use editor_worker::{DEFAULT_COMMAND_CAPACITY, EditorHandle, EditorWorker, WindowSender};
 pub use session::{
     DirListing, FileMeta, FileRev, FileRevHandler, InheritedItem, LocationSegment, LogRequest,

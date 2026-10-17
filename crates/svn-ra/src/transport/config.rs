@@ -25,6 +25,17 @@ pub const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(4);
 /// each other closely, so they still share connections.
 pub const DEFAULT_WRITE_REUSE_WINDOW: Duration = Duration::from_secs(1);
 
+/// Default most requests a connection that carries writes is used for, the write included.
+/// Some proxies and middleboxes reset a connection under its (N+1)-th request instead of
+/// closing it cleanly; a write that meets such a reset is never sent again, so the commit would
+/// fail at the same place every time. Two keeps every write on a connection's first or second
+/// request. New connections resume the TLS session (no full handshake), so the cost is mostly
+/// round trips: against Apache 2.4 + mod_dav_svn 1.14.3 and 1.15.0, a 1000-file commit took
+/// 2-6 % longer on a local link and about 40 % longer with 10 ms of round-trip time, where every
+/// second write waits for a TCP and a TLS round trip (`crates/svn-ra/tests/commit_timing.rs`).
+/// Raise it, or set `0`, where no such middlebox sits on the path.
+pub const DEFAULT_WRITE_CONNECTION_REQUESTS: usize = 2;
+
 /// Subversion version this client speaks as (the `User-Agent` prefix and the transaction's
 /// client compatibility property).
 pub const SVN_COMPAT_VERSION: &str = "1.15.0";
@@ -121,6 +132,10 @@ pub struct TransportConfig {
     /// `OPTIONS`, `PROPFIND`, `REPORT`); see [`DEFAULT_WRITE_REUSE_WINDOW`]. Zero sends every
     /// write on a new connection.
     pub write_reuse_window: Duration,
+    /// Most requests a connection that carries writes is used for, the write included; see
+    /// [`DEFAULT_WRITE_CONNECTION_REQUESTS`]. `0` sets no limit. The final write of an
+    /// operation (`MERGE`, `LOCK`, `UNLOCK`) always goes out on a new connection.
+    pub write_connection_requests: usize,
     /// Maximum same-origin redirects followed per request.
     pub max_redirects: u8,
     /// Proxy selection.
@@ -140,6 +155,7 @@ impl Default for TransportConfig {
             retry: RetryPolicy::default(),
             pool_idle_timeout: DEFAULT_POOL_IDLE_TIMEOUT,
             write_reuse_window: DEFAULT_WRITE_REUSE_WINDOW,
+            write_connection_requests: DEFAULT_WRITE_CONNECTION_REQUESTS,
             max_redirects: 5,
             proxy: ProxyConfig::System,
             extra_root_certs: Vec::new(),

@@ -7,6 +7,7 @@ import type {
   AppError,
   CheckoutRequest,
   CommitRequest,
+  CompareRequest,
   DiffGetRequest,
   DiffTarget,
   FileStatus,
@@ -28,6 +29,7 @@ import type {
   WcEntry,
   WorkingCopy,
 } from "../bindings";
+import { mockCompareSummary } from "./compare-mock";
 import { MOCK_WC_ID, mockSettings, mockWorkingCopies } from "./data";
 import { MOCK_REPO_ROOT, MOCK_YOUNGEST, mockRevDiff } from "./remote-data";
 import { freshMainStatus, mockWcDiff } from "./wc-mock-fixtures";
@@ -68,6 +70,11 @@ interface State {
   serverLocks: Map<string, LockInfo>;
   /** Versioned properties by `wcId\0path` (the root is `""`). */
   props: Map<string, Map<string, string>>;
+  /**
+   * Commits still to break off before anything was committed (the connection cut under an
+   * upload, the transaction confirmed deleted): they fail with `commit-not-applied`.
+   */
+  commitCuts: number;
 }
 
 /** A registered working copy whose folder was moved, for the repository manager demo. */
@@ -127,6 +134,7 @@ function initialState(): State {
         ]),
       ],
     ]),
+    commitCuts: 0,
   };
 }
 
@@ -161,6 +169,11 @@ let state = initialState();
 /** Restores the sample working copies and status (tests, and dev reloads). */
 export function resetWcMock(): void {
   state = initialState();
+}
+
+/** The next `count` commits break off with nothing committed (`commit-not-applied`; tests). */
+export function setMockCommitCuts(count: number): void {
+  state.commitCuts = count;
 }
 
 /** Empties the working copy list, as on a fresh install (tests: the Welcome screen). */
@@ -605,6 +618,27 @@ export function wcMockCommands(deps: MockDeps) {
       if (files.some((f) => f.remote?.outOfDate)) {
         return fail("out-of-date", "File is out of date; update first");
       }
+      if (state.commitCuts > 0) {
+        state.commitCuts -= 1;
+        return ok(
+          simulateOp(
+            "commit",
+            `Commit ${req.paths.length} file(s)`,
+            req.wcId,
+            undefined,
+            undefined,
+            {
+              code: "commit-not-applied",
+              message: "Nothing was committed; it is safe to try again.",
+              detail:
+                "Nothing was committed; it is safe to try again. <- HTTP request failed: connection reset by peer",
+              path: null,
+              retryable: true,
+              actions: ["retry"],
+            },
+          ),
+        );
+      }
       const rev = state.youngest + 1;
       return op(
         "commit",
@@ -643,6 +677,26 @@ export function wcMockCommands(deps: MockDeps) {
         wcId,
         () => {
           patchWc(wcId, { baseRev: target, incomplete: false, resume: null });
+          deps.emit("wc://revision-changed", { wcId, baseRev: target, revRange: null });
+        },
+        { kind: "newRev", newRev: target },
+      );
+    },
+    compareSummarize: (req: CompareRequest) => {
+      const wc = wcOf(req.wcId);
+      if (!wc) return fail("not-a-working-copy", "Unknown working copy");
+      const summary = mockCompareSummary(req, wc, statusOf(req.wcId));
+      return typeof summary === "string" ? fail("wc-invalid-operation", summary) : ok(summary);
+    },
+    wcUpdateLatest: (wcId: string) => {
+      const wc = wcOf(wcId);
+      const target = state.youngest;
+      return op(
+        "update",
+        `Update ${wc?.name ?? wcId}`,
+        wcId,
+        () => {
+          patchWc(wcId, { baseRev: target, incoming: 0, incomplete: false, resume: null });
           deps.emit("wc://revision-changed", { wcId, baseRev: target, revRange: null });
         },
         { kind: "newRev", newRev: target },

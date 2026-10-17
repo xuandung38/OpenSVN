@@ -145,11 +145,17 @@ impl UpdateControl for RecordingUpdates {
 #[derive(Default)]
 pub struct RecordingMenu {
     pub modes: Mutex<Vec<bool>>,
+    pub views: Mutex<Vec<opensvn_ipc::MenuViewState>>,
 }
 
 impl MenuControl for RecordingMenu {
     fn set_layout_mode(&self, has_layout: bool) -> Result<(), AppError> {
         self.modes.lock().unwrap().push(has_layout);
+        Ok(())
+    }
+
+    fn set_view(&self, view: opensvn_ipc::MenuViewState) -> Result<(), AppError> {
+        self.views.lock().unwrap().push(view);
         Ok(())
     }
 }

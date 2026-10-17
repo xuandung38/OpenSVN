@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wc-update-latest"
+description = "Enables the wc_update_latest command without any pre-configured scope."
+commands.allow = ["wc_update_latest"]
+
+[[permission]]
+identifier = "deny-wc-update-latest"
+description = "Denies the wc_update_latest command without any pre-configured scope."
+commands.deny = ["wc_update_latest"]

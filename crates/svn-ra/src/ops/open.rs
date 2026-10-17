@@ -130,6 +130,18 @@ impl RaSession for HttpRaSession {
         self.wire.session_url()
     }
 
+    fn file_wcprops(&self, repos_relpath: &RelPath, created_rev: Revnum) -> Vec<PropChange> {
+        // What mod_dav_svn sends as the `D:checked-in` of a file in an update report (see the
+        // update event bridge), built from the stubs it announced.
+        match self.wire.urls().rev_root(created_rev, repos_relpath) {
+            Ok(url) => vec![PropChange {
+                name: "svn:wc:ra_dav:version-url".to_owned(),
+                value: Some(bytes::Bytes::from(url.path().to_owned())),
+            }],
+            Err(_) => Vec::new(),
+        }
+    }
+
     fn authenticated_user(&self) -> Option<String> {
         self.wire
             .transport()

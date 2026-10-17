@@ -42,6 +42,9 @@ pub enum ErrorCode {
     ServerProtocolError,
     /// The request itself is invalid (bad value, expired path grant, unsupported option).
     InvalidArgument,
+    /// A commit broke off before it was applied and its server transaction is confirmed gone:
+    /// nothing was committed, so the same commit can be sent again (Retry).
+    CommitNotApplied,
     Internal,
 }
 
@@ -223,7 +226,9 @@ impl From<&SvnError> for AppError {
 /// Cleanup action; `ProtocolViolation` (a malformed server response) maps to
 /// `server-protocol-error` without it, since cleanup cannot repair the server; `UnsafePath` and
 /// `ServerUnsupported` map to `internal`;
-/// `CommitOutcomeUnknown` and `WriteOutcomeUnknown` map to a non-retryable `network`; `LimitExceeded` maps to a
+/// `CommitOutcomeUnknown` and `WriteOutcomeUnknown` map to a non-retryable `network`, while
+/// `CommitNotApplied` (nothing committed, nothing left on the server) is a retryable
+/// `commit-not-applied`; `LimitExceeded` maps to a
 /// non-retryable `invalid-argument` with no actions.
 /// The match is exhaustive on purpose: a new engine code must be mapped explicitly.
 pub fn map_svn_error_code(code: SvnErrorCode) -> (ErrorCode, bool, &'static [ErrorAction]) {
@@ -261,6 +266,8 @@ pub fn map_svn_error_code(code: SvnErrorCode) -> (ErrorCode, bool, &'static [Err
         S::CommitOutcomeUnknown => (ErrorCode::Network, false, &[]),
         // Same for a lock or unlock that may have been carried out: refresh, then decide.
         S::WriteOutcomeUnknown => (ErrorCode::Network, false, &[]),
+        // The server confirmed the transaction is gone before anything was merged.
+        S::CommitNotApplied => (ErrorCode::CommitNotApplied, true, &[A::Retry]),
         // A size cap, not corruption: the same request fails again, and cleanup cannot help.
         S::LimitExceeded => (ErrorCode::InvalidArgument, false, &[]),
         S::Corrupt => (ErrorCode::WcNeedsCleanup, false, &[A::Cleanup]),

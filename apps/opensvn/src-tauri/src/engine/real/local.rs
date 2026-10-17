@@ -34,6 +34,7 @@ pub(super) fn accept_of(choice: ResolveChoice) -> Accept {
         ResolveChoice::Theirs => Accept::TheirsFull,
         ResolveChoice::Working => Accept::Working,
         ResolveChoice::Base => Accept::Base,
+        ResolveChoice::MineConflict => Accept::MineConflict,
     }
 }
 

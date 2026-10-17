@@ -138,13 +138,14 @@ pub(super) async fn delete_txn(wire: &RaWire, txn: &TxnName, cancel: &CancelToke
 
 /// Best-effort cleanup delete of a transaction: never prompts for credentials or certificates
 /// (only cached credentials are used) and gives up after [`CLEANUP_TIMEOUT`]. Safe to run from
-/// a detached task after the user has moved on.
-pub(super) async fn cleanup_txn(wire: &RaWire, txn: &TxnName) -> Result<()> {
+/// a detached task after the user has moved on. Says whether the transaction still existed
+/// (and is now deleted).
+pub(super) async fn cleanup_txn(wire: &RaWire, txn: &TxnName) -> Result<bool> {
     // Cleanup must work after the operation was cancelled, so it has its own token.
     let cancel = CancelToken::new();
     let work = delete_txn_found(wire, txn, &cancel, true);
     match tokio::time::timeout(CLEANUP_TIMEOUT, work).await {
-        Ok(r) => r.map(|_| ()),
+        Ok(r) => r,
         Err(_) => {
             cancel.cancel();
             Err(SvnError::new(

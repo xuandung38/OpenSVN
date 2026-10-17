@@ -817,4 +817,101 @@ async fn identical_logs_share_one_server_read_until_the_revision_moves() {
         .await
         .unwrap();
     assert_eq!(logs.fetches(), 2);
+
+fn compare_rows(s: &opensvn_ipc::CompareSummary) -> Vec<(String, &'static str, bool)> {
+    use opensvn_ipc::CompareChange as C;
+    s.entries
+        .iter()
+        .map(|e| {
+            (
+                e.path.clone(),
+                match e.change {
+                    C::Added => "added",
+                    C::Deleted => "deleted",
+                    C::Modified => "modified",
+                    C::Normal => "normal",
+                },
+                e.props_changed,
+            )
+        })
+        .collect()
+}
+
+/// Compare with branch at chosen revisions, and with local changes (#18 follow-up).
+#[tokio::test]
+async fn compare_summarize_two_locations_at_chosen_revisions() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    let request = |left_rev, right_rev, include_local| opensvn_ipc::CompareRequest {
+        wc_id: wc.id.clone(),
+        left_rev,
+        include_local,
+        right_url: url("branches/feature-x"),
+        right_rev,
+    };
+    // trunk@HEAD against the branch at HEAD.
+    let s = commands::compare_summarize(f.state(), request(None, None, false))
+        .await
+        .unwrap();
+    assert_eq!((s.left_rev, s.right_rev), (Some(Rev(10)), Rev(10)));
+    let deleted = |p: &str| (p.to_owned(), "deleted", false);
+    assert_eq!(
+        compare_rows(&s),
+        [
+            ("README.md".to_owned(), "modified", false),
+            deleted("assets"),
+            deleted("assets/logo.png"),
+            deleted("docs"),
+            deleted("docs/guide.md"),
+            ("src/lib.rs".to_owned(), "deleted", false),
+            ("src/main.rs".to_owned(), "modified", false),
+        ]
+    );
+    // trunk@3 against the branch as it was made (r4): same README and main.rs.
+    let s = commands::compare_summarize(f.state(), request(Some(Rev(3)), Some(Rev(4)), false))
+        .await
+        .unwrap();
+    assert_eq!((s.left_rev, s.right_rev), (Some(Rev(3)), Rev(4)));
+    assert!(
+        compare_rows(&s)
+            .iter()
+            .all(|(p, change, _)| *change == "deleted" && !p.starts_with("README")),
+        "{:?}",
+        s.entries
+    );
+
+    // The working copy (r8, local edits) against trunk at HEAD.
+    let s = commands::compare_summarize(
+        f.state(),
+        opensvn_ipc::CompareRequest {
+            right_url: url("trunk"),
+            ..request(Some(Rev(3)), None, true)
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.left_rev, None);
+    let rows = compare_rows(&s);
+    for wanted in [
+        ("README.md".to_owned(), "modified", false),
+        ("src/util.rs".to_owned(), "deleted", false),
+        ("src/main.rs".to_owned(), "modified", false),
+        ("docs/guide.md".to_owned(), "modified", true),
+    ] {
+        assert!(rows.contains(&wanted), "{wanted:?} in {rows:?}");
+    }
+    // Unversioned files are not compared.
+    assert!(!rows.iter().any(|r| r.0 == "notes.txt"), "{rows:?}");
+
+    // Another repository is refused.
+    let err = commands::compare_summarize(
+        f.state(),
+        opensvn_ipc::CompareRequest {
+            right_url: "https://svn.test.local/repos/other/trunk".into(),
+            ..request(None, None, false)
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(!err.message.is_empty());
 }

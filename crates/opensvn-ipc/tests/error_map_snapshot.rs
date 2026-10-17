@@ -34,6 +34,7 @@ fn all_codes() -> Vec<SvnErrorCode> {
         FileInUse,
         Cancelled,
         CommitOutcomeUnknown,
+        CommitNotApplied,
         WriteOutcomeUnknown,
         LimitExceeded,
         Corrupt,
@@ -47,8 +48,8 @@ fn all_codes() -> Vec<SvnErrorCode> {
             | WcFormatUnsupported | NotAWorkingCopy | ConflictBlocksCommit | HookFailed
             | RepositoryMoved | PristineNotHydrated | WcInvalidOperation | UnrelatedResources
             | PathNotFound | UnsafePath | DiskFull | PermissionDenied | FileInUse | Cancelled
-            | CommitOutcomeUnknown | WriteOutcomeUnknown | LimitExceeded | Corrupt
-            | ProtocolViolation | ServerUnsupported | Internal => v.push(c),
+            | CommitOutcomeUnknown | CommitNotApplied | WriteOutcomeUnknown | LimitExceeded
+            | Corrupt | ProtocolViolation | ServerUnsupported | Internal => v.push(c),
         }
     }
     v
@@ -103,6 +104,35 @@ fn malformed_server_response_is_a_protocol_error_without_cleanup() {
     let v = serde_json::to_value(&e).unwrap();
     assert_eq!(v["code"], "server-protocol-error");
     assert_eq!(v["actions"], serde_json::Value::Null);
+}
+
+#[test]
+fn a_commit_that_was_not_applied_offers_retry() {
+    let e = AppError::from(
+        &SvnError::new(
+            SvnErrorCode::CommitNotApplied,
+            "Nothing was committed; it is safe to try again.",
+        )
+        .with_child(SvnError::new(
+            SvnErrorCode::Network,
+            "HTTP request failed: connection reset by peer",
+        )),
+    );
+    assert_eq!(e.code, ErrorCode::CommitNotApplied);
+    assert!(e.retryable);
+    assert_eq!(e.actions, Some(Box::new(vec![ErrorAction::Retry])));
+    assert_eq!(e.message, "Nothing was committed; it is safe to try again.");
+    // The broken connection stays in the details.
+    assert_eq!(
+        e.detail.as_deref(),
+        Some(
+            "Nothing was committed; it is safe to try again. <- HTTP request failed: \
+             connection reset by peer"
+        )
+    );
+    let v = serde_json::to_value(&e).unwrap();
+    assert_eq!(v["code"], "commit-not-applied");
+    assert_eq!(v["actions"], serde_json::json!(["retry"]));
 }
 
 #[test]

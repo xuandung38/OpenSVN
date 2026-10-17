@@ -240,7 +240,7 @@ impl CommitEditor for PrefixedCommitEditor {
         self.inner.close_edit().await
     }
 
-    async fn abort_edit(self: Box<Self>) -> Result<()> {
+    async fn abort_edit(self: Box<Self>) -> Result<crate::TxnAbort> {
         self.inner.abort_edit().await
     }
 }

@@ -162,8 +162,9 @@ pub struct Compare {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Ignored {
-    /// `NODES.dav_cache`: svn's ra_serf caches `svn:wc:ra_dav:version-url` there, the engine
-    /// leaves it empty (svn asks the server when the cache is empty).
+    /// `NODES.dav_cache`: svn's ra_serf caches `svn:wc:ra_dav:version-url` there. The engine
+    /// fills it the same way, so the client scenarios compare it; the option stays for a
+    /// comparison of working copies that took different paths (one committed, one updated).
     DavCache,
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "../../components/ui/button";
 import { useToast } from "../../components/ui/toast";
 import { ipc, toAppError, unwrap } from "../../ipc/client";
@@ -24,9 +24,29 @@ function useSecondsUntil(at: number | null): number {
 }
 
 /**
+ * What the live region says: "Connection lost" while the operation waits, "Reconnected" once a
+ * wait ended and the operation went on (running or done), nothing otherwise. It changes only when
+ * that state changes, never with the countdown.
+ */
+function useConnectionAnnouncement(op: OpState): "lost" | "reconnected" | null {
+  const waiting = isWaitingForConnection(op);
+  const waited = useRef(false);
+  useEffect(() => {
+    if (waiting) waited.current = true;
+  }, [waiting]);
+  if (waiting) return "lost";
+  return waited.current && op.state !== "failed" ? "reconnected" : null;
+}
+
+/**
  * "Connection lost, retrying in Ns…" for an operation that waits for the network, with "Retry
  * now" (an immediate attempt) and "Cancel" (the working copy stays incomplete and can be
- * continued later). Renders nothing when the operation is not waiting.
+ * continued later). The visible notice renders only while the operation waits.
+ *
+ * Screen readers hear a separate live region, kept in the document for as long as the component
+ * is mounted so that a change is announced: "Connection lost" when the wait starts and
+ * "Reconnected" when it ends. The countdown is ordinary text outside it, so it is not re-read
+ * every second.
  */
 export function ConnectionWaitNotice({
   op,
@@ -38,31 +58,48 @@ export function ConnectionWaitNotice({
 }) {
   const t = useT(activityStrings);
   const toast = useToast();
-  const seconds = useSecondsUntil(op.retryAt);
-  if (!isWaitingForConnection(op)) return null;
+  const waiting = isWaitingForConnection(op);
+  const seconds = useSecondsUntil(waiting ? op.retryAt : null);
+  const announcement = useConnectionAnnouncement(op);
   const text = seconds > 0 ? t("waitRetryIn", { seconds }) : t("waitRetrying");
   return (
-    <div
-      className="flex flex-wrap items-center gap-2 bg-warn-soft px-3.5 py-1.5"
-      data-testid="connection-wait"
-    >
-      <span className="flex-1" role="status">
-        {text}
-      </span>
-      <Button
-        onClick={() =>
-          void (async () => {
-            try {
-              await unwrap(ipc().commands.opRetryNow(op.handle.opId));
-            } catch (e) {
-              toast.show(toAppError(e).message);
-            }
-          })()
-        }
+    <>
+      <span
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+        data-testid="connection-wait-live"
       >
-        {t("waitRetryNow")}
-      </Button>
-      {onCancel && <Button onClick={onCancel}>{t("cancel")}</Button>}
-    </div>
+        {announcement === "lost"
+          ? t("waitLost")
+          : announcement === "reconnected"
+            ? t("waitReconnected")
+            : ""}
+      </span>
+      {waiting && (
+        <div
+          className="flex flex-wrap items-center gap-2 bg-warn-soft px-3.5 py-1.5"
+          data-testid="connection-wait"
+        >
+          <span className="flex-1" data-testid="connection-wait-countdown">
+            {text}
+          </span>
+          <Button
+            onClick={() =>
+              void (async () => {
+                try {
+                  await unwrap(ipc().commands.opRetryNow(op.handle.opId));
+                } catch (e) {
+                  toast.show(toAppError(e).message);
+                }
+              })()
+            }
+          >
+            {t("waitRetryNow")}
+          </Button>
+          {onCancel && <Button onClick={onCancel}>{t("cancel")}</Button>}
+        </div>
+      )}
+    </>
   );
 }

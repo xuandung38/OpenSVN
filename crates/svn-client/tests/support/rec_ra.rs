@@ -372,12 +372,12 @@ impl CommitEditor for RecEditor {
         merged
     }
 
-    async fn abort_edit(self: Box<Self>) -> Result<()> {
+    async fn abort_edit(self: Box<Self>) -> Result<svn_ra_api::TxnAbort> {
         let this = *self;
         push(&this.log, "abort_edit".into());
         match this.inner {
             Some(e) => e.abort_edit().await,
-            None => Ok(()),
+            None => Ok(svn_ra_api::TxnAbort::Deleted),
         }
     }
 }

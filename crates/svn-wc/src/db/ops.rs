@@ -1004,9 +1004,11 @@ pub(crate) fn commit_node(
     if cur.op_depth == 0 {
         exec_cached(
             conn,
+            // The RA layer's cache names the old revision: svn's commit drops it.
             "UPDATE nodes SET revision = ?3, changed_revision = ?3, changed_date = ?4, \
              changed_author = ?5, checksum = ?6, properties = ?7, translated_size = ?8, \
-             last_mod_time = ?9 WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = 0",
+             last_mod_time = ?9, dav_cache = NULL \
+             WHERE wc_id = ?1 AND local_relpath = ?2 AND op_depth = 0",
             params![
                 wc_id,
                 path.as_str(),

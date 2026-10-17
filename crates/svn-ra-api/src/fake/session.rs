@@ -179,6 +179,19 @@ impl FakeRaSession {
         state.txn_delete_faults_left = Some(times);
     }
 
+    /// Makes the upload (`apply_text`) after the next `skip` ones break off as a connection
+    /// reset under the `PUT` would: it fails with a `Network` error carrying
+    /// `ConnectionFailure::ConnectionReset`, and the file text does not reach the transaction.
+    pub fn cut_upload(&self, skip: u32) {
+        self.guard().upload_cut = Some(skip);
+    }
+
+    /// Makes every `abort_edit` fail with `reason` (a server error to the transaction's
+    /// `DELETE`) and keep the transaction; `None` restores normal answers.
+    pub fn fail_aborts(&self, reason: Option<&str>) {
+        self.guard().abort_fault = reason.map(str::to_owned);
+    }
+
     /// Names of commit transactions that are still open.
     pub fn open_txns(&self) -> Vec<String> {
         let mut v: Vec<String> = self.guard().txns.iter().cloned().collect();

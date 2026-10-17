@@ -274,6 +274,40 @@ async fn menu_set_layout_over_ipc() {
 }
 
 #[tokio::test]
+async fn menu_set_view_over_ipc() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let ipc = Ipc::new(&f);
+    let view = json!({
+        "showUnversioned": false,
+        "showIgnored": true,
+        "groupByChangelist": true,
+        "tree": false,
+    });
+    assert_eq!(
+        ipc.call("menu_set_view", json!({ "view": view })).unwrap(),
+        Value::Null
+    );
+    assert_eq!(
+        *f.menu.views.lock().unwrap(),
+        [opensvn_ipc::MenuViewState {
+            show_unversioned: false,
+            show_ignored: true,
+            group_by_changelist: true,
+            tree: false,
+        }]
+    );
+    // A missing field or a non-boolean is rejected by the IPC layer; the menu is not touched.
+    for bad in [
+        json!({ "view": { "showUnversioned": true } }),
+        json!({ "view": { "showUnversioned": 1, "showIgnored": true, "groupByChangelist": true, "tree": false } }),
+        json!({}),
+    ] {
+        assert!(ipc.call("menu_set_view", bad).is_err());
+    }
+    assert_eq!(f.menu.views.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn op_retry_now_over_ipc() {
     let f = Fixture::new(Duration::ZERO).await;
     let ipc = Ipc::new(&f);

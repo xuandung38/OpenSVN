@@ -14,7 +14,10 @@ use std::time::{Duration, Instant};
 use common::{ScriptedPrompter, TestCa};
 use reqwest::Method;
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
-use svn_ra::transport::{HttpRequest, HttpTransport, RequestBody, RetryPolicy, is_idempotent};
+use svn_ra::transport::{
+    DEFAULT_WRITE_CONNECTION_REQUESTS, HttpRequest, HttpTransport, RequestBody, RetryPolicy,
+    is_idempotent, needs_new_connection,
+};
 use svn_types::{CancelToken, ConnectionFailure, ErrorCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -52,6 +55,9 @@ enum Reuse {
     /// dropped the idle connection without telling the client, which only learns it once the
     /// next request went out.
     CloseIfIdle(Duration),
+    /// A TCP reset under every request after the first N of a connection, without an answer
+    /// (a middlebox that limits the requests per connection the hard way).
+    ResetAfter(usize),
 }
 
 /// Raw HTTPS server that answers each request with the next scripted [`Act`] (`Ok("ok")` once
@@ -60,6 +66,8 @@ struct RawServer {
     addr: SocketAddr,
     seen: Arc<Mutex<Vec<String>>>,
     connections: Arc<Mutex<usize>>,
+    /// How the TLS handshake of each connection went, in accept order.
+    handshakes: Arc<Mutex<Vec<rustls::HandshakeKind>>>,
 }
 
 impl RawServer {
@@ -94,19 +102,31 @@ impl RawServer {
         let script = Arc::new(Mutex::new(VecDeque::from(script)));
         let seen: Arc<Mutex<Vec<String>>> = Arc::default();
         let connections: Arc<Mutex<usize>> = Arc::default();
-        let (seen2, conns2) = (Arc::clone(&seen), Arc::clone(&connections));
+        let handshakes: Arc<Mutex<Vec<rustls::HandshakeKind>>> = Arc::default();
+        let (seen2, conns2, kinds2) = (
+            Arc::clone(&seen),
+            Arc::clone(&connections),
+            Arc::clone(&handshakes),
+        );
         tokio::spawn(async move {
             loop {
                 let Ok((tcp, _)) = listener.accept().await else {
                     return;
                 };
                 *conns2.lock().unwrap() += 1;
-                let (acceptor, script, seen) =
-                    (acceptor.clone(), Arc::clone(&script), Arc::clone(&seen2));
+                let (acceptor, script, seen, kinds) = (
+                    acceptor.clone(),
+                    Arc::clone(&script),
+                    Arc::clone(&seen2),
+                    Arc::clone(&kinds2),
+                );
                 tokio::spawn(async move {
                     let Ok(tls) = acceptor.accept(tcp).await else {
                         return;
                     };
+                    if let Some(kind) = tls.get_ref().1.handshake_kind() {
+                        kinds.lock().unwrap().push(kind);
+                    }
                     serve_connection(tls, &script, &seen, reuse).await;
                 });
             }
@@ -115,6 +135,7 @@ impl RawServer {
             addr,
             seen,
             connections,
+            handshakes,
         }
     }
 
@@ -128,6 +149,10 @@ impl RawServer {
 
     fn connections(&self) -> usize {
         *self.connections.lock().unwrap()
+    }
+
+    fn handshakes(&self) -> Vec<rustls::HandshakeKind> {
+        self.handshakes.lock().unwrap().clone()
     }
 }
 
@@ -198,9 +223,17 @@ async fn serve_connection(
                 Reuse::Keep => false,
                 Reuse::Close => true,
                 Reuse::CloseIfIdle(after) => idle_since.elapsed() > after,
+                Reuse::ResetAfter(_) => false,
             };
         if close {
             return unclean_close(tls).await;
+        }
+        if let Reuse::ResetAfter(n) = reuse
+            && served > n
+        {
+            let tcp = tls.into_inner().0.into_std().unwrap();
+            socket_reset(tcp);
+            return;
         }
         let act = script
             .lock()
@@ -458,9 +491,11 @@ async fn a_write_after_a_pause_does_not_go_out_on_a_connection_dropped_while_idl
         });
         assert_eq!(body_of(&t, m, &server.url("/1")).await.unwrap(), "ok");
         assert_eq!(body_of(&t, m, &server.url("/2")).await.unwrap(), "ok");
+        // MERGE, LOCK and UNLOCK always open a connection of their own.
+        let own = needs_new_connection(&Method::from_bytes(m.as_bytes()).unwrap());
         assert_eq!(
             server.connections(),
-            1,
+            if own { 2 } else { 1 },
             "{m}: back-to-back writes share a connection"
         );
         tokio::time::sleep(Duration::from_millis(600)).await;
@@ -470,8 +505,118 @@ async fn a_write_after_a_pause_does_not_go_out_on_a_connection_dropped_while_idl
             "{m} after a pause"
         );
         assert_eq!(server.seen(), [m, m, m], "{m}: every write sent once");
-        assert_eq!(server.connections(), 2, "{m}");
+        assert_eq!(server.connections(), if own { 3 } else { 2 }, "{m}");
     }
+}
+
+/// Writes that do not settle an operation, in the order a commit sends them.
+const TXN_WRITES: [&str; 8] = [
+    "MKACTIVITY",
+    "POST",
+    "CHECKOUT",
+    "PUT",
+    "PROPPATCH",
+    "MKCOL",
+    "COPY",
+    "DELETE",
+];
+
+#[tokio::test]
+async fn writes_get_through_a_middlebox_that_resets_connections_after_two_requests() {
+    let ca = TestCa::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server = RawServer::serve(&ca, Vec::new(), Reuse::ResetAfter(2), listener);
+    // The default limit, no retry at all: nothing may depend on a resend.
+    let t = transport(&ca, |c| c.retry = RetryPolicy::none());
+    assert_eq!(DEFAULT_WRITE_CONNECTION_REQUESTS, 2);
+    let mut sent = Vec::new();
+    for round in 0..3 {
+        for m in TXN_WRITES.iter().chain(&["MERGE", "LOCK", "UNLOCK"]) {
+            let read = t
+                .send_and_read(
+                    req(m, &server.url(&format!("/{round}/{m}"))),
+                    1024,
+                    &CancelToken::new(),
+                )
+                .await;
+            assert_eq!(read.expect(m).body, "ok", "{m}");
+            sent.push((*m).to_owned());
+        }
+    }
+    // Every write reached the server exactly once.
+    assert_eq!(server.seen(), sent);
+}
+
+#[tokio::test]
+async fn a_write_connection_carries_at_most_the_configured_requests() {
+    for (limit, connections) in [(1, 6), (2, 3), (3, 2), (0, 1)] {
+        let ca = TestCa::new();
+        let server = RawServer::start(&ca, Vec::new()).await;
+        let t = transport(&ca, |c| c.write_connection_requests = limit);
+        for i in 0..6 {
+            assert_eq!(
+                body_of(&t, "PUT", &server.url(&format!("/{i}")))
+                    .await
+                    .unwrap(),
+                "ok"
+            );
+        }
+        assert_eq!(server.connections(), connections, "limit {limit}");
+        assert_eq!(server.seen(), ["PUT"; 6], "limit {limit}");
+    }
+}
+
+#[tokio::test]
+async fn merge_lock_and_unlock_always_open_a_connection_of_their_own() {
+    let ca = TestCa::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // A server that never takes a second request on a connection: a settling write that went
+    // out on a used one would fail.
+    let server = RawServer::serve(&ca, Vec::new(), Reuse::ResetAfter(1), listener);
+    let t = transport(&ca, |c| {
+        c.retry = RetryPolicy::none();
+        c.write_connection_requests = 0;
+    });
+    // The read and write pools both hold a used connection now.
+    assert_eq!(body_of(&t, "GET", &server.url("/r")).await.unwrap(), "ok");
+    assert_eq!(body_of(&t, "PUT", &server.url("/w")).await.unwrap(), "ok");
+    for m in ["MERGE", "LOCK", "UNLOCK", "MERGE"] {
+        assert_eq!(
+            body_of(&t, m, &server.url("/s")).await.unwrap(),
+            "ok",
+            "{m}"
+        );
+    }
+    assert_eq!(server.connections(), 6);
+    assert_eq!(
+        server.seen(),
+        ["GET", "PUT", "MERGE", "LOCK", "UNLOCK", "MERGE"]
+    );
+}
+
+#[tokio::test]
+async fn new_connections_resume_the_tls_session_of_any_earlier_one() {
+    let ca = TestCa::new();
+    let server = RawServer::start(&ca, Vec::new()).await;
+    let t = transport(&ca, |c| c.write_connection_requests = 1);
+    // Reads, writes and settling writes each use a pool of their own; the session of the first
+    // connection serves them all.
+    assert_eq!(
+        body_of(&t, "OPTIONS", &server.url("/")).await.unwrap(),
+        "ok"
+    );
+    for m in ["PUT", "PUT", "MERGE"] {
+        assert_eq!(body_of(&t, m, &server.url("/x")).await.unwrap(), "ok");
+    }
+    let kinds = server.handshakes();
+    assert_eq!(kinds.len(), 4, "{kinds:?}");
+    assert_eq!(kinds[0], rustls::HandshakeKind::Full);
+    assert!(
+        kinds[1..]
+            .iter()
+            .all(|k| *k == rustls::HandshakeKind::Resumed),
+        "{kinds:?}"
+    );
 }
 
 #[tokio::test]
@@ -580,6 +725,41 @@ async fn send_and_read_fetches_a_cut_off_read_again() {
         .expect("third attempt");
     assert_eq!(read.body, "complete");
     assert_eq!(server.seen(), ["REPORT", "REPORT", "REPORT"]);
+}
+
+#[tokio::test]
+async fn a_read_cut_off_mid_body_goes_out_again_on_a_new_connection() {
+    let ca = TestCa::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Every reused connection is closed under its next request: two pooled ones are stale.
+    let server = RawServer::serve(
+        &ca,
+        vec![
+            Act::Ok("a".into()),
+            Act::Ok("b".into()),
+            Act::Truncate {
+                body: "z".repeat(500),
+                keep: 50,
+            },
+            Act::Ok("complete".into()),
+        ],
+        Reuse::Close,
+        listener,
+    );
+    let t = transport(&ca, |c| c.retry.delays = vec![Duration::ZERO; 3]);
+    let (ua, ub) = (server.url("/a"), server.url("/b"));
+    let (a, b) = tokio::join!(body_of(&t, "GET", &ua), body_of(&t, "GET", &ub));
+    assert_eq!((a.unwrap(), b.unwrap()), ("a".into(), "b".into()));
+    assert_eq!(server.connections(), 2);
+    let read = t
+        .send_and_read(req("REPORT", &server.url("/r")), 1024, &CancelToken::new())
+        .await
+        .expect("sent again");
+    assert_eq!(read.body, "complete");
+    // A stale pooled connection, the cut-off body on a new one, then a new one again: the
+    // second stale connection in the pool is never tried.
+    assert_eq!(server.seen(), ["GET", "GET", "REPORT", "REPORT", "REPORT"]);
+    assert_eq!(server.connections(), 4);
 }
 
 #[tokio::test]

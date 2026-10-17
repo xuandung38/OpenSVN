@@ -68,6 +68,8 @@ export const wcStrings = defineStrings({
     warnNeedsLock: "{count} file(s) need a lock you do not hold; the server may reject them.",
     warnLockedOther: "{count} file(s) are locked by another user.",
     outOfDate: "The server has newer changes. Update, then commit again.",
+    nothingCommitted:
+      "The connection was cut while committing. Nothing was committed; it is safe to try again.",
     updateNow: "Update now",
     tagWarning:
       "You are on a tag. Tags are normally read-only; commit only if you mean to change it.",
@@ -147,8 +149,6 @@ export const wcStrings = defineStrings({
     viewShowIgnored: "Show ignored files",
     viewGroupChangelist: "Group by changelist",
     viewTree: "Show as tree",
-    viewOn: "{name}: on",
-    viewOff: "{name}: off",
     folderRow: "Folder {path}, {count} file(s)",
     // Help menu
     docsFailed: "Could not open the documentation: {message}",
@@ -215,6 +215,8 @@ export const wcStrings = defineStrings({
     warnNeedsLock: "{count} file cần lock mà bạn chưa giữ; server có thể từ chối.",
     warnLockedOther: "{count} file đang bị người khác lock.",
     outOfDate: "Server có thay đổi mới hơn. Hãy Update rồi commit lại.",
+    nothingCommitted:
+      "Kết nối bị ngắt khi đang commit. Chưa có gì được commit, có thể thử lại an toàn.",
     updateNow: "Update ngay",
     tagWarning: "Bạn đang ở một tag. Tag thường chỉ đọc; chỉ commit nếu bạn thật sự muốn sửa.",
     incomingTitle: "Đã cập nhật",
@@ -286,8 +288,6 @@ export const wcStrings = defineStrings({
     viewShowIgnored: "Hiện file bị ignore",
     viewGroupChangelist: "Nhóm theo changelist",
     viewTree: "Hiện dạng cây thư mục",
-    viewOn: "{name}: bật",
-    viewOff: "{name}: tắt",
     folderRow: "Thư mục {path}, {count} file",
     docsFailed: "Không mở được tài liệu: {message}",
     logsFailed: "Không mở được thư mục log: {message}",

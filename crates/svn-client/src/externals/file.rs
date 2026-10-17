@@ -54,6 +54,8 @@ struct Fetched {
     sha1: String,
     entry: DirEntry,
     text: tempfile::TempPath,
+    /// The RA layer's cache for the file (see [`RaSession::file_wcprops`]).
+    wcprops: Vec<PropChange>,
 }
 
 /// Fetches the file external of `job` at `url`@`rev` and applies it.
@@ -86,7 +88,11 @@ pub(super) async fn ensure(
     if session.uuid() != wc_uuid || root_string(session.as_ref()) != wc_root.trim_end_matches('/') {
         return Err(not_in_repository(url, &wc_root));
     }
-    let fetched = fetch(session.as_ref(), &db, &name, rev, job).await?;
+    let mut fetched = fetch(session.as_ref(), &db, &name, rev, job).await?;
+    fetched.wcprops = session.file_wcprops(
+        &RelPath::new(&wanted)?,
+        fetched.entry.created_rev.unwrap_or(fetched.rev),
+    );
     // svn caches what the file inherits at its repository location (a file external is an
     // update root); a server that cannot say leaves the empty cache `mark_file_external` sets.
     let iprops = match session
@@ -210,6 +216,7 @@ async fn fetch(
         sha1,
         entry,
         text,
+        wcprops: Vec::new(),
     })
 }
 
@@ -388,6 +395,7 @@ fn drive(
     for change in prop_changes(&old, &f.props)
         .into_iter()
         .chain(entry_props(&f.entry))
+        .chain(f.wcprops.iter().cloned())
     {
         ed.change_file_prop(file, change)?;
     }

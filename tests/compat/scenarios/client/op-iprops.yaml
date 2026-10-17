@@ -27,7 +27,7 @@ steps:
   - { on: engine, wc: e3, svn: [switch, "{url}/branches/feature-x/src"] }
   - { on: svn15, wc: o3, svn: [switch, "{url}/branches/feature-x/src", "."] }
 compare:
-  - { left: e, right: o, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e, right: o, checks: [tree, status, info, wcdb] }
   - { left: e, right: o, checks: [status], reader: svn14 }
-  - { left: e2, right: o2, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
-  - { left: e3, right: o3, checks: [tree, status, info, wcdb], ignore: [dav_cache] }
+  - { left: e2, right: o2, checks: [tree, status, info, wcdb] }
+  - { left: e3, right: o3, checks: [tree, status, info, wcdb] }

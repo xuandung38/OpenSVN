@@ -353,14 +353,40 @@ pub async fn drive_update(
     }
 
     db.wc_lock_obtain(&lock_dir, -1, ObtainMode::Cleanup)?;
-    let _guard = LockGuard {
+    let guard = LockGuard {
         db: Arc::clone(&db),
         dir: lock_dir,
     };
+    // `svn cleanup` may break the lock mid-drive and empty `.svn/tmp`: a temp file or pristine
+    // install then fails on a vanished path before the next transaction sees the lost lock.
+    drive_locked(ctx, session, db, target_wc, target, anchor, params, cancel)
+        .await
+        .map_err(|e| guard.db.wc_lock_explain_failure(&guard.dir, e))
+}
+
+/// The part of [`drive_update`] that runs under the working copy lock.
+#[allow(clippy::too_many_arguments)]
+async fn drive_locked(
+    ctx: &ClientCtx,
+    session: &dyn RaSession,
+    db: Arc<WcDb>,
+    target_wc: RelPath,
+    target: RelPath,
+    anchor: RelPath,
+    params: UpdateParams,
+    cancel: &CancelToken,
+) -> Result<UpdateSummary> {
     // An earlier operation may have been interrupted: finish its queued work first.
     {
         let (db, cancel) = (Arc::clone(&db), cancel.clone());
         blocking(move || crate::wc::run_work_queue(&db, &cancel).map(|_| ())).await?;
+    }
+
+    // A switch empties the RA layer's cache (`dav_cache`) of the whole target before it
+    // drives, like svn's (file externals below it included): the nodes the drive sends get
+    // theirs again, the others keep none.
+    if matches!(params.kind, UpdateKind::Switch(_)) {
+        db.with_txn(|t| t.clear_dav_cache(&target_wc))?;
     }
 
     // Nodes whose inherited-properties cache the drive refreshes (svn collects them before it
@@ -555,15 +581,38 @@ pub async fn drive_update(
         .unwrap_or_else(PoisonError::into_inner)
         .revision;
     if !params.sticky_depth
-        && matches!(params.kind, UpdateKind::Update)
         && let Some(rev) = reached
     {
         // The update itself succeeded; markers it cannot record leave the working copy as it
-        // was before this was implemented, so only cancellation is reported.
-        if let Err(e) =
-            record_unseen_children(session, &db, &target_wc, &target, params.depth, rev, cancel)
+        // was before this was implemented, so only cancellation is reported. A switch lists the
+        // target at its new location, through a session there (svn's switch editor fetches the
+        // entries of the switch URL the same way).
+        let narrow = matches!(
+            params.depth,
+            Depth::Empty | Depth::Files | Depth::Immediates
+        );
+        let listed = match &params.kind {
+            UpdateKind::Switch(url) if narrow => {
+                session.reparented(url).map(|s| (Some(s), RelPath::root()))
+            }
+            _ => Ok((None, target.clone())),
+        };
+        let result = match listed {
+            Ok((at, dir)) => {
+                record_unseen_children(
+                    at.as_deref().unwrap_or(session),
+                    &db,
+                    &target_wc,
+                    &dir,
+                    params.depth,
+                    rev,
+                    cancel,
+                )
                 .await
-        {
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = result {
             if e.code == ErrorCode::Cancelled {
                 return Err(e);
             }
@@ -580,7 +629,7 @@ pub async fn drive_update(
             tracing::warn!("could not cache inherited properties: {e}");
         }
     }
-    let out = outcome.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut out = outcome.lock().unwrap_or_else(PoisonError::into_inner);
     let mut events: Vec<UpdateEvent> = restored
         .into_iter()
         .map(|(path, kind)| UpdateEvent {
@@ -590,7 +639,7 @@ pub async fn drive_update(
         })
         .collect();
     events.extend(earlier_events);
-    events.extend(out.events.iter().cloned());
+    events.append(&mut out.events);
     if reconnects > 0 {
         // A resumed drive sends again the directories the broken one had opened: report each
         // notification once.

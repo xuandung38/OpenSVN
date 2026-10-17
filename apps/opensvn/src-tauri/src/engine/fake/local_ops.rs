@@ -98,7 +98,7 @@ impl FakeEngine {
                 return Ok(());
             }
             match req.choice {
-                ResolveChoice::Mine | ResolveChoice::Working => {}
+                ResolveChoice::Mine | ResolveChoice::Working | ResolveChoice::MineConflict => {}
                 ResolveChoice::Theirs | ResolveChoice::Base => node.work = node.base.clone(),
             }
             node.conflicted = false;

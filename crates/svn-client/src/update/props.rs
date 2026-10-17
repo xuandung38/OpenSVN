@@ -24,6 +24,24 @@ pub fn is_special_prop(name: &str) -> bool {
     name.starts_with("svn:entry:") || name.starts_with("svn:wc:") || name.starts_with("svn:dav:")
 }
 
+/// The RA layer's cache (`dav_cache`) after `changes`: the `svn:wc:*` ones set or remove their
+/// entry in `old`, every other change is ignored.
+pub fn apply_wc_props(old: Props, changes: &[PropChange]) -> Props {
+    let mut m = to_map(&old);
+    for c in changes.iter().filter(|c| c.name.starts_with("svn:wc:")) {
+        let key = c.name.clone().into_bytes();
+        match &c.value {
+            Some(v) => {
+                m.insert(key, v.to_vec());
+            }
+            None => {
+                m.remove(&key);
+            }
+        }
+    }
+    to_props(m)
+}
+
 fn to_map(p: &Props) -> BTreeMap<Vec<u8>, Vec<u8>> {
     p.iter().cloned().collect()
 }

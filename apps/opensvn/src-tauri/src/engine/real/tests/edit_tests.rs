@@ -298,8 +298,8 @@ impl CommitEditor for Recorder {
             "not driven to the end in these tests",
         ))
     }
-    async fn abort_edit(self: Box<Self>) -> SvnResult<()> {
-        Ok(())
+    async fn abort_edit(self: Box<Self>) -> SvnResult<svn_ra_api::TxnAbort> {
+        Ok(svn_ra_api::TxnAbort::Deleted)
     }
 }
 

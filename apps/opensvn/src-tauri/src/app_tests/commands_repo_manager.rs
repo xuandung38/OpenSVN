@@ -521,3 +521,75 @@ fn the_demo_engine_banner_is_shown_only_in_release_builds() {
     };
     assert!(!visible_capabilities(real, true).demo);
 }
+
+/// "Update to latest instead" keeps the externals choice of the interrupted checkout, as
+/// Continue does (#172 follow-up): it reads the checkout journal of the working copy.
+#[tokio::test]
+async fn update_to_latest_keeps_the_externals_choice_of_the_interrupted_checkout() {
+    use crate::db::CheckoutJournal;
+
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    for ignore_externals in [true, false] {
+        f.state()
+            .db
+            .checkout_journal_put(&CheckoutJournal {
+                root_path: wc.root_path.clone(),
+                url: format!("{DEMO_REPO_URL}/trunk"),
+                depth: "infinity".into(),
+                ignore_externals,
+            })
+            .unwrap();
+        let h = commands::wc_update_latest(f.state(), wc.id.clone())
+            .await
+            .unwrap();
+        assert_eq!(h.title, format!("Update {}", wc.name));
+        assert!(matches!(
+            f.wait_op(&h).await.unwrap(),
+            OpResult::NewRev { .. }
+        ));
+        assert_eq!(f.engine.resumes().last(), Some(&(None, ignore_externals)));
+        // Finished: nothing left to continue.
+        assert!(
+            f.state()
+                .db
+                .checkout_journal_get(&wc.root_path)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    // Without a journal (an interrupted update) it is a plain update to HEAD, with externals.
+    let h = commands::wc_update_latest(f.state(), wc.id.clone())
+        .await
+        .unwrap();
+    f.wait_op(&h).await.unwrap();
+    assert_eq!(f.engine.resumes().last(), Some(&(None, false)));
+    assert_eq!(f.engine.resumes().len(), 3);
+}
+
+/// A switch that stopped half-way goes on to its URL at HEAD; a plain update would leave the
+/// folders it had not reached at their old URL.
+#[tokio::test]
+async fn update_to_latest_of_an_unfinished_switch_switches() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let wc = f.add_demo_wc().await;
+    let url = format!("{DEMO_REPO_URL}/trunk");
+    f.state()
+        .db
+        .switch_journal_put(&wc.root_path, &url, false)
+        .unwrap();
+    let h = commands::wc_update_latest(f.state(), wc.id.clone())
+        .await
+        .unwrap();
+    assert_eq!(h.title, format!("Switch {}", wc.name));
+    f.wait_op(&h).await.unwrap();
+    assert!(f.engine.resumes().is_empty());
+    assert!(
+        f.state()
+            .db
+            .switch_journal_get(&wc.root_path)
+            .unwrap()
+            .is_none()
+    );
+}

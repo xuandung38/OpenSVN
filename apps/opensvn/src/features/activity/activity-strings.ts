@@ -17,6 +17,8 @@ export const activityStrings = defineStrings({
     waitRetryIn: "Connection lost, retrying in {seconds}s…",
     waitRetrying: "Connection lost, retrying…",
     waitRetryNow: "Retry now",
+    waitLost: "Connection lost",
+    waitReconnected: "Reconnected",
     stageDone: "Done",
     stageFailed: "Failed",
     stageWorking: "Working",
@@ -60,6 +62,8 @@ export const activityStrings = defineStrings({
       "The connection was cut while sending; the change may or may not have reached the server. Refresh before trying again.",
     errCommitUnsure:
       "The connection was cut while committing; the commit may or may not have reached the server. Refresh the history before committing again.",
+    errNothingCommitted:
+      "The connection was cut while committing. Nothing was committed; it is safe to try again.",
     errConnectionClosed: "Connection was closed by the server",
     errTimeout: "The server took too long to respond",
     errRefused: "The server refused the connection",
@@ -82,6 +86,8 @@ export const activityStrings = defineStrings({
     waitRetryIn: "Mất kết nối, thử lại sau {seconds} giây…",
     waitRetrying: "Mất kết nối, đang thử lại…",
     waitRetryNow: "Thử lại ngay",
+    waitLost: "Mất kết nối",
+    waitReconnected: "Đã kết nối lại",
     stageDone: "Xong",
     stageFailed: "Thất bại",
     stageWorking: "Đang xử lý",
@@ -124,6 +130,8 @@ export const activityStrings = defineStrings({
       "Kết nối bị ngắt khi đang gửi; thay đổi có thể đã tới máy chủ hoặc chưa. Hãy làm mới trước khi thử lại.",
     errCommitUnsure:
       "Kết nối bị ngắt khi đang commit; commit có thể đã tới máy chủ hoặc chưa. Hãy làm mới lịch sử trước khi commit lại.",
+    errNothingCommitted:
+      "Kết nối bị ngắt khi đang commit. Chưa có gì được commit, có thể thử lại an toàn.",
     errConnectionClosed: "Máy chủ đã đóng kết nối",
     errTimeout: "Máy chủ phản hồi quá lâu",
     errRefused: "Máy chủ từ chối kết nối",
