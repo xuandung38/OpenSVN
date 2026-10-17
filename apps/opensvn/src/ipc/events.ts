@@ -336,7 +336,12 @@ function applyToCache(qc: QueryClient, name: EventName, payload: unknown): void 
     case "wc://revision-changed": {
       // The status of the same scan arrives as `wc://status-changed`.
       void qc.invalidateQueries({ queryKey: queryKeys.workingCopies });
-      void qc.invalidateQueries({ queryKey: queryKeys.logRoot });
+      // A log still loading for the old revision is dropped, not waited for: a refetch of a
+      // query without data joins the running fetch, which may be a page the server needs
+      // minutes for (see `do_log`), while the new revision's page is quick.
+      void qc
+        .cancelQueries({ queryKey: queryKeys.logRoot })
+        .then(() => qc.invalidateQueries({ queryKey: queryKeys.logRoot }));
       break;
     }
     case "wc://incoming":

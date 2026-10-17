@@ -57,8 +57,14 @@ struct SnapState {
 struct Generation {
     next: AtomicU64,
     applied: tokio::sync::Mutex<u64>,
-    /// Scans running now.
+    /// Scans running or waiting for their turn now.
     running: AtomicUsize,
+    /// One scan at a time: a full scan of a large tree holds every NODES row, and two at once
+    /// (opening plus the first `status_get`, a refresh plus the watcher) double the peak.
+    scan: tokio::sync::Mutex<()>,
+    /// Ticket of the latest scan that started and completed: a request older than it needs
+    /// no scan of its own.
+    covered: AtomicU64,
     /// Signalled whenever a scan ends.
     ended: tokio::sync::Notify,
 }
@@ -212,7 +218,13 @@ impl StatusPublisher {
     pub async fn publish(&self, r: &ResolvedWc) -> Result<(), AppError> {
         let generation = self.generation(&r.wc.id);
         let _running = Running::start(&generation);
-        // The ticket is taken before the scan starts, so it orders scans by start time.
+        let asked = generation.next.fetch_add(1, Ordering::SeqCst) + 1;
+        let _turn = generation.scan.lock().await;
+        if generation.covered.load(Ordering::SeqCst) > asked {
+            // A scan that started after this request finished meanwhile: nothing to add.
+            return Ok(());
+        }
+        // The ticket is taken as the scan starts, so it orders scans by start time.
         let ticket = generation.next.fetch_add(1, Ordering::SeqCst) + 1;
         let engine = Arc::clone(&self.engine);
         let wc = r.wc.clone();
@@ -241,6 +253,7 @@ impl StatusPublisher {
         *applied = ticket;
         self.apply_local(&r.wc.id, fresh)?;
         self.publish_revision(&r.wc.id, &info);
+        generation.covered.fetch_max(ticket, Ordering::SeqCst);
         Ok(())
     }
 

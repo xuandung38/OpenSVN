@@ -1,4 +1,4 @@
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { expect, test, vi } from "vitest";
 import { unwrap } from "./client";
 import {
@@ -280,5 +280,29 @@ test("event bus: path logs, warnings and results stay with the operation; backgr
   expect(ops.b3?.state).toBe("failed");
   expect(ops.b4?.state).toBe("failed");
   expect(ops.k1?.state).toBe("done");
+  bus.stop();
+});
+
+test("a revision change drops a log still loading and reads it again", async () => {
+  const qc = new QueryClient();
+  const bus = createEventBus(mockAdapter, qc);
+  await bus.start();
+  let calls = 0;
+  const key = queryKeys.log("wc-main", "", 100);
+  // A mounted view of the log (the History sidebar).
+  const observer = new QueryObserver(qc, {
+    queryKey: key,
+    queryFn: () => {
+      calls++;
+      // The first read never ends (a page the server needs minutes for); the second is quick.
+      return calls === 1 ? new Promise<string>(() => {}) : Promise.resolve("fresh");
+    },
+  });
+  const unsubscribe = observer.subscribe(() => {});
+  await vi.waitFor(() => expect(calls).toBe(1));
+  mockEmit("wc://revision-changed", { wcId: "wc-main", baseRev: 2, revRange: null });
+  await vi.waitFor(() => expect(qc.getQueryData(key)).toBe("fresh"));
+  expect(calls).toBe(2);
+  unsubscribe();
   bus.stop();
 });
