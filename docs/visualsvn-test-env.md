@@ -248,6 +248,10 @@ write answers: those of the standard repository's writes are all below 1 KiB.
   confirmed deleted fails with `CommitNotApplied`: nothing was committed). `write_op!`
   (`engine/conformance.rs`) then checks with the proxy log that a write really met the fault,
   that no write request line repeats, and with `svnadmin lstxns` that no transaction is left.
+  One exception: the answer to the `POST` that creates a commit's transaction is only headers
+  (`SVN-Txn-Name`, no body), so when it is cut the client never learns the transaction's name
+  and cannot delete it, as svn cannot. The commit then fails with the connection failure before
+  any `MERGE` (nothing was committed), and at most one transaction per cut `POST` may stay.
   The scenario then ends ("ends as designed" in the output, with `--nocapture`), because
   repeating the write would meet the same fault. The rest of the scenario is covered by the
   direct run.
