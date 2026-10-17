@@ -60,6 +60,13 @@ impl LazyProps {
         }
     }
 
+    /// True when `raw` holds no property: an empty blob or an empty list (a non-empty list
+    /// holds at least one atom).
+    fn empty_list(raw: &[u8]) -> bool {
+        raw.iter()
+            .all(|b| matches!(b, b'(' | b')') || b.is_ascii_whitespace())
+    }
+
     /// The properties, as [`Node::properties`] of the same row would hold them (`None` when
     /// the row records no property information).
     pub fn get(&self) -> Result<Option<&Props>> {
@@ -76,10 +83,7 @@ impl LazyProps {
     /// True when [`Self::get`] yields no property (no information, an empty blob or an empty
     /// list), decided without decoding: a non-empty list holds at least one atom.
     pub fn is_empty(&self) -> bool {
-        self.raw.as_deref().is_none_or(|r| {
-            r.iter()
-                .all(|b| matches!(b, b'(' | b')') || b.is_ascii_whitespace())
-        })
+        self.raw.as_deref().is_none_or(Self::empty_list)
     }
 
     /// False when the stored list certainly has no property `name` (its name does not occur
@@ -96,11 +100,13 @@ impl LazyProps {
 #[derive(Debug, Clone, Default)]
 pub struct SubtreeRows {
     /// NODES rows of the root and everything below it, ordered by path (bytewise) then
-    /// `op_depth`. [`Node::properties`] is always `None` here; the properties of
-    /// `nodes[i]` are `pristine[i]`.
+    /// `op_depth`. [`Node::properties`] holds what the row records when that is no property
+    /// list or an empty one; rows with properties have `None` there and their list, undecoded,
+    /// in `pristine`.
     pub nodes: Vec<Node>,
-    /// Pristine properties of each row of `nodes`, at the same index.
-    pub pristine: Vec<LazyProps>,
+    /// Undecoded property lists of the rows that have properties: by path, the `op_depth` of
+    /// each such row with its list.
+    pub pristine: std::collections::HashMap<String, Vec<(u32, LazyProps)>>,
     /// ACTUAL_NODE rows of the root and everything below it, ordered by path (bytewise).
     pub actual: Vec<ActualRow>,
     /// The whole LOCK cache (locks are matched by repository location, not by local path).
@@ -114,10 +120,10 @@ impl WcDb {
         let wc_id = self.wc_id;
         self.with_read(|c| {
             let tx = c.unchecked_transaction().map_err(sql_err)?;
-            let (nodes, pristine) = self.node_rows_split(&tx, root)?.into_iter().unzip();
+            let Part { nodes, props } = self.node_rows_split(&tx, root)?;
             let out = SubtreeRows {
                 nodes,
-                pristine,
+                pristine: by_path(props),
                 actual: actual_rows(&tx, wc_id, root)?,
                 locks: lock_rows(&tx)?,
             };
@@ -134,7 +140,7 @@ impl WcDb {
     /// with it SQLite's shared lock), so no writer can commit while the parts are read: every
     /// connection sees the same database. A part whose connection cannot be opened is read on
     /// `tx`.
-    fn node_rows_split(&self, tx: &rusqlite::Connection, root: &RelPath) -> Result<Vec<Row>> {
+    fn node_rows_split(&self, tx: &rusqlite::Connection, root: &RelPath) -> Result<Part> {
         let wc_id = self.wc_id;
         let (lo, hi): (Option<i64>, Option<i64>) = tx
             .query_row("SELECT min(rowid), max(rowid) FROM nodes", [], |r| {
@@ -143,7 +149,7 @@ impl WcDb {
             .map_err(sql_err)?;
         let parts = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         let (Some(lo), Some(hi)) = (lo, hi) else {
-            return Ok(Vec::new());
+            return Ok(Part::default());
         };
         let span = hi.saturating_sub(lo).saturating_add(1);
         if !root.is_root() || parts < 2 || span < SPLIT_ROWS {
@@ -158,7 +164,7 @@ impl WcDb {
             })
             .collect();
         let path = self.wcroot.join(ADM_DIR).join(DB_FILE);
-        let helpers: Vec<Option<Result<Vec<Row>>>> = std::thread::scope(|scope| {
+        let helpers: Vec<Option<Result<Part>>> = std::thread::scope(|scope| {
             let handles: Vec<_> = ranges[1..]
                 .iter()
                 .map(|&(a, b)| {
@@ -171,16 +177,18 @@ impl WcDb {
                 .chain(handles.into_iter().map(|h| h.join().ok().flatten()))
                 .collect()
         });
-        let mut out = Vec::new();
+        let mut out = Part::default();
         for (part, &(a, b)) in helpers.into_iter().zip(&ranges) {
-            out.extend(match part {
+            let part = match part {
                 Some(Ok(rows)) => rows,
                 // `tx` already holds the shared lock, so it reads on whatever stopped the helper
                 // (a real error comes back from this read too).
                 Some(Err(_)) | None => rowid_rows(tx, wc_id, a, b)?,
-            });
+            };
+            out.nodes.extend(part.nodes);
+            out.props.extend(part.props);
         }
-        sort_nodes(&mut out);
+        sort_nodes(&mut out.nodes);
         Ok(out)
     }
 }
@@ -192,12 +200,12 @@ impl WcDb {
 /// commit takes PENDING and waits for `tx` to finish; a new connection cannot take a shared
 /// lock past PENDING, so waiting here would deadlock both until the busy timeout (`WcBusy`).
 /// A busy helper gives its part back to `tx`, which can still read.
-fn helper_rows(path: &std::path::Path, wc_id: i64, a: i64, b: i64) -> Option<Result<Vec<Row>>> {
+fn helper_rows(path: &std::path::Path, wc_id: i64, a: i64, b: i64) -> Option<Result<Part>> {
     let conn = open_connection(path, OpenMode::ReadOnly).ok()?;
     if conn.busy_timeout(std::time::Duration::ZERO).is_err() {
         return None;
     }
-    let read = || -> Result<Vec<Row>> {
+    let read = || -> Result<Part> {
         failpoint!("wc.subtree.helper_before_read");
         rowid_rows(&conn, wc_id, a, b)
     };
@@ -208,25 +216,53 @@ fn helper_rows(path: &std::path::Path, wc_id: i64, a: i64, b: i64) -> Option<Res
 const SPLIT_ROWS: i64 = 4096;
 
 /// NODES rows of the working copy with a rowid in `a..=b`.
-fn rowid_rows(conn: &rusqlite::Connection, wc_id: i64, a: i64, b: i64) -> Result<Vec<Row>> {
+fn rowid_rows(conn: &rusqlite::Connection, wc_id: i64, a: i64, b: i64) -> Result<Part> {
     let sql =
         format!("SELECT {NODE_COLUMNS} FROM nodes WHERE rowid BETWEEN ?2 AND ?3 AND wc_id = ?1");
     let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
-    let mut rows = stmt.query(params![wc_id, a, b]).map_err(sql_err)?;
-    let mut out = Vec::new();
+    let rows = stmt.query(params![wc_id, a, b]).map_err(sql_err)?;
+    collect(rows)
+}
+
+/// NODES rows as read, with the property lists of the rows that have properties.
+#[derive(Default)]
+struct Part {
+    nodes: Vec<Node>,
+    props: Vec<((String, u32), LazyProps)>,
+}
+
+fn by_path(
+    props: Vec<((String, u32), LazyProps)>,
+) -> std::collections::HashMap<String, Vec<(u32, LazyProps)>> {
+    let mut out: std::collections::HashMap<String, Vec<(u32, LazyProps)>> =
+        std::collections::HashMap::with_capacity(props.len());
+    for ((path, op_depth), lazy) in props {
+        out.entry(path).or_default().push((op_depth, lazy));
+    }
+    out
+}
+
+fn collect(mut rows: rusqlite::Rows<'_>) -> Result<Part> {
+    let mut out = Part::default();
     while let Some(r) = rows.next().map_err(sql_err)? {
-        let (node, props) = node_from_row_raw(r)?;
-        out.push((node, LazyProps::new(props)));
+        let (mut node, props) = node_from_row_raw(r)?;
+        match props {
+            None => {}
+            // Most rows: no property, nothing to keep or decode.
+            Some(raw) if LazyProps::empty_list(&raw) => node.properties = Some(Vec::new()),
+            Some(raw) => out.props.push((
+                (node.relpath.as_str().to_owned(), node.op_depth),
+                LazyProps::new(Some(raw)),
+            )),
+        }
+        out.nodes.push(node);
     }
     Ok(out)
 }
 
-/// One NODES row with its undecoded properties.
-type Row = (Node, LazyProps);
-
 /// Orders rows by path (bytewise, like SQLite's BINARY collation) then `op_depth`.
-fn sort_nodes(rows: &mut [Row]) {
-    fn key((n, _): &Row) -> (&[u8], u32) {
+fn sort_nodes(rows: &mut [Node]) {
+    fn key(n: &Node) -> (&[u8], u32) {
         (n.relpath.as_str().as_bytes(), n.op_depth)
     }
     // Rows usually come in path order already (the table grows in checkout order).
@@ -251,19 +287,15 @@ fn subtree_filter(root: &RelPath) -> String {
 /// NODES rows of the subtree, ordered by path (bytewise, like SQLite's BINARY collation) then
 /// `op_depth`. Sorted here rather than with `ORDER BY`, which makes SQLite copy every row into
 /// a temporary b-tree before it returns the first.
-fn node_rows(conn: &rusqlite::Connection, wc_id: i64, root: &RelPath) -> Result<Vec<Row>> {
+fn node_rows(conn: &rusqlite::Connection, wc_id: i64, root: &RelPath) -> Result<Part> {
     let sql = format!(
         "SELECT {NODE_COLUMNS} FROM nodes WHERE {}",
         subtree_filter(root)
     );
     let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
-    let mut rows = stmt.query(params![wc_id, root.as_str()]).map_err(sql_err)?;
-    let mut out = Vec::new();
-    while let Some(r) = rows.next().map_err(sql_err)? {
-        let (node, props) = node_from_row_raw(r)?;
-        out.push((node, LazyProps::new(props)));
-    }
-    sort_nodes(&mut out);
+    let rows = stmt.query(params![wc_id, root.as_str()]).map_err(sql_err)?;
+    let mut out = collect(rows)?;
+    sort_nodes(&mut out.nodes);
     Ok(out)
 }
 

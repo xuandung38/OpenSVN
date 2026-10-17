@@ -240,6 +240,47 @@ async fn log_pages_are_newest_first_and_link_to_the_next_page() {
     assert_eq!(second.next_rev, None);
 }
 
+/// A page larger than the first request reads on in requests of growing size below the last
+/// entry: every revision once, newest first, with the right link to the next page, also for
+/// revisions that do not touch the logged path.
+#[tokio::test]
+async fn a_large_log_page_is_read_in_growing_requests_without_gaps() {
+    let f = fixture();
+    for i in 0..60 {
+        let path = if i % 3 == 0 {
+            "other/x.txt"
+        } else {
+            "trunk/README.md"
+        };
+        f.repo
+            .seed(
+                "bob",
+                &format!("change {i}"),
+                &[put(path, &format!("{i}\n"))],
+            )
+            .unwrap();
+    }
+    let scope = LogScope::Url(format!("{URL}/trunk"));
+    let mut seen = Vec::new();
+    let mut from = None;
+    loop {
+        let mut req = log_request(25, None);
+        req.from_rev = from;
+        let page = f.engine.log(&scope, &req, &ctx()).await.unwrap();
+        assert!(page.entries.len() <= 25);
+        seen.extend(page.entries.iter().map(|e| e.rev.0));
+        match page.next_rev {
+            Some(r) => from = Some(r),
+            None => break,
+        }
+    }
+    let expected: Vec<u64> = (1..=61)
+        .rev()
+        .filter(|r| *r == 1 || (r - 2) % 3 != 0)
+        .collect();
+    assert_eq!(seen, expected);
+}
+
 #[tokio::test]
 async fn log_filter_matches_author_and_message_case_insensitively() {
     let f = fixture();

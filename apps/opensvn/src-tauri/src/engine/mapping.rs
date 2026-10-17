@@ -108,11 +108,6 @@ impl LogPager {
         }
     }
 
-    /// The page size.
-    pub(crate) fn limit(&self) -> usize {
-        self.limit
-    }
-
     /// True when a text filter decides which entries match (the server cannot stop early).
     pub(crate) fn filtered(&self) -> bool {
         self.filter.is_some()

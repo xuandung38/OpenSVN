@@ -98,8 +98,8 @@ struct Snapshot<'a> {
     root: RelPath,
     /// Rows of each path, lowest `op_depth` first.
     nodes: HashMap<&'a str, &'a [Node]>,
-    /// Pristine properties of the current (highest `op_depth`) row of each path.
-    props: HashMap<&'a str, &'a LazyProps>,
+    /// Undecoded pristine properties of the rows that have properties.
+    pristine: &'a HashMap<String, Vec<(u32, LazyProps)>>,
     /// Distinct child paths of each path that has rows, sorted.
     children: HashMap<&'a str, Vec<&'a RelPath>>,
     actual: HashMap<&'a str, &'a ActualRow>,
@@ -111,7 +111,6 @@ impl<'a> Snapshot<'a> {
     /// Indexes `rows`, the [`WcDb::read_subtree`] of `root`.
     fn new(db: &'a WcDb, root: &RelPath, rows: &'a SubtreeRows) -> Self {
         let mut nodes: HashMap<&'a str, &'a [Node]> = HashMap::with_capacity(rows.nodes.len());
-        let mut props: HashMap<&'a str, &'a LazyProps> = HashMap::with_capacity(rows.nodes.len());
         let mut children: HashMap<&'a str, Vec<&'a RelPath>> = HashMap::new();
         // Rows come ordered by path then `op_depth`: each run of equal paths is one node, and
         // each path is listed under its parent once and in order.
@@ -127,16 +126,13 @@ impl<'a> Snapshot<'a> {
                 children.entry(parent).or_default().push(path);
             }
             nodes.insert(path.as_str(), &rows.nodes[start..end]);
-            if let Some(p) = rows.pristine.get(end - 1) {
-                props.insert(path.as_str(), p);
-            }
             start = end;
         }
         Self {
             db,
             root: root.clone(),
             nodes,
-            props,
+            pristine: &rows.pristine,
             children,
             actual: rows
                 .actual
@@ -188,9 +184,13 @@ impl<'a> Snapshot<'a> {
     /// [`WcDb::pristine_props`].
     fn pristine_props(&self, rel: &RelPath) -> Result<Cow<'_, Props>> {
         if self.inside(rel)
-            && let Some((cur, props)) = self.current(rel)
+            && let Some((cur, lazy)) = self.current(rel)
         {
-            return Ok(match (props.get()?, cur.presence.is_present()) {
+            let props = match lazy {
+                Some(l) => l.get()?,
+                None => cur.properties.as_ref(),
+            };
+            return Ok(match (props, cur.presence.is_present()) {
                 (Some(p), true) => Cow::Borrowed(p),
                 _ => Cow::Owned(Vec::new()),
             });
@@ -199,19 +199,29 @@ impl<'a> Snapshot<'a> {
         Ok(Cow::Owned(self.db.pristine_props(rel)?))
     }
 
-    /// Current row of a path inside the subtree, with its undecoded pristine properties.
-    fn current(&self, rel: &RelPath) -> Option<(&'a Node, &'a LazyProps)> {
+    /// Current row of a path inside the subtree, with its undecoded pristine properties when
+    /// it has any (the others carry theirs in [`Node::properties`]).
+    fn current(&self, rel: &RelPath) -> Option<(&'a Node, Option<&'a LazyProps>)> {
         let cur = self.nodes.get(rel.as_str()).and_then(|v| v.last())?;
-        Some((cur, self.props.get(rel.as_str())?))
+        let lazy = self
+            .pristine
+            .get(rel.as_str())
+            .and_then(|rows| rows.iter().find(|(d, _)| *d == cur.op_depth))
+            .map(|(_, l)| l);
+        Some((cur, lazy))
     }
 
     /// True when the pristine properties of `rel` are empty, without decoding them when the
     /// node is inside the subtree.
     fn pristine_is_empty(&self, rel: &RelPath) -> Result<bool> {
         if self.inside(rel)
-            && let Some((cur, props)) = self.current(rel)
+            && let Some((cur, lazy)) = self.current(rel)
         {
-            return Ok(!cur.presence.is_present() || props.is_empty());
+            return Ok(!cur.presence.is_present()
+                || lazy.map_or_else(
+                    || cur.properties.as_ref().is_none_or(Vec::is_empty),
+                    LazyProps::is_empty,
+                ));
         }
         Ok(self.pristine_props(rel)?.is_empty())
     }
@@ -223,9 +233,10 @@ impl<'a> Snapshot<'a> {
             return Ok(inspect::prop_value(&changed, name).map(<[u8]>::to_vec));
         }
         if self.inside(rel)
-            && let Some((_, props)) = self.current(rel)
-            && !props.may_have(name)
+            && let Some((_, lazy)) = self.current(rel)
+            && lazy.is_none_or(|l| !l.may_have(name))
         {
+            // No property list kept: the row has none (or an empty one).
             return Ok(None);
         }
         let props = self.pristine_props(rel)?;
