@@ -127,6 +127,8 @@ mod tests {
         );
     }
 
+    // `/data` is absolute only by Unix rules, and the Linux layout is resolved on Linux only.
+    #[cfg(unix)]
     #[test]
     fn xdg_data_home_wins_when_absolute() {
         let e = env(&[("HOME", "/home/u"), ("XDG_DATA_HOME", "/data")]);

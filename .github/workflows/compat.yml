@@ -85,19 +85,26 @@ jobs:
       - name: Start compat environment
         run: cargo xtask compat up --no-build
 
+      # `--repos` only: without a selection flag `fixtures` also regenerates the checked-in WC
+      # tarballs and protocol captures, which need svn and a native Apache on the runner.
       - name: Create fixture repos (verifies pinned dump hashes)
-        run: cargo xtask compat fixtures
+        run: cargo xtask compat fixtures --repos
 
       - name: Harness self-check (svn15 vs svn15, svn14 vs svn15)
         run: cargo xtask compat run
+
+      # The distribution's svn and mod_dav_svn (1.14.3): svnadmin and the throwaway server below.
+      - name: Install Subversion 1.14 and Apache mod_dav_svn
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends subversion apache2 libapache2-mod-svn
+          svn --version --quiet
 
       # The engine (crash-worker: svn-ra + svn-client + svn-wc) checks out, commits and updates;
       # then svn 1.14.5 (the compat client image) runs status, commit and update on the same
       # working copy, and the engine takes it back. Server: a throwaway local mod_dav_svn.
       - name: svn 1.14.5 client on engine-created working copies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends subversion apache2 libapache2-mod-svn
           cargo build -p opensvn-crash --bin crash-worker --locked
           scripts/test-env/engine-wc-old-client.sh target/debug/crash-worker
 
@@ -119,6 +126,13 @@ jobs:
           cache: pnpm
       - name: Build frontend (embedded by the Tauri context macro)
         run: pnpm install --frozen-lockfile && pnpm build
+      # The oracle of the svn comparisons in the conformance suite (OPENSVN_SVN_BIN).
+      - name: Install Subversion 1.15 (oracle client)
+        uses: ./.github/actions/install-svn-115
+      # The containers publish on 127.0.0.1 only, and the runner resolves `localhost` to ::1
+      # first; svn (serf) tries that address alone and gets "connection refused". Prefer IPv4.
+      - name: Resolve localhost to IPv4 first
+        run: echo 'precedence ::ffff:0:0/96  100' | sudo tee -a /etc/gai.conf
       - name: Real engine conformance against Apache + mod_dav_svn
         run: >-
           cargo test -p opensvn --features real-engine,engine-conformance --locked
@@ -215,7 +229,7 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo xtask compat up --no-build --legacy
-      - run: cargo xtask compat fixtures --legacy
+      - run: cargo xtask compat fixtures --repos --legacy
       - run: cargo xtask compat run --legacy
       - name: Tear down
         if: always()

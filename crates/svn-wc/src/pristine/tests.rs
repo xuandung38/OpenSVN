@@ -455,6 +455,7 @@ fn batch_needs_a_writable_store() {
 
 /// A temp file holding `content` in the store's directory, with its record (as the update
 /// editor hands it to `place`).
+#[cfg(unix)]
 fn placed_text(
     st: &PristineStore<MemIndex>,
     content: &[u8],

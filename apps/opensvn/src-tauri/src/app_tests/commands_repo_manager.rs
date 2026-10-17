@@ -309,7 +309,8 @@ async fn reveal_shows_items_inside_the_working_copy_only() {
     commands::reveal_in_os(f.state(), id.clone(), "readme.txt".into())
         .await
         .unwrap();
-    let root = parent.path().join("proj").canonicalize().unwrap();
+    // The file manager gets plain paths, not Windows `\\?\` ones (dunce, as the app).
+    let root = dunce::canonicalize(parent.path().join("proj")).unwrap();
     assert_eq!(revealed(&f), [root.clone(), root.join("readme.txt")]);
     for bad in [
         "../outside",

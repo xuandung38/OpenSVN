@@ -55,9 +55,10 @@ async fn confirmed_pick_is_stored_with_the_canonical_path() {
         .await
         .unwrap();
     let stored = s.tools_editor.unwrap();
+    // Stored without the Windows `\\?\` prefix (dunce strips it as `strip_verbatim` does).
     assert_eq!(
         stored.path,
-        std::fs::canonicalize(&exe).unwrap().to_string_lossy()
+        dunce::canonicalize(&exe).unwrap().to_string_lossy()
     );
     assert_eq!(stored.args, vec!["--wait"]);
     // the user saw the full command line before it was saved
@@ -241,7 +242,7 @@ async fn a_diff_tool_per_extension_is_confirmed_stored_replaced_and_cleared() {
     // The tool for the extension wins over the global one; other files use the global one.
     let (program, args, by_ext) = svc.external_diff_tool_for("a/b/Report.docx").unwrap();
     assert!(by_ext && args == ["{left}", "{right}"]);
-    assert_eq!(program, std::fs::canonicalize(&exe).unwrap());
+    assert_eq!(program, dunce::canonicalize(&exe).unwrap());
     let err = svc.external_diff_tool_for("a.txt").unwrap_err();
     assert_eq!(err.actions, Some(Box::new(vec![ErrorAction::OpenSettings])));
 

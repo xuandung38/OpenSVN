@@ -328,8 +328,10 @@ async fn checked_abort_reports_server_and_transport_failures_as_unknown() {
         _ => Reply::status(500),
     })
     .await;
+    // Long enough for the session to open (the first TLS handshake takes a while on some
+    // runners), well below the 5 s delay of the DELETE answer.
     let transport = transport_trusting(&ca, ScriptedPrompter::with_credentials("a", "b"), |c| {
-        c.read_timeout = Duration::from_millis(300);
+        c.read_timeout = Duration::from_secs(2);
     });
     let url = RepoUrl::parse(srv.url("/svn/repo/trunk").as_str()).unwrap();
     let wire = RaWire::open(transport, url, &CancelToken::new())

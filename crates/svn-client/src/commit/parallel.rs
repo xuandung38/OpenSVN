@@ -78,8 +78,7 @@ where
 /// Flushes every file to disk (`fsync`), several at a time.
 pub(crate) fn sync_files(paths: Vec<PathBuf>) -> Result<()> {
     map(paths, |p| {
-        std::fs::File::open(&p)
-            .and_then(|f| f.sync_all())
+        svn_wc::durable::sync_file(&p)
             .map_err(|e| SvnError::from_io(format!("sync '{}'", p.display()), &e))
     })
     .map(|_| ())
