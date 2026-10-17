@@ -95,11 +95,14 @@ pub(crate) struct LogPager {
 impl LogPager {
     pub(crate) fn new(req: &opensvn_ipc::LogGetRequest) -> Self {
         Self {
+            // Read like the log cache's key (`LogKey`), which shares one page between
+            // requests whose filters differ only by surrounding blanks.
             filter: req
                 .filter
-                .as_ref()
-                .map(|f| f.to_lowercase())
-                .filter(|f| !f.is_empty()),
+                .as_deref()
+                .map(str::trim)
+                .filter(|f| !f.is_empty())
+                .map(str::to_lowercase),
             limit: req.limit.clamp(1, 1000) as usize,
             keep: false,
             tops: 0,

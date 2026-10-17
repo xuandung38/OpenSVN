@@ -819,6 +819,69 @@ async fn identical_logs_share_one_server_read_until_the_revision_moves() {
     assert_eq!(logs.fetches(), 2);
 }
 
+/// The app's own remote writes make revisions: a log page read from HEAD before them is not
+/// served from the cache afterwards.
+#[tokio::test]
+async fn remote_edits_and_copies_drop_cached_logs() {
+    let f = Fixture::new(Duration::ZERO).await;
+    let log = || {
+        commands::log_get(
+            f.state(),
+            LogGetRequest {
+                target: LogTarget::Url { url: url("trunk") },
+                from_rev: None,
+                to_rev: None,
+                limit: 5,
+                stop_on_copy: None,
+                with_paths: false,
+                filter: None,
+                include_merged: None,
+                revprops: None,
+            },
+        )
+    };
+    let logs = std::sync::Arc::clone(f.state().status.logs());
+    log().await.unwrap();
+    log().await.unwrap();
+    assert_eq!(logs.fetches(), 1);
+
+    let h = commands::remote_edit(
+        f.state(),
+        RemoteEditRequest {
+            ops: vec![RemoteOp::Mkdir {
+                url: url("trunk/tools"),
+            }],
+            message: "tools".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let OpResult::NewRev { new_rev } = f.wait_op(&h).await.unwrap() else {
+        panic!("a new revision");
+    };
+    assert_eq!(log().await.unwrap().entries[0].rev, new_rev);
+    assert_eq!(logs.fetches(), 2);
+
+    let h = commands::copy_location(
+        f.state(),
+        CopyLocationRequest {
+            from_url: url("trunk/tools"),
+            from_rev: None,
+            to_url: url("trunk/tools2"),
+            message: "tools2".into(),
+            switch_wc_id: None,
+            from_wc: None,
+        },
+    )
+    .await
+    .unwrap();
+    let OpResult::NewRev { new_rev } = f.wait_op(&h).await.unwrap() else {
+        panic!("a new revision");
+    };
+    assert_eq!(log().await.unwrap().entries[0].rev, new_rev);
+    assert_eq!(logs.fetches(), 3);
+}
+
 fn compare_rows(s: &opensvn_ipc::CompareSummary) -> Vec<(String, &'static str, bool)> {
     use opensvn_ipc::CompareChange as C;
     s.entries
