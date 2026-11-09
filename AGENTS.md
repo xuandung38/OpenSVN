@@ -1,6 +1,6 @@
 # AGENTS.md: hướng dẫn và tiến độ cho người và agent cùng làm OpenSVN
 
-Cập nhật lần cuối: 2026-10-17.
+Cập nhật lần cuối: 2026-11-09.
 Đọc file này trước khi nhận việc. Lệnh build/test, quy tắc đặt tên nhánh và cấu trúc repo nằm ở `docs/contributing.md`. Kiến trúc nằm ở `docs/system-architecture.md`.
 
 
@@ -129,12 +129,13 @@ Build bộ cài:
 | Update/switch giống svn 1.15 hơn: fake server theo `link_path` cả phía đích khi update (subtree đã switch); switch `--depth` hẹp ghi `not-present` cho mục mới ngoài depth, resume ở thư mục đích khớp svn; `NODES.dav_cache` ghi `svn:wc:ra_dav:version-url` như ra_serf (commit, cleanup, switch xóa), scenario không còn `ignore: [dav_cache]`; conflict "local moved away, incoming edit" và resolve `mine-conflict` (đưa thay đổi sang đích move)/`working` (phá move), `theirs-conflict` bị từ chối như svn, có trong IPC và hộp thoại Conflicts; marker conflict không còn read-only | #203 |
 | Commit qua proxy/middlebox reset kết nối sau N request: kết nối mang write chỉ dùng cho tối đa 2 request (`write_connection_requests`), `MERGE`/`LOCK`/`UNLOCK` luôn mở kết nối mới, mọi kết nối của một origin dùng chung TLS session cache (kết nối mới resume, không handshake đầy đủ), read bị cắt giữa body gửi lại trên kết nối mới. Suite DAV qua proxy `--reset-after 2`, `--idle-reset 2`, `--stale-after 2` trên 1.14.3 và 1.15.0 không còn write nào trúng lỗi. PUT bị cắt mà server xác nhận đã xóa txn báo `CommitNotApplied` (IPC `commit-not-applied`, nút Thử lại trong ô commit) | #205 |
 | Suite DAV qua `flaky-tls-proxy.py --truncate-every 2` (`--truncate-at` 2048/1024/100) xanh 41/41 trên 1.14.3 và 1.15.0. Không đọc nào bị bỏ sót retry: 24 lỗi cũ là do bộ đếm cắt của proxy khóa pha với chu kỳ resume `OPTIONS` + `REPORT`, nên lần resume nào cũng bị cắt tại cùng một byte; giờ request đọc (`GET`/`HEAD`/`OPTIONS`/`PROPFIND`/`REPORT`) gửi lại sau một lần cắt đi qua (K > 1). Write gửi lại không được miễn, để lần gửi lại sai (#166) không bị che. `POST` tạo txn bị cắt giữa header thì server giữ một txn client không biết tên (như svn), không có `MERGE`, lỗi kết nối; `check_broken_write` chấp nhận đúng trường hợp này | #206 |
+| Status khớp tên file không phải NFC với `wc.db` (macOS giữ nguyên byte lúc tạo, thường NFD): trước đây mỗi file có dấu hiện hai lần (`?` và `!`), UI đề nghị add file đã versioned và commit báo "already under version control". Tên trên đĩa khóa theo NFC, file đọc qua đúng cách viết trên đĩa. Chỉ phần status; add/commit/move qua đường dẫn NFC trên filesystem nhạy NFC/NFD vẫn thuộc nhánh "giữ nguyên byte đường dẫn" ở mục 4 | #210 |
 
 Issue đã đóng trong đợt rà gần nhất: #9, #10, #13, #14, #99, #128, #144, #145, #146.
 
 ## 4. Đang làm (đừng nhận trùng)
 
-Hiện không có PR nào đang mở.
+Draft [#210](https://github.com/xuandung38/OpenSVN/pull/210): status khớp tên NFC/NFD (đừng nhận trùng). Ngoài ra không có PR nào đang mở.
 
 Chủ repo có một số nhánh làm trên máy riêng, **chưa push**: hiển thị %/ETA khi checkout, giữ nguyên byte đường dẫn (NFC/NFD), build Mac. Hỏi chủ repo trước khi làm những mảng này.
 
