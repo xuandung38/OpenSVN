@@ -571,15 +571,41 @@ impl Lister<'_> {
         }
         let versioned: BTreeSet<String> = names.clone();
         let mut listing = Listing::new();
+        // Exact names on disk that are not in NFC, by their NFC form (the form `wc.db` keeps).
+        let mut disk_names: HashMap<String, String> = HashMap::new();
         if listable && let Ok(rd) = fs::read_dir(&abs) {
+            let mut entries: Vec<(String, Option<fs::Metadata>)> = Vec::new();
             for e in rd.flatten() {
                 if let Some(n) = e.file_name().to_str()
                     && n != svn_wc::db::ADM_DIR
                 {
-                    names.insert(n.to_owned());
                     // `DirEntry::metadata` does not follow symlinks, like `lstat`.
-                    listing.insert(n.to_owned(), e.metadata().ok());
+                    entries.push((n.to_owned(), e.metadata().ok()));
                 }
+            }
+            let raw: BTreeSet<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+            let keyed: Vec<(String, String, Option<fs::Metadata>)> = entries
+                .iter()
+                .map(|(n, md)| {
+                    // macOS keeps the bytes of a name as created (often NFD, e.g. from Finder or
+                    // an archive), while paths are NFC everywhere else: match them by NFC, or a
+                    // versioned file shows up twice, as unversioned and as missing. When both
+                    // spellings are on disk they stay two entries.
+                    let key = match RelPath::new(n) {
+                        Ok(r) if r.as_str() != n && !raw.contains(r.as_str()) => {
+                            r.as_str().to_owned()
+                        }
+                        _ => n.clone(),
+                    };
+                    (key, n.clone(), md.clone())
+                })
+                .collect();
+            for (key, exact, md) in keyed {
+                if key != exact {
+                    disk_names.insert(key.clone(), exact);
+                }
+                names.insert(key.clone());
+                listing.insert(key, md);
             }
         }
         let mut local_ignores: Option<Vec<String>> = None;
@@ -588,6 +614,12 @@ impl Lister<'_> {
             // Same path and errors as `abs_path(child)`, without `lstat`ing the ancestors again
             // (only the name is checked below a directory that is not listed).
             let child_abs = safe_join_child(&abs, disk.as_ref().filter(|_| listable), &child)?;
+            // The file keeps the spelling it has on disk, which a case- and
+            // normalization-sensitive file system needs to find it.
+            let child_abs = match disk_names.get(&name) {
+                Some(exact) => abs.join(exact),
+                None => child_abs,
+            };
             let is_versioned = versioned.contains(&name);
             let child_disk = if listable {
                 child_disk(&mut listing, &name, &child, &child_abs)?

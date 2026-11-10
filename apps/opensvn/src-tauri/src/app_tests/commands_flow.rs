@@ -557,6 +557,7 @@ async fn open_working_copy_republishes_status_when_files_change() {
     let timing = crate::status::StatusTiming {
         debounce: Duration::from_millis(20),
         fallback_poll: Duration::from_millis(40),
+        retry_base: Duration::from_millis(20),
     };
     let f = Fixture::with_timing(Duration::ZERO, timing).await;
     let wc = f.add_demo_wc().await;
