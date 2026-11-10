@@ -18,6 +18,12 @@ use crate::wc::ResolvedWc;
 /// Rescan period when no watch is available.
 pub const FALLBACK_POLL: Duration = Duration::from_secs(30);
 
+/// First wait before a rescan that failed is tried again; it doubles for each further failure.
+pub const RETRY_BASE: Duration = Duration::from_secs(1);
+
+/// Failed rescans in a row after which the watcher waits for the next file event.
+const MAX_RETRIES: u32 = 5;
+
 /// Timing knobs (tests shorten them).
 #[derive(Debug, Clone, Copy)]
 pub struct StatusTiming {
@@ -25,6 +31,8 @@ pub struct StatusTiming {
     pub debounce: Duration,
     /// Rescan period in fallback mode.
     pub fallback_poll: Duration,
+    /// First wait before a failed rescan is tried again (doubles each time).
+    pub retry_base: Duration,
 }
 
 impl Default for StatusTiming {
@@ -32,6 +40,7 @@ impl Default for StatusTiming {
         Self {
             debounce: DEBOUNCE,
             fallback_poll: FALLBACK_POLL,
+            retry_base: RETRY_BASE,
         }
     }
 }
@@ -111,6 +120,11 @@ async fn watch_loop(wc: ResolvedWc, publisher: Arc<StatusPublisher>, timing: Sta
     let mut debouncer = Debouncer::new(timing.debounce);
     let mut poll = tokio::time::interval(timing.fallback_poll);
     poll.tick().await; // the first tick is immediate; the open path already scanned
+    // A rescan that fails (the working copy is busy with a write, another program holds its lock)
+    // is tried again: with a watch there is no periodic rescan, so the list would stay as it was
+    // until the next file event.
+    let mut failures: u32 = 0;
+    let mut retry_at: Option<Instant> = None;
     loop {
         let deadline = debouncer.deadline().map(Instant::from_std);
         // Biased: pending file events are taken before the quiet-period deadline, so a burst that
@@ -120,6 +134,9 @@ async fn watch_loop(wc: ResolvedWc, publisher: Arc<StatusPublisher>, timing: Sta
             event = rx.recv(), if watching => {
                 let Some((path, is_dir)) = event else { break };
                 debouncer.push(&path, is_dir, std::time::Instant::now());
+                // The scan this event leads to starts over; it schedules its own retry.
+                failures = 0;
+                retry_at = None;
             }
             () = async {
                 match deadline {
@@ -127,11 +144,18 @@ async fn watch_loop(wc: ResolvedWc, publisher: Arc<StatusPublisher>, timing: Sta
                     None => std::future::pending().await,
                 }
             } => {
-                if debouncer.take_ready(std::time::Instant::now()).is_some()
-                    && let Err(e) = publisher.publish(&wc).await
-                {
-                    tracing::warn!(code = ?e.code, "status refresh after file change failed");
+                if debouncer.take_ready(std::time::Instant::now()).is_some() {
+                    rescan(&wc, &publisher, timing, &mut failures, &mut retry_at, "after file change").await;
                 }
+            }
+            () = async {
+                match retry_at {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                retry_at = None;
+                rescan(&wc, &publisher, timing, &mut failures, &mut retry_at, "retry").await;
             }
             _ = poll.tick(), if !watching => {
                 if let Err(e) = publisher.publish(&wc).await {
@@ -139,5 +163,57 @@ async fn watch_loop(wc: ResolvedWc, publisher: Arc<StatusPublisher>, timing: Sta
                 }
             }
         }
+    }
+}
+
+/// Wait before the retry that follows the `failures`-th failed rescan in a row; `None` when the
+/// tries are used up (or nothing failed).
+fn retry_delay(base: Duration, failures: u32) -> Option<Duration> {
+    if failures == 0 || failures > MAX_RETRIES {
+        return None;
+    }
+    base.checked_mul(1 << (failures - 1))
+}
+
+/// Publishes the working copy status; on failure schedules the next try.
+async fn rescan(
+    wc: &ResolvedWc,
+    publisher: &StatusPublisher,
+    timing: StatusTiming,
+    failures: &mut u32,
+    retry_at: &mut Option<Instant>,
+    why: &str,
+) {
+    match publisher.publish(wc).await {
+        Ok(()) => {
+            *failures = 0;
+            *retry_at = None;
+        }
+        Err(e) => {
+            *failures += 1;
+            *retry_at = retry_delay(timing.retry_base, *failures).map(|d| Instant::now() + d);
+            tracing::warn!(
+                code = ?e.code,
+                attempt = *failures,
+                will_retry = retry_at.is_some(),
+                "status refresh {why} failed"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retries_back_off_and_stop() {
+        let base = Duration::from_secs(1);
+        assert_eq!(retry_delay(base, 0), None);
+        let waits: Vec<_> = (1..=MAX_RETRIES)
+            .map(|n| retry_delay(base, n).map(|d| d.as_secs()))
+            .collect();
+        assert_eq!(waits, [Some(1), Some(2), Some(4), Some(8), Some(16)]);
+        assert_eq!(retry_delay(base, MAX_RETRIES + 1), None);
     }
 }
